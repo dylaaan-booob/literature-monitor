@@ -1,0 +1,4 @@
+# Syntax example only; replace this expression before a real monitoring run.
+venue_whitelist: list.md
+keyword_expression: '"high-dimensional" AND statistics'
+log_level: INFO
