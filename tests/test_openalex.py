@@ -1,13 +1,17 @@
 import json
+from copy import deepcopy
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from pydantic import ValidationError
 
+import literature_monitor.openalex as openalex_module
 from literature_monitor.config import JournalConfig
+from literature_monitor.models import CanonicalMetadata
 from literature_monitor.openalex import (
     IssueSeverity,
     OpenAlexClient,
@@ -138,10 +142,30 @@ def test_no_successful_issn_is_an_error() -> None:
 def test_remote_failure_is_not_treated_as_an_unresolved_issn() -> None:
     client, _ = make_client(
         fixture("source_cybernetics.json"),
-        http_error(500),
-        http_error(500),
-        http_error(500),
+        TimeoutError("timed out"),
+        TimeoutError("timed out"),
+        TimeoutError("timed out"),
     )
+    journal = JournalConfig(
+        name="IEEE Transactions on Cybernetics",
+        issn=("2168-2267", "2168-2275"),
+    )
+
+    source, issues = resolve_journal_source(client, journal)
+
+    assert source is not None
+    assert source.openalex_id == "https://openalex.org/S4210191041"
+    assert len(issues) == 1
+    assert issues[0].issn == "2168-2275"
+    assert issues[0].severity is IssueSeverity.WARNING
+    assert "incomplete ISSN verification" in issues[0].message
+    assert "timed out" in issues[0].message
+
+
+def test_success_plus_source_semantic_failure_rejects_the_journal() -> None:
+    non_journal = fixture("source_cybernetics.json")
+    non_journal["type"] = "conference"
+    client, _ = make_client(fixture("source_cybernetics.json"), non_journal)
     journal = JournalConfig(
         name="IEEE Transactions on Cybernetics",
         issn=("2168-2267", "2168-2275"),
@@ -153,7 +177,27 @@ def test_remote_failure_is_not_treated_as_an_unresolved_issn() -> None:
     assert len(issues) == 1
     assert issues[0].issn == "2168-2275"
     assert issues[0].severity is IssueSeverity.ERROR
-    assert "HTTP 500" in issues[0].message
+    assert "non-journal" in issues[0].message
+    assert "remote/API failure" not in issues[0].message
+
+
+def test_no_successful_issn_after_remote_failures_is_a_journal_error() -> None:
+    client, _ = make_client(*(http_error(500) for _ in range(6)))
+    journal = JournalConfig(
+        name="IEEE Transactions on Cybernetics",
+        issn=("2168-2267", "2168-2275"),
+    )
+
+    source, issues = resolve_journal_source(client, journal)
+
+    assert source is None
+    assert len(issues) == 1
+    assert issues[0].issn is None
+    assert issues[0].severity is IssueSeverity.ERROR
+    assert "no configured ISSN resolved" in issues[0].message
+    assert "incomplete ISSN verification" in issues[0].message
+    assert "2168-2267" in issues[0].message
+    assert "2168-2275" in issues[0].message
 
 
 @pytest.mark.parametrize(
@@ -195,6 +239,38 @@ def test_normalized_name_allows_leading_the_and_punctuation() -> None:
 def test_retry_backoff_is_injected_and_never_really_sleeps() -> None:
     delays: list[float] = []
     opener = SequenceOpener(http_error(429), http_error(500), fixture("source_biometrics.json"))
+    client = OpenAlexClient(opener=opener, sleep=delays.append)
+
+    payload = client.get_source_by_issn("0006-341X")
+
+    assert payload["id"] == "https://openalex.org/S8265502"
+    assert delays == [1, 2]
+    assert len(opener.requests) == 3
+
+
+def test_timeout_retries_use_injected_backoff_without_real_sleep() -> None:
+    delays: list[float] = []
+    opener = SequenceOpener(
+        TimeoutError("timed out"),
+        TimeoutError("timed out"),
+        fixture("source_biometrics.json"),
+    )
+    client = OpenAlexClient(opener=opener, sleep=delays.append)
+
+    payload = client.get_source_by_issn("0006-341X")
+
+    assert payload["id"] == "https://openalex.org/S8265502"
+    assert delays == [1, 2]
+    assert len(opener.requests) == 3
+
+
+def test_connection_retries_use_injected_backoff_without_real_sleep() -> None:
+    delays: list[float] = []
+    opener = SequenceOpener(
+        URLError("connection refused"),
+        URLError("connection refused"),
+        fixture("source_biometrics.json"),
+    )
     client = OpenAlexClient(opener=opener, sleep=delays.append)
 
     payload = client.get_source_by_issn("0006-341X")
@@ -264,6 +340,133 @@ def test_discovery_pages_normalizes_records_and_builds_venue_first_query() -> No
     assert all(
         "search" not in parse_qs(urlparse(request.full_url).query)
         for request in work_requests
+    )
+
+
+def test_normalization_preserves_author_order_orcid_and_abstract_positions() -> None:
+    page = deepcopy(fixture("works_page_1.json"))
+    page["meta"]["next_cursor"] = None
+    work = page["results"][0]
+    work["doi"] = "https://doi.org/"
+    work["abstract_inverted_index"] = {"model": [2], "The": [0], "Cox": [1]}
+    work["authorships"][0]["author"]["orcid"] = (
+        "  https://orcid.org/0000-0002-9447-7023  "
+    )
+    work["authorships"].append(
+        {
+            "author": {
+                "id": "https://openalex.org/A123",
+                "display_name": "Second Author",
+                "orcid": "https://orcid.org/0000-0001-2345-6789",
+            },
+            "raw_author_name": "Second Author",
+        }
+    )
+    client, _ = make_client(fixture("source_biometrics.json"), page)
+
+    result = discover_journals(
+        client,
+        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+    assert not result.has_errors
+    assert len(result.records) == 1
+    record = result.records[0]
+    assert record.external_ids.doi is None
+    assert record.metadata.abstract == "The Cox model"
+    assert [author.name for author in record.authors] == ["Weihao Li", "Second Author"]
+    assert [author.orcid for author in record.authors] == [
+        "https://orcid.org/0000-0002-9447-7023",
+        "https://orcid.org/0000-0001-2345-6789",
+    ]
+
+
+def test_model_validation_failure_skips_only_the_bad_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = deepcopy(fixture("works_page_1.json"))
+    page["meta"]["next_cursor"] = None
+    malformed = deepcopy(page["results"][0])
+    malformed["id"] = "https://openalex.org/W100"
+    malformed["title"] = "Trigger model validation"
+    valid = deepcopy(page["results"][0])
+    valid["id"] = "https://openalex.org/W101"
+    page["results"] = [malformed, valid]
+    original_normalize = openalex_module._normalize_work
+
+    with pytest.raises(ValidationError) as captured:
+        CanonicalMetadata(title="", journal="Biometrics")
+    validation_error = captured.value
+
+    def normalize_with_provider_validation(
+        payload: Any,
+        source: openalex_module.ResolvedSource,
+        retrieved_at: datetime,
+    ) -> tuple[openalex_module.OpenAlexWorkRecord, tuple[str, ...]]:
+        if payload.get("title") == "Trigger model validation":
+            raise validation_error
+        return original_normalize(payload, source, retrieved_at)
+
+    monkeypatch.setattr(openalex_module, "_normalize_work", normalize_with_provider_validation)
+    client, _ = make_client(fixture("source_biometrics.json"), page)
+
+    result = discover_journals(
+        client,
+        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+    assert [record.external_ids.openalex for record in result.records] == [
+        "https://openalex.org/W101"
+    ]
+    assert result.has_errors
+    assert len(result.issues) == 1
+    assert result.issues[0].stage == "record_normalization"
+    assert result.issues[0].record_id == "https://openalex.org/W100"
+
+
+def test_bad_record_in_one_journal_does_not_stop_later_journals() -> None:
+    bad_page = deepcopy(fixture("works_page_1.json"))
+    bad_page["meta"]["next_cursor"] = None
+    bad_page["results"][0]["title"] = None
+    later_page = deepcopy(fixture("works_page_1.json"))
+    later_page["meta"]["next_cursor"] = None
+    later_page["results"][0]["id"] = "https://openalex.org/W200"
+    later_page["results"][0]["primary_location"]["source"]["id"] = (
+        "https://openalex.org/S4210191041"
+    )
+    client, _ = make_client(
+        fixture("source_biometrics.json"),
+        bad_page,
+        fixture("source_cybernetics.json"),
+        fixture("source_cybernetics.json"),
+        later_page,
+    )
+
+    result = discover_journals(
+        client,
+        (
+            JournalConfig(name="Biometrics", issn=("0006-341X",)),
+            JournalConfig(
+                name="IEEE Transactions on Cybernetics",
+                issn=("2168-2267", "2168-2275"),
+            ),
+        ),
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+    assert [record.external_ids.openalex for record in result.records] == [
+        "https://openalex.org/W200"
+    ]
+    assert len(result.sources) == 2
+    assert result.has_errors
+    assert any(
+        issue.journal == "Biometrics" and issue.stage == "record_normalization"
+        for issue in result.issues
     )
 
 

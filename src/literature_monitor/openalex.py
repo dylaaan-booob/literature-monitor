@@ -16,6 +16,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from pydantic import ValidationError
+
 from literature_monitor.config import JournalConfig
 from literature_monitor.models import (
     Author,
@@ -298,49 +300,81 @@ def resolve_journal_source(
 ) -> tuple[ResolvedSource | None, tuple[DiscoveryIssue, ...]]:
     hits: list[_SourceHit] = []
     unresolved: list[str] = []
+    request_failures: list[tuple[str, str]] = []
+    source_validation_failures: list[tuple[str, str]] = []
     issues: list[DiscoveryIssue] = []
-    failed = False
 
     for issn in journal.issn:
         try:
             payload = client.get_source_by_issn(issn)
-            hits.append(_parse_source(payload, issn))
         except OpenAlexNotFoundError:
             unresolved.append(issn)
-        except OpenAlexError as error:
-            failed = True
-            issues.append(
-                DiscoveryIssue(
-                    severity=IssueSeverity.ERROR,
-                    stage="source_resolution",
-                    journal=journal.name,
-                    issn=issn,
-                    message=str(error),
-                )
-            )
+            continue
+        except OpenAlexRequestError as error:
+            request_failures.append((issn, str(error)))
+            continue
+        try:
+            hits.append(_parse_source(payload, issn))
+        except OpenAlexRecordError as error:
+            source_validation_failures.append((issn, str(error)))
 
-    if failed:
-        for issn in unresolved:
-            issues.append(
-                DiscoveryIssue(
-                    severity=IssueSeverity.WARNING,
-                    stage="source_resolution",
-                    journal=journal.name,
-                    issn=issn,
-                    message=f"ISSN {issn} is unresolved in OpenAlex",
-                )
-            )
-        return None, tuple(issues)
     if not hits:
+        details: list[str] = []
+        if unresolved:
+            details.append(f"unresolved ISSNs: {', '.join(unresolved)}")
+        if request_failures:
+            failures = "; ".join(
+                f"{issn}: {message}" for issn, message in request_failures
+            )
+            details.append(f"incomplete ISSN verification: {failures}")
+        if source_validation_failures:
+            failures = "; ".join(
+                f"{issn}: {message}" for issn, message in source_validation_failures
+            )
+            details.append(f"Source validation failures: {failures}")
         issues.append(
             DiscoveryIssue(
                 severity=IssueSeverity.ERROR,
                 stage="source_resolution",
                 journal=journal.name,
-                message=f"no configured ISSN resolved in OpenAlex: {', '.join(unresolved)}",
+                message=(
+                    "no configured ISSN resolved in OpenAlex"
+                    + (f" ({'; '.join(details)})" if details else "")
+                ),
             )
         )
         return None, tuple(issues)
+
+    for issn in unresolved:
+        issues.append(
+            DiscoveryIssue(
+                severity=IssueSeverity.WARNING,
+                stage="source_resolution",
+                journal=journal.name,
+                issn=issn,
+                message=f"ISSN {issn} is unresolved; using the consistent resolved Source",
+            )
+        )
+    for issn, message in request_failures:
+        issues.append(
+            DiscoveryIssue(
+                severity=IssueSeverity.WARNING,
+                stage="source_resolution",
+                journal=journal.name,
+                issn=issn,
+                message=f"incomplete ISSN verification after remote/API failure: {message}",
+            )
+        )
+    for issn, message in source_validation_failures:
+        issues.append(
+            DiscoveryIssue(
+                severity=IssueSeverity.ERROR,
+                stage="source_resolution",
+                journal=journal.name,
+                issn=issn,
+                message=f"resolved Source failed validation: {message}",
+            )
+        )
 
     source_ids = {hit.openalex_id for hit in hits}
     if len(source_ids) != 1:
@@ -358,6 +392,9 @@ def resolve_journal_source(
         )
         return None, tuple(issues)
 
+    if source_validation_failures:
+        return None, tuple(issues)
+
     source = hits[0]
     if not _journal_name_matches(journal.name, source):
         issues.append(
@@ -372,17 +409,6 @@ def resolve_journal_source(
             )
         )
         return None, tuple(issues)
-
-    for issn in unresolved:
-        issues.append(
-            DiscoveryIssue(
-                severity=IssueSeverity.WARNING,
-                stage="source_resolution",
-                journal=journal.name,
-                issn=issn,
-                message=f"ISSN {issn} is unresolved; using the consistent resolved Source",
-            )
-        )
 
     return (
         ResolvedSource(
@@ -407,7 +433,9 @@ def _normalize_doi(value: Any) -> str | None:
     doi = value.strip()
     prefix = "https://doi.org/"
     if doi.casefold().startswith(prefix):
-        doi = doi[len(prefix) :]
+        doi = doi[len(prefix) :].strip()
+    if not doi:
+        return None
     return doi.casefold()
 
 
@@ -564,7 +592,7 @@ def discover_journals(
                     record_id = payload.get("id") if isinstance(payload, dict) else None
                     try:
                         record, warnings = _normalize_work(payload, source, timestamp)
-                    except OpenAlexError as error:
+                    except (OpenAlexError, ValidationError) as error:
                         issues.append(
                             DiscoveryIssue(
                                 severity=IssueSeverity.ERROR,
