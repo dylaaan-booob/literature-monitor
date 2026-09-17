@@ -43,7 +43,7 @@
 | IEEE Transactions on Neural Networks and Learning Systems | 2162-237X / 2162-2388 |
 | IEEE Transactions on Pattern Analysis and Machine Intelligence | 0162-8828 |
 | International Journal of Computer Vision | 0920-5691 / 1573-1405 |
-| IEEE Transactions on Cybernetics | 1094-6977 |
+| IEEE Transactions on Cybernetics | 2168-2267 / 2168-2275 |
 | IEEE Transactions on Systems, Man and Cybernetics: Systems | 2168-2216 |
 | Journal of Machine Learning Research | 1532-4435 / 1533-7928 |
 | Artificial Intelligence | 0004-3702 |
