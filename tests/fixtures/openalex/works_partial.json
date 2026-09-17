@@ -1,0 +1,47 @@
+{
+  "meta": {
+    "count": 2,
+    "per_page": 100,
+    "next_cursor": null
+  },
+  "results": [
+    {
+      "id": "https://openalex.org/W100",
+      "doi": 42,
+      "title": "A usable partial record",
+      "publication_date": "not-a-date",
+      "abstract_inverted_index": ["invalid"],
+      "authorships": [
+        {
+          "author": {
+            "id": null,
+            "display_name": "Ada Author",
+            "orcid": null
+          },
+          "raw_author_name": "Ada Author"
+        }
+      ],
+      "primary_location": {
+        "source": {
+          "id": "https://openalex.org/S8265502",
+          "display_name": "Biometrics"
+        }
+      }
+    },
+    {
+      "id": "https://openalex.org/W101",
+      "doi": null,
+      "title": "A record without authors",
+      "publication_date": "2026-01-02",
+      "abstract_inverted_index": null,
+      "authorships": [],
+      "primary_location": {
+        "source": {
+          "id": "https://openalex.org/S8265502",
+          "display_name": "Biometrics"
+        }
+      }
+    }
+  ],
+  "group_by": []
+}

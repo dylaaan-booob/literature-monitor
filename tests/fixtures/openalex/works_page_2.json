@@ -1,0 +1,33 @@
+{
+  "meta": {
+    "count": 2,
+    "per_page": 100,
+    "next_cursor": null
+  },
+  "results": [
+    {
+      "id": "https://openalex.org/W7125247299",
+      "doi": null,
+      "title": "Inhomogeneous mark correlation functions for general marked point processes",
+      "publication_date": null,
+      "abstract_inverted_index": null,
+      "authorships": [
+        {
+          "author": {
+            "id": null,
+            "display_name": null,
+            "orcid": null
+          },
+          "raw_author_name": "Mehdi Moradi"
+        }
+      ],
+      "primary_location": {
+        "source": {
+          "id": "https://openalex.org/S8265502",
+          "display_name": "Biometrics"
+        }
+      }
+    }
+  ],
+  "group_by": []
+}

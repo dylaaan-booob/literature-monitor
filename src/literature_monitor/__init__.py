@@ -1,4 +1,4 @@
-"""Offline foundation for the literature-monitoring workflow."""
+"""Literature-monitoring workflow package."""
 
 from literature_monitor.models import CanonicalPaper
 
