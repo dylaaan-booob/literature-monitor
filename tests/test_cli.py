@@ -21,6 +21,7 @@ from literature_monitor.crossref import (
 from literature_monitor.logging_setup import LOGGER_NAME, configure_logging
 from literature_monitor.materialize import (
     MaterializationIssue,
+    MaterializationIssueSeverity,
     MaterializationResult,
 )
 from literature_monitor.models import (
@@ -1376,6 +1377,7 @@ def test_materialize_runs_full_pipeline_in_order_without_stdout(
         return MaterializationResult(
             created_papers=(destination / "Papers" / "paper.md",),
             existing_papers=(),
+            updated_papers=(),
             created_authors=(destination / "Authors" / "author.md",),
             existing_authors=(),
             issues=(),
@@ -1551,6 +1553,7 @@ def test_materialize_canonicalization_warning_is_nonfatal(
         lambda papers, output_dir: MaterializationResult(
             created_papers=(output_dir / "Papers" / "paper.md",),
             existing_papers=(),
+            updated_papers=(),
             created_authors=(),
             existing_authors=(),
             issues=(),
@@ -1618,7 +1621,7 @@ def test_materialize_partial_upstream_error_still_materializes_papers(
         papers: tuple[CanonicalPaper, ...], output_dir: Path
     ) -> MaterializationResult:
         received.extend(papers)
-        return MaterializationResult((), (), (), (), ())
+        return MaterializationResult((), (), (), (), (), ())
 
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.materialize_papers", fake_materialize
@@ -1643,8 +1646,19 @@ def test_materialize_partial_upstream_error_still_materializes_papers(
     assert len(received) == 1
 
 
-def test_materialize_filesystem_error_returns_one(
-    tmp_path: Path, monkeypatch: object, capsys: object
+@pytest.mark.parametrize(
+    ("severity", "expected_exit"),
+    [
+        (MaterializationIssueSeverity.WARNING, 0),
+        (MaterializationIssueSeverity.ERROR, 1),
+    ],
+)
+def test_materialize_issue_severity_controls_exit_code(
+    severity: MaterializationIssueSeverity,
+    expected_exit: int,
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
 ) -> None:
     repository_root = Path(__file__).resolve().parents[1]
     issue_path = tmp_path / "Papers" / "failed.md"
@@ -1673,9 +1687,16 @@ def test_materialize_filesystem_error_returns_one(
         lambda papers, output_dir: MaterializationResult(
             created_papers=(),
             existing_papers=(),
+            updated_papers=(),
             created_authors=(),
             existing_authors=(),
-            issues=(MaterializationIssue(issue_path, "permission denied"),),
+            issues=(
+                MaterializationIssue(
+                    issue_path,
+                    "materialization diagnostic",
+                    severity,
+                ),
+            ),
         ),
     )
 
@@ -1694,6 +1715,11 @@ def test_materialize_filesystem_error_returns_one(
     )
 
     captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 1
-    assert "permission denied" in captured.err
-    assert "1 materialization issues" in captured.err
+    assert result == expected_exit
+    assert "materialization diagnostic" in captured.err
+    expected_label = (
+        "1 materialization warnings, 0 materialization errors"
+        if severity is MaterializationIssueSeverity.WARNING
+        else "0 materialization warnings, 1 materialization errors"
+    )
+    assert expected_label in captured.err

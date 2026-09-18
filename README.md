@@ -1,10 +1,10 @@
 # Literature Monitor
 
 This repository contains the journal-monitoring workflow specified in
-`SPEC.md`. It currently provides the Task 1 project foundation through Task 6
-Obsidian materialization: venue-first OpenAlex discovery, local keyword
-filtering, DOI-only Crossref enrichment, canonicalization and version
-consolidation, and creation-only Paper and Author Markdown output.
+`SPEC.md`. It currently provides the Task 1 project foundation through Task 7
+incremental Obsidian materialization: venue-first OpenAlex discovery, local
+keyword filtering, DOI-only Crossref enrichment, canonicalization and version
+consolidation, and durable Paper and Author Markdown updates.
 
 ## Setup
 
@@ -155,8 +155,9 @@ stable UUID recovery across independent runs, or Zotero export.
 
 ## Materialize Obsidian Markdown
 
-The Task 6 command runs the complete journal-first pipeline and creates Paper
-and Author notes under an Obsidian-compatible output directory:
+The materialize command runs the complete journal-first pipeline and creates or
+incrementally updates Paper and Author notes under an Obsidian-compatible output
+directory:
 
 ```bash
 uv run literature-monitor materialize \
@@ -175,15 +176,23 @@ The command writes to:
 <output-dir>/Authors
 ```
 
-Task 6 is creation-only. Existing Paper and Author files are reused without
-changing any bytes, so human status, notes, unknown frontmatter, and custom body
-sections remain untouched. A missing Paper is created only after all of its
-required Author notes were created successfully or already exist as files.
+Task 7 scans existing Markdown and recovers Paper identity from UUIDs, external
+identifiers, version keys, and source keys before using the conservative
+title-and-ordered-author fallback. Matched Papers retain their durable UUID and
+path. Versions and sources accumulate across runs, and the preferred version is
+recomputed before bibliographic metadata is updated. A lower-priority incoming
+manifestation cannot overwrite the snapshot belonging to the effective
+preferred version.
 
-This is not yet the complete overlapping-rerun behavior from `SPEC.md`. Reusing
-the same Paper path in Task 6 assumes the same `CanonicalPaper` title and UUID
-and the same creation-time UUID collision context. A different batch can change
-the short-UUID length, a changed title can change the slug, and a separate
-canonicalization run can assign a new UUID. Reading existing Markdown to recover
-identity, retaining an old filename when metadata improves, and safely updating
-machine-managed metadata are Task 7 responsibilities.
+Updates preserve workflow status, discovery time, Zotero key, unknown
+frontmatter, Notes, and unmanaged body sections. Managed frontmatter and the
+title, Abstract, Versions, and Sources sections are rewritten atomically only
+when their rendered bytes change. Existing opaque Author files remain reusable
+at their deterministic paths and are never overwritten; parseable Author notes
+may receive missing stable identifiers without being renamed.
+
+Malformed but identity-readable Papers still block duplicate creation. Unsafe
+or ambiguous matches are reported as errors and left unchanged, while
+recoverable metadata conflicts are warnings. Task 7 does not automatically
+merge, delete, or rename historical duplicates and does not implement Zotero
+export.

@@ -21,7 +21,10 @@ from literature_monitor.keywords import (
     parse_keyword_expression,
 )
 from literature_monitor.logging_setup import configure_logging
-from literature_monitor.materialize import materialize_papers
+from literature_monitor.materialize import (
+    MaterializationIssueSeverity,
+    materialize_papers,
+)
 from literature_monitor.openalex import (
     IssueSeverity,
     OpenAlexClient,
@@ -85,7 +88,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     materialize_parser = subparsers.add_parser(
         "materialize",
-        help="create Task 6 Obsidian Paper and Author Markdown files",
+        help="create or incrementally update Obsidian Paper and Author Markdown files",
     )
     _add_discovery_arguments(materialize_parser)
     materialize_parser.add_argument(
@@ -233,16 +236,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                         args.output_dir,
                     )
                     for issue in materialization.issues:
-                        logger.error(
+                        log = (
+                            logger.error
+                            if issue.severity is MaterializationIssueSeverity.ERROR
+                            else logger.warning
+                        )
+                        log(
                             "Materialization [%s]: %s",
                             issue.path,
                             issue.message,
                         )
+                    materialization_warnings = sum(
+                        issue.severity is MaterializationIssueSeverity.WARNING
+                        for issue in materialization.issues
+                    )
+                    materialization_errors = sum(
+                        issue.severity is MaterializationIssueSeverity.ERROR
+                        for issue in materialization.issues
+                    )
                     logger.info(
                         "Materialization completed: %d discovered, %d retained, "
                         "%d enriched, %d canonical papers, %d paper files created, "
-                        "%d paper files existing, %d author files created, "
-                        "%d author files existing, %d materialization issues, "
+                        "%d paper files matched, %d paper files updated, "
+                        "%d author files created, %d author files existing, "
+                        "%d materialization warnings, %d materialization errors, "
                         "%d canonicalization issues, %d OpenAlex issues, "
                         "%d Crossref issues",
                         len(result.records),
@@ -251,9 +268,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         len(canonicalization.papers),
                         len(materialization.created_papers),
                         len(materialization.existing_papers),
+                        len(materialization.updated_papers),
                         len(materialization.created_authors),
                         len(materialization.existing_authors),
-                        len(materialization.issues),
+                        materialization_warnings,
+                        materialization_errors,
                         len(canonicalization.issues),
                         len(result.issues),
                         len(enrichment.issues),

@@ -9,6 +9,9 @@ import yaml
 
 from literature_monitor.materialize import (
     MISSING_ABSTRACT,
+    MaterializationIssue,
+    MaterializationIssueSeverity,
+    MaterializationResult,
     materialize_papers,
     render_paper_markdown,
 )
@@ -75,6 +78,50 @@ def paper(
             status=WorkflowStatus.CANDIDATE,
             discovered_at=NOW,
         ),
+        preferred_version=VersionRef(
+            source=version.source,
+            identifier=version.identifier,
+        ),
+    )
+
+
+def manifestation(
+    identifier: str,
+    *,
+    title: str,
+    kind: VersionKind,
+    version_source: str,
+    version_identifier: str,
+    version_date: date | None,
+    author: Author = Author(name="Ada Author"),
+    shared_record_id: str = "shared-work",
+) -> CanonicalPaper:
+    version = PaperVersion(
+        source=version_source,
+        identifier=version_identifier,
+        kind=kind,
+        date=version_date,
+    )
+    return CanonicalPaper(
+        id=UUID(identifier),
+        metadata=CanonicalMetadata(
+            title=title,
+            journal="Biometrics",
+            publication_date=version_date,
+            abstract=f"{title} abstract",
+            author_keywords=(title.casefold(),),
+        ),
+        external_ids=ExternalIds(),
+        authors=(author,),
+        versions=(version,),
+        sources=(
+            MetadataSource(
+                provider="openalex",
+                record_id=shared_record_id,
+                retrieved_at=NOW,
+            ),
+        ),
+        workflow=Workflow(discovered_at=NOW),
         preferred_version=VersionRef(
             source=version.source,
             identifier=version.identifier,
@@ -304,7 +351,9 @@ def test_paper_collision_context_does_not_change_name_only_author_path(
     }
 
 
-def test_rerun_preserves_existing_paper_and_author_bytes(tmp_path: Path) -> None:
+def test_rerun_preserves_human_paper_content_and_opaque_author_bytes(
+    tmp_path: Path,
+) -> None:
     source = paper(
         "a2345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         authors=(Author(name="Ada", openalex_id="https://openalex.org/A9"),),
@@ -317,7 +366,7 @@ def test_rerun_preserves_existing_paper_and_author_bytes(tmp_path: Path) -> None
         .replace("status: candidate", "status: rejected\ncustom_field: retained")
         .replace("## Notes\n", "## Notes\n\nHuman note.\n\n## Custom\n\nKeep me.\n")
     ).encode()
-    modified_author = b"---\ntype: author\nname: Human edited\n---\n"
+    modified_author = b"human-owned opaque author\n"
     paper_path.write_bytes(modified_paper)
     author_path.write_bytes(modified_author)
 
@@ -329,6 +378,30 @@ def test_rerun_preserves_existing_paper_and_author_bytes(tmp_path: Path) -> None
     assert second.existing_authors == (author_path,)
     assert paper_path.read_bytes() == modified_paper
     assert author_path.read_bytes() == modified_author
+
+
+def test_parsed_author_note_is_enriched_without_losing_unknown_content(
+    tmp_path: Path,
+) -> None:
+    source = paper(
+        "aa345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        authors=(Author(name="Ada", openalex_id="https://openalex.org/A9"),),
+    )
+    first = materialize_papers((source,), tmp_path)
+    author_path = first.created_authors[0]
+    original = (
+        "---\ntype: author\nname: Ada\ncustom: retained\n---\n\nHuman body.\n"
+    )
+    author_path.write_text(original, encoding="utf-8")
+
+    result = materialize_papers((source,), tmp_path)
+
+    contents = author_path.read_text(encoding="utf-8")
+    values = frontmatter(contents)
+    assert result.existing_authors == (author_path,)
+    assert values["openalex_id"] == "https://openalex.org/A9"
+    assert values["custom"] == "retained"
+    assert contents.endswith("\nHuman body.\n")
 
 
 def test_failed_author_blocks_dependent_paper_but_not_unrelated_paper(
@@ -401,3 +474,781 @@ def test_existing_author_file_is_available_to_new_paper(tmp_path: Path) -> None:
     assert result.existing_authors == (author_path,)
     assert len(result.created_papers) == 1
     assert author_path.read_bytes() == original
+
+
+def test_fresh_uuid_recovers_existing_path_from_each_strong_identity(
+    tmp_path: Path,
+) -> None:
+    cases = (
+        ("uuid", True, ExternalIds(), (), ()),
+        ("doi", False, ExternalIds(doi="10.1000/shared"), (), ()),
+        (
+            "external",
+            False,
+            ExternalIds.model_validate({"pmid": "12345"}),
+            (),
+            (),
+        ),
+        (
+            "version",
+            False,
+            ExternalIds(),
+            (
+                PaperVersion(
+                    source="arxiv",
+                    identifier="2609.00001",
+                    kind=VersionKind.PREPRINT,
+                ),
+            ),
+            (),
+        ),
+        (
+            "source",
+            False,
+            ExternalIds(),
+            (),
+            (
+                MetadataSource(
+                    provider="OpenAlex",
+                    record_id="W-identity",
+                    retrieved_at=NOW,
+                ),
+            ),
+        ),
+    )
+    for ordinal, (name, same_uuid, external_ids, versions, sources) in enumerate(
+        cases, start=1
+    ):
+        root = tmp_path / name
+        first_id = UUID(f"{ordinal:08x}-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        initial = CanonicalPaper(
+            id=first_id,
+            metadata=CanonicalMetadata(title="Initial", journal="Biometrics"),
+            external_ids=external_ids,
+            authors=(Author(name="Ada"),),
+            versions=versions,
+            sources=sources,
+            workflow=Workflow(discovered_at=NOW),
+        )
+        first = materialize_papers((initial,), root)
+        incoming = initial.model_copy(
+            update={
+                "id": (
+                    first_id
+                    if same_uuid
+                    else UUID(f"{ordinal + 20:08x}-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+                ),
+                "metadata": initial.metadata.model_copy(update={"title": "Changed"}),
+            }
+        )
+
+        second = materialize_papers((incoming,), root)
+
+        assert second.created_papers == ()
+        assert second.existing_papers == first.created_papers
+        assert len(tuple((root / "Papers").glob("*.md"))) == 1
+        assert frontmatter(first.created_papers[0].read_text())["id"] == str(first_id)
+
+
+def test_malformed_identity_readable_paper_blocks_duplicate_and_isolated_work(
+    tmp_path: Path,
+) -> None:
+    original = paper("13345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    first = materialize_papers((original,), tmp_path)
+    original_path = first.created_papers[0]
+    malformed = original_path.read_text().replace(
+        "status: candidate", "status: impossible"
+    ).encode()
+    original_path.write_bytes(malformed)
+    duplicate = original.model_copy(
+        update={
+            "id": UUID("14345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            "metadata": original.metadata.model_copy(update={"title": "Duplicate"}),
+        }
+    )
+    unrelated = paper(
+        "15345678-cccc-4ccc-8ccc-cccccccccccc",
+        title="Unrelated",
+    ).model_copy(
+        update={
+            "external_ids": ExternalIds(doi="10.5555/unrelated"),
+            "versions": (),
+            "sources": (),
+            "preferred_version": None,
+        }
+    )
+
+    result = materialize_papers((duplicate, unrelated), tmp_path)
+
+    assert result.has_errors
+    assert original_path.read_bytes() == malformed
+    assert result.existing_papers == (original_path,)
+    assert len(result.created_papers) == 1
+    assert result.created_papers[0].name.startswith("unrelated--")
+    assert len(tuple((tmp_path / "Papers").glob("*.md"))) == 2
+
+
+def test_preferred_version_upgrade_updates_bibliographic_snapshot(
+    tmp_path: Path,
+) -> None:
+    preprint = manifestation(
+        "16345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        title="Preprint title",
+        kind=VersionKind.PREPRINT,
+        version_source="arxiv",
+        version_identifier="2601.00001",
+        version_date=date(2026, 1, 1),
+    )
+    final = manifestation(
+        "17345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        title="Final title",
+        kind=VersionKind.JOURNAL_FINAL,
+        version_source="doi",
+        version_identifier="10.5555/final",
+        version_date=date(2026, 9, 10),
+    )
+    first = materialize_papers((preprint,), tmp_path)
+
+    result = materialize_papers((final,), tmp_path)
+
+    values = frontmatter(first.created_papers[0].read_text())
+    assert result.created_papers == ()
+    assert result.updated_papers == first.created_papers
+    assert values["id"] == str(preprint.id)
+    assert values["title"] == "Final title"
+    assert values["publication_date"] == "2026-09-10"
+    assert values["preferred_version"] == {
+        "source": "doi",
+        "identifier": "10.5555/final",
+    }
+    assert len(values["versions"]) == 2  # type: ignore[arg-type]
+    assert not result.has_errors
+
+
+def test_lower_priority_rerun_preserves_effective_preferred_snapshot(
+    tmp_path: Path,
+) -> None:
+    final = manifestation(
+        "18345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        title="Final title",
+        kind=VersionKind.JOURNAL_FINAL,
+        version_source="doi",
+        version_identifier="10.5555/final",
+        version_date=date(2026, 9, 10),
+    )
+    preprint = manifestation(
+        "19345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        title="Preprint title",
+        kind=VersionKind.PREPRINT,
+        version_source="arxiv",
+        version_identifier="2601.00001",
+        version_date=date(2026, 1, 1),
+    )
+    first = materialize_papers((final,), tmp_path)
+
+    result = materialize_papers((preprint,), tmp_path)
+
+    values = frontmatter(first.created_papers[0].read_text())
+    assert result.created_papers == ()
+    assert values["title"] == "Final title"
+    assert values["publication_date"] == "2026-09-10"
+    assert values["preferred_version"] == {
+        "source": "doi",
+        "identifier": "10.5555/final",
+    }
+    assert len(values["versions"]) == 2  # type: ignore[arg-type]
+    assert any(
+        issue.severity is MaterializationIssueSeverity.WARNING
+        for issue in result.issues
+    )
+    assert not result.has_errors
+
+
+def test_version_enrichment_and_conflict_are_nonfatal_warnings(
+    tmp_path: Path,
+) -> None:
+    initial = manifestation(
+        "1a345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        title="Versioned",
+        kind=VersionKind.UNKNOWN,
+        version_source="doi",
+        version_identifier="10.5555/version",
+        version_date=None,
+    )
+    enriched = manifestation(
+        "1b345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        title="Versioned",
+        kind=VersionKind.JOURNAL_FINAL,
+        version_source="doi",
+        version_identifier="10.5555/version",
+        version_date=date(2026, 9, 10),
+    )
+    first = materialize_papers((initial,), tmp_path)
+    materialize_papers((enriched,), tmp_path)
+    conflicting = enriched.model_copy(
+        update={
+            "versions": (
+                enriched.versions[0].model_copy(
+                    update={
+                        "kind": VersionKind.ACCEPTED_MANUSCRIPT,
+                        "date": date(2026, 9, 11),
+                    }
+                ),
+            )
+        }
+    )
+
+    result = materialize_papers((conflicting,), tmp_path)
+
+    values = frontmatter(first.created_papers[0].read_text())
+    version = values["versions"][0]  # type: ignore[index]
+    assert version["kind"] == "journal_final"
+    assert version["date"] == "2026-09-10"
+    assert len(result.issues) >= 2
+    assert all(
+        issue.severity is MaterializationIssueSeverity.WARNING
+        for issue in result.issues
+    )
+    assert not result.has_errors
+
+
+def test_title_fallback_requires_author_note_stable_evidence(
+    tmp_path: Path,
+) -> None:
+    original = CanonicalPaper(
+        id=UUID("1c345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        metadata=CanonicalMetadata(title="Same Title", journal="Biometrics"),
+        authors=(Author(name="Ada", openalex_id="https://openalex.org/A42"),),
+        workflow=Workflow(discovered_at=NOW),
+    )
+    first = materialize_papers((original,), tmp_path)
+    incoming = original.model_copy(
+        update={"id": UUID("1d345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb")}
+    )
+
+    matched = materialize_papers((incoming,), tmp_path)
+
+    assert matched.existing_papers == first.created_papers
+    assert matched.created_papers == ()
+
+    first.created_authors[0].write_text("opaque author\n", encoding="utf-8")
+    second_incoming = incoming.model_copy(
+        update={"id": UUID("1e345678-cccc-4ccc-8ccc-cccccccccccc")}
+    )
+    blocked_fallback = materialize_papers((second_incoming,), tmp_path)
+
+    assert len(blocked_fallback.created_papers) == 1
+    assert len(tuple((tmp_path / "Papers").glob("*.md"))) == 2
+    assert first.created_authors[0].read_text() == "opaque author\n"
+
+
+def test_title_author_fallback_does_not_cross_conflicting_dois(
+    tmp_path: Path,
+) -> None:
+    author = Author(name="Ada", openalex_id="https://openalex.org/A43")
+    initial = CanonicalPaper(
+        id=UUID("1ea45678-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        metadata=CanonicalMetadata(title="Shared Title", journal="Biometrics"),
+        external_ids=ExternalIds(doi="10.5555/first"),
+        authors=(author,),
+        workflow=Workflow(discovered_at=NOW),
+    )
+    incoming = initial.model_copy(
+        update={
+            "id": UUID("1eb45678-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            "external_ids": ExternalIds(doi="10.5555/second"),
+        }
+    )
+    materialize_papers((initial,), tmp_path)
+
+    result = materialize_papers((incoming,), tmp_path)
+
+    assert len(result.created_papers) == 1
+    assert len(tuple((tmp_path / "Papers").glob("*.md"))) == 2
+
+
+def test_unidentified_author_gains_stable_id_without_renaming(tmp_path: Path) -> None:
+    initial = manifestation(
+        "1f345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        title="Initial",
+        kind=VersionKind.PREPRINT,
+        version_source="arxiv",
+        version_identifier="2601.00002",
+        version_date=date(2026, 1, 2),
+        author=Author(name="Ada"),
+    )
+    first = materialize_papers((initial,), tmp_path)
+    incoming = initial.model_copy(
+        update={
+            "id": UUID("20345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            "authors": (
+                Author(name="Ada", openalex_id="https://openalex.org/A99"),
+            ),
+        }
+    )
+
+    result = materialize_papers((incoming,), tmp_path)
+
+    author_path = first.created_authors[0]
+    assert result.created_authors == ()
+    assert not (tmp_path / "Authors" / "openalex-a99.md").exists()
+    assert frontmatter(author_path.read_text())["openalex_id"] == (
+        "https://openalex.org/A99"
+    )
+
+
+def test_name_only_authors_reuse_unambiguous_links_after_reordering(
+    tmp_path: Path,
+) -> None:
+    ada = Author(name="Ada")
+    bob = Author(name="Bob")
+    initial = paper(
+        "20445678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        authors=(ada, bob),
+    )
+    first = materialize_papers((initial,), tmp_path)
+    incoming = initial.model_copy(update={"authors": (bob, ada)})
+
+    result = materialize_papers((incoming,), tmp_path)
+
+    values = frontmatter(first.created_papers[0].read_text())
+    assert values["authors"] == [
+        f"[[Authors/unidentified-{initial.id.hex}-02|Bob]]",
+        f"[[Authors/unidentified-{initial.id.hex}-01|Ada]]",
+    ]
+    assert result.created_authors == ()
+    assert not result.has_errors
+
+
+def test_name_only_author_insertion_fails_closed_on_occupied_ordinal(
+    tmp_path: Path,
+) -> None:
+    initial = paper(
+        "20545678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        authors=(Author(name="Ada"), Author(name="Bob")),
+    )
+    first = materialize_papers((initial,), tmp_path)
+    paper_path = first.created_papers[0]
+    original = paper_path.read_bytes()
+    incoming = initial.model_copy(
+        update={
+            "authors": (
+                Author(name="Carol"),
+                Author(name="Ada"),
+                Author(name="Bob"),
+            )
+        }
+    )
+
+    result = materialize_papers((incoming,), tmp_path)
+
+    assert result.updated_papers == ()
+    assert result.created_authors == ()
+    assert result.has_errors
+    assert paper_path.read_bytes() == original
+    assert len(tuple((tmp_path / "Authors").glob("*.md"))) == 2
+
+
+def test_conflicting_openalex_id_blocks_same_orcid_author_match(
+    tmp_path: Path,
+) -> None:
+    initial = CanonicalPaper(
+        id=UUID("20645678-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        metadata=CanonicalMetadata(title="Stable Conflict", journal="Biometrics"),
+        authors=(
+            Author(
+                name="Ada",
+                openalex_id="https://openalex.org/A1",
+                orcid="0000-0002-1825-0097",
+            ),
+        ),
+        workflow=Workflow(discovered_at=NOW),
+    )
+    first = materialize_papers((initial,), tmp_path)
+    original = first.created_papers[0].read_bytes()
+    incoming = initial.model_copy(
+        update={
+            "id": UUID("20745678-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            "authors": (
+                Author(
+                    name="Ada",
+                    openalex_id="https://openalex.org/A2",
+                    orcid="0000-0002-1825-0097",
+                ),
+            ),
+        }
+    )
+
+    result = materialize_papers((incoming,), tmp_path)
+
+    assert result.existing_papers == ()
+    assert result.created_papers == ()
+    assert result.has_errors
+    assert first.created_papers[0].read_bytes() == original
+    assert not (tmp_path / "Authors" / "openalex-a2.md").exists()
+
+
+def test_abstract_h2_is_not_duplicated_and_rerun_is_byte_stable(
+    tmp_path: Path,
+) -> None:
+    abstract = "Overview.\n\n## Methods\n\nComplete method details."
+    source = paper(
+        "20845678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        abstract=abstract,
+    )
+    first = materialize_papers((source,), tmp_path)
+    paper_path = first.created_papers[0]
+    customized = paper_path.read_text().replace(
+        "## Notes\n",
+        "## Notes\n\nHuman note.\n\n## Custom\n\nKeep this section.\n",
+    )
+    paper_path.write_text(customized, encoding="utf-8")
+    expected = paper_path.read_bytes()
+
+    second = materialize_papers((source,), tmp_path)
+    third = materialize_papers((source,), tmp_path)
+
+    contents = paper_path.read_text()
+    assert second.updated_papers == ()
+    assert third.updated_papers == ()
+    assert paper_path.read_bytes() == expected
+    assert contents.count("## Methods") == 1
+    assert "## Custom\n\nKeep this section." in contents
+
+
+def test_changed_abstract_h2_replaces_complete_managed_abstract(
+    tmp_path: Path,
+) -> None:
+    initial = paper(
+        "20945678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        abstract="Old overview.\n\n## Methods\n\nOld method details.",
+    )
+    first = materialize_papers((initial,), tmp_path)
+    paper_path = first.created_papers[0]
+    customized = paper_path.read_text().replace(
+        "<!-- literature-monitor:abstract-end -->\n\n## Versions",
+        "<!-- literature-monitor:abstract-end -->\n\n"
+        "## Custom\n\nKeep this section.\n\n## Versions",
+    )
+    paper_path.write_text(customized, encoding="utf-8")
+    changed = initial.model_copy(
+        update={
+            "metadata": initial.metadata.model_copy(
+                update={
+                    "abstract": "New overview.\n\n## Results\n\nNew result details."
+                }
+            )
+        }
+    )
+
+    result = materialize_papers((changed,), tmp_path)
+
+    contents = paper_path.read_text()
+    assert result.updated_papers == (paper_path,)
+    assert "Old overview." not in contents
+    assert "## Methods" not in contents
+    assert "Old method details." not in contents
+    assert "New overview.\n\n## Results\n\nNew result details." in contents
+    assert "## Custom\n\nKeep this section." in contents
+    stable_bytes = paper_path.read_bytes()
+
+    rerun = materialize_papers((changed,), tmp_path)
+
+    assert rerun.updated_papers == ()
+    assert paper_path.read_bytes() == stable_bytes
+
+
+def test_changed_legacy_abstract_h2_with_ambiguous_boundary_fails_closed(
+    tmp_path: Path,
+) -> None:
+    initial = paper(
+        "20a45678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        abstract="Old overview.\n\n## Methods\n\nOld method details.",
+    )
+    first = materialize_papers((initial,), tmp_path)
+    paper_path = first.created_papers[0]
+    legacy = paper_path.read_text().replace(
+        "<!-- literature-monitor:abstract-end -->\n",
+        "",
+    )
+    paper_path.write_text(legacy, encoding="utf-8")
+    original = paper_path.read_bytes()
+    changed = initial.model_copy(
+        update={
+            "metadata": initial.metadata.model_copy(
+                update={
+                    "abstract": "New overview.\n\n## Results\n\nNew result details."
+                }
+            )
+        }
+    )
+
+    result = materialize_papers((changed,), tmp_path)
+
+    assert result.updated_papers == ()
+    assert result.has_errors
+    assert paper_path.read_bytes() == original
+
+
+def test_atomic_replace_failure_preserves_original_paper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = manifestation(
+        "21345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        title="Original",
+        kind=VersionKind.PREPRINT,
+        version_source="arxiv",
+        version_identifier="2601.00003",
+        version_date=date(2026, 1, 3),
+        author=Author(name="Ada", openalex_id="https://openalex.org/A100"),
+    )
+    first = materialize_papers((original,), tmp_path)
+    path = first.created_papers[0]
+    before = path.read_bytes()
+    changed = original.model_copy(
+        update={
+            "id": UUID("22345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            "metadata": original.metadata.model_copy(update={"title": "Changed"}),
+        }
+    )
+
+    def fail_replace(source: object, destination: object) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr("literature_monitor.materialize.os.replace", fail_replace)
+    result = materialize_papers((changed,), tmp_path)
+
+    assert result.updated_papers == ()
+    assert result.has_errors
+    assert path.read_bytes() == before
+
+
+def test_issue_severity_controls_has_errors(tmp_path: Path) -> None:
+    warning = MaterializationIssue(
+        tmp_path,
+        "recoverable conflict",
+        MaterializationIssueSeverity.WARNING,
+    )
+    error = MaterializationIssue(tmp_path, "unsafe state")
+    common = {
+        "created_papers": (),
+        "existing_papers": (),
+        "updated_papers": (),
+        "created_authors": (),
+        "existing_authors": (),
+    }
+
+    assert not MaterializationResult(issues=(warning,), **common).has_errors
+    assert MaterializationResult(issues=(warning, error), **common).has_errors
+
+
+def test_update_preserves_workflow_unknown_frontmatter_and_unmanaged_body(
+    tmp_path: Path,
+) -> None:
+    initial = paper("23345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    first = materialize_papers((initial,), tmp_path)
+    path = first.created_papers[0]
+    edited = (
+        path.read_text()
+        .replace(
+            "status: candidate",
+            "status: kept\ncustom_field:\n  nested: retained",
+        )
+        .replace("zotero_key: null", "zotero_key: ZOT123")
+        .replace(
+            f"# {initial.metadata.title}\n\n",
+            f"# {initial.metadata.title}\n\nIntro prose.\n\n"
+            "## Custom Before\n\nKeep before.\n\n",
+        )
+        .replace(
+            "## Notes\n",
+            "## Notes\n\nHuman note.\n\n### Note child\n\nKeep child.\n\n"
+            "## Custom After\n\nKeep after.\n",
+        )
+    )
+    path.write_text(edited, encoding="utf-8")
+    incoming = initial.model_copy(
+        update={
+            "metadata": initial.metadata.model_copy(
+                update={"title": "Improved Title", "abstract": "Improved abstract."}
+            )
+        }
+    )
+
+    result = materialize_papers((incoming,), tmp_path)
+
+    contents = path.read_text()
+    values = frontmatter(contents)
+    assert result.updated_papers == (path,)
+    assert values["status"] == "kept"
+    assert values["zotero_key"] == "ZOT123"
+    assert values["custom_field"] == {"nested": "retained"}
+    for retained in (
+        "Intro prose.",
+        "## Custom Before\n\nKeep before.",
+        "## Notes\n\nHuman note.",
+        "### Note child\n\nKeep child.",
+        "## Custom After\n\nKeep after.",
+    ):
+        assert retained in contents
+    assert "# Improved Title" in contents
+    assert "## Abstract\n\nImproved abstract." in contents
+
+    stable_bytes = path.read_bytes()
+    rerun = materialize_papers((incoming,), tmp_path)
+    assert rerun.updated_papers == ()
+    assert path.read_bytes() == stable_bytes
+
+
+def test_external_ids_and_sources_union_preserve_durable_conflicts(
+    tmp_path: Path,
+) -> None:
+    initial = paper("24345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa").model_copy(
+        update={
+            "external_ids": ExternalIds.model_validate(
+                {"doi": "10.5555/shared", "pmid": "old-pmid"}
+            ),
+            "sources": (
+                MetadataSource(
+                    provider="openalex",
+                    record_id="W-union",
+                    retrieved_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                ),
+            ),
+        }
+    )
+    first = materialize_papers((initial,), tmp_path)
+    incoming = initial.model_copy(
+        update={
+            "id": UUID("25345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            "external_ids": ExternalIds.model_validate(
+                {"pmid": "new-pmid", "semantic_scholar": "S2-1"}
+            ),
+            "sources": (
+                MetadataSource(
+                    provider="OpenAlex",
+                    record_id="W-union",
+                    retrieved_at=datetime(2026, 9, 18, tzinfo=timezone.utc),
+                ),
+            ),
+        }
+    )
+
+    result = materialize_papers((incoming,), tmp_path)
+
+    values = frontmatter(first.created_papers[0].read_text())
+    external_ids = values["external_ids"]
+    sources = values["sources"]
+    assert external_ids["doi"] == "10.5555/shared"  # type: ignore[index]
+    assert external_ids["pmid"] == "old-pmid"  # type: ignore[index]
+    assert external_ids["semantic_scholar"] == "S2-1"  # type: ignore[index]
+    assert sources[0]["retrieved_at"] == "2026-09-18T00:00:00Z"  # type: ignore[index]
+    assert any("external ID pmid conflicts" in issue.message for issue in result.issues)
+    assert not result.has_errors
+
+
+def test_ambiguous_existing_identity_and_multiple_incoming_fail_closed(
+    tmp_path: Path,
+) -> None:
+    first = paper(
+        "26345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        title="First duplicate",
+    )
+    second = paper(
+        "27345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        title="Second duplicate",
+    )
+    seeded = materialize_papers((first, second), tmp_path)
+    assert len(seeded.created_papers) == 2
+    ambiguous = first.model_copy(
+        update={
+            "id": UUID("28345678-cccc-4ccc-8ccc-cccccccccccc"),
+            "metadata": first.metadata.model_copy(update={"title": "Ambiguous"}),
+        }
+    )
+
+    result = materialize_papers((ambiguous,), tmp_path)
+
+    assert result.created_papers == ()
+    assert result.has_errors
+    assert len(tuple((tmp_path / "Papers").glob("*.md"))) == 2
+
+    isolated_root = tmp_path / "single"
+    original = materialize_papers((first,), isolated_root)
+    incoming_one = first.model_copy(
+        update={"id": UUID("29345678-dddd-4ddd-8ddd-dddddddddddd")}
+    )
+    incoming_two = first.model_copy(
+        update={"id": UUID("2a345678-eeee-4eee-8eee-eeeeeeeeeeee")}
+    )
+    shared = materialize_papers((incoming_one, incoming_two), isolated_root)
+    assert shared.created_papers == ()
+    assert shared.existing_papers == original.created_papers
+    assert shared.has_errors
+
+
+def test_corpus_uuid_collision_only_changes_new_paper_filename(
+    tmp_path: Path,
+) -> None:
+    existing = paper(
+        "abcdef12-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        title="Existing Collision",
+    ).model_copy(
+        update={"external_ids": ExternalIds(doi="10.5555/existing")}
+    )
+    first = materialize_papers((existing,), tmp_path)
+    existing_path = first.created_papers[0]
+    new = paper(
+        "abcdef12-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        title="New Collision",
+    ).model_copy(
+        update={
+            "external_ids": ExternalIds(doi="10.5555/new"),
+            "versions": (),
+            "sources": (),
+            "preferred_version": None,
+        }
+    )
+
+    result = materialize_papers((new,), tmp_path)
+
+    assert existing_path.exists()
+    assert result.created_papers == (
+        tmp_path
+        / "Papers"
+        / paper_filename(new.metadata.title, new.id, (existing.id, new.id)),
+    )
+
+
+@pytest.mark.parametrize(
+    "body_suffix",
+    (
+        "\n# Second primary heading\n",
+        "\n## Abstract\n\nDuplicate managed section.\n",
+        "\n```python\n# heading inside an unclosed fence\n",
+    ),
+)
+def test_ambiguous_body_blocks_update_without_creating_duplicate(
+    body_suffix: str,
+    tmp_path: Path,
+) -> None:
+    initial = paper("2b345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    first = materialize_papers((initial,), tmp_path)
+    path = first.created_papers[0]
+    original = path.read_bytes() + body_suffix.encode()
+    path.write_bytes(original)
+    incoming = initial.model_copy(
+        update={
+            "id": UUID("2c345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            "metadata": initial.metadata.model_copy(update={"title": "Changed"}),
+        }
+    )
+
+    result = materialize_papers((incoming,), tmp_path)
+
+    assert result.has_errors
+    assert result.created_papers == ()
+    assert result.updated_papers == ()
+    assert path.read_bytes() == original
+    assert len(tuple((tmp_path / "Papers").glob("*.md"))) == 1
