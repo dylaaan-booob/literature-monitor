@@ -3,8 +3,17 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from literature_monitor.cli import main
 from literature_monitor.config import load_config
+from literature_monitor.crossref import (
+    CrossrefWorkRecord,
+    EnrichedWorkRecord,
+    EnrichmentIssue,
+    EnrichmentIssueSeverity,
+    EnrichmentResult,
+)
 from literature_monitor.logging_setup import LOGGER_NAME, configure_logging
 from literature_monitor.models import Author, CanonicalMetadata, ExternalIds, MetadataSource
 from literature_monitor.openalex import (
@@ -140,6 +149,77 @@ def filter_diagnostic_result(*, with_error: bool = False) -> DiscoveryResult:
             record("W12", "Unrelated paper"),
         ),
         issues=base.issues,
+    )
+
+
+def enrichment_diagnostic_result(
+    *,
+    all_retained: bool = False,
+    with_error: bool = False,
+) -> DiscoveryResult:
+    timestamp = datetime(2026, 9, 18, tzinfo=timezone.utc)
+
+    def record(
+        identifier: str,
+        title: str,
+        abstract: str,
+        doi: str | None,
+    ) -> OpenAlexWorkRecord:
+        return OpenAlexWorkRecord(
+            metadata=CanonicalMetadata(
+                title=title,
+                journal="Biometrics",
+                abstract=abstract,
+            ),
+            external_ids=ExternalIds(
+                openalex=f"https://openalex.org/{identifier}",
+                doi=doi,
+            ),
+            authors=(Author(name="Ada Author"),),
+            source_id="https://openalex.org/S8265502",
+            provenance=MetadataSource(
+                provider="openalex",
+                record_id=f"https://openalex.org/{identifier}",
+                retrieved_at=timestamp,
+            ),
+        )
+
+    return DiscoveryResult(
+        sources=diagnostic_result().sources,
+        records=(
+            record(
+                "W1",
+                "High-dimensional models",
+                "Statistics inference",
+                "10.5555/one",
+            ),
+            record(
+                "W2",
+                "High-dimensional excluded" if all_retained else "Excluded paper",
+                "Statistics methods" if all_retained else "Different topic",
+                "10.5555/two",
+            ),
+            record(
+                "W3",
+                "High-dimensional analysis",
+                "Statistics without identifiers",
+                None,
+            ),
+        ),
+        issues=diagnostic_result(with_error=with_error).issues,
+    )
+
+
+def crossref_record(doi: str) -> CrossrefWorkRecord:
+    timestamp = datetime(2026, 9, 18, tzinfo=timezone.utc)
+    return CrossrefWorkRecord(
+        doi=doi,
+        title="Crossref title",
+        provenance=MetadataSource(
+            provider="crossref",
+            record_id=doi,
+            retrieved_at=timestamp,
+        ),
     )
 
 
@@ -443,3 +523,434 @@ def test_openalex_filter_emits_retained_records_despite_partial_errors(
     )
     assert "bad record" in captured.err
     assert "3 discovered, 1 retained, 2 filtered out" in captured.err
+
+
+def test_crossref_enrich_uses_config_filter_before_enrichment(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    received: list[OpenAlexWorkRecord] = []
+    client_sentinel = object()
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: enrichment_diagnostic_result(),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient",
+        lambda **kwargs: client_sentinel,
+    )
+
+    def fake_enrich(
+        client: object, records: tuple[OpenAlexWorkRecord, ...]
+    ) -> EnrichmentResult:
+        assert client is client_sentinel
+        received.extend(records)
+        return EnrichmentResult(
+            records=(
+                EnrichedWorkRecord(
+                    openalex=records[0],
+                    crossref=crossref_record("10.5555/one"),
+                ),
+                EnrichedWorkRecord(openalex=records[1]),
+            ),
+            issues=(
+                EnrichmentIssue(
+                    severity=EnrichmentIssueSeverity.WARNING,
+                    stage="missing_doi",
+                    message="record has no DOI",
+                    record_id=records[1].external_ids.openalex,
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.enrich_records", fake_enrich
+    )
+
+    result = main(
+        (
+            "crossref-enrich",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--journal",
+            "Biometrics",
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    rows = [json.loads(line) for line in captured.out.splitlines()]
+    assert result == 0
+    assert [record.external_ids.openalex for record in received] == [
+        "https://openalex.org/W1",
+        "https://openalex.org/W3",
+    ]
+    assert [row["openalex"]["external_ids"]["openalex"] for row in rows] == [
+        "https://openalex.org/W1",
+        "https://openalex.org/W3",
+    ]
+    assert rows[0]["crossref"]["doi"] == "10.5555/one"
+    assert rows[1]["crossref"] is None
+    assert (
+        "3 discovered, 2 retained, 1 enriched, 1 without DOI, "
+        "0 unavailable, 0 failed" in captured.err
+    )
+
+
+def test_crossref_enrich_override_is_one_run_only_and_passes_mailto(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    config_path = repository_root / "config.example.yaml"
+    before = config_path.read_bytes()
+    received: list[OpenAlexWorkRecord] = []
+    mailto_values: list[str | None] = []
+    monkeypatch.setenv("CROSSREF_MAILTO", "monitor@example.com")  # type: ignore[attr-defined]
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: enrichment_diagnostic_result(),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient",
+        lambda *, mailto=None: mailto_values.append(mailto) or object(),
+    )
+
+    def fake_enrich(
+        client: object, records: tuple[OpenAlexWorkRecord, ...]
+    ) -> EnrichmentResult:
+        received.extend(records)
+        return EnrichmentResult(
+            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
+            issues=(),
+        )
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.enrich_records", fake_enrich
+    )
+
+    result = main(
+        (
+            "crossref-enrich",
+            "--config",
+            str(config_path),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+            "--keyword-expression",
+            '"excluded paper"',
+        )
+    )
+
+    capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert [record.external_ids.openalex for record in received] == [
+        "https://openalex.org/W2"
+    ]
+    assert mailto_values == ["monitor@example.com"]
+    assert config_path.read_bytes() == before
+
+
+def test_crossref_enrich_invalid_override_constructs_no_clients(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+
+    def unexpected_call(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider path must not be reached")
+
+    for name in (
+        "OpenAlexClient",
+        "CrossrefClient",
+        "discover_journals",
+        "enrich_records",
+    ):
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            f"literature_monitor.cli.{name}", unexpected_call
+        )
+
+    result = main(
+        (
+            "crossref-enrich",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+            "--keyword-expression",
+            "alpha AND",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert "--keyword-expression" in captured.err
+    assert "column" in captured.err
+
+
+def test_crossref_enrich_validates_config_before_override(
+    tmp_path: Path, monkeypatch: object, capsys: object
+) -> None:
+    config_path = tmp_path / "bad.yaml"
+    config_path.write_text("keyword_expression: alpha\n", encoding="utf-8")
+
+    def unexpected_call(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider path must not be reached")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.OpenAlexClient", unexpected_call
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", unexpected_call
+    )
+
+    result = main(
+        (
+            "crossref-enrich",
+            "--config",
+            str(config_path),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+            "--keyword-expression",
+            "alpha AND",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert "venue_whitelist" in captured.err
+    assert "--keyword-expression" not in captured.err
+
+
+def test_crossref_enrich_rejects_invalid_dates_before_provider_clients(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+
+    def unexpected_call(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider path must not be reached")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.OpenAlexClient", unexpected_call
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", unexpected_call
+    )
+
+    result = main(
+        (
+            "crossref-enrich",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-02-01",
+            "--to-date",
+            "2026-01-01",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert "--from-date must not be after --to-date" in captured.err
+
+
+def test_crossref_enrich_emits_all_records_on_partial_hard_failure(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: enrichment_diagnostic_result(all_retained=True),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+
+    def fake_enrich(
+        client: object, records: tuple[OpenAlexWorkRecord, ...]
+    ) -> EnrichmentResult:
+        return EnrichmentResult(
+            records=(
+                EnrichedWorkRecord(
+                    openalex=records[0],
+                    crossref=crossref_record("10.5555/one"),
+                ),
+                EnrichedWorkRecord(openalex=records[1]),
+                EnrichedWorkRecord(openalex=records[2]),
+            ),
+            issues=(
+                EnrichmentIssue(
+                    severity=EnrichmentIssueSeverity.ERROR,
+                    stage="request_failure",
+                    message="server unavailable",
+                    record_id=records[1].external_ids.openalex,
+                    doi=records[1].external_ids.doi,
+                ),
+                EnrichmentIssue(
+                    severity=EnrichmentIssueSeverity.WARNING,
+                    stage="missing_doi",
+                    message="record has no DOI",
+                    record_id=records[2].external_ids.openalex,
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.enrich_records", fake_enrich
+    )
+
+    result = main(
+        (
+            "crossref-enrich",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    rows = [json.loads(line) for line in captured.out.splitlines()]
+    assert result == 1
+    assert len(rows) == 3
+    assert [row["crossref"] is not None for row in rows] == [True, False, False]
+    assert "server unavailable" in captured.err
+    assert "1 failed" in captured.err
+
+
+def test_crossref_enrich_not_found_is_nonfatal(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: enrichment_diagnostic_result(),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+
+    def fake_enrich(
+        client: object, records: tuple[OpenAlexWorkRecord, ...]
+    ) -> EnrichmentResult:
+        return EnrichmentResult(
+            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
+            issues=(
+                EnrichmentIssue(
+                    severity=EnrichmentIssueSeverity.WARNING,
+                    stage="not_found",
+                    message="not found",
+                    record_id=records[0].external_ids.openalex,
+                    doi=records[0].external_ids.doi,
+                ),
+                EnrichmentIssue(
+                    severity=EnrichmentIssueSeverity.WARNING,
+                    stage="missing_doi",
+                    message="record has no DOI",
+                    record_id=records[1].external_ids.openalex,
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.enrich_records", fake_enrich
+    )
+
+    result = main(
+        (
+            "crossref-enrich",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert all(
+        json.loads(line)["crossref"] is None for line in captured.out.splitlines()
+    )
+    assert "1 unavailable, 0 failed" in captured.err
+
+
+def test_crossref_enrich_keeps_openalex_hard_error_exit_status(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: enrichment_diagnostic_result(with_error=True),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.enrich_records",
+        lambda client, records: EnrichmentResult(
+            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
+            issues=(),
+        ),
+    )
+
+    result = main(
+        (
+            "crossref-enrich",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 1
+    assert "bad record" in captured.err
+
+
+@pytest.mark.parametrize("command", ["openalex-discover", "openalex-filter"])
+def test_existing_openalex_commands_never_construct_crossref_client(
+    command: str, monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+
+    def unexpected_crossref(*args: object, **kwargs: object) -> object:
+        raise AssertionError("Crossref client must not be constructed")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", unexpected_crossref
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: (
+            diagnostic_result() if command == "openalex-discover" else filter_diagnostic_result()
+        ),
+    )
+
+    result = main(
+        (
+            command,
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0

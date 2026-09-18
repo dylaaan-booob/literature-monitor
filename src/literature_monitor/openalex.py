@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 from pydantic import ValidationError
 
 from literature_monitor.config import JournalConfig
+from literature_monitor.identifiers import normalize_doi
 from literature_monitor.models import (
     Author,
     CanonicalMetadata,
@@ -425,20 +426,6 @@ def resolve_journal_source(
     )
 
 
-def _normalize_doi(value: Any) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError("invalid DOI")
-    doi = value.strip()
-    prefix = "https://doi.org/"
-    if doi.casefold().startswith(prefix):
-        doi = doi[len(prefix) :].strip()
-    if not doi:
-        return None
-    return doi.casefold()
-
-
 def _parse_publication_date(value: Any) -> date | None:
     if value is None:
         return None
@@ -502,7 +489,7 @@ def _normalize_work(
         publication_date = None
         warnings.append("invalid publication_date was treated as missing")
     try:
-        doi = _normalize_doi(payload.get("doi"))
+        doi = normalize_doi(payload.get("doi"))
     except ValueError:
         doi = None
         warnings.append("invalid DOI was treated as missing")

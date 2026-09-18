@@ -1,0 +1,16 @@
+{
+  "status": "ok",
+  "message-type": "work",
+  "message-version": "1.0.0",
+  "message": {
+    "DOI": "10.1093/biomtc/ujag004",
+    "title": ["A Complete Crossref Study"],
+    "container-title": ["Biometrics"],
+    "abstract": "<jats:p>An <jats:italic>important</jats:italic> result &amp; extension.</jats:p>",
+    "published": {
+      "date-parts": [[2026, 1, 20]]
+    },
+    "relation": {},
+    "type": "journal-article"
+  }
+}

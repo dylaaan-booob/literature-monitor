@@ -2,7 +2,8 @@
 
 This repository contains the journal-monitoring workflow specified in
 `SPEC.md`. It currently provides the Task 1 project foundation, Task 2
-OpenAlex venue-first discovery, and Task 3 local keyword filtering.
+OpenAlex venue-first discovery, Task 3 local keyword filtering, and Task 4
+DOI-only Crossref enrichment.
 
 ## Setup
 
@@ -91,3 +92,37 @@ uv run literature-monitor openalex-filter \
 
 Task 3 does not perform Crossref enrichment, canonicalization, Markdown
 materialization, Zotero integration, conference monitoring, or persistence.
+
+## Diagnose Crossref enrichment
+
+The Task 4 diagnostic runs venue-first OpenAlex discovery, applies the keyword
+expression locally, and performs Crossref DOI lookups only for retained records.
+It preserves each original OpenAlex record and attaches normalized Crossref
+provider evidence when available. Records without a DOI, and records that are
+not present in Crossref, remain in the output with `crossref: null`.
+
+```bash
+uv run literature-monitor crossref-enrich \
+  --config config.example.yaml \
+  --journal "Biometrics" \
+  --from-date 2026-01-20 \
+  --to-date 2026-01-25 \
+  --keyword-expression '"multiview learning"'
+```
+
+Crossref access is anonymous. An optional contact address can be supplied for
+the polite API pool without changing repository configuration:
+
+```bash
+CROSSREF_MAILTO=you@example.com uv run literature-monitor crossref-enrich \
+  --config config.example.yaml \
+  --journal "Biometrics" \
+  --from-date 2026-01-20 \
+  --to-date 2026-01-25 \
+  --keyword-expression '"multiview learning"'
+```
+
+stdout is diagnostic `EnrichedWorkRecord` NDJSON and is not a stable export
+format. Task 4 does not merge Crossref fields into canonical metadata and does
+not implement deduplication, version consolidation, UUID creation, Markdown
+materialization, Zotero integration, or persistence.

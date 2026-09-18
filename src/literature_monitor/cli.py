@@ -9,6 +9,11 @@ from datetime import date
 from pathlib import Path
 
 from literature_monitor.config import ConfigurationError, load_config
+from literature_monitor.crossref import (
+    CrossrefClient,
+    EnrichmentIssueSeverity,
+    enrich_records,
+)
 from literature_monitor.keywords import (
     KeywordSyntaxError,
     evaluate_keyword_expression,
@@ -58,6 +63,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--keyword-expression",
         help="override the configured expression for this diagnostic run only",
     )
+    enrich_parser = subparsers.add_parser(
+        "crossref-enrich",
+        help="diagnose Task 4 Crossref enrichment (NDJSON is not a stable export)",
+    )
+    _add_discovery_arguments(enrich_parser)
+    enrich_parser.add_argument(
+        "--keyword-expression",
+        help="override the configured expression for this diagnostic run only",
+    )
     return parser
 
 
@@ -80,7 +94,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             config.venue_whitelist,
         )
         return 0
-    if args.command in {"openalex-discover", "openalex-filter"}:
+    if args.command in {"openalex-discover", "openalex-filter", "crossref-enrich"}:
         try:
             config = load_config(args.config)
         except ConfigurationError as error:
@@ -89,7 +103,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         logger = configure_logging(config.log_level.value)
 
         keyword_ast = config.keyword_ast
-        if args.command == "openalex-filter" and args.keyword_expression is not None:
+        if (
+            args.command in {"openalex-filter", "crossref-enrich"}
+            and args.keyword_expression is not None
+        ):
             try:
                 keyword_ast = parse_keyword_expression(args.keyword_expression)
             except KeywordSyntaxError as error:
@@ -134,12 +151,59 @@ def main(argv: Sequence[str] | None = None) -> int:
             log = logger.error if issue.severity is IssueSeverity.ERROR else logger.warning
             log("%s [%s]: %s", issue.journal, issue.stage, detail)
         records = result.records
-        if args.command == "openalex-filter":
+        if args.command in {"openalex-filter", "crossref-enrich"}:
             records = tuple(
                 record
                 for record in records
                 if evaluate_keyword_expression(keyword_ast, record.metadata)
             )
+        if args.command == "crossref-enrich":
+            crossref_client = CrossrefClient(
+                mailto=os.environ.get("CROSSREF_MAILTO")
+            )
+            enrichment = enrich_records(crossref_client, records)
+            for issue in enrichment.issues:
+                detail = issue.message
+                if issue.doi is not None:
+                    detail = f"DOI {issue.doi}: {detail}"
+                if issue.record_id is not None:
+                    detail = f"{issue.record_id}: {detail}"
+                log = (
+                    logger.error
+                    if issue.severity is EnrichmentIssueSeverity.ERROR
+                    else logger.warning
+                )
+                log("Crossref [%s]: %s", issue.stage, detail)
+            for record in enrichment.records:
+                print(record.model_dump_json())
+
+            without_doi = sum(
+                issue.stage == "missing_doi" for issue in enrichment.issues
+            )
+            unavailable = sum(
+                issue.stage == "not_found" for issue in enrichment.issues
+            )
+            failed = sum(
+                issue.severity is EnrichmentIssueSeverity.ERROR
+                for issue in enrichment.issues
+            )
+            enriched_count = sum(
+                record.crossref is not None for record in enrichment.records
+            )
+            logger.info(
+                "Crossref enrichment diagnostic completed: %d discovered, %d retained, "
+                "%d enriched, %d without DOI, %d unavailable, %d failed, "
+                "%d OpenAlex issues, %d Crossref issues",
+                len(result.records),
+                len(records),
+                enriched_count,
+                without_doi,
+                unavailable,
+                failed,
+                len(result.issues),
+                len(enrichment.issues),
+            )
+            return 1 if result.has_errors or enrichment.has_errors else 0
         for record in records:
             print(record.model_dump_json())
         if args.command == "openalex-filter":

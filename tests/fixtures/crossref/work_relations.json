@@ -1,0 +1,24 @@
+{
+  "status": "ok",
+  "message-type": "work",
+  "message-version": "1.0.0",
+  "message": {
+    "DOI": "10.5555/relations",
+    "relation": {
+      "is-preprint-of": [
+        {
+          "id-type": "doi",
+          "id": "HTTPS://DOI.ORG/10.5555/TARGET",
+          "asserted-by": "subject"
+        }
+      ],
+      "references": [
+        {
+          "id-type": "pmid",
+          "id": "123456",
+          "asserted-by": "object"
+        }
+      ]
+    }
+  }
+}
