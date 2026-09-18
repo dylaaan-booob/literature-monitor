@@ -194,5 +194,32 @@ may receive missing stable identifiers without being renamed.
 Malformed but identity-readable Papers still block duplicate creation. Unsafe
 or ambiguous matches are reported as errors and left unchanged, while
 recoverable metadata conflicts are warnings. Task 7 does not automatically
-merge, delete, or rename historical duplicates and does not implement Zotero
-export.
+merge, delete, or rename historical duplicates.
+
+## Export Kept Papers for Zotero
+
+The export command reads the existing durable Paper Markdown without running
+discovery, enrichment, canonicalization, or materialization:
+
+```bash
+uv run literature-monitor export-kept \
+  --output-dir /path/to/obsidian-vault/literature-monitor
+```
+
+Only Papers with `status: kept` are written to stdout. Papers marked
+`candidate`, `rejected`, or `in_zotero` are skipped. Each kept Paper produces
+one line using DOI first, then `arXiv:<id>`, or a tab-separated `MANUAL` entry
+with title, journal, and publication date when neither identifier is available;
+a missing date is written as `unknown`. Malformed Paper files are reported on
+stderr without blocking other valid entries, and make the command exit with
+status 1. The output can be redirected to a file:
+
+```bash
+uv run literature-monitor export-kept \
+  --output-dir /path/to/obsidian-vault/literature-monitor \
+  > kept-for-zotero.txt
+```
+
+The command does not call Zotero APIs or change Markdown state. After a
+successful downstream Zotero import, change the Paper status to `in_zotero`
+manually.

@@ -20,6 +20,7 @@ from literature_monitor.keywords import (
     evaluate_keyword_expression,
     parse_keyword_expression,
 )
+from literature_monitor.kept_export import export_kept_papers
 from literature_monitor.logging_setup import configure_logging
 from literature_monitor.materialize import (
     MaterializationIssueSeverity,
@@ -96,12 +97,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="override the configured expression for this run only",
     )
     materialize_parser.add_argument("--output-dir", type=Path, required=True)
+    export_parser = subparsers.add_parser(
+        "export-kept",
+        help="export kept Papers from durable Markdown for Zotero import",
+    )
+    export_parser.add_argument("--output-dir", type=Path, required=True)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     logger = configure_logging()
+    if args.command == "export-kept":
+        result = export_kept_papers(args.output_dir)
+        for entry in result.entries:
+            print(entry)
+        for issue in result.issues:
+            logger.error("Kept export [%s]: %s", issue.path, issue.message)
+        logger.info(
+            "Kept export completed: %d entries, %d issues",
+            len(result.entries),
+            len(result.issues),
+        )
+        return 1 if result.has_errors else 0
     if args.command == "validate":
         try:
             config = load_config(args.config)

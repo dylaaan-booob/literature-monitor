@@ -18,6 +18,7 @@ from literature_monitor.crossref import (
     EnrichmentIssueSeverity,
     EnrichmentResult,
 )
+from literature_monitor.kept_export import KeptExportIssue, KeptExportResult
 from literature_monitor.logging_setup import LOGGER_NAME, configure_logging
 from literature_monitor.materialize import (
     MaterializationIssue,
@@ -1723,3 +1724,73 @@ def test_materialize_issue_severity_controls_exit_code(
         else "0 materialization warnings, 1 materialization errors"
     )
     assert expected_label in captured.err
+
+
+def test_export_kept_cli_writes_entries_without_entering_provider_pipeline(
+    tmp_path: Path, monkeypatch: object, capsys: object
+) -> None:
+    def unexpected_call(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider and materialization paths must not be reached")
+
+    for name in (
+        "load_config",
+        "OpenAlexClient",
+        "CrossrefClient",
+        "discover_journals",
+        "enrich_records",
+        "canonicalize_records",
+        "materialize_papers",
+    ):
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            f"literature_monitor.cli.{name}", unexpected_call
+        )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.export_kept_papers",
+        lambda output_dir: KeptExportResult(
+            entries=("10.5555/example", "arXiv:2601.01234"),
+            issues=(),
+        ),
+    )
+
+    result = main(("export-kept", "--output-dir", str(tmp_path)))
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert captured.out == "10.5555/example\narXiv:2601.01234\n"
+    assert "Kept export completed: 2 entries, 0 issues" in captured.err
+
+
+def test_export_kept_cli_reports_issues_after_successful_entries(
+    tmp_path: Path, monkeypatch: object, capsys: object
+) -> None:
+    issue_path = tmp_path / "Papers" / "broken.md"
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.export_kept_papers",
+        lambda output_dir: KeptExportResult(
+            entries=("10.5555/valid",),
+            issues=(KeptExportIssue(issue_path, "invalid durable state"),),
+        ),
+    )
+
+    result = main(("export-kept", "--output-dir", str(tmp_path)))
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 1
+    assert captured.out == "10.5555/valid\n"
+    assert str(issue_path) in captured.err
+    assert "invalid durable state" in captured.err
+    assert "Kept export completed: 1 entries, 1 issues" in captured.err
+
+
+def test_export_kept_cli_missing_papers_directory_is_empty_and_read_only(
+    tmp_path: Path, capsys: object
+) -> None:
+    output_dir = tmp_path / "missing-output"
+
+    result = main(("export-kept", "--output-dir", str(output_dir)))
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert captured.out == ""
+    assert "Kept export completed: 0 entries, 0 issues" in captured.err
+    assert not output_dir.exists()
