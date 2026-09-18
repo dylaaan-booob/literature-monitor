@@ -102,6 +102,47 @@ def diagnostic_result(*, with_error: bool = False) -> DiscoveryResult:
     )
 
 
+def filter_diagnostic_result(*, with_error: bool = False) -> DiscoveryResult:
+    timestamp = datetime(2026, 9, 18, tzinfo=timezone.utc)
+    base = diagnostic_result(with_error=with_error)
+
+    def record(
+        identifier: str,
+        title: str,
+        *,
+        abstract: str | None = None,
+    ) -> OpenAlexWorkRecord:
+        return OpenAlexWorkRecord(
+            metadata=CanonicalMetadata(
+                title=title,
+                journal="Biometrics",
+                abstract=abstract,
+            ),
+            external_ids=ExternalIds(openalex=f"https://openalex.org/{identifier}"),
+            authors=(Author(name="Ada Author"),),
+            source_id="https://openalex.org/S8265502",
+            provenance=MetadataSource(
+                provider="openalex",
+                record_id=f"https://openalex.org/{identifier}",
+                retrieved_at=timestamp,
+            ),
+        )
+
+    return DiscoveryResult(
+        sources=base.sources,
+        records=(
+            record(
+                "W10",
+                "High-dimensional models",
+                abstract="New results in statistics",
+            ),
+            record("W11", "Bayesian multiview learning"),
+            record("W12", "Unrelated paper"),
+        ),
+        issues=base.issues,
+    )
+
+
 def test_openalex_discover_cli_writes_diagnostic_ndjson_and_logs_to_stderr(
     monkeypatch: object, capsys: object
 ) -> None:
@@ -235,3 +276,170 @@ def test_openalex_discover_cli_rejects_reverse_date_range_without_network(
     assert result == 2
     assert "--from-date must not be after --to-date" in captured.err
     assert not called
+
+
+def test_openalex_filter_uses_config_expression_and_reports_counts(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: filter_diagnostic_result(),
+    )
+
+    result = main(
+        (
+            "openalex-filter",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--journal",
+            "Biometrics",
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    rows = [json.loads(line) for line in captured.out.splitlines()]
+    assert result == 0
+    assert [row["external_ids"]["openalex"] for row in rows] == [
+        "https://openalex.org/W10"
+    ]
+    assert "3 discovered, 1 retained, 2 filtered out" in captured.err
+
+
+def test_openalex_filter_override_is_one_run_only_and_takes_precedence(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    config_path = repository_root / "config.example.yaml"
+    before = config_path.read_bytes()
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: filter_diagnostic_result(),
+    )
+
+    result = main(
+        (
+            "openalex-filter",
+            "--config",
+            str(config_path),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+            "--keyword-expression",
+            '"multiview learning"',
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert json.loads(captured.out)["external_ids"]["openalex"] == (
+        "https://openalex.org/W11"
+    )
+    assert config_path.read_bytes() == before
+
+
+def test_openalex_filter_invalid_override_does_not_construct_client_or_discover(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+
+    def unexpected_call(*args: object, **kwargs: object) -> object:
+        raise AssertionError("network path must not be reached")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.OpenAlexClient", unexpected_call
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals", unexpected_call
+    )
+
+    result = main(
+        (
+            "openalex-filter",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+            "--keyword-expression",
+            "alpha AND",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert "--keyword-expression" in captured.err
+    assert "column" in captured.err
+
+
+def test_openalex_filter_validates_config_before_override(
+    tmp_path: Path, monkeypatch: object, capsys: object
+) -> None:
+    config_path = tmp_path / "bad.yaml"
+    config_path.write_text("keyword_expression: alpha\n", encoding="utf-8")
+    called = False
+
+    def unexpected_discovery(*args: object) -> DiscoveryResult:
+        nonlocal called
+        called = True
+        return filter_diagnostic_result()
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals", unexpected_discovery
+    )
+
+    result = main(
+        (
+            "openalex-filter",
+            "--config",
+            str(config_path),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+            "--keyword-expression",
+            "alpha AND",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert "venue_whitelist" in captured.err
+    assert "--keyword-expression" not in captured.err
+    assert not called
+
+
+def test_openalex_filter_emits_retained_records_despite_partial_errors(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: filter_diagnostic_result(with_error=True),
+    )
+
+    result = main(
+        (
+            "openalex-filter",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 1
+    assert json.loads(captured.out)["external_ids"]["openalex"] == (
+        "https://openalex.org/W10"
+    )
+    assert "bad record" in captured.err
+    assert "3 discovered, 1 retained, 2 filtered out" in captured.err

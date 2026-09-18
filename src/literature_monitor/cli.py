@@ -9,6 +9,11 @@ from datetime import date
 from pathlib import Path
 
 from literature_monitor.config import ConfigurationError, load_config
+from literature_monitor.keywords import (
+    KeywordSyntaxError,
+    evaluate_keyword_expression,
+    parse_keyword_expression,
+)
 from literature_monitor.logging_setup import configure_logging
 from literature_monitor.openalex import (
     IssueSeverity,
@@ -24,6 +29,16 @@ def _date_argument(value: str) -> date:
         raise argparse.ArgumentTypeError(f"expected YYYY-MM-DD, got {value!r}") from error
 
 
+def _add_discovery_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--from-date", type=_date_argument, required=True)
+    parser.add_argument("--to-date", type=_date_argument, required=True)
+    parser.add_argument(
+        "--journal",
+        help="limit diagnostics to one exact configured journal name",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="literature-monitor")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -33,12 +48,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "openalex-discover",
         help="diagnose Task 2 OpenAlex discovery (NDJSON output is not a stable export)",
     )
-    discover.add_argument("--config", type=Path, required=True)
-    discover.add_argument("--from-date", type=_date_argument, required=True)
-    discover.add_argument("--to-date", type=_date_argument, required=True)
-    discover.add_argument(
-        "--journal",
-        help="limit diagnostics to one exact configured journal name",
+    _add_discovery_arguments(discover)
+    filter_parser = subparsers.add_parser(
+        "openalex-filter",
+        help="diagnose Task 3 local keyword filtering (NDJSON is not a stable export)",
+    )
+    _add_discovery_arguments(filter_parser)
+    filter_parser.add_argument(
+        "--keyword-expression",
+        help="override the configured expression for this diagnostic run only",
     )
     return parser
 
@@ -62,13 +80,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             config.venue_whitelist,
         )
         return 0
-    if args.command == "openalex-discover":
+    if args.command in {"openalex-discover", "openalex-filter"}:
         try:
             config = load_config(args.config)
         except ConfigurationError as error:
             logger.error("%s", error)
             return 2
         logger = configure_logging(config.log_level.value)
+
+        keyword_ast = config.keyword_ast
+        if args.command == "openalex-filter" and args.keyword_expression is not None:
+            try:
+                keyword_ast = parse_keyword_expression(args.keyword_expression)
+            except KeywordSyntaxError as error:
+                logger.error("--keyword-expression: %s", error)
+                return 2
+
         if args.from_date > args.to_date:
             logger.error("--from-date must not be after --to-date")
             return 2
@@ -106,13 +133,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 detail = f"{issue.record_id}: {detail}"
             log = logger.error if issue.severity is IssueSeverity.ERROR else logger.warning
             log("%s [%s]: %s", issue.journal, issue.stage, detail)
-        for record in result.records:
+        records = result.records
+        if args.command == "openalex-filter":
+            records = tuple(
+                record
+                for record in records
+                if evaluate_keyword_expression(keyword_ast, record.metadata)
+            )
+        for record in records:
             print(record.model_dump_json())
-        logger.info(
-            "OpenAlex diagnostic completed: %d sources, %d records, %d issues",
-            len(result.sources),
-            len(result.records),
-            len(result.issues),
-        )
+        if args.command == "openalex-filter":
+            logger.info(
+                "OpenAlex filter diagnostic completed: %d discovered, %d retained, "
+                "%d filtered out, %d issues",
+                len(result.records),
+                len(records),
+                len(result.records) - len(records),
+                len(result.issues),
+            )
+        else:
+            logger.info(
+                "OpenAlex diagnostic completed: %d sources, %d records, %d issues",
+                len(result.sources),
+                len(result.records),
+                len(result.issues),
+            )
         return 1 if result.has_errors else 0
     return 2

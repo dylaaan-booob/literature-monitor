@@ -1,8 +1,8 @@
 # Literature Monitor
 
 This repository contains the journal-monitoring workflow specified in
-`SPEC.md`. It currently provides the Task 1 project foundation and Task 2
-OpenAlex venue-first discovery.
+`SPEC.md`. It currently provides the Task 1 project foundation, Task 2
+OpenAlex venue-first discovery, and Task 3 local keyword filtering.
 
 ## Setup
 
@@ -58,4 +58,36 @@ OPENALEX_API_KEY=your-key uv run literature-monitor openalex-discover \
 ```
 
 Task 2 does not perform keyword filtering, Crossref enrichment, Markdown
+materialization, Zotero integration, conference monitoring, or persistence.
+
+## Diagnose local keyword filtering
+
+The Task 3 diagnostic runs the same venue-first OpenAlex discovery and then
+evaluates the configured keyword expression locally. It writes only retained
+original OpenAlex records as NDJSON to stdout and reports discovered, retained,
+and filtered-out counts on stderr. This NDJSON is not a stable export format.
+
+Use the configured expression:
+
+```bash
+uv run literature-monitor openalex-filter \
+  --config config.example.yaml \
+  --journal "Biometrics" \
+  --from-date 2026-01-20 \
+  --to-date 2026-01-25
+```
+
+For a one-run diagnostic expression, use an override. It is not written to the
+configuration file:
+
+```bash
+uv run literature-monitor openalex-filter \
+  --config config.example.yaml \
+  --journal "Biometrics" \
+  --from-date 2026-01-20 \
+  --to-date 2026-01-25 \
+  --keyword-expression '"multiview learning"'
+```
+
+Task 3 does not perform Crossref enrichment, canonicalization, Markdown
 materialization, Zotero integration, conference monitoring, or persistence.

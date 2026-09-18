@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TypeAlias
+
+from literature_monitor.models import CanonicalMetadata
 
 
 class KeywordSyntaxError(ValueError):
@@ -66,6 +70,8 @@ _OPERATORS = {
     "or": _TokenKind.OR,
     "not": _TokenKind.NOT,
 }
+
+_WHITESPACE_PATTERN = re.compile(r"\s+")
 
 
 def _tokenize(text: str) -> tuple[_Token, ...]:
@@ -190,3 +196,68 @@ class _Parser:
 
 def parse_keyword_expression(text: str) -> KeywordExpression:
     return _Parser(text).parse()
+
+
+def _normalize_search_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return _WHITESPACE_PATTERN.sub(" ", normalized).strip()
+
+
+def _is_token_character(character: str) -> bool:
+    return character == "_" or character.isalnum()
+
+
+def _unit_contains_literal(unit: str, literal: str) -> bool:
+    if not literal:
+        return False
+
+    require_left_boundary = _is_token_character(literal[0])
+    require_right_boundary = _is_token_character(literal[-1])
+    start = 0
+    while True:
+        index = unit.find(literal, start)
+        if index < 0:
+            return False
+        end = index + len(literal)
+        left_valid = (
+            not require_left_boundary
+            or index == 0
+            or not _is_token_character(unit[index - 1])
+        )
+        right_valid = (
+            not require_right_boundary
+            or end == len(unit)
+            or not _is_token_character(unit[end])
+        )
+        if left_valid and right_valid:
+            return True
+        start = index + 1
+
+
+def evaluate_keyword_expression(
+    expression: KeywordExpression,
+    metadata: CanonicalMetadata,
+) -> bool:
+    """Evaluate an expression against independent title/keyword/abstract units."""
+
+    values = (metadata.title, *metadata.author_keywords, metadata.abstract)
+    units = tuple(
+        normalized
+        for value in values
+        if value is not None
+        if (normalized := _normalize_search_text(value))
+    )
+
+    def evaluate(node: KeywordExpression) -> bool:
+        if isinstance(node, (Term, Phrase)):
+            literal = _normalize_search_text(node.value)
+            return any(_unit_contains_literal(unit, literal) for unit in units)
+        if isinstance(node, Not):
+            return not evaluate(node.operand)
+        if isinstance(node, And):
+            return evaluate(node.left) and evaluate(node.right)
+        if isinstance(node, Or):
+            return evaluate(node.left) or evaluate(node.right)
+        raise TypeError(f"unsupported keyword expression node: {type(node).__name__}")
+
+    return evaluate(expression)
