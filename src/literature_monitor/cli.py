@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
+from literature_monitor.canonicalize import canonicalize_records
 from literature_monitor.config import ConfigurationError, load_config
 from literature_monitor.crossref import (
     CrossrefClient,
@@ -72,6 +73,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--keyword-expression",
         help="override the configured expression for this diagnostic run only",
     )
+    canonicalize_parser = subparsers.add_parser(
+        "canonicalize",
+        help="diagnose Task 5 canonicalization (NDJSON is not a stable export)",
+    )
+    _add_discovery_arguments(canonicalize_parser)
+    canonicalize_parser.add_argument(
+        "--keyword-expression",
+        help="override the configured expression for this diagnostic run only",
+    )
     return parser
 
 
@@ -94,7 +104,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             config.venue_whitelist,
         )
         return 0
-    if args.command in {"openalex-discover", "openalex-filter", "crossref-enrich"}:
+    if args.command in {
+        "openalex-discover",
+        "openalex-filter",
+        "crossref-enrich",
+        "canonicalize",
+    }:
         try:
             config = load_config(args.config)
         except ConfigurationError as error:
@@ -104,7 +119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         keyword_ast = config.keyword_ast
         if (
-            args.command in {"openalex-filter", "crossref-enrich"}
+            args.command in {"openalex-filter", "crossref-enrich", "canonicalize"}
             and args.keyword_expression is not None
         ):
             try:
@@ -151,13 +166,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             log = logger.error if issue.severity is IssueSeverity.ERROR else logger.warning
             log("%s [%s]: %s", issue.journal, issue.stage, detail)
         records = result.records
-        if args.command in {"openalex-filter", "crossref-enrich"}:
+        if args.command in {"openalex-filter", "crossref-enrich", "canonicalize"}:
             records = tuple(
                 record
                 for record in records
                 if evaluate_keyword_expression(keyword_ast, record.metadata)
             )
-        if args.command == "crossref-enrich":
+        if args.command in {"crossref-enrich", "canonicalize"}:
             crossref_client = CrossrefClient(
                 mailto=os.environ.get("CROSSREF_MAILTO")
             )
@@ -174,9 +189,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else logger.warning
                 )
                 log("Crossref [%s]: %s", issue.stage, detail)
-            for record in enrichment.records:
-                print(record.model_dump_json())
-
             without_doi = sum(
                 issue.stage == "missing_doi" for issue in enrichment.issues
             )
@@ -190,6 +202,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             enriched_count = sum(
                 record.crossref is not None for record in enrichment.records
             )
+            if args.command == "canonicalize":
+                canonicalization = canonicalize_records(enrichment.records)
+                for issue in canonicalization.issues:
+                    detail = issue.message
+                    if issue.record_ids:
+                        detail = f"{', '.join(issue.record_ids)}: {detail}"
+                    logger.warning("Canonicalization [%s]: %s", issue.stage, detail)
+                for paper in canonicalization.papers:
+                    print(paper.model_dump_json())
+                logger.info(
+                    "Canonicalization diagnostic completed: %d discovered, "
+                    "%d retained, %d enriched, %d canonical papers, "
+                    "%d canonicalization issues, %d OpenAlex issues, "
+                    "%d Crossref issues",
+                    len(result.records),
+                    len(records),
+                    enriched_count,
+                    len(canonicalization.papers),
+                    len(canonicalization.issues),
+                    len(result.issues),
+                    len(enrichment.issues),
+                )
+                return 1 if result.has_errors or enrichment.has_errors else 0
+
+            for record in enrichment.records:
+                print(record.model_dump_json())
             logger.info(
                 "Crossref enrichment diagnostic completed: %d discovered, %d retained, "
                 "%d enriched, %d without DOI, %d unavailable, %d failed, "

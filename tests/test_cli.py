@@ -5,6 +5,10 @@ from pathlib import Path
 
 import pytest
 
+from literature_monitor.canonicalize import (
+    CanonicalizationIssue,
+    CanonicalizationResult,
+)
 from literature_monitor.cli import main
 from literature_monitor.config import load_config
 from literature_monitor.crossref import (
@@ -15,7 +19,16 @@ from literature_monitor.crossref import (
     EnrichmentResult,
 )
 from literature_monitor.logging_setup import LOGGER_NAME, configure_logging
-from literature_monitor.models import Author, CanonicalMetadata, ExternalIds, MetadataSource
+from literature_monitor.models import (
+    Author,
+    CanonicalMetadata,
+    CanonicalPaper,
+    ExternalIds,
+    MetadataSource,
+    PaperVersion,
+    VersionKind,
+    VersionRef,
+)
 from literature_monitor.openalex import (
     DiscoveryIssue,
     DiscoveryResult,
@@ -220,6 +233,21 @@ def crossref_record(doi: str) -> CrossrefWorkRecord:
             record_id=doi,
             retrieved_at=timestamp,
         ),
+    )
+
+
+def canonical_paper(identifier: str = "10.5555/one") -> CanonicalPaper:
+    version = PaperVersion(
+        kind=VersionKind.JOURNAL_FINAL,
+        source="doi",
+        identifier=identifier,
+    )
+    return CanonicalPaper(
+        metadata=CanonicalMetadata(title="Canonical paper", journal="Biometrics"),
+        external_ids=ExternalIds(doi=identifier),
+        authors=(Author(name="Ada Author"),),
+        versions=(version,),
+        preferred_version=VersionRef(source="doi", identifier=identifier),
     )
 
 
@@ -954,3 +982,351 @@ def test_existing_openalex_commands_never_construct_crossref_client(
 
     capsys.readouterr()  # type: ignore[attr-defined]
     assert result == 0
+
+
+def test_canonicalize_runs_full_pipeline_and_emits_canonical_ndjson(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    received_by_enrichment: list[OpenAlexWorkRecord] = []
+    received_by_canonicalization: list[EnrichedWorkRecord] = []
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: enrichment_diagnostic_result(),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+
+    def fake_enrich(
+        client: object, records: tuple[OpenAlexWorkRecord, ...]
+    ) -> EnrichmentResult:
+        received_by_enrichment.extend(records)
+        return EnrichmentResult(
+            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
+            issues=(),
+        )
+
+    def fake_canonicalize(
+        records: tuple[EnrichedWorkRecord, ...],
+    ) -> CanonicalizationResult:
+        received_by_canonicalization.extend(records)
+        return CanonicalizationResult(papers=(canonical_paper(),), issues=())
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.enrich_records", fake_enrich
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.canonicalize_records", fake_canonicalize
+    )
+
+    result = main(
+        (
+            "canonicalize",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--journal",
+            "Biometrics",
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    rows = [json.loads(line) for line in captured.out.splitlines()]
+    assert result == 0
+    assert [record.external_ids.openalex for record in received_by_enrichment] == [
+        "https://openalex.org/W1",
+        "https://openalex.org/W3",
+    ]
+    assert [record.openalex for record in received_by_canonicalization] == list(
+        received_by_enrichment
+    )
+    assert len(rows) == 1
+    assert rows[0]["metadata"]["title"] == "Canonical paper"
+    assert rows[0]["preferred_version"] == {
+        "source": "doi",
+        "identifier": "10.5555/one",
+    }
+    assert "2 retained, 0 enriched, 1 canonical papers" in captured.err
+
+
+def test_canonicalize_override_is_applied_before_enrichment(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    received: list[OpenAlexWorkRecord] = []
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: enrichment_diagnostic_result(),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+
+    def fake_enrich(
+        client: object, records: tuple[OpenAlexWorkRecord, ...]
+    ) -> EnrichmentResult:
+        received.extend(records)
+        return EnrichmentResult(
+            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
+            issues=(),
+        )
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.enrich_records", fake_enrich
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.canonicalize_records",
+        lambda records: CanonicalizationResult(
+            papers=(canonical_paper("10.5555/two"),), issues=()
+        ),
+    )
+
+    result = main(
+        (
+            "canonicalize",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+            "--keyword-expression",
+            '"excluded paper"',
+        )
+    )
+
+    capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert [record.external_ids.openalex for record in received] == [
+        "https://openalex.org/W2"
+    ]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ("--from-date", "2026-01-01", "--to-date", "2026-01-31", "--keyword-expression", "alpha AND"),
+        ("--from-date", "2026-02-01", "--to-date", "2026-01-01"),
+    ],
+)
+def test_canonicalize_invalid_input_stops_before_provider_path(
+    arguments: tuple[str, ...], monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+
+    def unexpected_call(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider path must not be reached")
+
+    for name in (
+        "OpenAlexClient",
+        "CrossrefClient",
+        "discover_journals",
+        "enrich_records",
+        "canonicalize_records",
+    ):
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            f"literature_monitor.cli.{name}", unexpected_call
+        )
+
+    result = main(
+        (
+            "canonicalize",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            *arguments,
+        )
+    )
+
+    capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+
+
+def test_canonicalize_invalid_config_stops_before_provider_path(
+    tmp_path: Path, monkeypatch: object, capsys: object
+) -> None:
+    config_path = tmp_path / "bad.yaml"
+    config_path.write_text("keyword_expression: alpha\n", encoding="utf-8")
+
+    def unexpected_call(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider path must not be reached")
+
+    for name in (
+        "OpenAlexClient",
+        "CrossrefClient",
+        "discover_journals",
+        "enrich_records",
+        "canonicalize_records",
+    ):
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            f"literature_monitor.cli.{name}", unexpected_call
+        )
+
+    result = main(
+        (
+            "canonicalize",
+            "--config",
+            str(config_path),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert "venue_whitelist" in captured.err
+
+
+def test_canonicalize_warnings_keep_low_confidence_outputs_and_zero_exit(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: enrichment_diagnostic_result(),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.enrich_records",
+        lambda client, records: EnrichmentResult(
+            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
+            issues=(),
+        ),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.canonicalize_records",
+        lambda records: CanonicalizationResult(
+            papers=(canonical_paper("10.5555/a"), canonical_paper("10.5555/b")),
+            issues=(
+                CanonicalizationIssue(
+                    stage="blocked_match",
+                    message="insufficient author evidence",
+                    record_ids=("W1", "W2"),
+                ),
+            ),
+        ),
+    )
+
+    result = main(
+        (
+            "canonicalize",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert len(captured.out.splitlines()) == 2
+    assert "blocked_match" in captured.err
+    assert "2 canonical papers, 1 canonicalization issues" in captured.err
+
+
+def test_canonicalize_partial_upstream_failure_still_emits_successful_papers(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: enrichment_diagnostic_result(with_error=True),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.enrich_records",
+        lambda client, records: EnrichmentResult(
+            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
+            issues=(),
+        ),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.canonicalize_records",
+        lambda records: CanonicalizationResult(
+            papers=(canonical_paper(),), issues=()
+        ),
+    )
+
+    result = main(
+        (
+            "canonicalize",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 1
+    assert json.loads(captured.out)["metadata"]["title"] == "Canonical paper"
+    assert "bad record" in captured.err
+
+
+def test_canonicalize_crossref_error_still_emits_successful_papers(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: enrichment_diagnostic_result(),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+
+    def fake_enrich(
+        client: object, records: tuple[OpenAlexWorkRecord, ...]
+    ) -> EnrichmentResult:
+        return EnrichmentResult(
+            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
+            issues=(
+                EnrichmentIssue(
+                    severity=EnrichmentIssueSeverity.ERROR,
+                    stage="request_failure",
+                    message="server unavailable",
+                    record_id=records[0].external_ids.openalex,
+                    doi=records[0].external_ids.doi,
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.enrich_records", fake_enrich
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.canonicalize_records",
+        lambda records: CanonicalizationResult(
+            papers=(canonical_paper(),), issues=()
+        ),
+    )
+
+    result = main(
+        (
+            "canonicalize",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 1
+    assert json.loads(captured.out)["metadata"]["title"] == "Canonical paper"
+    assert "server unavailable" in captured.err

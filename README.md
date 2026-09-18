@@ -3,7 +3,8 @@
 This repository contains the journal-monitoring workflow specified in
 `SPEC.md`. It currently provides the Task 1 project foundation, Task 2
 OpenAlex venue-first discovery, Task 3 local keyword filtering, and Task 4
-DOI-only Crossref enrichment.
+DOI-only Crossref enrichment, and Task 5 canonicalization and version
+consolidation.
 
 ## Setup
 
@@ -126,3 +127,28 @@ stdout is diagnostic `EnrichedWorkRecord` NDJSON and is not a stable export
 format. Task 4 does not merge Crossref fields into canonical metadata and does
 not implement deduplication, version consolidation, UUID creation, Markdown
 materialization, Zotero integration, or persistence.
+
+## Diagnose canonicalization and versions
+
+The Task 5 diagnostic runs the complete journal-first discovery, local keyword
+filter, and Crossref enrichment pipeline before consolidating the retained
+evidence into canonical papers. Matching is conservative and evidence-based:
+exact identifiers and explicit version relations take priority, while the
+title-and-author fallback requires compatible ordered author identities.
+
+```bash
+uv run literature-monitor canonicalize \
+  --config config.example.yaml \
+  --journal "Biometrics" \
+  --from-date 2026-01-20 \
+  --to-date 2026-01-25 \
+  --keyword-expression '"multiview learning"'
+```
+
+All actually discovered versions remain in `versions`. The preferred version
+uses `journal_final > journal_online > accepted_manuscript > latest preprint`,
+with `unknown` as the final fallback. stdout is diagnostic `CanonicalPaper`
+NDJSON and is not a stable export format.
+
+Task 5 does not implement Markdown materialization, persistent rerun state,
+stable UUID recovery across independent runs, or Zotero export.
