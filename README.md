@@ -1,10 +1,10 @@
 # Literature Monitor
 
 This repository contains the journal-monitoring workflow specified in
-`SPEC.md`. It currently provides the Task 1 project foundation, Task 2
-OpenAlex venue-first discovery, Task 3 local keyword filtering, and Task 4
-DOI-only Crossref enrichment, and Task 5 canonicalization and version
-consolidation.
+`SPEC.md`. It currently provides the Task 1 project foundation through Task 6
+Obsidian materialization: venue-first OpenAlex discovery, local keyword
+filtering, DOI-only Crossref enrichment, canonicalization and version
+consolidation, and creation-only Paper and Author Markdown output.
 
 ## Setup
 
@@ -152,3 +152,38 @@ NDJSON and is not a stable export format.
 
 Task 5 does not implement Markdown materialization, persistent rerun state,
 stable UUID recovery across independent runs, or Zotero export.
+
+## Materialize Obsidian Markdown
+
+The Task 6 command runs the complete journal-first pipeline and creates Paper
+and Author notes under an Obsidian-compatible output directory:
+
+```bash
+uv run literature-monitor materialize \
+  --config config.example.yaml \
+  --journal "Biometrics" \
+  --from-date 2026-01-20 \
+  --to-date 2026-01-25 \
+  --keyword-expression '"multiview learning"' \
+  --output-dir /path/to/obsidian-vault/literature-monitor
+```
+
+The command writes to:
+
+```text
+<output-dir>/Papers
+<output-dir>/Authors
+```
+
+Task 6 is creation-only. Existing Paper and Author files are reused without
+changing any bytes, so human status, notes, unknown frontmatter, and custom body
+sections remain untouched. A missing Paper is created only after all of its
+required Author notes were created successfully or already exist as files.
+
+This is not yet the complete overlapping-rerun behavior from `SPEC.md`. Reusing
+the same Paper path in Task 6 assumes the same `CanonicalPaper` title and UUID
+and the same creation-time UUID collision context. A different batch can change
+the short-UUID length, a changed title can change the slug, and a separate
+canonicalization run can assign a new UUID. Reading existing Markdown to recover
+identity, retaining an old filename when metadata improves, and safely updating
+machine-managed metadata are Task 7 responsibilities.

@@ -19,6 +19,10 @@ from literature_monitor.crossref import (
     EnrichmentResult,
 )
 from literature_monitor.logging_setup import LOGGER_NAME, configure_logging
+from literature_monitor.materialize import (
+    MaterializationIssue,
+    MaterializationResult,
+)
 from literature_monitor.models import (
     Author,
     CanonicalMetadata,
@@ -1330,3 +1334,366 @@ def test_canonicalize_crossref_error_still_emits_successful_papers(
     assert result == 1
     assert json.loads(captured.out)["metadata"]["title"] == "Canonical paper"
     assert "server unavailable" in captured.err
+
+
+def test_materialize_runs_full_pipeline_in_order_without_stdout(
+    tmp_path: Path, monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    output_dir = tmp_path / "Vault"
+    events: list[str] = []
+    received_by_enrichment: list[OpenAlexWorkRecord] = []
+    received_by_materialization: list[CanonicalPaper] = []
+    canonical = canonical_paper("10.5555/two")
+
+    def fake_discover(*args: object) -> DiscoveryResult:
+        events.append("discover")
+        return enrichment_diagnostic_result()
+
+    def fake_enrich(
+        client: object, records: tuple[OpenAlexWorkRecord, ...]
+    ) -> EnrichmentResult:
+        events.append("enrich")
+        received_by_enrichment.extend(records)
+        return EnrichmentResult(
+            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
+            issues=(),
+        )
+
+    def fake_canonicalize(
+        records: tuple[EnrichedWorkRecord, ...],
+    ) -> CanonicalizationResult:
+        events.append("canonicalize")
+        assert [record.openalex for record in records] == received_by_enrichment
+        return CanonicalizationResult(papers=(canonical,), issues=())
+
+    def fake_materialize(
+        papers: tuple[CanonicalPaper, ...], destination: Path
+    ) -> MaterializationResult:
+        events.append("materialize")
+        received_by_materialization.extend(papers)
+        assert destination == output_dir
+        return MaterializationResult(
+            created_papers=(destination / "Papers" / "paper.md",),
+            existing_papers=(),
+            created_authors=(destination / "Authors" / "author.md",),
+            existing_authors=(),
+            issues=(),
+        )
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals", fake_discover
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.enrich_records", fake_enrich
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.canonicalize_records", fake_canonicalize
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.materialize_papers", fake_materialize
+    )
+
+    result = main(
+        (
+            "materialize",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+            "--keyword-expression",
+            '"excluded paper"',
+            "--output-dir",
+            str(output_dir),
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert events == ["discover", "enrich", "canonicalize", "materialize"]
+    assert [record.external_ids.openalex for record in received_by_enrichment] == [
+        "https://openalex.org/W2"
+    ]
+    assert received_by_materialization == [canonical]
+    assert captured.out == ""
+    assert "1 canonical papers, 1 paper files created" in captured.err
+    assert "1 author files created, 0 author files existing" in captured.err
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        (
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+            "--keyword-expression",
+            "alpha AND",
+        ),
+        ("--from-date", "2026-02-01", "--to-date", "2026-01-01"),
+    ],
+)
+def test_materialize_invalid_input_stops_before_provider_and_materializer(
+    arguments: tuple[str, ...],
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+
+    def unexpected_call(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider and materializer paths must not be reached")
+
+    for name in (
+        "OpenAlexClient",
+        "CrossrefClient",
+        "discover_journals",
+        "enrich_records",
+        "canonicalize_records",
+        "materialize_papers",
+    ):
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            f"literature_monitor.cli.{name}", unexpected_call
+        )
+
+    result = main(
+        (
+            "materialize",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            *arguments,
+            "--output-dir",
+            str(tmp_path),
+        )
+    )
+
+    capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+
+
+def test_materialize_invalid_config_stops_before_provider_and_materializer(
+    tmp_path: Path, monkeypatch: object, capsys: object
+) -> None:
+    config_path = tmp_path / "bad.yaml"
+    config_path.write_text("keyword_expression: alpha\n", encoding="utf-8")
+
+    def unexpected_call(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider and materializer paths must not be reached")
+
+    for name in (
+        "OpenAlexClient",
+        "discover_journals",
+        "materialize_papers",
+    ):
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            f"literature_monitor.cli.{name}", unexpected_call
+        )
+
+    result = main(
+        (
+            "materialize",
+            "--config",
+            str(config_path),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+            "--output-dir",
+            str(tmp_path / "Vault"),
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert "venue_whitelist" in captured.err
+
+
+def test_materialize_canonicalization_warning_is_nonfatal(
+    tmp_path: Path, monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    canonical = canonical_paper()
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: enrichment_diagnostic_result(),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.enrich_records",
+        lambda client, records: EnrichmentResult(
+            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
+            issues=(),
+        ),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.canonicalize_records",
+        lambda records: CanonicalizationResult(
+            papers=(canonical,),
+            issues=(
+                CanonicalizationIssue(
+                    stage="blocked_match",
+                    message="insufficient evidence",
+                    record_ids=("W1", "W2"),
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.materialize_papers",
+        lambda papers, output_dir: MaterializationResult(
+            created_papers=(output_dir / "Papers" / "paper.md",),
+            existing_papers=(),
+            created_authors=(),
+            existing_authors=(),
+            issues=(),
+        ),
+    )
+
+    result = main(
+        (
+            "materialize",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+            "--output-dir",
+            str(tmp_path),
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert captured.out == ""
+    assert "blocked_match" in captured.err
+    assert "1 canonicalization issues" in captured.err
+
+
+@pytest.mark.parametrize("upstream", ["openalex", "crossref"])
+def test_materialize_partial_upstream_error_still_materializes_papers(
+    upstream: str, tmp_path: Path, monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    received: list[CanonicalPaper] = []
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: enrichment_diagnostic_result(with_error=upstream == "openalex"),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+    enrichment_issues = (
+        EnrichmentIssue(
+            severity=EnrichmentIssueSeverity.ERROR,
+            stage="request_failure",
+            message="server unavailable",
+            record_id="https://openalex.org/W1",
+            doi="10.5555/one",
+        ),
+    ) if upstream == "crossref" else ()
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.enrich_records",
+        lambda client, records: EnrichmentResult(
+            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
+            issues=enrichment_issues,
+        ),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.canonicalize_records",
+        lambda records: CanonicalizationResult(
+            papers=(canonical_paper(),), issues=()
+        ),
+    )
+
+    def fake_materialize(
+        papers: tuple[CanonicalPaper, ...], output_dir: Path
+    ) -> MaterializationResult:
+        received.extend(papers)
+        return MaterializationResult((), (), (), (), ())
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.materialize_papers", fake_materialize
+    )
+
+    result = main(
+        (
+            "materialize",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+            "--output-dir",
+            str(tmp_path),
+        )
+    )
+
+    capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 1
+    assert len(received) == 1
+
+
+def test_materialize_filesystem_error_returns_one(
+    tmp_path: Path, monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    issue_path = tmp_path / "Papers" / "failed.md"
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: enrichment_diagnostic_result(),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.enrich_records",
+        lambda client, records: EnrichmentResult(
+            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
+            issues=(),
+        ),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.canonicalize_records",
+        lambda records: CanonicalizationResult(
+            papers=(canonical_paper(),), issues=()
+        ),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.materialize_papers",
+        lambda papers, output_dir: MaterializationResult(
+            created_papers=(),
+            existing_papers=(),
+            created_authors=(),
+            existing_authors=(),
+            issues=(MaterializationIssue(issue_path, "permission denied"),),
+        ),
+    )
+
+    result = main(
+        (
+            "materialize",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+            "--output-dir",
+            str(tmp_path),
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 1
+    assert "permission denied" in captured.err
+    assert "1 materialization issues" in captured.err

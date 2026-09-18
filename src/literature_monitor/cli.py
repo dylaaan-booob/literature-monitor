@@ -21,6 +21,7 @@ from literature_monitor.keywords import (
     parse_keyword_expression,
 )
 from literature_monitor.logging_setup import configure_logging
+from literature_monitor.materialize import materialize_papers
 from literature_monitor.openalex import (
     IssueSeverity,
     OpenAlexClient,
@@ -82,6 +83,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--keyword-expression",
         help="override the configured expression for this diagnostic run only",
     )
+    materialize_parser = subparsers.add_parser(
+        "materialize",
+        help="create Task 6 Obsidian Paper and Author Markdown files",
+    )
+    _add_discovery_arguments(materialize_parser)
+    materialize_parser.add_argument(
+        "--keyword-expression",
+        help="override the configured expression for this run only",
+    )
+    materialize_parser.add_argument("--output-dir", type=Path, required=True)
     return parser
 
 
@@ -109,6 +120,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "openalex-filter",
         "crossref-enrich",
         "canonicalize",
+        "materialize",
     }:
         try:
             config = load_config(args.config)
@@ -119,7 +131,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         keyword_ast = config.keyword_ast
         if (
-            args.command in {"openalex-filter", "crossref-enrich", "canonicalize"}
+            args.command
+            in {"openalex-filter", "crossref-enrich", "canonicalize", "materialize"}
             and args.keyword_expression is not None
         ):
             try:
@@ -166,13 +179,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             log = logger.error if issue.severity is IssueSeverity.ERROR else logger.warning
             log("%s [%s]: %s", issue.journal, issue.stage, detail)
         records = result.records
-        if args.command in {"openalex-filter", "crossref-enrich", "canonicalize"}:
+        if args.command in {
+            "openalex-filter",
+            "crossref-enrich",
+            "canonicalize",
+            "materialize",
+        }:
             records = tuple(
                 record
                 for record in records
                 if evaluate_keyword_expression(keyword_ast, record.metadata)
             )
-        if args.command in {"crossref-enrich", "canonicalize"}:
+        if args.command in {"crossref-enrich", "canonicalize", "materialize"}:
             crossref_client = CrossrefClient(
                 mailto=os.environ.get("CROSSREF_MAILTO")
             )
@@ -202,13 +220,52 @@ def main(argv: Sequence[str] | None = None) -> int:
             enriched_count = sum(
                 record.crossref is not None for record in enrichment.records
             )
-            if args.command == "canonicalize":
+            if args.command in {"canonicalize", "materialize"}:
                 canonicalization = canonicalize_records(enrichment.records)
                 for issue in canonicalization.issues:
                     detail = issue.message
                     if issue.record_ids:
                         detail = f"{', '.join(issue.record_ids)}: {detail}"
                     logger.warning("Canonicalization [%s]: %s", issue.stage, detail)
+                if args.command == "materialize":
+                    materialization = materialize_papers(
+                        canonicalization.papers,
+                        args.output_dir,
+                    )
+                    for issue in materialization.issues:
+                        logger.error(
+                            "Materialization [%s]: %s",
+                            issue.path,
+                            issue.message,
+                        )
+                    logger.info(
+                        "Materialization completed: %d discovered, %d retained, "
+                        "%d enriched, %d canonical papers, %d paper files created, "
+                        "%d paper files existing, %d author files created, "
+                        "%d author files existing, %d materialization issues, "
+                        "%d canonicalization issues, %d OpenAlex issues, "
+                        "%d Crossref issues",
+                        len(result.records),
+                        len(records),
+                        enriched_count,
+                        len(canonicalization.papers),
+                        len(materialization.created_papers),
+                        len(materialization.existing_papers),
+                        len(materialization.created_authors),
+                        len(materialization.existing_authors),
+                        len(materialization.issues),
+                        len(canonicalization.issues),
+                        len(result.issues),
+                        len(enrichment.issues),
+                    )
+                    return (
+                        1
+                        if result.has_errors
+                        or enrichment.has_errors
+                        or materialization.has_errors
+                        else 0
+                    )
+
                 for paper in canonicalization.papers:
                     print(paper.model_dump_json())
                 logger.info(
