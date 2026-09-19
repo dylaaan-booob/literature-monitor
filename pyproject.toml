@@ -3,6 +3,8 @@ name = "literature-monitor"
 version = "0.1.0"
 description = "A lightweight journal-monitoring workflow"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "pydantic>=2,<3",
