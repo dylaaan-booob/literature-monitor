@@ -277,7 +277,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 record.crossref is not None for record in enrichment.records
             )
             if args.command in {"canonicalize", "materialize"}:
-                canonicalization = canonicalize_records(enrichment.records)
+                evidence = tuple(
+                    item
+                    for record in enrichment.records
+                    for item in record.to_evidence()
+                )
+                canonicalization = canonicalize_records(evidence)
                 for issue in canonicalization.issues:
                     detail = issue.message
                     if issue.record_ids:

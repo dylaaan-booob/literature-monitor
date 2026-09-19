@@ -32,6 +32,7 @@ from literature_monitor.models import (
     ExternalIds,
     MetadataSource,
     PaperVersion,
+    ProviderWorkEvidence,
     VersionKind,
     VersionRef,
 )
@@ -1142,7 +1143,7 @@ def test_canonicalize_runs_full_pipeline_and_emits_canonical_ndjson(
 ) -> None:
     repository_root = Path(__file__).resolve().parents[1]
     received_by_enrichment: list[OpenAlexWorkRecord] = []
-    received_by_canonicalization: list[EnrichedWorkRecord] = []
+    received_by_canonicalization: list[ProviderWorkEvidence] = []
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.discover_journals",
         lambda *args: enrichment_diagnostic_result(),
@@ -1156,12 +1157,18 @@ def test_canonicalize_runs_full_pipeline_and_emits_canonical_ndjson(
     ) -> EnrichmentResult:
         received_by_enrichment.extend(records)
         return EnrichmentResult(
-            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
+            records=(
+                EnrichedWorkRecord(
+                    openalex=records[0],
+                    crossref=crossref_record("10.5555/one"),
+                ),
+                EnrichedWorkRecord(openalex=records[1]),
+            ),
             issues=(),
         )
 
     def fake_canonicalize(
-        records: tuple[EnrichedWorkRecord, ...],
+        records: tuple[ProviderWorkEvidence, ...],
     ) -> CanonicalizationResult:
         received_by_canonicalization.extend(records)
         return CanonicalizationResult(papers=(canonical_paper(),), issues=())
@@ -1194,8 +1201,11 @@ def test_canonicalize_runs_full_pipeline_and_emits_canonical_ndjson(
         "https://openalex.org/W1",
         "https://openalex.org/W3",
     ]
-    assert [record.openalex for record in received_by_canonicalization] == list(
-        received_by_enrichment
+    assert [
+        record.provenance.provider for record in received_by_canonicalization
+    ] == ["openalex", "crossref", "openalex"]
+    assert received_by_canonicalization[1].supplements[0].record_id == (
+        received_by_enrichment[0].provenance.record_id
     )
     assert len(rows) == 1
     assert rows[0]["metadata"]["title"] == "Canonical paper"
@@ -1203,7 +1213,7 @@ def test_canonicalize_runs_full_pipeline_and_emits_canonical_ndjson(
         "source": "doi",
         "identifier": "10.5555/one",
     }
-    assert "2 retained, 0 enriched, 1 canonical papers" in captured.err
+    assert "2 retained, 1 enriched, 1 canonical papers" in captured.err
 
 
 def test_canonicalize_override_is_applied_before_enrichment(
@@ -1510,10 +1520,12 @@ def test_materialize_runs_full_pipeline_in_order_without_stdout(
         )
 
     def fake_canonicalize(
-        records: tuple[EnrichedWorkRecord, ...],
+        records: tuple[ProviderWorkEvidence, ...],
     ) -> CanonicalizationResult:
         events.append("canonicalize")
-        assert [record.openalex for record in records] == received_by_enrichment
+        assert [record.external_ids.openalex for record in records] == [
+            record.external_ids.openalex for record in received_by_enrichment
+        ]
         return CanonicalizationResult(papers=(canonical,), issues=())
 
     def fake_materialize(

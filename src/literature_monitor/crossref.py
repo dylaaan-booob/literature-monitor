@@ -18,7 +18,17 @@ from urllib.request import Request, urlopen
 from pydantic import Field, ValidationError, model_validator
 
 from literature_monitor.identifiers import normalize_doi
-from literature_monitor.models import DomainModel, MetadataSource, NonEmptyStr
+from literature_monitor.models import (
+    DomainModel,
+    EvidenceDate,
+    EvidenceDateKind,
+    EvidenceRelation,
+    ExternalIds,
+    MetadataSource,
+    NonEmptyStr,
+    ProviderRecordRef,
+    ProviderWorkEvidence,
+)
 from literature_monitor.openalex import OpenAlexWorkRecord
 
 CROSSREF_BASE_URL = "https://api.crossref.org"
@@ -71,10 +81,55 @@ class CrossrefWorkRecord(DomainModel):
     work_type: NonEmptyStr | None = None
     provenance: MetadataSource
 
+    def to_evidence(
+        self,
+        *,
+        supplements: tuple[ProviderRecordRef, ...] = (),
+    ) -> ProviderWorkEvidence:
+        return ProviderWorkEvidence(
+            provenance=self.provenance,
+            title=self.title,
+            journal=self.journal,
+            abstract=self.abstract,
+            external_ids=ExternalIds(
+                doi=self.doi,
+                crossref=self.provenance.record_id,
+            ),
+            dates=tuple(
+                EvidenceDate(
+                    kind=EvidenceDateKind(item.kind.value),
+                    year=item.year,
+                    month=item.month,
+                    day=item.day,
+                )
+                for item in self.dates
+            ),
+            relations=tuple(
+                EvidenceRelation(
+                    relation_type=item.relation_type,
+                    id_type=item.id_type,
+                    identifier=item.identifier,
+                    asserted_by=item.asserted_by,
+                )
+                for item in self.relations
+            ),
+            supplements=supplements,
+        )
+
 
 class EnrichedWorkRecord(DomainModel):
     openalex: OpenAlexWorkRecord
     crossref: CrossrefWorkRecord | None = None
+
+    def to_evidence(self) -> tuple[ProviderWorkEvidence, ...]:
+        openalex = self.openalex.to_evidence()
+        if self.crossref is None:
+            return (openalex,)
+        anchor = ProviderRecordRef(
+            provider=openalex.provenance.provider,
+            record_id=openalex.provenance.record_id,
+        )
+        return (openalex, self.crossref.to_evidence(supplements=(anchor,)))
 
 
 class EnrichmentIssueSeverity(str, Enum):

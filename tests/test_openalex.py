@@ -12,8 +12,11 @@ from pydantic import ValidationError
 import literature_monitor.openalex as openalex_module
 from literature_monitor.canonicalize import canonicalize_records
 from literature_monitor.config import JournalConfig
-from literature_monitor.crossref import EnrichedWorkRecord
-from literature_monitor.models import CanonicalMetadata, VersionKind
+from literature_monitor.models import (
+    CanonicalMetadata,
+    EvidenceVersionRole,
+    VersionKind,
+)
 from literature_monitor.openalex import (
     IssueSeverity,
     OpenAlexClient,
@@ -398,7 +401,40 @@ def test_normalization_preserves_inline_location_version_hints() -> None:
         ),
     }
 
-    paper = canonicalize_records((EnrichedWorkRecord(openalex=record),)).papers[0]
+    evidence = record.to_evidence()
+    assert evidence.provenance == record.provenance
+    assert evidence.title == record.metadata.title
+    assert evidence.journal == record.metadata.journal
+    assert evidence.publication_date == record.metadata.publication_date
+    assert evidence.abstract == record.metadata.abstract
+    assert evidence.author_keywords == record.metadata.author_keywords
+    assert evidence.authors == record.authors
+    assert evidence.external_ids == record.external_ids
+    assert {
+        (hint.source, hint.identifier, hint.role, hint.url)
+        for hint in evidence.version_hints
+    } == {
+        (
+            "doi",
+            "10.5555/final",
+            EvidenceVersionRole.PUBLICATION,
+            "https://doi.org/10.5555/final",
+        ),
+        (
+            "arxiv",
+            "2601.01234",
+            EvidenceVersionRole.PREPRINT,
+            "https://arxiv.org/abs/2601.01234",
+        ),
+        (
+            "openalex_location",
+            "pmh:oai:repository.example:item-1",
+            EvidenceVersionRole.MANUSCRIPT,
+            "https://repository.example/item-1",
+        ),
+    }
+
+    paper = canonicalize_records((evidence,)).papers[0]
     versions = {
         (version.source, version.identifier): version for version in paper.versions
     }

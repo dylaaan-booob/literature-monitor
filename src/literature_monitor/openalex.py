@@ -24,9 +24,12 @@ from literature_monitor.models import (
     Author,
     CanonicalMetadata,
     DomainModel,
+    EvidenceVersionHint,
+    EvidenceVersionRole,
     ExternalIds,
     MetadataSource,
     NonEmptyStr,
+    ProviderWorkEvidence,
 )
 
 OPENALEX_BASE_URL = "https://api.openalex.org"
@@ -95,6 +98,32 @@ class OpenAlexWorkRecord(DomainModel):
     source_id: NonEmptyStr
     provenance: MetadataSource
     version_hints: tuple[OpenAlexVersionHint, ...] = ()
+
+    def to_evidence(self) -> ProviderWorkEvidence:
+        roles = {
+            OpenAlexVersion.PUBLISHED: EvidenceVersionRole.PUBLICATION,
+            OpenAlexVersion.ACCEPTED: EvidenceVersionRole.MANUSCRIPT,
+            OpenAlexVersion.SUBMITTED: EvidenceVersionRole.PREPRINT,
+        }
+        return ProviderWorkEvidence(
+            provenance=self.provenance,
+            title=self.metadata.title,
+            journal=self.metadata.journal,
+            publication_date=self.metadata.publication_date,
+            abstract=self.metadata.abstract,
+            author_keywords=self.metadata.author_keywords,
+            authors=self.authors,
+            external_ids=self.external_ids,
+            version_hints=tuple(
+                EvidenceVersionHint(
+                    source=hint.source,
+                    identifier=hint.identifier,
+                    role=roles[hint.version],
+                    url=hint.url,
+                )
+                for hint in self.version_hints
+            ),
+        )
 
 
 @dataclass(frozen=True)

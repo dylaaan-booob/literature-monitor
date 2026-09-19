@@ -101,6 +101,70 @@ class MetadataSource(DomainModel):
         return value
 
 
+class ProviderRecordRef(DomainModel):
+    provider: NonEmptyStr
+    record_id: NonEmptyStr
+
+
+class EvidenceDateKind(str, Enum):
+    PUBLISHED = "published"
+    PUBLISHED_ONLINE = "published-online"
+    PUBLISHED_PRINT = "published-print"
+    ISSUED = "issued"
+
+
+class EvidenceDate(DomainModel):
+    kind: EvidenceDateKind
+    year: Annotated[int, Field(strict=True, ge=1, le=9999)]
+    month: Annotated[int, Field(strict=True, ge=1, le=12)] | None = None
+    day: Annotated[int, Field(strict=True, ge=1, le=31)] | None = None
+
+    @model_validator(mode="after")
+    def validate_partial_date(self) -> EvidenceDate:
+        if self.day is not None and self.month is None:
+            raise ValueError("day requires month")
+        if self.month is not None:
+            Date(self.year, self.month, self.day or 1)
+        return self
+
+
+class EvidenceRelation(DomainModel):
+    relation_type: NonEmptyStr
+    id_type: NonEmptyStr
+    identifier: NonEmptyStr
+    asserted_by: NonEmptyStr | None = None
+
+
+class EvidenceVersionRole(str, Enum):
+    PUBLICATION = "publication"
+    MANUSCRIPT = "manuscript"
+    PREPRINT = "preprint"
+
+
+class EvidenceVersionHint(DomainModel):
+    source: NonEmptyStr
+    identifier: NonEmptyStr
+    role: EvidenceVersionRole
+    url: NonEmptyStr | None = None
+
+
+class ProviderWorkEvidence(DomainModel):
+    """Transient provider-neutral evidence consumed by canonicalization."""
+
+    provenance: MetadataSource
+    title: NonEmptyStr | None = None
+    journal: NonEmptyStr | None = None
+    publication_date: Date | None = None
+    abstract: str | None = None
+    author_keywords: tuple[NonEmptyStr, ...] = ()
+    authors: tuple[Author, ...] = ()
+    external_ids: ExternalIds = Field(default_factory=ExternalIds)
+    dates: tuple[EvidenceDate, ...] = ()
+    relations: tuple[EvidenceRelation, ...] = ()
+    version_hints: tuple[EvidenceVersionHint, ...] = ()
+    supplements: tuple[ProviderRecordRef, ...] = ()
+
+
 class WorkflowStatus(str, Enum):
     CANDIDATE = "candidate"
     REJECTED = "rejected"
