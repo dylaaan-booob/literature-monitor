@@ -10,7 +10,7 @@ from literature_monitor.canonicalize import (
     CanonicalizationResult,
     consolidate_evidence,
 )
-from literature_monitor.cli import main
+from literature_monitor.cli import _build_parser, main
 from literature_monitor.config import JournalConfig, load_config
 from literature_monitor.crossref import (
     CrossrefDiscoveryIssue,
@@ -61,6 +61,19 @@ def application_handlers() -> list[logging.Handler]:
         for handler in logging.getLogger(LOGGER_NAME).handlers
         if getattr(handler, "_literature_monitor_handler", False)
     ]
+
+
+def test_cli_help_uses_functional_diagnostic_names() -> None:
+    help_text = _build_parser().format_help()
+
+    assert "diagnose OpenAlex discovery" in help_text
+    assert "diagnose local keyword filtering" in help_text
+    assert "diagnose Crossref DOI enrichment" in help_text
+    assert "diagnose canonicalization" in help_text
+    assert "Task 2" not in help_text
+    assert "Task 3" not in help_text
+    assert "Task 4" not in help_text
+    assert "Task 5" not in help_text
 
 
 def test_logging_configuration_is_idempotent() -> None:

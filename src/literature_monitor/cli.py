@@ -79,7 +79,7 @@ def _build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--config", type=Path, required=True)
     discover = subparsers.add_parser(
         "openalex-discover",
-        help="diagnose Task 2 OpenAlex discovery (NDJSON output is not a stable export)",
+        help="diagnose OpenAlex discovery (NDJSON output is not a stable export)",
     )
     _add_discovery_arguments(discover)
     crossref_discover = subparsers.add_parser(
@@ -89,7 +89,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_discovery_arguments(crossref_discover)
     filter_parser = subparsers.add_parser(
         "openalex-filter",
-        help="diagnose Task 3 local keyword filtering (NDJSON is not a stable export)",
+        help="diagnose local keyword filtering (NDJSON is not a stable export)",
     )
     _add_discovery_arguments(filter_parser)
     filter_parser.add_argument(
@@ -98,7 +98,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     enrich_parser = subparsers.add_parser(
         "crossref-enrich",
-        help="diagnose Task 4 Crossref enrichment (NDJSON is not a stable export)",
+        help="diagnose Crossref DOI enrichment (NDJSON is not a stable export)",
     )
     _add_discovery_arguments(enrich_parser)
     enrich_parser.add_argument(
@@ -107,7 +107,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     canonicalize_parser = subparsers.add_parser(
         "canonicalize",
-        help="diagnose Task 5 canonicalization (NDJSON is not a stable export)",
+        help="diagnose canonicalization (NDJSON is not a stable export)",
     )
     _add_discovery_arguments(canonicalize_parser)
     canonicalize_parser.add_argument(

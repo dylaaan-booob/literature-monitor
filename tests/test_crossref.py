@@ -124,7 +124,7 @@ def test_client_uses_versioned_encoded_doi_endpoint_and_polite_headers() -> None
     assert parsed.path == "/v1/works/10.1002%2F%28abc%29%2Fx"
     assert parse_qs(parsed.query) == {"mailto": ["monitor@example.com"]}
     assert request.get_header("Accept") == "application/json"
-    assert request.get_header("User-agent") == "literature-monitor/0.1"
+    assert request.get_header("User-agent") == "literature-monitor/0.2.0"
     assert timeout == 17
 
 

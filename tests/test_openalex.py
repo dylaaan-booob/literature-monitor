@@ -98,6 +98,10 @@ def test_singleton_requests_each_issn_independently_and_uses_bearer_key() -> Non
         request.get_header("Authorization") == "Bearer secret"
         for request, _ in opener.requests
     )
+    assert all(
+        request.get_header("User-agent") == "literature-monitor/0.2.0"
+        for request, _ in opener.requests
+    )
     assert all(timeout == 30 for _, timeout in opener.requests)
 
 

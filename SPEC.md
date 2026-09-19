@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — MVP Specification v1.1
 
-**Status:** Active; v0.1.0 delivered and multi-source retrieval evolution specified
+**Status:** Active; v0.1.0 released and R0–R3 implemented and audited
 
-**Stage:** Multi-source retrieval R0 specification alignment
+**Stage:** v0.2.0 release closeout and validation; Search-engine parity deferred
 **Scope:** Journal monitoring only; conferences are excluded from MVP
 
 ---
@@ -1067,9 +1067,9 @@ The original MVP tasks are completed history, not pending implementation steps:
 
 This list records the shipped v0.1.0 sequence. It does not give OpenAlex or the original post-filter Crossref enrichment path authority over the revised multi-source candidate universe.
 
-### 23.2 Multi-source retrieval evolution
+### 23.2 Completed multi-source retrieval evolution
 
-Proceed as separately planned, implemented, and reviewed tasks:
+R0–R3 are completed, separately reviewed history:
 
 ```text
 R0 Specification alignment
@@ -1079,13 +1079,13 @@ R0 Specification alignment
 → later Search-engine parity
 ```
 
-- R0 changes only the product specification and repository engineering constraints.
-- R1 introduces a provider-neutral transient evidence representation, adapts the existing OpenAlex and Crossref records to that boundary, and removes canonicalization's structural dependency on an OpenAlex record while preserving the current user-visible OpenAlex → local filter → Crossref enrichment behavior.
-- R2 adds independent Crossref journal/date discovery, unions OpenAlex and Crossref evidence, performs identity/evidence consolidation, constructs the multi-provider searchable projection, and moves final local keyword filtering after available evidence consolidation.
-- R3 adds Semantic Scholar supplementation and venue/date-constrained supplemental discovery.
+- R0 aligned the product specification and repository engineering constraints.
+- R1 introduced a provider-neutral transient evidence representation, adapted the existing OpenAlex and Crossref records to that boundary, and removed canonicalization's structural dependency on an OpenAlex record while preserving the then-current user-visible OpenAlex → local filter → Crossref enrichment behavior.
+- R2 added independent Crossref journal/date discovery, unioned OpenAlex and Crossref evidence, performed identity/evidence consolidation, constructed the multi-provider searchable projection, and moved final local keyword filtering after available evidence consolidation.
+- R3 added Semantic Scholar supplementation and venue/date-constrained supplemental discovery.
 - Search-engine parity remains later work and must not be pulled into R0–R3.
 
-R0–R3 must remain separate implementation tasks with their own plans, diffs, verification, and review. Completing this specification alignment does not start R1.
+Each R0–R3 task was implemented and reviewed as a separate bounded change. This sequence is retained as project history, not as a pending implementation plan.
 
 ---
 
@@ -1126,6 +1126,13 @@ No additional infrastructure is required for MVP completion.
 
 ## 26. Next Project Step
 
-After R0 is reviewed, plan R1 as a separate bounded task. Do not implement the provider-neutral evidence boundary, Crossref independent discovery, Semantic Scholar integration, or search-engine parity as part of specification alignment.
+R0–R3 are complete and audited. The next bounded project sequence is:
 
-For each later task, inspect the repository before editing, keep the task boundary explicit, and review the actual diff and relevant verification output before proceeding to the next task.
+```text
+v0.2.0 release closeout
+→ package, live-provider, and durable-state release validation
+→ v0.2.0 release
+→ later product evolution
+```
+
+Search-engine parity remains deferred later work and is not part of v0.2.0 release closeout or validation. For each later task, inspect the repository before editing, keep the task boundary explicit, and review the actual diff and relevant verification output before proceeding to the next task.

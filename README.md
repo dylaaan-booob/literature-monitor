@@ -40,7 +40,7 @@ or database operations.
 ## End-to-end validation
 
 The default `uv run pytest` suite includes a deterministic full-cycle CLI
-regression using local HTTP fixtures. The Task 9 acceptance coverage includes
+regression using local HTTP fixtures. The end-to-end acceptance coverage includes
 a representative multi-journal full cycle and a partially overlapping rerun.
 The normal CLI commands can also be used for manual smoke validation against
 the real OpenAlex, Crossref, and Semantic Scholar providers, but those results
@@ -51,10 +51,11 @@ through `OPENALEX_API_KEY`, `CROSSREF_MAILTO`, and
 
 ## Diagnose OpenAlex discovery
 
-The Task 2 diagnostic command resolves each configured ISSN independently,
+The OpenAlex discovery diagnostic resolves each configured ISSN independently,
 retrieves works from the resolved OpenAlex Source in an inclusive date window,
 and writes normalized records as NDJSON to stdout. Logs are written to stderr.
-The NDJSON shape is a validation surface for Task 2, not a stable export format.
+The NDJSON shape is a validation surface for OpenAlex discovery, not a stable
+export format.
 
 ```bash
 uv run literature-monitor openalex-discover \
@@ -74,8 +75,9 @@ OPENALEX_API_KEY=your-key uv run literature-monitor openalex-discover \
   --to-date 2026-01-31
 ```
 
-Task 2 does not perform keyword filtering, Crossref enrichment, Markdown
-materialization, Zotero integration, conference monitoring, or persistence.
+The OpenAlex discovery diagnostic does not perform keyword filtering, Crossref
+enrichment, Markdown materialization, Zotero integration, conference monitoring,
+or persistence.
 
 ## Diagnose Crossref discovery
 
@@ -97,8 +99,8 @@ set in the environment to use Crossref's polite API pool.
 
 ## Diagnose local keyword filtering
 
-The Task 3 diagnostic runs the same venue-first OpenAlex discovery and then
-evaluates the configured keyword expression locally. It writes only retained
+The local keyword filtering diagnostic runs the same venue-first OpenAlex
+discovery and then evaluates the configured keyword expression locally. It writes only retained
 original OpenAlex records as NDJSON to stdout and reports discovered, retained,
 and filtered-out counts on stderr. This NDJSON is not a stable export format.
 
@@ -124,13 +126,15 @@ uv run literature-monitor openalex-filter \
   --keyword-expression '"multiview learning"'
 ```
 
-Task 3 does not perform Crossref enrichment, canonicalization, Markdown
-materialization, Zotero integration, conference monitoring, or persistence.
+The local keyword filtering diagnostic does not perform Crossref enrichment,
+canonicalization, Markdown materialization, Zotero integration, conference
+monitoring, or persistence.
 
 ## Diagnose Crossref DOI enrichment
 
-This historical stage diagnostic runs venue-first OpenAlex discovery, applies the keyword
-expression locally, and performs Crossref DOI lookups only for retained records.
+This historical stage diagnostic runs venue-first OpenAlex discovery, applies
+the keyword expression locally, and performs Crossref DOI lookups only for
+retained records.
 It preserves each original OpenAlex record and attaches normalized Crossref
 provider evidence when available. Records without a DOI, and records that are
 not present in Crossref, remain in the output with `crossref: null`.
@@ -157,9 +161,9 @@ CROSSREF_MAILTO=you@example.com uv run literature-monitor crossref-enrich \
 ```
 
 stdout is diagnostic `EnrichedWorkRecord` NDJSON and is not a stable export
-format. Task 4 does not merge Crossref fields into canonical metadata and does
-not implement deduplication, version consolidation, UUID creation, Markdown
-materialization, Zotero integration, or persistence.
+format. This historical diagnostic does not merge Crossref fields into canonical
+metadata and does not implement deduplication, version consolidation, UUID
+creation, Markdown materialization, Zotero integration, or persistence.
 
 ## Diagnose canonicalization and versions
 
@@ -188,8 +192,9 @@ uses `journal_final > journal_online > accepted_manuscript > latest preprint`,
 with `unknown` as the final fallback. stdout is diagnostic `CanonicalPaper`
 NDJSON and is not a stable export format.
 
-Task 5 does not implement Markdown materialization, persistent rerun state,
-stable UUID recovery across independent runs, or Zotero export.
+The canonicalization diagnostic does not implement Markdown materialization,
+persistent rerun state, stable UUID recovery across independent runs, or Zotero
+export.
 
 ## Materialize Obsidian Markdown
 
@@ -216,13 +221,13 @@ The command writes to:
 <output-dir>/Authors
 ```
 
-Task 7 scans existing Markdown and recovers Paper identity from UUIDs, external
-identifiers, version keys, and source keys before using the conservative
-title-and-ordered-author fallback. Matched Papers retain their durable UUID and
-path. Versions and sources accumulate across runs, and the preferred version is
-recomputed before bibliographic metadata is updated. A lower-priority incoming
-manifestation cannot overwrite the snapshot belonging to the effective
-preferred version.
+Incremental materialization scans existing Markdown and recovers Paper identity
+from UUIDs, external identifiers, version keys, and source keys before using the
+conservative title-and-ordered-author fallback. Matched Papers retain their
+durable UUID and path. Versions and sources accumulate across runs, and the
+preferred version is recomputed before bibliographic metadata is updated. A
+lower-priority incoming manifestation cannot overwrite the snapshot belonging
+to the effective preferred version.
 
 Updates preserve workflow status, discovery time, Zotero key, unknown
 frontmatter, Notes, and unmanaged body sections. Managed frontmatter and the
@@ -233,8 +238,8 @@ may receive missing stable identifiers without being renamed.
 
 Malformed but identity-readable Papers still block duplicate creation. Unsafe
 or ambiguous matches are reported as errors and left unchanged, while
-recoverable metadata conflicts are warnings. Task 7 does not automatically
-merge, delete, or rename historical duplicates.
+recoverable metadata conflicts are warnings. Incremental materialization does
+not automatically merge, delete, or rename historical duplicates.
 
 ## Export Kept Papers for Zotero
 
