@@ -8,8 +8,6 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TypeAlias
 
-from literature_monitor.models import CanonicalMetadata, ProviderWorkEvidence
-
 
 class KeywordSyntaxError(ValueError):
     def __init__(self, message: str, position: int) -> None:
@@ -45,17 +43,6 @@ class Or:
 
 
 KeywordExpression: TypeAlias = Term | Phrase | Not | And | Or
-
-
-@dataclass(frozen=True)
-class SearchableProjection:
-    titles: tuple[str, ...] = ()
-    author_keywords: tuple[str, ...] = ()
-    abstracts: tuple[str, ...] = ()
-
-    @property
-    def units(self) -> tuple[str, ...]:
-        return (*self.titles, *self.author_keywords, *self.abstracts)
 
 
 class _TokenKind(Enum):
@@ -241,119 +228,3 @@ def broad_positive_query(expression: KeywordExpression) -> str | None:
         raise TypeError(f"unsupported keyword expression node: {type(node).__name__}")
 
     return convert(expression)
-
-
-def _normalize_search_text(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value).casefold()
-    return _WHITESPACE_PATTERN.sub(" ", normalized).strip()
-
-
-def _is_token_character(character: str) -> bool:
-    return character == "_" or character.isalnum()
-
-
-def _unit_contains_literal(unit: str, literal: str) -> bool:
-    if not literal:
-        return False
-
-    require_left_boundary = _is_token_character(literal[0])
-    require_right_boundary = _is_token_character(literal[-1])
-    start = 0
-    while True:
-        index = unit.find(literal, start)
-        if index < 0:
-            return False
-        end = index + len(literal)
-        left_valid = (
-            not require_left_boundary
-            or index == 0
-            or not _is_token_character(unit[index - 1])
-        )
-        right_valid = (
-            not require_right_boundary
-            or end == len(unit)
-            or not _is_token_character(unit[end])
-        )
-        if left_valid and right_valid:
-            return True
-        start = index + 1
-
-
-def _deduplicate_units(values: tuple[str | None, ...]) -> tuple[str, ...]:
-    units: dict[str, set[str]] = {}
-    for value in values:
-        if value is None or not (normalized := _normalize_search_text(value)):
-            continue
-        units.setdefault(normalized, set()).add(value.strip())
-    return tuple(
-        min(units[key], key=lambda value: (value.casefold(), value))
-        for key in sorted(units)
-    )
-
-
-def build_searchable_projection(
-    evidence: tuple[ProviderWorkEvidence, ...],
-) -> SearchableProjection:
-    """Build independent searchable units from all provider evidence."""
-
-    return SearchableProjection(
-        titles=_deduplicate_units(tuple(record.title for record in evidence)),
-        author_keywords=_deduplicate_units(
-            tuple(
-                keyword
-                for record in evidence
-                for keyword in record.author_keywords
-            )
-        ),
-        abstracts=_deduplicate_units(
-            tuple(record.abstract for record in evidence)
-        ),
-    )
-
-
-def evaluate_keyword_units(
-    expression: KeywordExpression,
-    values: tuple[str, ...],
-) -> bool:
-    """Evaluate an expression against independent searchable text units."""
-
-    units = tuple(
-        normalized
-        for value in values
-        if (normalized := _normalize_search_text(value))
-    )
-
-    def evaluate(node: KeywordExpression) -> bool:
-        if isinstance(node, (Term, Phrase)):
-            literal = _normalize_search_text(node.value)
-            return any(_unit_contains_literal(unit, literal) for unit in units)
-        if isinstance(node, Not):
-            return not evaluate(node.operand)
-        if isinstance(node, And):
-            return evaluate(node.left) and evaluate(node.right)
-        if isinstance(node, Or):
-            return evaluate(node.left) or evaluate(node.right)
-        raise TypeError(f"unsupported keyword expression node: {type(node).__name__}")
-
-    return evaluate(expression)
-
-
-def evaluate_searchable_projection(
-    expression: KeywordExpression,
-    projection: SearchableProjection,
-) -> bool:
-    return evaluate_keyword_units(expression, projection.units)
-
-
-def evaluate_keyword_expression(
-    expression: KeywordExpression,
-    metadata: CanonicalMetadata,
-) -> bool:
-    """Evaluate an expression against independent title/keyword/abstract units."""
-
-    values = tuple(
-        value
-        for value in (metadata.title, *metadata.author_keywords, metadata.abstract)
-        if value is not None
-    )
-    return evaluate_keyword_units(expression, values)

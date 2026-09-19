@@ -99,10 +99,11 @@ set in the environment to use Crossref's polite API pool.
 
 ## Diagnose local keyword filtering
 
-The local keyword filtering diagnostic runs the same venue-first OpenAlex
-discovery and then evaluates the configured keyword expression locally. It writes only retained
-original OpenAlex records as NDJSON to stdout and reports discovered, retained,
-and filtered-out counts on stderr. This NDJSON is not a stable export format.
+The local keyword filtering diagnostic runs venue-first OpenAlex discovery and
+then evaluates the configured keyword expression with the local FTS5 matcher.
+It writes only retained original OpenAlex records as NDJSON to stdout and
+reports discovered, retained, and filtered-out counts on stderr. This NDJSON is
+not a stable export format.
 
 Use the configured expression:
 
@@ -130,11 +131,42 @@ The local keyword filtering diagnostic does not perform Crossref enrichment,
 canonicalization, Markdown materialization, Zotero integration, conference
 monitoring, or persistence.
 
+## Keyword matching semantics
+
+Local filtering searches only Title, true author- or publisher-supplied Author
+Keywords, and Abstract. Each title, abstract, and individual author keyword is
+an independent searchable unit. Provider topics, fields of study, and inferred
+topics are not searchable.
+
+Expressions support Terms, quoted phrases, `AND`, `OR`, `NOT`, and parentheses.
+Before matching, text is normalized with Unicode NFKC, Unicode casefold, and
+whitespace normalization, then tokenized with SQLite FTS5 `unicode61` semantics.
+Each Term's complete token sequence must occur contiguously within one searchable
+unit. For example, `strasse` matches `Straße`. Punctuation is a tokenizer
+boundary, so `high-dimensional` can match both `high-dimensional` and
+`high dimensional`. This is lexical token equivalence, not fuzzy matching.
+
+A quoted phrase must occur as one complete contiguous token sequence inside a
+single searchable unit. Given a title unit `deep` and an abstract unit
+`learning`, `"deep learning"` is false, while `deep AND learning` is true.
+Boolean operators are evaluated for the consolidated work, so in the
+multi-provider `canonicalize` and `materialize` pipeline one operand may match
+an OpenAlex title and another may match a Crossref or Semantic Scholar abstract.
+A phrase still cannot span fields or provider records.
+
+Each filtering stage builds a transient in-memory SQLite FTS5 index and discards
+it after the run. The index is rebuilt as needed, writes no persistent search
+database, and is not a second durable source of truth beside Markdown. If the
+current Python SQLite runtime lacks FTS5, commands that require local filtering
+report a clear error and exit without falling back to the previous substring
+matcher. Local matching does not provide synonym expansion, stemming, `NEAR`,
+wildcard or prefix syntax, BM25 ranking, fuzzy search, or semantic search.
+
 ## Diagnose Crossref DOI enrichment
 
 This historical stage diagnostic runs venue-first OpenAlex discovery, applies
-the keyword expression locally, and performs Crossref DOI lookups only for
-retained records.
+the keyword expression with the same local FTS5 semantics described above, and
+performs Crossref DOI lookups only for retained records.
 It preserves each original OpenAlex record and attaches normalized Crossref
 provider evidence when available. Records without a DOI, and records that are
 not present in Crossref, remain in the output with `crossref: null`.
@@ -171,10 +203,10 @@ The canonicalization diagnostic retrieves journal/date evidence from OpenAlex
 and Crossref, performs Crossref DOI supplementation, then uses Semantic Scholar
 for DOI batch supplementation and venue/date-bounded supplemental discovery.
 Provider search expands coverage only: all evidence is consolidated before the
-existing local keyword expression evaluates provider titles, true author
-keywords, and abstracts. Semantic Scholar fields of study remain provider
-taxonomy and are not treated as author keywords or searchable text. Retained
-clusters become canonical papers. Matching is conservative and evidence-based:
+local FTS5 filter evaluates the searchable projection using the rules above.
+Semantic Scholar fields of study remain provider taxonomy and are not treated
+as author keywords or searchable text. Retained clusters become canonical
+papers. Matching is conservative and evidence-based:
 exact identifiers and explicit version relations take priority, while the
 title-and-author fallback requires compatible ordered author identities.
 
@@ -199,9 +231,10 @@ export.
 ## Materialize Obsidian Markdown
 
 The materialize command runs the same three-provider
-consolidation-before-filter pipeline and creates or incrementally updates Paper
-and Author notes under an Obsidian-compatible output directory. Semantic
-Scholar access is anonymous by default; set `SEMANTIC_SCHOLAR_API_KEY` in the
+consolidation-before-filter pipeline and the same local FTS5 matching rules,
+then creates or incrementally updates Paper and Author notes under an
+Obsidian-compatible output directory. Semantic Scholar access is anonymous by
+default; set `SEMANTIC_SCHOLAR_API_KEY` in the
 environment when using an API key:
 
 ```bash

@@ -24,10 +24,8 @@ from literature_monitor.crossref import (
     enrich_records,
 )
 from literature_monitor.keywords import (
+    KeywordExpression,
     KeywordSyntaxError,
-    build_searchable_projection,
-    evaluate_keyword_expression,
-    evaluate_searchable_projection,
     parse_keyword_expression,
 )
 from literature_monitor.kept_export import export_kept_papers
@@ -44,6 +42,13 @@ from literature_monitor.openalex import (
     resolve_journal_source,
 )
 from literature_monitor.retrieval import assemble_provider_evidence
+from literature_monitor.search import (
+    SearchBackendError,
+    SearchableProjection,
+    build_metadata_searchable_projection,
+    build_searchable_projection,
+    match_searchable_projections,
+)
 from literature_monitor.semantic_scholar import (
     SemanticScholarIssue,
     SemanticScholarIssueSeverity,
@@ -226,6 +231,18 @@ def _log_semantic_scholar_issues(
         log("Semantic Scholar [%s]: %s", issue.stage, detail)
 
 
+def _match_local_search(
+    logger: logging.Logger,
+    expression: KeywordExpression,
+    projections: Sequence[SearchableProjection],
+) -> tuple[bool, ...] | None:
+    try:
+        return match_searchable_projections(expression, projections)
+    except SearchBackendError as error:
+        logger.error("Local search / FTS5 backend failure: %s", error)
+        return None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     logger = configure_logging()
@@ -382,10 +399,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1 if openalex.has_errors else 0
 
         if args.command in {"openalex-filter", "crossref-enrich"}:
+            records = openalex.records
+            projections = tuple(
+                build_metadata_searchable_projection(record.metadata)
+                for record in records
+            )
+            matches = _match_local_search(logger, keyword_ast, projections)
+            if matches is None:
+                return 2
             filtered = tuple(
                 record
-                for record in openalex.records
-                if evaluate_keyword_expression(keyword_ast, record.metadata)
+                for record, matched in zip(records, matches, strict=True)
+                if matched
             )
             if args.command == "openalex-filter":
                 for record in filtered:
@@ -456,13 +481,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         consolidation = consolidate_evidence(all_evidence)
         for issue in consolidation.issues:
             _log_canonicalization_issue(logger, "Consolidation", issue)
+        clusters = consolidation.clusters
+        projections = tuple(
+            build_searchable_projection(cluster.evidence)
+            for cluster in clusters
+        )
+        matches = _match_local_search(logger, keyword_ast, projections)
+        if matches is None:
+            return 2
         retained_clusters = tuple(
             cluster
-            for cluster in consolidation.clusters
-            if evaluate_searchable_projection(
-                keyword_ast,
-                build_searchable_projection(cluster.evidence),
-            )
+            for cluster, matched in zip(clusters, matches, strict=True)
+            if matched
         )
         retained_evidence = tuple(
             evidence

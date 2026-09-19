@@ -1,5 +1,3 @@
-from datetime import datetime, timezone
-
 import pytest
 
 from literature_monitor.keywords import (
@@ -8,61 +6,10 @@ from literature_monitor.keywords import (
     Not,
     Or,
     Phrase,
-    SearchableProjection,
     Term,
     broad_positive_query,
-    build_searchable_projection,
-    evaluate_keyword_expression,
-    evaluate_searchable_projection,
     parse_keyword_expression,
 )
-from literature_monitor.models import (
-    CanonicalMetadata,
-    MetadataSource,
-    ProviderTopic,
-    ProviderWorkEvidence,
-)
-
-
-def matches(
-    expression: str,
-    *,
-    title: str = "Unrelated title",
-    author_keywords: tuple[str, ...] = (),
-    abstract: str | None = None,
-) -> bool:
-    return evaluate_keyword_expression(
-        parse_keyword_expression(expression),
-        CanonicalMetadata(
-            title=title,
-            journal="Test Journal",
-            author_keywords=author_keywords,
-            abstract=abstract,
-        ),
-    )
-
-
-def provider_evidence(
-    provider: str,
-    *,
-    title: str | None = None,
-    abstract: str | None = None,
-    author_keywords: tuple[str, ...] = (),
-    provider_topics: tuple[ProviderTopic, ...] = (),
-    fields_of_study: tuple[str, ...] = (),
-) -> ProviderWorkEvidence:
-    return ProviderWorkEvidence(
-        provenance=MetadataSource(
-            provider=provider,
-            record_id=f"{provider}-1",
-            retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
-        ),
-        title=title,
-        abstract=abstract,
-        author_keywords=author_keywords,
-        provider_topics=provider_topics,
-        fields_of_study=fields_of_study,
-    )
 
 
 def test_operator_precedence_and_case_insensitivity() -> None:
@@ -113,139 +60,6 @@ def test_invalid_expressions_include_column(expression: str) -> None:
         parse_keyword_expression(expression)
 
 
-def test_terms_and_phrases_match_casefolded_nfkc_whitespace_normalized_units() -> None:
-    assert matches("strasse", title="Die Straße")
-    assert matches("p>>n", title="Ｐ>>Ｎ asymptotics")
-    assert matches('"high dimensional"', abstract="high\n\tdimensional inference")
-
-
-def test_title_abstract_and_each_author_keyword_are_independent_units() -> None:
-    assert matches("titleword", title="TitleWord study")
-    assert matches("abstractword", abstract="An AbstractWord appears here")
-    assert matches("keywordword", author_keywords=("KeywordWord",))
-    assert not matches('"deep learning"', title="deep", abstract="learning")
-    assert not matches('"deep learning"', author_keywords=("deep", "learning"))
-
-
-def test_and_subexpressions_may_match_different_units() -> None:
-    assert matches(
-        "causal AND genomics",
-        title="Causal inference",
-        abstract="Applications in genomics",
-    )
-
-
-def test_boolean_semantics_precedence_parentheses_and_not() -> None:
-    assert not matches("alpha OR beta AND gamma", title="beta")
-    assert matches("(alpha OR beta) AND gamma", title="beta", abstract="gamma")
-    assert matches("alpha AND NOT excluded", title="alpha")
-    assert not matches("alpha AND NOT excluded", title="alpha excluded")
-
-
-def test_missing_optional_fields_degrade_to_available_units() -> None:
-    assert matches("abstract", title="Other", abstract="Abstract match")
-    assert matches("title", title="Title only")
-    assert not matches("missing", title="Title only")
-
-
-@pytest.mark.parametrize(
-    ("expression", "matching", "nonmatching"),
-    [
-        ("high-dimensional", "high-dimensional statistics", "high dimensional statistics"),
-        ("multi-view", "multi-view learning", "multi view learning"),
-        ("p>>n", "the p>>n regime", "the p > > n regime"),
-    ],
-)
-def test_punctuation_is_literal(
-    expression: str, matching: str, nonmatching: str
-) -> None:
-    assert matches(expression, title=matching)
-    assert not matches(expression, title=nonmatching)
-
-
-def test_token_boundaries_reject_embedded_only_matches() -> None:
-    assert not matches("net", title="internet")
-    assert not matches("alpha", title="alpha_numeric")
-    assert matches("alpha", title="alpha-beta")
-
-
-def test_boundary_search_continues_after_an_invalid_occurrence() -> None:
-    assert matches("net", title="internet methods for net analysis")
-
-
-def test_boundary_constraints_only_apply_to_literal_token_edges() -> None:
-    assert matches(">>n", title="p>>n")
-    assert matches("p>>", title="p>>n")
-
-
-def test_whitespace_only_phrase_does_not_match_everything() -> None:
-    assert not matches('"   "', title="Any title")
-
-
-def test_multi_provider_projection_retains_only_explicit_search_units() -> None:
-    projection = build_searchable_projection(
-        (
-            provider_evidence(
-                "openalex",
-                title="OpenAlex title",
-                abstract="OpenAlex abstract",
-                author_keywords=("Author keyword",),
-            ),
-            provider_evidence(
-                "crossref",
-                title="Crossref title",
-                abstract="Crossref abstract",
-            ),
-        )
-    )
-
-    assert set(projection.titles) == {"OpenAlex title", "Crossref title"}
-    assert set(projection.abstracts) == {
-        "OpenAlex abstract",
-        "Crossref abstract",
-    }
-    assert projection.author_keywords == ("Author keyword",)
-
-
-def test_projection_preserves_unit_and_boolean_semantics() -> None:
-    projection = SearchableProjection(
-        titles=("deep", "causal inference"),
-        abstracts=("learning", "genomics without excluded content"),
-    )
-
-    assert not evaluate_searchable_projection(
-        parse_keyword_expression('"deep learning"'),
-        projection,
-    )
-    assert evaluate_searchable_projection(
-        parse_keyword_expression("causal AND genomics"),
-        projection,
-    )
-    assert not evaluate_searchable_projection(
-        parse_keyword_expression("causal AND NOT excluded"),
-        projection,
-    )
-
-
-def test_crossref_abstract_rescues_openalex_search_miss() -> None:
-    projection = build_searchable_projection(
-        (
-            provider_evidence("openalex", title="Unrelated title"),
-            provider_evidence(
-                "crossref",
-                title="Another title",
-                abstract="Cox regression identifies the signal",
-            ),
-        )
-    )
-
-    assert evaluate_searchable_projection(
-        parse_keyword_expression('"Cox regression"'),
-        projection,
-    )
-    assert not matches('"Cox regression"', title="Unrelated title")
-
-
 @pytest.mark.parametrize(
     ("expression", "expected"),
     [
@@ -277,24 +91,4 @@ def test_broad_positive_query_sanitizes_provider_operators() -> None:
 
     assert broad_positive_query(expression) == (
         '(causal review) + ("genomics editorial survey quoted")'
-    )
-
-
-def test_provider_taxonomy_is_not_searchable() -> None:
-    projection = build_searchable_projection(
-        (
-            provider_evidence(
-                "semantic_scholar",
-                title="Unrelated",
-                provider_topics=(
-                    ProviderTopic(value="Causal inference", source="s2-fos-model"),
-                ),
-                fields_of_study=("Genomics",),
-            ),
-        )
-    )
-
-    assert not evaluate_searchable_projection(
-        parse_keyword_expression("causal OR genomics"),
-        projection,
     )

@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — MVP Specification v1.1
 
-**Status:** Active; v0.1.0 released and R0–R3 implemented and audited
+**Status:** Active; v0.2.0 released and R0–R3 implemented and audited
 
-**Stage:** v0.2.0 release closeout and validation; Search-engine parity deferred
+**Stage:** v0.2.1 release closeout and validation
 **Scope:** Journal monitoring only; conferences are excluded from MVP
 
 ---
@@ -93,6 +93,7 @@ MVP includes:
 - Semantic Scholar metadata supplementation and supplemental discovery;
 - provider-neutral identity/evidence consolidation;
 - local keyword filtering after available evidence is consolidated;
+- a transient, reconstructible SQLite FTS5 runtime index for local lexical filtering;
 - provider, journal, and request failure isolation;
 - canonical paper identity;
 - basic cross-source deduplication;
@@ -119,8 +120,16 @@ MVP does **not** include:
 - Topic Graph construction;
 - citation graph construction;
 - automatic research-thread detection;
-- LLM relevance ranking;
-- LLM semantic keyword expansion;
+- automatic synonym expansion;
+- stemming;
+- Porter tokenizer;
+- trigram or fuzzy matching;
+- semantic search;
+- LLM query expansion;
+- relevance ranking, including BM25 or LLM-based ranking;
+- field-specific query syntax;
+- user-facing `NEAR` syntax;
+- user-facing wildcard or prefix syntax;
 - automatic idea generation;
 - automatic paper summarization;
 - automatic PDF download for candidates;
@@ -133,8 +142,10 @@ MVP does **not** include:
 - citation-count ranking;
 - journal ranking;
 - durable database or another mandatory source of truth;
+- persistent search database;
 - Track B workflow/state expansion beyond the current Markdown lifecycle;
-- search-engine parity features such as FTS5, stemming, wildcards, or proximity operators.
+
+SQLite FTS5 is permitted only as transient, reconstructible runtime state. It must not become durable workflow state or a mandatory second source of truth.
 
 ---
 
@@ -245,6 +256,18 @@ Keywords are a **filter inside the journal whitelist**, not a global discovery m
 
 Filtering occurs only after records with sufficient identity evidence have been consolidated. The searchable projection for an identity cluster uses the eligible fields available across all provider evidence in that cluster, rather than only the fields from the first or otherwise preferred provider record.
 
+The required order is:
+
+```text
+journal/date retrieval
+→ provider evidence
+→ evidence consolidation
+→ searchable projection
+→ local keyword filtering
+```
+
+The complete Boolean expression must not be applied provider-record-by-provider-record before evidence consolidation.
+
 ### 7.1 Search fields
 
 MVP follows a 篇关摘-style search scope:
@@ -269,25 +292,67 @@ Only author/publisher-supplied keywords that can be identified as such should be
 
 Provider-derived keywords, topics, or fields of study must remain distinct from `Author Keywords`. They may be retained as provider evidence, but they must not be silently mapped into the `Author Keywords` search field.
 
+Each concrete field value contributed by available evidence is an independent **searchable unit**. Searchable units therefore include, for example:
+
+- a provider A title;
+- a provider A abstract;
+- a provider B title;
+- a provider B abstract;
+- each individual author keyword.
+
+Field and provider boundaries are retained in the searchable projection even though Boolean evaluation occurs at the consolidated research-work identity.
+
 ### 7.2 Expression semantics
 
 MVP supports:
 
-- words;
-- exact phrases;
+- Terms as defined by the existing keyword grammar, including punctuation-containing Terms such as `x/y`, `a-b`, `p>>n`, and `high-dimensional`;
+- quoted phrases;
 - `AND`;
 - `OR`;
 - `NOT`;
 - parentheses;
 - case-insensitive matching.
 
+Before lexical matching, every searchable unit and the content of every atomic Term or quoted-phrase operand are normalized in this order:
+
+```text
+Unicode NFKC
+→ Unicode casefold
+→ whitespace normalization
+```
+
+Whitespace normalization strips leading and trailing whitespace and collapses each internal whitespace run to one space. SQLite FTS5 `unicode61` lexical tokenization occurs only after this normalization. The implementation must apply Unicode casefold before tokenization rather than relying on `unicode61` case handling alone; for example, `strasse` must match `Straße`.
+
+The existing expression grammar defines Term boundaries and remains unchanged. Each normalized Term is tokenized with `unicode61`. If it produces one or more lexical tokens, that complete ordered token sequence must occur contiguously within one searchable unit for the Term to match. A Term cannot span searchable units. If a Term produces no lexical tokens, that atomic operand does not match any research work. Term content must be treated as lexical input and must not be interpolated verbatim into SQLite FTS5 query syntax.
+
+Boolean operators combine atomic operand truth values at the consolidated work level, so `A AND B` may match different searchable units or evidence supplied by different providers. `NOT` retains these work-level Boolean semantics: it negates whether its operand matches the work, not merely whether it matches the same searchable unit as another operand.
+
+A quoted phrase represents one contiguous lexical token sequence and must occur completely within one searchable unit. A phrase must not span title and abstract, two author keywords, or records from different providers. For example:
+
+```text
+title unit: deep
+abstract unit: learning
+
+"deep learning" → false
+deep AND learning → true
+```
+
+Punctuation is handled as a `unicode61` tokenizer boundary; character-for-character punctuation-sensitive substring equivalence is not required. Consequently, the Term `high-dimensional` matches both `high-dimensional` and `high dimensional` when they produce the same contiguous lexical token sequence. A Term such as `p>>n` is handled by its resulting `unicode61` token sequence in the same way. This is lexical token matching, not fuzzy matching, and punctuation-containing Terms remain valid user syntax.
+
 MVP does not require:
 
 - automatic synonym expansion;
-- proximity/`NEAR` operators;
-- LLM semantic matching;
+- stemming or the Porter tokenizer;
+- trigram or fuzzy matching;
+- semantic search or LLM query expansion;
+- relevance or BM25 ranking;
+- field-specific query syntax;
+- user-facing proximity/`NEAR` syntax;
+- user-facing wildcard or prefix syntax;
 - automatic topic inference;
-- complex wildcard syntax.
+
+SQLite FTS5 may implement this contract only through a transient, reconstructible runtime index. The index is disposable and must not become a persistent search database, durable workflow state, or another mandatory source of truth.
 
 The keyword expression must be configuration, not hard-coded logic.
 
@@ -522,7 +587,7 @@ MVP does not compare PDF/text differences between versions.
 
 Markdown files are the durable user-facing state for candidate decisions.
 
-MVP does not require SQLite or another mandatory database as a second source of truth.
+SQLite FTS5 may be used only for the transient runtime index described in §7; no SQLite or other durable database is a mandatory second source of truth.
 
 An implementation may use disposable caches or indexes for speed, but they must be reconstructible from configuration, source APIs, and the Markdown corpus.
 
@@ -950,11 +1015,18 @@ Given a test expression using `AND`, `OR`, `NOT`, phrases, and parentheses:
 
 - records with the same normalized DOI consolidate into one identity cluster;
 - available provider evidence is consolidated before local filtering;
-- an abstract supplied by any provider in the cluster participates in filtering;
-- matching is case-insensitive;
-- Title + Author Keywords + Abstract are used when available;
-- the matcher degrades safely when fields are missing;
-- provider-derived keywords, topics, or fields of study are not silently substituted for author keywords.
+- only Title + Author Keywords + Abstract are searchable;
+- an eligible field supplied by any provider in the cluster participates in filtering as its own searchable unit;
+- a missing abstract or author keywords degrades safely and does not by itself exclude the work;
+- provider-derived keywords, topics, or fields of study remain non-searchable and are not silently substituted for author keywords;
+- Boolean operands may match across searchable units and across providers within the consolidated work;
+- the existing grammar continues to accept punctuation-containing Terms, and Term content is never interpreted verbatim as SQLite FTS5 query syntax;
+- after normalization, a Term's complete nonempty `unicode61` token sequence must occur contiguously within one searchable unit and cannot span units;
+- a Term that produces no lexical tokens does not match any research work;
+- a quoted phrase matches only when its full token sequence occurs within one searchable unit and cannot span fields, keywords, or provider records;
+- lexical normalization applies NFKC, then Unicode casefold, then whitespace normalization before `unicode61` tokenization, preserving matches such as `strasse` against `Straße`;
+- punctuation follows SQLite FTS5 `unicode61` token semantics, including lexical equivalence between token sequences such as `high-dimensional` and `high dimensional`;
+- the local search index is transient, reconstructible runtime state and is not a durable or mandatory source of truth.
 
 ### 22.4 Candidate creation
 
@@ -1076,16 +1148,24 @@ R0 Specification alignment
 → R1 Provider-neutral evidence boundary
 → R2 Crossref independent discovery
 → R3 Semantic Scholar integration
-→ later Search-engine parity
 ```
 
 - R0 aligned the product specification and repository engineering constraints.
 - R1 introduced a provider-neutral transient evidence representation, adapted the existing OpenAlex and Crossref records to that boundary, and removed canonicalization's structural dependency on an OpenAlex record while preserving the then-current user-visible OpenAlex → local filter → Crossref enrichment behavior.
 - R2 added independent Crossref journal/date discovery, unioned OpenAlex and Crossref evidence, performed identity/evidence consolidation, constructed the multi-provider searchable projection, and moved final local keyword filtering after available evidence consolidation.
 - R3 added Semantic Scholar supplementation and venue/date-constrained supplemental discovery.
-- Search-engine parity remains later work and must not be pulled into R0–R3.
 
 Each R0–R3 task was implemented and reviewed as a separate bounded change. This sequence is retained as project history, not as a pending implementation plan.
+
+### 23.3 Completed v0.2.1 lexical-search evolution
+
+The bounded v0.2.1 lexical-search evolution is implemented:
+
+1. the observable lexical-search contract was aligned with §7 and §22.3;
+2. the transient SQLite FTS5 batch backend was implemented;
+3. all local filtering entry points were integrated with that backend after the appropriate metadata or evidence consolidation stage.
+
+This work does not retroactively alter the completed R0–R3 history or bring other SQLite FTS5 capabilities into product scope.
 
 ---
 
@@ -1126,13 +1206,6 @@ No additional infrastructure is required for MVP completion.
 
 ## 26. Next Project Step
 
-R0–R3 are complete and audited. The next bounded project sequence is:
+R0–R3 are complete and audited, and v0.2.0 has been released. The v0.2.1 lexical-search contract alignment, transient FTS5 backend, and pipeline integration are complete.
 
-```text
-v0.2.0 release closeout
-→ package, live-provider, and durable-state release validation
-→ v0.2.0 release
-→ later product evolution
-```
-
-Search-engine parity remains deferred later work and is not part of v0.2.0 release closeout or validation. For each later task, inspect the repository before editing, keep the task boundary explicit, and review the actual diff and relevant verification output before proceeding to the next task.
+The current bounded project step is v0.2.1 release closeout and validation. Commit, tag, push, and publication remain separate release actions after this release candidate is audited; v0.2.1 is not yet released.

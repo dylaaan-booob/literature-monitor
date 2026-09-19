@@ -23,7 +23,6 @@ from literature_monitor.crossref import (
 )
 from literature_monitor.kept_export import KeptExportIssue, KeptExportResult
 from literature_monitor.logging_setup import LOGGER_NAME, configure_logging
-from literature_monitor.keywords import evaluate_searchable_projection
 from literature_monitor.materialize import (
     MaterializationIssue,
     MaterializationIssueSeverity,
@@ -48,6 +47,7 @@ from literature_monitor.openalex import (
     ResolvedSource,
 )
 from literature_monitor.retrieval import EvidenceRetrievalResult
+from literature_monitor.search import SearchBackendError, SearchableProjection
 from literature_monitor.semantic_scholar import (
     SemanticScholarIssue,
     SemanticScholarIssueSeverity,
@@ -765,6 +765,138 @@ def test_openalex_filter_uses_config_expression_and_reports_counts(
     assert "3 discovered, 1 retained, 2 filtered out" in captured.err
 
 
+def test_openalex_filter_batches_all_records_and_preserves_retained_order(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    batches: list[tuple[SearchableProjection, ...]] = []
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: filter_diagnostic_result(),
+    )
+
+    def fake_match(
+        expression: object,
+        projections: tuple[SearchableProjection, ...],
+    ) -> tuple[bool, ...]:
+        batches.append(projections)
+        return (False, True, True)
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.match_searchable_projections",
+        fake_match,
+    )
+
+    result = main(
+        (
+            "openalex-filter",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    rows = [json.loads(line) for line in captured.out.splitlines()]
+    assert len(batches) == 1
+    assert [projection.titles for projection in batches[0]] == [
+        ("High-dimensional models",),
+        ("Bayesian multiview learning",),
+        ("Unrelated paper",),
+    ]
+    assert [row["external_ids"]["openalex"] for row in rows] == [
+        "https://openalex.org/W11",
+        "https://openalex.org/W12",
+    ]
+    assert result == 0
+    assert "3 discovered, 2 retained, 1 filtered out" in captured.err
+
+
+def test_openalex_filter_exposes_unicode61_punctuation_semantics(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    discovery = filter_diagnostic_result()
+    first = discovery.records[0]
+    spaced_title = first.model_copy(
+        update={
+            "metadata": first.metadata.model_copy(
+                update={"title": "High dimensional models"}
+            )
+        }
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: DiscoveryResult(
+            sources=discovery.sources,
+            records=(spaced_title, *discovery.records[1:]),
+            issues=discovery.issues,
+        ),
+    )
+
+    result = main(
+        (
+            "openalex-filter",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+            "--keyword-expression",
+            "high-dimensional",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert json.loads(captured.out)["external_ids"]["openalex"] == (
+        "https://openalex.org/W10"
+    )
+
+
+def test_openalex_filter_reports_search_backend_failure_without_traceback(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: filter_diagnostic_result(),
+    )
+
+    def fail_search(*args: object) -> tuple[bool, ...]:
+        raise SearchBackendError("SQLite FTS5 is unavailable")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.match_searchable_projections",
+        fail_search,
+    )
+
+    result = main(
+        (
+            "openalex-filter",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert captured.out == ""
+    assert "Local search / FTS5 backend failure" in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_openalex_filter_override_is_one_run_only_and_takes_precedence(
     monkeypatch: object, capsys: object
 ) -> None:
@@ -905,6 +1037,8 @@ def test_crossref_enrich_uses_config_filter_before_enrichment(
 ) -> None:
     repository_root = Path(__file__).resolve().parents[1]
     received: list[OpenAlexWorkRecord] = []
+    match_batches: list[tuple[SearchableProjection, ...]] = []
+    events: list[str] = []
     client_sentinel = object()
 
     monkeypatch.setattr(  # type: ignore[attr-defined]
@@ -916,9 +1050,23 @@ def test_crossref_enrich_uses_config_filter_before_enrichment(
         lambda **kwargs: client_sentinel,
     )
 
+    def fake_match(
+        expression: object,
+        projections: tuple[SearchableProjection, ...],
+    ) -> tuple[bool, ...]:
+        events.append("filter")
+        match_batches.append(projections)
+        return (True, False, True)
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.match_searchable_projections",
+        fake_match,
+    )
+
     def fake_enrich(
         client: object, records: tuple[OpenAlexWorkRecord, ...]
     ) -> EnrichmentResult:
+        events.append("enrich")
         assert client is client_sentinel
         received.extend(records)
         return EnrichmentResult(
@@ -959,6 +1107,13 @@ def test_crossref_enrich_uses_config_filter_before_enrichment(
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     rows = [json.loads(line) for line in captured.out.splitlines()]
     assert result == 0
+    assert events == ["filter", "enrich"]
+    assert len(match_batches) == 1
+    assert [projection.titles for projection in match_batches[0]] == [
+        ("High-dimensional models",),
+        ("Excluded paper",),
+        ("High-dimensional analysis",),
+    ]
     assert [record.external_ids.openalex for record in received] == [
         "https://openalex.org/W1",
         "https://openalex.org/W3",
@@ -2154,6 +2309,7 @@ def test_materialize_runs_full_pipeline_in_order_without_stdout(
     repository_root = Path(__file__).resolve().parents[1]
     output_dir = tmp_path / "Vault"
     events: list[str] = []
+    filter_batches: list[tuple[SearchableProjection, ...]] = []
     received_by_materialization: list[CanonicalPaper] = []
     canonical = canonical_paper("10.5555/two")
 
@@ -2165,10 +2321,18 @@ def test_materialize_runs_full_pipeline_in_order_without_stdout(
         events.append("consolidate")
         return consolidate_evidence(records)
 
-    def fake_filter(expression: object, projection: object) -> bool:
-        if "filter" not in events:
-            events.append("filter")
-        return evaluate_searchable_projection(expression, projection)  # type: ignore[arg-type]
+    def fake_filter(
+        expression: object,
+        projections: tuple[SearchableProjection, ...],
+    ) -> tuple[bool, ...]:
+        events.append("filter")
+        filter_batches.append(projections)
+        assert [projection.titles for projection in projections] == [
+            ("High-dimensional models",),
+            ("Excluded paper",),
+            ("High-dimensional analysis",),
+        ]
+        return (False, True, False)
 
     def fake_canonicalize(
         records: tuple[ProviderWorkEvidence, ...],
@@ -2223,7 +2387,7 @@ def test_materialize_runs_full_pipeline_in_order_without_stdout(
         "literature_monitor.cli.consolidate_evidence", fake_consolidate
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.evaluate_searchable_projection", fake_filter
+        "literature_monitor.cli.match_searchable_projections", fake_filter
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.canonicalize_records", fake_canonicalize
@@ -2261,10 +2425,64 @@ def test_materialize_runs_full_pipeline_in_order_without_stdout(
         "materialize",
     ]
     assert received_by_materialization == [canonical]
+    assert len(filter_batches) == 1
     assert captured.out == ""
     assert "Semantic Scholar [unsupported_venue_filter]" in captured.err
     assert "1 canonical papers, 1 paper files created" in captured.err
     assert "1 author files created, 0 author files existing" in captured.err
+
+
+def test_multisource_search_backend_failure_stops_before_canonicalization(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    canonicalize_called = False
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: enrichment_diagnostic_result(),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient",
+        lambda **kwargs: object(),
+    )
+    install_multisource_mocks(monkeypatch)
+
+    def fail_search(*args: object) -> tuple[bool, ...]:
+        raise SearchBackendError("SQLite FTS5 is unavailable")
+
+    def unexpected_canonicalize(*args: object) -> CanonicalizationResult:
+        nonlocal canonicalize_called
+        canonicalize_called = True
+        raise AssertionError("canonicalization must not follow search failure")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.match_searchable_projections",
+        fail_search,
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.canonicalize_records",
+        unexpected_canonicalize,
+    )
+
+    result = main(
+        (
+            "canonicalize",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert captured.out == ""
+    assert "Local search / FTS5 backend failure" in captured.err
+    assert "Traceback" not in captured.err
+    assert not canonicalize_called
 
 
 @pytest.mark.parametrize(
