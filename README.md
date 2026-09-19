@@ -1,10 +1,10 @@
 # Literature Monitor
 
 This repository contains the journal-monitoring workflow specified in
-`SPEC.md`. It currently provides the Task 1 project foundation through Task 7
-incremental Obsidian materialization: venue-first OpenAlex discovery, local
-keyword filtering, DOI-only Crossref enrichment, canonicalization and version
-consolidation, and durable Paper and Author Markdown updates.
+`SPEC.md`. Tasks 1 through 8 implement the complete MVP workflow: venue-first
+OpenAlex discovery, local keyword filtering, DOI-only Crossref enrichment,
+canonicalization and version consolidation, durable Paper and Author Markdown
+updates, and kept-paper export. Task 9 validates that workflow end to end.
 
 ## Setup
 
@@ -33,6 +33,15 @@ uv run pytest
 Task 1 performs no network requests and does not implement discovery,
 Markdown materialization, Zotero integration, conference monitoring, or a
 database.
+
+## End-to-end validation
+
+The default `uv run pytest` suite includes a deterministic full-cycle CLI
+regression using local HTTP fixtures. Task 9 also validates the same workflow
+against the real OpenAlex and Crossref providers, but live provider checks are
+kept outside the default test suite because they depend on external service
+availability. Optional credentials and contact details are supplied only
+through `OPENALEX_API_KEY` and `CROSSREF_MAILTO` environment variables.
 
 ## Diagnose OpenAlex discovery
 
