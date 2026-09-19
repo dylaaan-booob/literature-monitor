@@ -1,7 +1,8 @@
-# Literature Monitoring Workflow — MVP Specification v1.0
+# Literature Monitoring Workflow — MVP Specification v1.1
 
-**Status:** Frozen for MVP implementation  
-**Stage:** Specification → ready for repository setup and Codex implementation planning  
+**Status:** Active; v0.1.0 delivered and multi-source retrieval evolution specified
+
+**Stage:** Multi-source retrieval R0 specification alignment
 **Scope:** Journal monitoring only; conferences are excluded from MVP
 
 ---
@@ -25,15 +26,17 @@ Build a lightweight, maintainable journal-monitoring workflow with the following
 ```text
 Journal whitelist
     ↓
-OpenAlex venue resolution
+Provider-specific journal/date retrieval
     ↓
-Source + date-window retrieval
+Provider evidence
+    ↓
+Identity/evidence consolidation
+    ↓
+Searchable projection
     ↓
 Local keyword filtering
     ↓
-Crossref enrichment
-    ↓
-Canonicalization / version consolidation
+CanonicalPaper / version consolidation
     ↓
 One candidate paper → one Markdown file
     ↓
@@ -62,16 +65,17 @@ The user maintains:
 
 A normal run should:
 
-1. resolve journals to OpenAlex sources;
-2. retrieve papers in the requested time window;
-3. filter them locally using the configured search expression;
-4. enrich metadata with Crossref when possible;
-5. merge duplicate records and known versions into one canonical paper;
-6. create one Markdown file per new candidate paper;
-7. create/update author notes and author links;
-8. preserve all prior human decisions and notes;
-9. allow the user to mark papers as `rejected`, `kept`, or later `in_zotero`;
-10. export identifiers for `kept` papers so existing Zotero DOI/identifier import functionality can be used.
+1. validate the journal whitelist and resolve any provider-specific venue identifiers;
+2. retrieve journal/date evidence independently from the configured providers;
+3. consolidate records that have sufficient identity evidence into provider-neutral evidence clusters;
+4. build a searchable projection from all available evidence in each cluster;
+5. apply the configured keyword expression locally to decide inclusion;
+6. merge each included cluster and its known versions into one canonical paper;
+7. create one Markdown file per new candidate paper;
+8. create/update author notes and author links;
+9. preserve all prior human decisions and notes;
+10. allow the user to mark papers as `rejected`, `kept`, or later `in_zotero`;
+11. export identifiers for `kept` papers so existing Zotero DOI/identifier import functionality can be used.
 
 ---
 
@@ -83,10 +87,13 @@ MVP includes:
 
 - journal whitelist configuration;
 - ISSN/EISSN-based venue resolution;
-- OpenAlex venue-first discovery;
-- rolling date-window retrieval;
-- local keyword filtering;
-- Crossref metadata enrichment;
+- multi-source evidence retrieval within the journal/date boundary;
+- OpenAlex journal/date discovery;
+- Crossref journal/date discovery and DOI enrichment;
+- Semantic Scholar metadata supplementation and supplemental discovery;
+- provider-neutral identity/evidence consolidation;
+- local keyword filtering after available evidence is consolidated;
+- provider, journal, and request failure isolation;
 - canonical paper identity;
 - basic cross-source deduplication;
 - version tracking and preferred-version selection;
@@ -124,7 +131,10 @@ MVP does **not** include:
 - Obsidian plugin;
 - recommendation ranking;
 - citation-count ranking;
-- journal ranking.
+- journal ranking;
+- durable database or another mandatory source of truth;
+- Track B workflow/state expansion beyond the current Markdown lifecycle;
+- search-engine parity features such as FTS5, stemming, wildcards, or proximity operators.
 
 ---
 
@@ -163,9 +173,9 @@ No global `research_article_only` assumption should be hard-coded because the wh
 
 ## 6. Data Source Policy
 
-### 6.1 OpenAlex — primary discovery source
+All retrieval remains journal-whitelist-first and date-bounded. OpenAlex, Crossref, and Semantic Scholar may each contribute evidence to the candidate universe. No provider has implicit canonical authority merely because its record was retrieved first.
 
-OpenAlex is the only primary discovery source in MVP.
+### 6.1 OpenAlex
 
 Responsibilities:
 
@@ -182,36 +192,48 @@ Responsibilities:
 - OpenAlex work ID;
 - useful relation or version hints when available.
 
-Discovery must be venue-first:
+OpenAlex retrieval must be venue-first:
 
 ```text
 journal whitelist
 → OpenAlex source
 → works in time window
-→ local keyword filter
+→ provider evidence
 ```
 
 It must **not** use OpenAlex global keyword search as the main discovery path.
 
-### 6.2 Crossref — enrichment source
-
-Crossref does not define the candidate universe.
+### 6.2 Crossref
 
 Responsibilities:
 
+- retrieve works independently by ISSN and date window;
 - enrich records by DOI and related bibliographic identifiers;
-- supplement publication dates;
-- supplement abstract when present;
+- contribute title, authorship, publication dates, abstract, and venue metadata when present;
 - provide relation metadata when available;
-- corroborate DOI and journal metadata.
+- contribute DOI, journal, and provenance evidence.
+
+A valid Crossref journal/date result may contribute a candidate even when no corresponding OpenAlex record exists.
 
 Crossref `type = journal-article` must not be interpreted as proof that a record is a research article.
 
-### 6.3 Publisher fallback
+### 6.3 Semantic Scholar
+
+Responsibilities:
+
+- supplement metadata by DOI or batch lookup;
+- perform venue/date-constrained supplemental discovery;
+- contribute title, authorship, abstract, external identifiers, topics/fields of study, and provenance when available.
+
+A broad positive query may be used only to expand provider coverage. Every returned record must still pass the configured date boundary and venue validation, and final inclusion is always decided by the unified local keyword expression.
+
+Venue validation must prefer ISSN/EISSN. Only when the provider record has no usable ISSN/EISSN may a strict normalized journal-name match be used as a fallback; ambiguous or mismatched venues must not enter the candidate universe.
+
+### 6.4 Publisher fallback
 
 Publisher fallback is deliberately excluded from MVP.
 
-If OpenAlex and Crossref cannot provide a field such as abstract, the field remains missing and the failure is recorded. The system must not scrape publisher pages in v1.0.
+If the configured providers cannot provide a field such as abstract, the field remains missing and the failure is recorded. The system must not scrape publisher pages in the MVP.
 
 Publisher-specific adapters may be considered only after real usage demonstrates persistent, high-value metadata gaps concentrated in specific journals or publishers.
 
@@ -220,6 +242,8 @@ Publisher-specific adapters may be considered only after real usage demonstrates
 ## 7. Keyword Filtering
 
 Keywords are a **filter inside the journal whitelist**, not a global discovery mechanism.
+
+Filtering occurs only after records with sufficient identity evidence have been consolidated. The searchable projection for an identity cluster uses the eligible fields available across all provider evidence in that cluster, rather than only the fields from the first or otherwise preferred provider record.
 
 ### 7.1 Search fields
 
@@ -239,9 +263,11 @@ Title + Author Keywords + Abstract
 
 A missing abstract or missing author keywords must not automatically exclude a paper.
 
+If one provider lacks an abstract and another provider in the same identity cluster supplies one, the available abstract must participate in filtering.
+
 Only author/publisher-supplied keywords that can be identified as such should be treated as `Author Keywords`.
 
-OpenAlex-generated `keywords` or `topics` must not be silently treated as author keywords for filtering.
+Provider-derived keywords, topics, or fields of study must remain distinct from `Author Keywords`. They may be retained as provider evidence, but they must not be silently mapped into the `Author Keywords` search field.
 
 ### 7.2 Expression semantics
 
@@ -349,6 +375,7 @@ external_ids:
   doi:
   arxiv:
   crossref:
+  semantic_scholar:
 ```
 
 All except the internal UUID are optional.
@@ -381,6 +408,9 @@ sources:
     record_id:
     retrieved_at:
   - provider: crossref
+    record_id:
+    retrieved_at:
+  - provider: semantic_scholar
     record_id:
     retrieved_at:
 ```
@@ -418,6 +448,8 @@ The system records only versions it actually discovers. It must not invent an un
 
 The system should determine whether two source records represent the same research work using evidence in descending reliability.
 
+Provider evidence may exist independently before consolidation. A Crossref-only work or a Semantic-Scholar-only supplemental work is valid input when it satisfies the journal/date boundary; canonicalization must not require an OpenAlex record.
+
 ### 10.1 Match priority
 
 ```text
@@ -441,11 +473,14 @@ Metadata enrichment must not use unconditional last-write-wins.
 
 General rules:
 
-- OpenAlex discovery data initializes the canonical record;
-- Crossref fills missing fields and supplements richer date/relation metadata;
+- field selection uses explicit, deterministic, provider-neutral normalization and completeness rules;
+- normalized DOI and other high-confidence identifiers may join records across providers;
+- the first-seen provider has no implicit canonical authority;
 - an existing nonempty canonical value should not be silently overwritten by a conflicting enrichment value unless an explicit normalization rule allows it;
 - conflicting values should remain inspectable through provenance/logging;
-- enrichment must be idempotent.
+- all contributing external identifiers and provenance must be retained;
+- no provider value may be invented to fill missing metadata;
+- consolidation and enrichment must be deterministic and idempotent.
 
 ---
 
@@ -569,6 +604,7 @@ The program may maintain bibliographic/system metadata such as:
 - publication dates;
 - DOI;
 - OpenAlex ID;
+- Semantic Scholar ID;
 - arXiv ID;
 - author identities;
 - author keywords;
@@ -758,8 +794,8 @@ It must support at least these operations conceptually:
 ### 19.1 Validate configuration
 
 - validate journal whitelist;
-- resolve/report OpenAlex sources;
-- report unresolved or ambiguous venues;
+- resolve/report provider-specific venue/source identifiers where applicable;
+- report unresolved or ambiguous venues per provider;
 - validate keyword expression syntax.
 
 ### 19.2 Discover/update candidates
@@ -773,6 +809,8 @@ Input:
 
 Output:
 
+- independently retrieved provider evidence;
+- identity/evidence consolidation and a local-filtering summary;
 - new candidate Markdown files;
 - safe enrichment of existing files;
 - author notes;
@@ -799,8 +837,9 @@ A partial failure must not invalidate the whole run.
 The system must tolerate:
 
 - one unresolved journal;
-- one failed OpenAlex page/request;
-- Crossref unavailable for a record;
+- one provider being unavailable;
+- one failed provider page/request;
+- one provider lacking a record or field that another provider supplies;
 - missing DOI;
 - missing abstract;
 - missing author keywords;
@@ -812,7 +851,8 @@ Requirements:
 - failures are logged;
 - unresolved venues are reported prominently;
 - no missing field is replaced with invented content;
-- successfully processed papers remain usable even when enrichment fails elsewhere;
+- provider, journal, and request failures are isolated from one another;
+- successful evidence continues through consolidation, local filtering, canonicalization, and materialization even when another retrieval or enrichment operation fails;
 - retries should not create duplicates.
 
 ---
@@ -885,30 +925,36 @@ Do not build a new Zotero ingestion subsystem in MVP.
 
 MVP is complete only when the following are demonstrated.
 
-### 22.1 Whitelist resolution
+### 22.1 Whitelist and venue validation
 
 Given the supplied journal whitelist with conferences excluded:
 
 - configured ISSNs can be validated;
-- OpenAlex source IDs are resolved or an explicit unresolved/ambiguous error is reported;
+- provider-specific venue/source identifiers are resolved where applicable, or an explicit unresolved/ambiguous error is reported;
+- ISSN/EISSN is preferred for venue identity, with strict normalized journal-name fallback only when a provider record lacks usable ISSN/EISSN;
 - no journal is silently dropped.
 
-### 22.2 Venue-first discovery
+### 22.2 Journal/date multi-source retrieval
 
 For a selected date window:
 
-- works are retrieved from the configured OpenAlex sources;
+- OpenAlex and Crossref can each contribute journal/date candidates independently;
+- Semantic Scholar can supplement metadata and contribute supplemental candidates that pass venue/date validation;
+- a candidate is not required to exist in OpenAlex first;
 - global keyword search is not used to define the candidate universe;
-- local filtering occurs only after venue/date retrieval.
+- Semantic Scholar broad positive queries do not decide final inclusion.
 
-### 22.3 Keyword filtering
+### 22.3 Evidence consolidation and keyword filtering
 
 Given a test expression using `AND`, `OR`, `NOT`, phrases, and parentheses:
 
+- records with the same normalized DOI consolidate into one identity cluster;
+- available provider evidence is consolidated before local filtering;
+- an abstract supplied by any provider in the cluster participates in filtering;
 - matching is case-insensitive;
 - Title + Author Keywords + Abstract are used when available;
 - the matcher degrades safely when fields are missing;
-- OpenAlex-generated topic/keyword inference is not silently substituted for author keywords.
+- provider-derived keywords, topics, or fields of study are not silently substituted for author keywords.
 
 ### 22.4 Candidate creation
 
@@ -961,11 +1007,30 @@ journal final
 
 - only one Paper Markdown exists.
 
-### 22.8 Low-confidence dedup safety
+### 22.8 Provider-neutral canonicalization
+
+Given valid evidence from multiple providers or from Crossref/Semantic Scholar without OpenAlex:
+
+- the work can produce a canonical paper without an OpenAlex record;
+- records sharing the same normalized DOI produce exactly one canonical work;
+- contributing external identifiers and provenance are retained;
+- first-seen provider order does not determine canonical authority;
+- no missing metadata is invented.
+
+### 22.9 Provider failure isolation
+
+When one provider, journal, or request fails:
+
+- successful evidence from other retrievals remains usable;
+- successful evidence can still be consolidated, filtered, canonicalized, and materialized;
+- the failure is reported without invalidating unrelated results;
+- rerunning after recovery does not create duplicate canonical papers.
+
+### 22.10 Low-confidence dedup safety
 
 Two papers with similar titles but insufficient identifier/author evidence must not be silently merged.
 
-### 22.9 Kept export
+### 22.11 Kept export
 
 After manually setting:
 
@@ -978,7 +1043,7 @@ status: kept
 - DOI is preferred when present;
 - lack of DOI does not delete or invalidate the paper record.
 
-### 22.10 User-edit safety
+### 22.12 User-edit safety
 
 After adding arbitrary human notes to a Paper Markdown, running the updater again must not erase or replace those notes.
 
@@ -986,119 +1051,41 @@ After adding arbitrary human notes to a Paper Markdown, running the updater agai
 
 ## 23. Suggested Implementation Sequence
 
-### Task 1 — Repository foundation
+### 23.1 Completed v0.1.0 history
 
-Goal:
+The original MVP tasks are completed history, not pending implementation steps:
 
-- package/project layout;
-- configuration loading;
-- logging;
-- UUID identity model;
-- Canonical Paper model;
-- journal and keyword validation;
-- test framework.
+1. repository foundation;
+2. OpenAlex venue-first discovery;
+3. local keyword expression engine;
+4. DOI-based Crossref enrichment;
+5. canonicalization and version consolidation;
+6. Obsidian materialization;
+7. incremental update semantics;
+8. kept-paper export;
+9. end-to-end validation.
 
-Acceptance:
+This list records the shipped v0.1.0 sequence. It does not give OpenAlex or the original post-filter Crossref enrichment path authority over the revised multi-source candidate universe.
 
-- models/config parse correctly;
-- tests run locally;
-- no network-dependent behavior required yet.
+### 23.2 Multi-source retrieval evolution
 
-### Task 2 — OpenAlex venue-first discovery
-
-Goal:
+Proceed as separately planned, implemented, and reviewed tasks:
 
 ```text
-ISSN
-→ OpenAlex Source
-→ date-window Works
-→ normalized source records
+R0 Specification alignment
+→ R1 Provider-neutral evidence boundary
+→ R2 Crossref independent discovery
+→ R3 Semantic Scholar integration
+→ later Search-engine parity
 ```
 
-Acceptance:
+- R0 changes only the product specification and repository engineering constraints.
+- R1 introduces a provider-neutral transient evidence representation, adapts the existing OpenAlex and Crossref records to that boundary, and removes canonicalization's structural dependency on an OpenAlex record while preserving the current user-visible OpenAlex → local filter → Crossref enrichment behavior.
+- R2 adds independent Crossref journal/date discovery, unions OpenAlex and Crossref evidence, performs identity/evidence consolidation, constructs the multi-provider searchable projection, and moves final local keyword filtering after available evidence consolidation.
+- R3 adds Semantic Scholar supplementation and venue/date-constrained supplemental discovery.
+- Search-engine parity remains later work and must not be pulled into R0–R3.
 
-- representative whitelist journals resolve;
-- unresolved journals are explicit;
-- works can be retrieved without keyword-first global search.
-
-### Task 3 — Keyword expression engine
-
-Goal:
-
-- Title + Author Keywords + Abstract filtering;
-- `AND`, `OR`, `NOT`, phrases, parentheses;
-- case-insensitive matching;
-- safe missing-field behavior.
-
-### Task 4 — Crossref enrichment
-
-Goal:
-
-- DOI-based enrichment;
-- supplementary dates;
-- abstract when available;
-- relations/provenance;
-- failure isolation.
-
-### Task 5 — Canonicalization and versions
-
-Goal:
-
-- exact DOI match;
-- explicit relation matching;
-- conservative title + author fallback;
-- version list;
-- preferred-version policy;
-- idempotent metadata merge.
-
-### Task 6 — Obsidian materialization
-
-Goal:
-
-- one paper → one Markdown;
-- stable UUID + `slug--short-uuid` filename;
-- full abstract;
-- status initialization;
-- Author wikilinks;
-- Author notes;
-- preserve human content.
-
-### Task 7 — Incremental update semantics
-
-Goal:
-
-- parse existing Markdown state;
-- preserve rejected/kept/in_zotero;
-- update bibliographic metadata only;
-- avoid duplicate papers/authors;
-- append newly discovered versions safely.
-
-### Task 8 — Kept-paper export
-
-Goal:
-
-- export only `kept` records;
-- prefer DOI;
-- skip `in_zotero`;
-- provide usable fallback metadata for records without DOI.
-
-### Task 9 — End-to-end validation
-
-Use a representative subset of journals from different publishers/fields and an overlapping rerun scenario.
-
-Validate the complete flow:
-
-```text
-whitelist
-→ OpenAlex
-→ filter
-→ Crossref
-→ canonicalize
-→ candidate Markdown
-→ manual status edit
-→ rerun
-→ kept export
-```
+R0–R3 must remain separate implementation tasks with their own plans, diffs, verification, and review. Completing this specification alignment does not start R1.
 
 ---
 
@@ -1139,13 +1126,6 @@ No additional infrastructure is required for MVP completion.
 
 ## 26. Next Project Step
 
-After this specification is placed in the repository:
+After R0 is reviewed, plan R1 as a separate bounded task. Do not implement the provider-neutral evidence boundary, Crossref independent discovery, Semantic Scholar integration, or search-engine parity as part of specification alignment.
 
-1. create the target repository;
-2. add `SPEC.md`;
-3. add a concise repository-level `AGENTS.md` describing engineering constraints and the role of the specification;
-4. let Codex inspect the repository before editing;
-5. implement one task at a time;
-6. after each task, review the actual diff and test output against the acceptance criteria before proceeding.
-
-At this point the project may move from **Specification** to **Implementation Planning**.
+For each later task, inspect the repository before editing, keep the task boundary explicit, and review the actual diff and relevant verification output before proceeding to the next task.

@@ -11,7 +11,8 @@
 
 - Implement the MVP one bounded task at a time and preserve the end-to-end behavior defined in `SPEC.md`.
 - `list.md` is the source of truth for the supplied venue whitelist. For the MVP, only its Journals section is in scope; the Conferences section must not be implemented or treated as discovery input.
-- Keep discovery journal-whitelist-first and venue-first through OpenAlex. Use Crossref only for enrichment; do not let it redefine the candidate universe.
+- Keep discovery/retrieval journal-whitelist-first, with ISSN/EISSN as the preferred venue identity. OpenAlex, Crossref, and Semantic Scholar may each contribute retrieval evidence, but global keyword-first discovery and publisher scraping remain excluded.
+- Isolate provider failures so successful evidence from other providers, journals, or requests remains usable. Consolidate available provider evidence before local keyword filtering decides inclusion.
 - Preserve the internal UUID as canonical identity, use conservative evidence-based deduplication, retain discovered versions, and never invent missing metadata.
 - Treat Paper Markdown as durable user-facing workflow state. Preserve human-controlled status, unknown frontmatter fields, notes, and other human-authored sections during reruns.
 - Keep disposable caches and indexes reconstructible. Do not introduce a mandatory second source of truth for workflow state.
