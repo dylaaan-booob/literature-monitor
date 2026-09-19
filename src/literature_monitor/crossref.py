@@ -1,11 +1,13 @@
-"""DOI-only Crossref enrichment for retained OpenAlex records."""
+"""Crossref journal discovery and DOI supplementation."""
 
 from __future__ import annotations
 
 import json
+import re
 import socket
 import time
-from collections.abc import Callable, Sequence
+import unicodedata
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from enum import Enum
@@ -17,8 +19,10 @@ from urllib.request import Request, urlopen
 
 from pydantic import Field, ValidationError, model_validator
 
+from literature_monitor.config import JournalConfig
 from literature_monitor.identifiers import normalize_doi
 from literature_monitor.models import (
+    Author,
     DomainModel,
     EvidenceDate,
     EvidenceDateKind,
@@ -32,6 +36,12 @@ from literature_monitor.models import (
 from literature_monitor.openalex import OpenAlexWorkRecord
 
 CROSSREF_BASE_URL = "https://api.crossref.org"
+CROSSREF_PAGE_SIZE = 100
+_ISSN_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{3}[0-9X]$")
+_ORCID_PATTERN = re.compile(
+    r"^(?:https?://orcid\.org/)?\d{4}-\d{4}-\d{4}-\d{3}[\dX]/?$",
+    re.IGNORECASE,
+)
 
 
 class CrossrefDateKind(str, Enum):
@@ -76,6 +86,8 @@ class CrossrefWorkRecord(DomainModel):
     title: NonEmptyStr | None = None
     journal: NonEmptyStr | None = None
     abstract: NonEmptyStr | None = None
+    authors: tuple[Author, ...] = ()
+    issns: tuple[NonEmptyStr, ...] = ()
     dates: tuple[CrossrefPartialDate, ...] = ()
     relations: tuple[CrossrefRelation, ...] = ()
     work_type: NonEmptyStr | None = None
@@ -91,6 +103,7 @@ class CrossrefWorkRecord(DomainModel):
             title=self.title,
             journal=self.journal,
             abstract=self.abstract,
+            authors=self.authors,
             external_ids=ExternalIds(
                 doi=self.doi,
                 crossref=self.provenance.record_id,
@@ -158,6 +171,30 @@ class EnrichmentResult:
         )
 
 
+@dataclass(frozen=True)
+class CrossrefDiscoveryIssue:
+    severity: EnrichmentIssueSeverity
+    stage: str
+    journal: str
+    issn: str
+    message: str
+    record_id: str | None = None
+    doi: str | None = None
+
+
+@dataclass(frozen=True)
+class CrossrefDiscoveryResult:
+    records: tuple[CrossrefWorkRecord, ...]
+    issues: tuple[CrossrefDiscoveryIssue, ...]
+
+    @property
+    def has_errors(self) -> bool:
+        return any(
+            issue.severity is EnrichmentIssueSeverity.ERROR
+            for issue in self.issues
+        )
+
+
 class CrossrefError(RuntimeError):
     """Base class for Crossref provider failures."""
 
@@ -198,9 +235,84 @@ class CrossrefClient:
         if normalized_doi is None:
             raise CrossrefRecordError("missing requested DOI")
 
-        url = f"{self.base_url}/v1/works/{quote(normalized_doi, safe='')}"
+        return self._request_json(
+            f"/v1/works/{quote(normalized_doi, safe='')}",
+            {},
+            not_found_message=(
+                f"DOI {normalized_doi} is not present in Crossref"
+            ),
+        )
+
+    def iter_journal_work_pages(
+        self,
+        issn: str,
+        from_date: date,
+        to_date: date,
+        *,
+        rows: int = CROSSREF_PAGE_SIZE,
+    ) -> Iterator[dict[str, Any]]:
+        if from_date > to_date:
+            raise ValueError("from_date must not be after to_date")
+        if rows < 1:
+            raise ValueError("rows must be positive")
+        cursor = "*"
+        seen_cursors: set[str] = set()
+        while True:
+            if cursor in seen_cursors:
+                raise CrossrefRequestError("Crossref returned a repeated cursor")
+            seen_cursors.add(cursor)
+            payload = self._request_json(
+                f"/v1/journals/{quote(issn, safe='')}/works",
+                {
+                    "filter": (
+                        f"from-pub-date:{from_date.isoformat()},"
+                        f"until-pub-date:{to_date.isoformat()}"
+                    ),
+                    "rows": str(rows),
+                    "cursor": cursor,
+                },
+                not_found_message=f"ISSN {issn} is not present in Crossref",
+            )
+            if (
+                payload.get("status") != "ok"
+                or payload.get("message-type") != "work-list"
+            ):
+                raise CrossrefRequestError(
+                    "Crossref journal response has an invalid envelope"
+                )
+            message = payload.get("message")
+            if not isinstance(message, dict):
+                raise CrossrefRequestError(
+                    "Crossref journal response lacks a list message"
+                )
+            items = message.get("items")
+            if not isinstance(items, list):
+                raise CrossrefRequestError(
+                    "Crossref journal response lacks a valid items list"
+                )
+            yield payload
+            if len(items) < rows:
+                return
+            next_cursor = message.get("next-cursor")
+            if not isinstance(next_cursor, str) or not next_cursor:
+                raise CrossrefRequestError(
+                    "Crossref journal response lacks a valid next cursor"
+                )
+            cursor = next_cursor
+
+    def _request_json(
+        self,
+        path: str,
+        params: dict[str, str],
+        *,
+        not_found_message: str | None = None,
+    ) -> dict[str, Any]:
+        query = dict(params)
         if self.mailto is not None:
-            url = f"{url}?{urlencode({'mailto': self.mailto})}"
+            query["mailto"] = self.mailto
+        url = f"{self.base_url}{path}"
+        if query:
+            url = f"{url}?{urlencode(query)}"
         request = Request(
             url,
             headers={
@@ -219,10 +331,8 @@ class CrossrefClient:
                     )
                 return payload
             except HTTPError as error:
-                if error.code == 404:
-                    raise CrossrefNotFoundError(
-                        f"DOI {normalized_doi} is not present in Crossref"
-                    ) from error
+                if error.code == 404 and not_found_message is not None:
+                    raise CrossrefNotFoundError(not_found_message) from error
                 if (error.code == 429 or error.code >= 500) and attempt < 2:
                     self._sleep(2**attempt)
                     continue
@@ -423,45 +533,138 @@ def _normalize_relations(
     return relations
 
 
-def _normalize_crossref_work(
-    payload: object,
-    requested_doi: str,
+def _normalize_orcid(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    candidate = value.strip()
+    if not _ORCID_PATTERN.fullmatch(candidate):
+        return None
+    identifier = re.sub(
+        r"^https?://orcid\.org/",
+        "",
+        candidate,
+        flags=re.IGNORECASE,
+    ).rstrip("/").upper()
+    digits = identifier.replace("-", "")
+    total = 0
+    for character in digits[:15]:
+        total = (total + int(character)) * 2
+    result = (12 - total % 11) % 11
+    check = "X" if result == 10 else str(result)
+    if digits[-1] != check:
+        return None
+    return f"https://orcid.org/{identifier}"
+
+
+def _normalize_authors(value: Any, warnings: list[str]) -> list[Author]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        warnings.append("invalid author list was treated as missing")
+        return []
+    authors: list[Author] = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, dict):
+            warnings.append(f"invalid author entry {index} was ignored")
+            continue
+        name_parts = [
+            part.strip()
+            for field in ("given", "family")
+            if isinstance((part := entry.get(field)), str) and part.strip()
+        ]
+        if name_parts:
+            name = " ".join(name_parts)
+        else:
+            raw_name = entry.get("name")
+            name = (
+                raw_name.strip()
+                if isinstance(raw_name, str) and raw_name.strip()
+                else None
+            )
+        if name is None:
+            warnings.append(f"author entry {index} without a usable name was ignored")
+            continue
+        raw_orcid = entry.get("ORCID")
+        orcid = _normalize_orcid(raw_orcid)
+        if raw_orcid is not None and orcid is None:
+            warnings.append(f"invalid ORCID for author entry {index} was ignored")
+        authors.append(Author(name=name, orcid=orcid))
+    return authors
+
+
+def _valid_issn(value: str) -> bool:
+    if not _ISSN_PATTERN.fullmatch(value):
+        return False
+    digits = value.replace("-", "")
+    values = [10 if character == "X" else int(character) for character in digits]
+    return (
+        sum(
+            number * weight
+            for number, weight in zip(values, range(8, 0, -1), strict=True)
+        )
+        % 11
+        == 0
+    )
+
+
+def _normalize_issns(message: dict[str, Any], warnings: list[str]) -> list[str]:
+    candidates: list[Any] = []
+    raw_issns = message.get("ISSN")
+    if raw_issns is not None:
+        if isinstance(raw_issns, list):
+            candidates.extend(raw_issns)
+        else:
+            warnings.append("invalid ISSN list was treated as missing")
+    raw_types = message.get("issn-type")
+    if raw_types is not None:
+        if isinstance(raw_types, list):
+            for index, item in enumerate(raw_types):
+                if isinstance(item, dict):
+                    candidates.append(item.get("value"))
+                else:
+                    warnings.append(f"invalid issn-type entry {index} was ignored")
+        else:
+            warnings.append("invalid issn-type list was treated as missing")
+
+    normalized: set[str] = set()
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, str):
+            warnings.append(f"invalid ISSN entry {index} was ignored")
+            continue
+        issn = candidate.strip().upper()
+        if not _valid_issn(issn):
+            warnings.append(f"invalid ISSN entry {index} was ignored")
+            continue
+        normalized.add(issn)
+    return sorted(normalized)
+
+
+def _normalize_crossref_message(
+    message: object,
     retrieved_at: datetime,
 ) -> tuple[CrossrefWorkRecord, tuple[str, ...]]:
-    if not isinstance(payload, dict):
-        raise CrossrefRecordError("Crossref response is not an object")
-    if payload.get("status") != "ok" or payload.get("message-type") != "work":
-        raise CrossrefRecordError("Crossref response has an invalid envelope")
-    message = payload.get("message")
     if not isinstance(message, dict):
         raise CrossrefRecordError("Crossref response lacks a work message")
-
     try:
-        normalized_requested_doi = normalize_doi(requested_doi)
-        normalized_response_doi = normalize_doi(message.get("DOI"))
+        doi = normalize_doi(message.get("DOI"))
     except ValueError as error:
         raise CrossrefRecordError("Crossref response has an invalid DOI") from error
-    if normalized_requested_doi is None:
-        raise CrossrefRecordError("requested DOI is missing")
-    if normalized_response_doi is None:
+    if doi is None:
         raise CrossrefRecordError("Crossref response is missing its DOI")
-    if normalized_response_doi != normalized_requested_doi:
-        raise CrossrefRecordError(
-            "Crossref response DOI does not match the requested DOI"
-        )
 
     normalized_retrieved_at = (
         retrieved_at.astimezone(timezone.utc)
         if retrieved_at.utcoffset() is not None
         else retrieved_at
     )
-
     warnings: list[str] = []
     title = _first_optional_string(message.get("title"), "title", warnings)
     journal = _first_optional_string(
         message.get("container-title"), "container-title", warnings
     )
     abstract = _normalize_abstract(message.get("abstract"), warnings)
+    authors = _normalize_authors(message.get("author"), warnings)
+    issns = _normalize_issns(message, warnings)
     dates = _normalize_dates(message, warnings)
     relations = _normalize_relations(message.get("relation"), warnings)
 
@@ -476,21 +679,47 @@ def _normalize_crossref_work(
 
     return (
         CrossrefWorkRecord(
-            doi=normalized_response_doi,
+            doi=doi,
             title=title,
             journal=journal,
             abstract=abstract,
+            authors=tuple(authors),
+            issns=tuple(issns),
             dates=tuple(dates),
             relations=tuple(relations),
             work_type=work_type,
             provenance=MetadataSource(
                 provider="crossref",
-                record_id=normalized_response_doi,
+                record_id=doi,
                 retrieved_at=normalized_retrieved_at,
             ),
         ),
         tuple(warnings),
     )
+
+
+def _normalize_crossref_work(
+    payload: object,
+    requested_doi: str,
+    retrieved_at: datetime,
+) -> tuple[CrossrefWorkRecord, tuple[str, ...]]:
+    if not isinstance(payload, dict):
+        raise CrossrefRecordError("Crossref response is not an object")
+    if payload.get("status") != "ok" or payload.get("message-type") != "work":
+        raise CrossrefRecordError("Crossref response has an invalid envelope")
+    message = payload.get("message")
+    record, warnings = _normalize_crossref_message(message, retrieved_at)
+    try:
+        normalized_requested_doi = normalize_doi(requested_doi)
+    except ValueError as error:
+        raise CrossrefRecordError("requested DOI is invalid") from error
+    if normalized_requested_doi is None:
+        raise CrossrefRecordError("requested DOI is missing")
+    if record.doi != normalized_requested_doi:
+        raise CrossrefRecordError(
+            "Crossref response DOI does not match the requested DOI"
+        )
+    return record, warnings
 
 
 def normalize_crossref_work(
@@ -506,6 +735,145 @@ def normalize_crossref_work(
         raise CrossrefRecordError(
             f"Crossref provider model validation failed: {error}"
         ) from error
+
+
+def normalize_crossref_discovered_work(
+    message: object,
+    retrieved_at: datetime,
+) -> tuple[CrossrefWorkRecord, tuple[str, ...]]:
+    """Normalize one work-list item behind the provider boundary."""
+
+    try:
+        return _normalize_crossref_message(message, retrieved_at)
+    except ValidationError as error:
+        raise CrossrefRecordError(
+            f"Crossref provider model validation failed: {error}"
+        ) from error
+
+
+def _normalize_journal_name(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
+def _venue_matches(record: CrossrefWorkRecord, journal: JournalConfig) -> bool:
+    if record.issns:
+        return bool(set(record.issns) & set(journal.issn))
+    return (
+        record.journal is not None
+        and _normalize_journal_name(record.journal)
+        == _normalize_journal_name(journal.name)
+    )
+
+
+def discover_crossref_journals(
+    client: CrossrefClient,
+    journals: Sequence[JournalConfig],
+    from_date: date,
+    to_date: date,
+    *,
+    retrieved_at: datetime | None = None,
+) -> CrossrefDiscoveryResult:
+    if from_date > to_date:
+        raise ValueError("from_date must not be after to_date")
+    timestamp = retrieved_at or datetime.now(timezone.utc)
+    if timestamp.utcoffset() is None:
+        raise ValueError("retrieved_at must include a timezone")
+    timestamp = timestamp.astimezone(timezone.utc)
+
+    records: list[tuple[int, int, CrossrefWorkRecord]] = []
+    issues: list[CrossrefDiscoveryIssue] = []
+    for journal_index, journal in enumerate(journals):
+        for issn_index, issn in enumerate(journal.issn):
+            try:
+                pages = client.iter_journal_work_pages(issn, from_date, to_date)
+                for page in pages:
+                    message = page["message"]
+                    for item in message["items"]:
+                        raw_doi = item.get("DOI") if isinstance(item, dict) else None
+                        try:
+                            record, warnings = normalize_crossref_discovered_work(
+                                item,
+                                timestamp,
+                            )
+                        except CrossrefRecordError as error:
+                            issues.append(
+                                CrossrefDiscoveryIssue(
+                                    severity=EnrichmentIssueSeverity.WARNING,
+                                    stage="record_normalization",
+                                    journal=journal.name,
+                                    issn=issn,
+                                    doi=raw_doi if isinstance(raw_doi, str) else None,
+                                    message=str(error),
+                                )
+                            )
+                            continue
+                        issues.extend(
+                            CrossrefDiscoveryIssue(
+                                severity=EnrichmentIssueSeverity.WARNING,
+                                stage="field_normalization",
+                                journal=journal.name,
+                                issn=issn,
+                                record_id=record.provenance.record_id,
+                                doi=record.doi,
+                                message=warning,
+                            )
+                            for warning in warnings
+                        )
+                        if not _venue_matches(record, journal):
+                            identity = (
+                                f"ISSNs {', '.join(record.issns)}"
+                                if record.issns
+                                else f"journal {record.journal!r}"
+                            )
+                            issues.append(
+                                CrossrefDiscoveryIssue(
+                                    severity=EnrichmentIssueSeverity.WARNING,
+                                    stage="venue_validation",
+                                    journal=journal.name,
+                                    issn=issn,
+                                    record_id=record.provenance.record_id,
+                                    doi=record.doi,
+                                    message=(
+                                        f"record {identity} does not match configured "
+                                        "journal identity"
+                                    ),
+                                )
+                            )
+                            continue
+                        records.append((journal_index, issn_index, record))
+            except CrossrefNotFoundError as error:
+                issues.append(
+                    CrossrefDiscoveryIssue(
+                        severity=EnrichmentIssueSeverity.WARNING,
+                        stage="journal_not_found",
+                        journal=journal.name,
+                        issn=issn,
+                        message=str(error),
+                    )
+                )
+            except CrossrefRequestError as error:
+                issues.append(
+                    CrossrefDiscoveryIssue(
+                        severity=EnrichmentIssueSeverity.ERROR,
+                        stage="work_retrieval",
+                        journal=journal.name,
+                        issn=issn,
+                        message=str(error),
+                    )
+                )
+
+    records.sort(
+        key=lambda item: (
+            item[0],
+            item[1],
+            item[2].doi,
+            item[2].provenance.record_id,
+        )
+    )
+    return CrossrefDiscoveryResult(
+        records=tuple(record for _, _, record in records),
+        issues=tuple(issues),
+    )
 
 
 def enrich_records(

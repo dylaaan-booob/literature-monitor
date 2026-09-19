@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import pytest
 
 from literature_monitor.keywords import (
@@ -6,11 +8,18 @@ from literature_monitor.keywords import (
     Not,
     Or,
     Phrase,
+    SearchableProjection,
     Term,
+    build_searchable_projection,
     evaluate_keyword_expression,
+    evaluate_searchable_projection,
     parse_keyword_expression,
 )
-from literature_monitor.models import CanonicalMetadata
+from literature_monitor.models import (
+    CanonicalMetadata,
+    MetadataSource,
+    ProviderWorkEvidence,
+)
 
 
 def matches(
@@ -28,6 +37,25 @@ def matches(
             author_keywords=author_keywords,
             abstract=abstract,
         ),
+    )
+
+
+def provider_evidence(
+    provider: str,
+    *,
+    title: str | None = None,
+    abstract: str | None = None,
+    author_keywords: tuple[str, ...] = (),
+) -> ProviderWorkEvidence:
+    return ProviderWorkEvidence(
+        provenance=MetadataSource(
+            provider=provider,
+            record_id=f"{provider}-1",
+            retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
+        ),
+        title=title,
+        abstract=abstract,
+        author_keywords=author_keywords,
     )
 
 
@@ -146,3 +174,67 @@ def test_boundary_constraints_only_apply_to_literal_token_edges() -> None:
 
 def test_whitespace_only_phrase_does_not_match_everything() -> None:
     assert not matches('"   "', title="Any title")
+
+
+def test_multi_provider_projection_retains_only_explicit_search_units() -> None:
+    projection = build_searchable_projection(
+        (
+            provider_evidence(
+                "openalex",
+                title="OpenAlex title",
+                abstract="OpenAlex abstract",
+                author_keywords=("Author keyword",),
+            ),
+            provider_evidence(
+                "crossref",
+                title="Crossref title",
+                abstract="Crossref abstract",
+            ),
+        )
+    )
+
+    assert set(projection.titles) == {"OpenAlex title", "Crossref title"}
+    assert set(projection.abstracts) == {
+        "OpenAlex abstract",
+        "Crossref abstract",
+    }
+    assert projection.author_keywords == ("Author keyword",)
+
+
+def test_projection_preserves_unit_and_boolean_semantics() -> None:
+    projection = SearchableProjection(
+        titles=("deep", "causal inference"),
+        abstracts=("learning", "genomics without excluded content"),
+    )
+
+    assert not evaluate_searchable_projection(
+        parse_keyword_expression('"deep learning"'),
+        projection,
+    )
+    assert evaluate_searchable_projection(
+        parse_keyword_expression("causal AND genomics"),
+        projection,
+    )
+    assert not evaluate_searchable_projection(
+        parse_keyword_expression("causal AND NOT excluded"),
+        projection,
+    )
+
+
+def test_crossref_abstract_rescues_openalex_search_miss() -> None:
+    projection = build_searchable_projection(
+        (
+            provider_evidence("openalex", title="Unrelated title"),
+            provider_evidence(
+                "crossref",
+                title="Another title",
+                abstract="Cox regression identifies the signal",
+            ),
+        )
+    )
+
+    assert evaluate_searchable_projection(
+        parse_keyword_expression('"Cox regression"'),
+        projection,
+    )
+    assert not matches('"Cox regression"', title="Unrelated title")

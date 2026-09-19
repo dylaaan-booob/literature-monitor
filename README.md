@@ -1,10 +1,10 @@
 # Literature Monitor
 
 This repository contains the journal-monitoring workflow specified in
-`SPEC.md`. Tasks 1 through 8 implement the complete MVP workflow: venue-first
-OpenAlex discovery, local keyword filtering, DOI-only Crossref enrichment,
-canonicalization and version consolidation, durable Paper and Author Markdown
-updates, and kept-paper export. Task 9 validates that workflow end to end.
+`SPEC.md`. The workflow retrieves date-bounded journal evidence independently
+from OpenAlex and Crossref, consolidates provider evidence before local keyword
+filtering, canonicalizes retained papers and versions, incrementally updates
+durable Paper and Author Markdown, and exports kept papers.
 
 ## Setup
 
@@ -76,6 +76,24 @@ OPENALEX_API_KEY=your-key uv run literature-monitor openalex-discover \
 Task 2 does not perform keyword filtering, Crossref enrichment, Markdown
 materialization, Zotero integration, conference monitoring, or persistence.
 
+## Diagnose Crossref discovery
+
+The Crossref discovery diagnostic queries every configured ISSN independently
+within the inclusive publication-date window and writes normalized provider
+records as NDJSON. It does not construct an OpenAlex client or apply local
+keyword filtering.
+
+```bash
+uv run literature-monitor crossref-discover \
+  --config config.example.yaml \
+  --journal "Biometrics" \
+  --from-date 2026-01-20 \
+  --to-date 2026-01-25
+```
+
+The output is diagnostic rather than a stable export. `CROSSREF_MAILTO` may be
+set in the environment to use Crossref's polite API pool.
+
 ## Diagnose local keyword filtering
 
 The Task 3 diagnostic runs the same venue-first OpenAlex discovery and then
@@ -108,9 +126,9 @@ uv run literature-monitor openalex-filter \
 Task 3 does not perform Crossref enrichment, canonicalization, Markdown
 materialization, Zotero integration, conference monitoring, or persistence.
 
-## Diagnose Crossref enrichment
+## Diagnose Crossref DOI enrichment
 
-The Task 4 diagnostic runs venue-first OpenAlex discovery, applies the keyword
+This historical stage diagnostic runs venue-first OpenAlex discovery, applies the keyword
 expression locally, and performs Crossref DOI lookups only for retained records.
 It preserves each original OpenAlex record and attaches normalized Crossref
 provider evidence when available. Records without a DOI, and records that are
@@ -144,9 +162,11 @@ materialization, Zotero integration, or persistence.
 
 ## Diagnose canonicalization and versions
 
-The Task 5 diagnostic runs the complete journal-first discovery, local keyword
-filter, and Crossref enrichment pipeline before consolidating the retained
-evidence into canonical papers. Matching is conservative and evidence-based:
+The canonicalization diagnostic retrieves journal/date evidence from both
+OpenAlex and Crossref, performs bounded DOI supplementation for OpenAlex gaps,
+consolidates identities, and then evaluates the local keyword expression over
+all provider titles, author keywords, and abstracts. Retained clusters become
+canonical papers. Matching is conservative and evidence-based:
 exact identifiers and explicit version relations take priority, while the
 title-and-author fallback requires compatible ordered author identities.
 
@@ -169,9 +189,9 @@ stable UUID recovery across independent runs, or Zotero export.
 
 ## Materialize Obsidian Markdown
 
-The materialize command runs the complete journal-first pipeline and creates or
-incrementally updates Paper and Author notes under an Obsidian-compatible output
-directory:
+The materialize command runs the same multi-source consolidation-before-filter
+pipeline and creates or incrementally updates Paper and Author notes under an
+Obsidian-compatible output directory:
 
 ```bash
 uv run literature-monitor materialize \

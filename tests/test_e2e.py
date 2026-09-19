@@ -12,7 +12,6 @@ import yaml
 
 from literature_monitor.cli import main
 from literature_monitor.crossref import CrossrefClient
-from literature_monitor.markdown_state import MISSING_ABSTRACT
 from literature_monitor.naming import paper_filename
 from literature_monitor.openalex import OpenAlexClient
 
@@ -167,6 +166,18 @@ def crossref_payload(
     }
 
 
+def crossref_list_payload(messages: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "status": "ok",
+        "message-type": "work-list",
+        "message-version": "1.0.0",
+        "message": {
+            "items": messages,
+            "next-cursor": "unused",
+        },
+    }
+
+
 def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -177,6 +188,23 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     output_dir = tmp_path / "vault"
     openalex_openers: list[SequenceOpener] = []
     crossref_openers: list[SequenceOpener] = []
+    matching_payload = fixture("crossref", "work_complete.json")["message"]
+    matching_payload["author"] = [{"given": "Thomas", "family": "Ding"}]
+    matching_payload["ISSN"] = ["0006-341X"]
+    crossref_only_payload = {
+        "DOI": "10.5555/crossref-only",
+        "title": ["Crossref-only monitoring study"],
+        "container-title": ["Biometrics"],
+        "abstract": "<jats:p>A crossref only result.</jats:p>",
+        "author": [{"given": "Crossref", "family": "Author"}],
+        "ISSN": ["0006-341X"],
+        "published-online": {"date-parts": [[2026, 1, 25]]},
+        "relation": {},
+        "type": "journal-article",
+    }
+    discovery_payload = crossref_list_payload(
+        [matching_payload, crossref_only_payload]
+    )
 
     def openalex_client(**kwargs: object) -> OpenAlexClient:
         opener = SequenceOpener(
@@ -192,7 +220,7 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
         )
 
     def crossref_client(**kwargs: object) -> CrossrefClient:
-        opener = SequenceOpener(fixture("crossref", "work_complete.json"))
+        opener = SequenceOpener(discovery_payload)
         crossref_openers.append(opener)
         return CrossrefClient(
             mailto=kwargs.get("mailto"),  # type: ignore[arg-type]
@@ -216,7 +244,7 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
         "--to-date",
         "2026-01-31",
         "--keyword-expression",
-        '"Cox regression" OR "point processes"',
+        '"important result" OR "crossref only"',
         "--output-dir",
         str(output_dir),
     )
@@ -250,10 +278,14 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
         assert values["versions"]
 
     doi_path = next(
-        path for path, values in values_by_path.items() if values["doi"] is not None
+        path
+        for path, values in values_by_path.items()
+        if values["doi"] == "10.1093/biomtc/ujag004"
     )
-    no_doi_path = next(
-        path for path, values in values_by_path.items() if values["doi"] is None
+    crossref_only_path = next(
+        path
+        for path, values in values_by_path.items()
+        if values["doi"] == "10.5555/crossref-only"
     )
     doi_values = values_by_path[doi_path]
     assert doi_values["doi"] == "10.1093/biomtc/ujag004"
@@ -262,7 +294,11 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
         "crossref",
         "openalex",
     }
-    assert MISSING_ABSTRACT in no_doi_path.read_text(encoding="utf-8")
+    assert {
+        source["provider"]
+        for source in values_by_path[crossref_only_path]["sources"]
+    } == {"crossref"}
+    assert "The Cox model" in doi_path.read_text(encoding="utf-8")
 
     replace_once(
         doi_path,
@@ -275,9 +311,9 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
         "## Notes\n\nHuman kept note.\n\n"
         "## Review Context\n\nRetain this custom section.\n",
     )
-    replace_once(no_doi_path, "status: candidate\n", "status: rejected\n")
+    replace_once(crossref_only_path, "status: candidate\n", "status: rejected\n")
     replace_once(
-        no_doi_path,
+        crossref_only_path,
         "## Notes\n",
         "## Notes\n\nHuman rejected note.\n",
     )
@@ -299,12 +335,12 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     } == expected_ids
 
     kept_contents = doi_path.read_text(encoding="utf-8")
-    rejected_contents = no_doi_path.read_text(encoding="utf-8")
+    rejected_contents = crossref_only_path.read_text(encoding="utf-8")
     assert frontmatter(doi_path)["status"] == "kept"
     assert frontmatter(doi_path)["reviewer_state"] == {"priority": "high"}
     assert "Human kept note." in kept_contents
     assert "## Review Context\n\nRetain this custom section." in kept_contents
-    assert frontmatter(no_doi_path)["status"] == "rejected"
+    assert frontmatter(crossref_only_path)["status"] == "rejected"
     assert "Human rejected note." in rejected_contents
 
     assert len(openalex_openers) == 2
@@ -330,9 +366,13 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
         assert opener.payloads == []
         assert len(opener.requests) == 1
         request, _timeout = opener.requests[0]
-        assert urlparse(request.full_url).path == (
-            "/v1/works/10.1093%2Fbiomtc%2Fujag004"
-        )
+        parsed = urlparse(request.full_url)
+        assert parsed.path == "/v1/journals/0006-341X/works"
+        query = parse_qs(parsed.query)
+        assert query["filter"] == [
+            "from-pub-date:2026-01-01,until-pub-date:2026-01-31"
+        ]
+        assert query["cursor"] == ["*"]
 
     before_export = snapshot_files(output_dir)
     assert main(("export-kept", "--output-dir", str(output_dir))) == 0
@@ -472,6 +512,8 @@ def test_representative_multi_journal_cycle_handles_overlapping_rerun(
 
     def route_crossref(request: Any) -> object:
         parsed = urlparse(request.full_url)
+        if parsed.path.startswith("/v1/journals/"):
+            return crossref_list_payload([])
         doi = unquote(parsed.path.removeprefix("/v1/works/")).casefold()
         return crossref_works[doi]
 
@@ -614,14 +656,36 @@ def test_representative_multi_journal_cycle_handles_overlapping_rerun(
         assert "q" not in query
         assert query["filter"] == [expected_filter]
 
+    crossref_urls = [
+        urlparse(request.full_url)
+        for request, _timeout in crossref_opener.requests
+    ]
+    journal_requests = [
+        request for request in crossref_urls if request.path.startswith("/v1/journals/")
+    ]
+    assert [request.path for request in journal_requests] == [
+        "/v1/journals/0006-341X/works",
+        "/v1/journals/0162-8828/works",
+        "/v1/journals/1548-7091/works",
+        "/v1/journals/1548-7105/works",
+    ] * 2
+    for request in journal_requests[:4]:
+        assert parse_qs(request.query)["filter"] == [
+            "from-pub-date:2026-01-01,until-pub-date:2026-01-20"
+        ]
+    for request in journal_requests[4:]:
+        assert parse_qs(request.query)["filter"] == [
+            "from-pub-date:2026-01-15,until-pub-date:2026-01-31"
+        ]
     crossref_requests = [
         unquote(urlparse(request.full_url).path.removeprefix("/v1/works/"))
         for request, _timeout in crossref_opener.requests
+        if urlparse(request.full_url).path.startswith("/v1/works/")
     ]
     assert crossref_requests == [
         "10.1000/biometrics-overlap",
-        "10.1000/tpami-overlap",
         "10.1000/nature-methods-overlap",
+        "10.1000/tpami-overlap",
     ] * 2
 
     before_export = snapshot_files(output_dir)

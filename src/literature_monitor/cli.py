@@ -3,21 +3,31 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
-from literature_monitor.canonicalize import canonicalize_records
+from literature_monitor.canonicalize import (
+    CanonicalizationIssue,
+    canonicalize_records,
+    consolidate_evidence,
+)
 from literature_monitor.config import ConfigurationError, load_config
 from literature_monitor.crossref import (
     CrossrefClient,
+    CrossrefDiscoveryIssue,
+    EnrichmentIssue,
     EnrichmentIssueSeverity,
+    discover_crossref_journals,
     enrich_records,
 )
 from literature_monitor.keywords import (
     KeywordSyntaxError,
+    build_searchable_projection,
     evaluate_keyword_expression,
+    evaluate_searchable_projection,
     parse_keyword_expression,
 )
 from literature_monitor.kept_export import export_kept_papers
@@ -27,11 +37,13 @@ from literature_monitor.materialize import (
     materialize_papers,
 )
 from literature_monitor.openalex import (
+    DiscoveryResult,
     IssueSeverity,
     OpenAlexClient,
     discover_journals,
     resolve_journal_source,
 )
+from literature_monitor.retrieval import assemble_provider_evidence
 
 
 def _date_argument(value: str) -> date:
@@ -64,6 +76,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="diagnose Task 2 OpenAlex discovery (NDJSON output is not a stable export)",
     )
     _add_discovery_arguments(discover)
+    crossref_discover = subparsers.add_parser(
+        "crossref-discover",
+        help="diagnose Crossref journal discovery (NDJSON is not a stable export)",
+    )
+    _add_discovery_arguments(crossref_discover)
     filter_parser = subparsers.add_parser(
         "openalex-filter",
         help="diagnose Task 3 local keyword filtering (NDJSON is not a stable export)",
@@ -107,6 +124,80 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     export_parser.add_argument("--output-dir", type=Path, required=True)
     return parser
+
+
+def _log_openalex_discovery(logger: logging.Logger, result: DiscoveryResult) -> None:
+    for source in result.sources:
+        logger.info(
+            "resolved %s to %s (%s)",
+            source.journal,
+            source.display_name,
+            source.openalex_id,
+        )
+    for issue in result.issues:
+        detail = issue.message
+        if issue.issn is not None:
+            detail = f"ISSN {issue.issn}: {detail}"
+        if issue.record_id is not None:
+            detail = f"{issue.record_id}: {detail}"
+        log = (
+            logger.error
+            if issue.severity is IssueSeverity.ERROR
+            else logger.warning
+        )
+        log("%s [%s]: %s", issue.journal, issue.stage, detail)
+
+
+def _log_crossref_discovery_issues(
+    logger: logging.Logger,
+    issues: Sequence[CrossrefDiscoveryIssue],
+) -> None:
+    for issue in issues:
+        detail = f"ISSN {issue.issn}: {issue.message}"
+        if issue.doi is not None:
+            detail = f"DOI {issue.doi}: {detail}"
+        if issue.record_id is not None:
+            detail = f"{issue.record_id}: {detail}"
+        log = (
+            logger.error
+            if issue.severity is EnrichmentIssueSeverity.ERROR
+            else logger.warning
+        )
+        log("%s [%s]: %s", issue.journal, issue.stage, detail)
+
+
+def _log_enrichment_issues(
+    logger: logging.Logger,
+    issues: Sequence[EnrichmentIssue],
+) -> None:
+    for issue in issues:
+        detail = issue.message
+        if issue.doi is not None:
+            detail = f"DOI {issue.doi}: {detail}"
+        if issue.record_id is not None:
+            detail = f"{issue.record_id}: {detail}"
+        log = (
+            logger.error
+            if issue.severity is EnrichmentIssueSeverity.ERROR
+            else logger.warning
+        )
+        log("Crossref [%s]: %s", issue.stage, detail)
+
+
+def _log_canonicalization_issue(
+    logger: logging.Logger,
+    label: str,
+    issue: CanonicalizationIssue,
+) -> None:
+    detail = issue.message
+    if issue.record_ids:
+        detail = f"{', '.join(issue.record_ids)}: {detail}"
+    logger.warning(
+        "%s [%s]: %s",
+        label,
+        issue.stage,
+        detail,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -174,6 +265,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command in {
         "openalex-discover",
         "openalex-filter",
+        "crossref-discover",
         "crossref-enrich",
         "canonicalize",
         "materialize",
@@ -212,187 +304,193 @@ def main(argv: Sequence[str] | None = None) -> int:
                 logger.error("unknown configured journal %r", args.journal)
                 return 2
 
-        client = OpenAlexClient(api_key=os.environ.get("OPENALEX_API_KEY"))
-        result = discover_journals(
-            client,
-            journals,
-            args.from_date,
-            args.to_date,
-        )
-        for source in result.sources:
-            logger.info(
-                "resolved %s to %s (%s)",
-                source.journal,
-                source.display_name,
-                source.openalex_id,
-            )
-        for issue in result.issues:
-            detail = issue.message
-            if issue.issn is not None:
-                detail = f"ISSN {issue.issn}: {detail}"
-            if issue.record_id is not None:
-                detail = f"{issue.record_id}: {detail}"
-            log = logger.error if issue.severity is IssueSeverity.ERROR else logger.warning
-            log("%s [%s]: %s", issue.journal, issue.stage, detail)
-        records = result.records
+        crossref_client = None
         if args.command in {
-            "openalex-filter",
+            "crossref-discover",
             "crossref-enrich",
             "canonicalize",
             "materialize",
         }:
-            records = tuple(
-                record
-                for record in records
-                if evaluate_keyword_expression(keyword_ast, record.metadata)
-            )
-        if args.command in {"crossref-enrich", "canonicalize", "materialize"}:
             crossref_client = CrossrefClient(
                 mailto=os.environ.get("CROSSREF_MAILTO")
             )
-            enrichment = enrich_records(crossref_client, records)
-            for issue in enrichment.issues:
-                detail = issue.message
-                if issue.doi is not None:
-                    detail = f"DOI {issue.doi}: {detail}"
-                if issue.record_id is not None:
-                    detail = f"{issue.record_id}: {detail}"
-                log = (
-                    logger.error
-                    if issue.severity is EnrichmentIssueSeverity.ERROR
-                    else logger.warning
+
+        if args.command == "crossref-discover":
+            assert crossref_client is not None
+            discovery = discover_crossref_journals(
+                crossref_client,
+                journals,
+                args.from_date,
+                args.to_date,
+            )
+            _log_crossref_discovery_issues(logger, discovery.issues)
+            for record in discovery.records:
+                print(record.model_dump_json())
+            logger.info(
+                "Crossref diagnostic completed: %d records, %d issues",
+                len(discovery.records),
+                len(discovery.issues),
+            )
+            return 1 if discovery.has_errors else 0
+
+        openalex_client = OpenAlexClient(
+            api_key=os.environ.get("OPENALEX_API_KEY")
+        )
+        openalex = discover_journals(
+            openalex_client,
+            journals,
+            args.from_date,
+            args.to_date,
+        )
+        _log_openalex_discovery(logger, openalex)
+
+        if args.command == "openalex-discover":
+            for record in openalex.records:
+                print(record.model_dump_json())
+            logger.info(
+                "OpenAlex diagnostic completed: %d sources, %d records, %d issues",
+                len(openalex.sources),
+                len(openalex.records),
+                len(openalex.issues),
+            )
+            return 1 if openalex.has_errors else 0
+
+        if args.command in {"openalex-filter", "crossref-enrich"}:
+            filtered = tuple(
+                record
+                for record in openalex.records
+                if evaluate_keyword_expression(keyword_ast, record.metadata)
+            )
+            if args.command == "openalex-filter":
+                for record in filtered:
+                    print(record.model_dump_json())
+                logger.info(
+                    "OpenAlex filter diagnostic completed: %d discovered, "
+                    "%d retained, %d filtered out, %d issues",
+                    len(openalex.records),
+                    len(filtered),
+                    len(openalex.records) - len(filtered),
+                    len(openalex.issues),
                 )
-                log("Crossref [%s]: %s", issue.stage, detail)
-            without_doi = sum(
-                issue.stage == "missing_doi" for issue in enrichment.issues
-            )
-            unavailable = sum(
-                issue.stage == "not_found" for issue in enrichment.issues
-            )
-            failed = sum(
-                issue.severity is EnrichmentIssueSeverity.ERROR
-                for issue in enrichment.issues
-            )
+                return 1 if openalex.has_errors else 0
+
+            assert crossref_client is not None
+            enrichment = enrich_records(crossref_client, filtered)
+            _log_enrichment_issues(logger, enrichment.issues)
+            for record in enrichment.records:
+                print(record.model_dump_json())
             enriched_count = sum(
                 record.crossref is not None for record in enrichment.records
             )
-            if args.command in {"canonicalize", "materialize"}:
-                evidence = tuple(
-                    item
-                    for record in enrichment.records
-                    for item in record.to_evidence()
-                )
-                canonicalization = canonicalize_records(evidence)
-                for issue in canonicalization.issues:
-                    detail = issue.message
-                    if issue.record_ids:
-                        detail = f"{', '.join(issue.record_ids)}: {detail}"
-                    logger.warning("Canonicalization [%s]: %s", issue.stage, detail)
-                if args.command == "materialize":
-                    materialization = materialize_papers(
-                        canonicalization.papers,
-                        args.output_dir,
-                    )
-                    for issue in materialization.issues:
-                        log = (
-                            logger.error
-                            if issue.severity is MaterializationIssueSeverity.ERROR
-                            else logger.warning
-                        )
-                        log(
-                            "Materialization [%s]: %s",
-                            issue.path,
-                            issue.message,
-                        )
-                    materialization_warnings = sum(
-                        issue.severity is MaterializationIssueSeverity.WARNING
-                        for issue in materialization.issues
-                    )
-                    materialization_errors = sum(
-                        issue.severity is MaterializationIssueSeverity.ERROR
-                        for issue in materialization.issues
-                    )
-                    logger.info(
-                        "Materialization completed: %d discovered, %d retained, "
-                        "%d enriched, %d canonical papers, %d paper files created, "
-                        "%d paper files matched, %d paper files updated, "
-                        "%d author files created, %d author files existing, "
-                        "%d materialization warnings, %d materialization errors, "
-                        "%d canonicalization issues, %d OpenAlex issues, "
-                        "%d Crossref issues",
-                        len(result.records),
-                        len(records),
-                        enriched_count,
-                        len(canonicalization.papers),
-                        len(materialization.created_papers),
-                        len(materialization.existing_papers),
-                        len(materialization.updated_papers),
-                        len(materialization.created_authors),
-                        len(materialization.existing_authors),
-                        materialization_warnings,
-                        materialization_errors,
-                        len(canonicalization.issues),
-                        len(result.issues),
-                        len(enrichment.issues),
-                    )
-                    return (
-                        1
-                        if result.has_errors
-                        or enrichment.has_errors
-                        or materialization.has_errors
-                        else 0
-                    )
-
-                for paper in canonicalization.papers:
-                    print(paper.model_dump_json())
-                logger.info(
-                    "Canonicalization diagnostic completed: %d discovered, "
-                    "%d retained, %d enriched, %d canonical papers, "
-                    "%d canonicalization issues, %d OpenAlex issues, "
-                    "%d Crossref issues",
-                    len(result.records),
-                    len(records),
-                    enriched_count,
-                    len(canonicalization.papers),
-                    len(canonicalization.issues),
-                    len(result.issues),
-                    len(enrichment.issues),
-                )
-                return 1 if result.has_errors or enrichment.has_errors else 0
-
-            for record in enrichment.records:
-                print(record.model_dump_json())
             logger.info(
-                "Crossref enrichment diagnostic completed: %d discovered, %d retained, "
-                "%d enriched, %d without DOI, %d unavailable, %d failed, "
-                "%d OpenAlex issues, %d Crossref issues",
-                len(result.records),
-                len(records),
+                "Crossref enrichment diagnostic completed: %d discovered, "
+                "%d retained, %d enriched, %d without DOI, %d unavailable, "
+                "%d failed, %d OpenAlex issues, %d Crossref issues",
+                len(openalex.records),
+                len(filtered),
                 enriched_count,
-                without_doi,
-                unavailable,
-                failed,
-                len(result.issues),
+                sum(issue.stage == "missing_doi" for issue in enrichment.issues),
+                sum(issue.stage == "not_found" for issue in enrichment.issues),
+                sum(
+                    issue.severity is EnrichmentIssueSeverity.ERROR
+                    for issue in enrichment.issues
+                ),
+                len(openalex.issues),
                 len(enrichment.issues),
             )
-            return 1 if result.has_errors or enrichment.has_errors else 0
-        for record in records:
-            print(record.model_dump_json())
-        if args.command == "openalex-filter":
-            logger.info(
-                "OpenAlex filter diagnostic completed: %d discovered, %d retained, "
-                "%d filtered out, %d issues",
-                len(result.records),
-                len(records),
-                len(result.records) - len(records),
-                len(result.issues),
+            return 1 if openalex.has_errors or enrichment.has_errors else 0
+
+        assert crossref_client is not None
+        crossref = discover_crossref_journals(
+            crossref_client,
+            journals,
+            args.from_date,
+            args.to_date,
+        )
+        _log_crossref_discovery_issues(logger, crossref.issues)
+        retrieval = assemble_provider_evidence(
+            crossref_client,
+            openalex.records,
+            crossref.records,
+        )
+        _log_enrichment_issues(logger, retrieval.issues)
+        consolidation = consolidate_evidence(retrieval.evidence)
+        for issue in consolidation.issues:
+            _log_canonicalization_issue(logger, "Consolidation", issue)
+        retained_clusters = tuple(
+            cluster
+            for cluster in consolidation.clusters
+            if evaluate_searchable_projection(
+                keyword_ast,
+                build_searchable_projection(cluster.evidence),
             )
-        else:
+        )
+        retained_evidence = tuple(
+            evidence
+            for cluster in retained_clusters
+            for evidence in cluster.evidence
+        )
+        canonicalization = canonicalize_records(retained_evidence)
+        for issue in canonicalization.issues:
+            _log_canonicalization_issue(logger, "Canonicalization", issue)
+
+        provider_errors = (
+            openalex.has_errors or crossref.has_errors or retrieval.has_errors
+        )
+        if args.command == "canonicalize":
+            for paper in canonicalization.papers:
+                print(paper.model_dump_json())
             logger.info(
-                "OpenAlex diagnostic completed: %d sources, %d records, %d issues",
-                len(result.sources),
-                len(result.records),
-                len(result.issues),
+                "Canonicalization diagnostic completed: %d OpenAlex records, "
+                "%d Crossref discovery records, %d Crossref DOI supplement "
+                "records, %d evidence clusters, %d retained clusters, "
+                "%d canonical papers, %d consolidation issues, "
+                "%d canonicalization issues, %d provider issues",
+                len(openalex.records),
+                len(crossref.records),
+                len(retrieval.supplement_records),
+                len(consolidation.clusters),
+                len(retained_clusters),
+                len(canonicalization.papers),
+                len(consolidation.issues),
+                len(canonicalization.issues),
+                len(openalex.issues) + len(crossref.issues) + len(retrieval.issues),
             )
-        return 1 if result.has_errors else 0
+            return 1 if provider_errors else 0
+
+        materialization = materialize_papers(
+            canonicalization.papers,
+            args.output_dir,
+        )
+        for issue in materialization.issues:
+            log = (
+                logger.error
+                if issue.severity is MaterializationIssueSeverity.ERROR
+                else logger.warning
+            )
+            log("Materialization [%s]: %s", issue.path, issue.message)
+        logger.info(
+            "Materialization completed: %d OpenAlex records, %d Crossref "
+            "discovery records, %d Crossref DOI supplement records, %d evidence "
+            "clusters, %d retained clusters, %d canonical papers, %d paper files "
+            "created, %d paper files matched, %d paper files updated, %d author "
+            "files created, %d author files existing, %d materialization issues, "
+            "%d consolidation issues, %d canonicalization issues, %d provider issues",
+            len(openalex.records),
+            len(crossref.records),
+            len(retrieval.supplement_records),
+            len(consolidation.clusters),
+            len(retained_clusters),
+            len(canonicalization.papers),
+            len(materialization.created_papers),
+            len(materialization.existing_papers),
+            len(materialization.updated_papers),
+            len(materialization.created_authors),
+            len(materialization.existing_authors),
+            len(materialization.issues),
+            len(consolidation.issues),
+            len(canonicalization.issues),
+            len(openalex.issues) + len(crossref.issues) + len(retrieval.issues),
+        )
+        return 1 if provider_errors or materialization.has_errors else 0
     return 2

@@ -8,10 +8,13 @@ import pytest
 from literature_monitor.canonicalize import (
     CanonicalizationIssue,
     CanonicalizationResult,
+    consolidate_evidence,
 )
 from literature_monitor.cli import main
 from literature_monitor.config import JournalConfig, load_config
 from literature_monitor.crossref import (
+    CrossrefDiscoveryIssue,
+    CrossrefDiscoveryResult,
     CrossrefWorkRecord,
     EnrichedWorkRecord,
     EnrichmentIssue,
@@ -20,6 +23,7 @@ from literature_monitor.crossref import (
 )
 from literature_monitor.kept_export import KeptExportIssue, KeptExportResult
 from literature_monitor.logging_setup import LOGGER_NAME, configure_logging
+from literature_monitor.keywords import evaluate_searchable_projection
 from literature_monitor.materialize import (
     MaterializationIssue,
     MaterializationIssueSeverity,
@@ -43,6 +47,7 @@ from literature_monitor.openalex import (
     OpenAlexWorkRecord,
     ResolvedSource,
 )
+from literature_monitor.retrieval import EvidenceRetrievalResult
 
 
 def application_handlers() -> list[logging.Handler]:
@@ -390,6 +395,28 @@ def crossref_record(doi: str) -> CrossrefWorkRecord:
     )
 
 
+def crossref_candidate(
+    doi: str,
+    *,
+    title: str,
+    abstract: str,
+) -> CrossrefWorkRecord:
+    timestamp = datetime(2026, 9, 18, tzinfo=timezone.utc)
+    return CrossrefWorkRecord(
+        doi=doi,
+        title=title,
+        journal="Biometrics",
+        abstract=abstract,
+        authors=(Author(name="Ada Author"),),
+        issns=("0006-341X",),
+        provenance=MetadataSource(
+            provider="crossref",
+            record_id=doi,
+            retrieved_at=timestamp,
+        ),
+    )
+
+
 def canonical_paper(identifier: str = "10.5555/one") -> CanonicalPaper:
     version = PaperVersion(
         kind=VersionKind.JOURNAL_FINAL,
@@ -402,6 +429,58 @@ def canonical_paper(identifier: str = "10.5555/one") -> CanonicalPaper:
         authors=(Author(name="Ada Author"),),
         versions=(version,),
         preferred_version=VersionRef(source="doi", identifier=identifier),
+    )
+
+
+def crossref_discovery_result(
+    records: tuple[CrossrefWorkRecord, ...] = (),
+    issues: tuple[CrossrefDiscoveryIssue, ...] = (),
+) -> CrossrefDiscoveryResult:
+    return CrossrefDiscoveryResult(records=records, issues=issues)
+
+
+def assembled_evidence(
+    records: tuple[OpenAlexWorkRecord, ...],
+    crossref_records: tuple[CrossrefWorkRecord, ...] = (),
+    issues: tuple[EnrichmentIssue, ...] = (),
+) -> EvidenceRetrievalResult:
+    return EvidenceRetrievalResult(
+        evidence=(
+            *(record.to_evidence() for record in records),
+            *(record.to_evidence() for record in crossref_records),
+        ),
+        supplement_records=(),
+        issues=issues,
+    )
+
+
+def install_multisource_mocks(
+    monkeypatch: object,
+    *,
+    crossref_records: tuple[CrossrefWorkRecord, ...] = (),
+    crossref_issues: tuple[CrossrefDiscoveryIssue, ...] = (),
+    retrieval_issues: tuple[EnrichmentIssue, ...] = (),
+    events: list[str] | None = None,
+) -> None:
+    def discover(*args: object) -> CrossrefDiscoveryResult:
+        if events is not None:
+            events.append("crossref_discover")
+        return crossref_discovery_result(crossref_records, crossref_issues)
+
+    def assemble(
+        client: object,
+        records: tuple[OpenAlexWorkRecord, ...],
+        discovered: tuple[CrossrefWorkRecord, ...],
+    ) -> EvidenceRetrievalResult:
+        if events is not None:
+            events.append("supplement")
+        return assembled_evidence(records, discovered, retrieval_issues)
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_crossref_journals", discover
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.assemble_provider_evidence", assemble
     )
 
 
@@ -749,7 +828,6 @@ def test_crossref_enrich_uses_config_filter_before_enrichment(
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.enrich_records", fake_enrich
     )
-
     result = main(
         (
             "crossref-enrich",
@@ -1138,11 +1216,109 @@ def test_existing_openalex_commands_never_construct_crossref_client(
     assert result == 0
 
 
+def test_crossref_discover_is_crossref_only_and_emits_provider_ndjson(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    client = object()
+    calls: list[tuple[object, tuple[str, ...], object, object]] = []
+
+    def unexpected_openalex(*args: object, **kwargs: object) -> object:
+        raise AssertionError("OpenAlex client must not be constructed")
+
+    def fake_discover(
+        received_client: object,
+        journals: tuple[JournalConfig, ...],
+        from_date: object,
+        to_date: object,
+    ) -> CrossrefDiscoveryResult:
+        calls.append(
+            (
+                received_client,
+                tuple(journal.name for journal in journals),
+                from_date,
+                to_date,
+            )
+        )
+        return crossref_discovery_result((crossref_record("10.5555/one"),))
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.OpenAlexClient", unexpected_openalex
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: client
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_crossref_journals", fake_discover
+    )
+
+    result = main(
+        (
+            "crossref-discover",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--journal",
+            "Biometrics",
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert calls[0][0] is client
+    assert calls[0][1] == ("BIOMETRICS",)
+    assert json.loads(captured.out)["doi"] == "10.5555/one"
+    assert "1 records, 0 issues" in captured.err
+
+
+def test_crossref_discover_keeps_records_on_isolated_hard_error(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    issue = CrossrefDiscoveryIssue(
+        severity=EnrichmentIssueSeverity.ERROR,
+        stage="work_retrieval",
+        journal="Biometrics",
+        issn="0006-341X",
+        message="server unavailable",
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_crossref_journals",
+        lambda *args: crossref_discovery_result(
+            (crossref_record("10.5555/success"),),
+            (issue,),
+        ),
+    )
+
+    result = main(
+        (
+            "crossref-discover",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 1
+    assert json.loads(captured.out)["doi"] == "10.5555/success"
+    assert "server unavailable" in captured.err
+
+
 def test_canonicalize_runs_full_pipeline_and_emits_canonical_ndjson(
     monkeypatch: object, capsys: object
 ) -> None:
     repository_root = Path(__file__).resolve().parents[1]
-    received_by_enrichment: list[OpenAlexWorkRecord] = []
+    received_by_assembly: list[OpenAlexWorkRecord] = []
     received_by_canonicalization: list[ProviderWorkEvidence] = []
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.discover_journals",
@@ -1152,18 +1328,27 @@ def test_canonicalize_runs_full_pipeline_and_emits_canonical_ndjson(
         "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
     )
 
-    def fake_enrich(
-        client: object, records: tuple[OpenAlexWorkRecord, ...]
-    ) -> EnrichmentResult:
-        received_by_enrichment.extend(records)
-        return EnrichmentResult(
-            records=(
-                EnrichedWorkRecord(
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_crossref_journals",
+        lambda *args: crossref_discovery_result(),
+    )
+
+    def fake_assemble(
+        client: object,
+        records: tuple[OpenAlexWorkRecord, ...],
+        discovered: tuple[CrossrefWorkRecord, ...],
+    ) -> EvidenceRetrievalResult:
+        received_by_assembly.extend(records)
+        return EvidenceRetrievalResult(
+            evidence=(
+                *EnrichedWorkRecord(
                     openalex=records[0],
                     crossref=crossref_record("10.5555/one"),
-                ),
-                EnrichedWorkRecord(openalex=records[1]),
+                ).to_evidence(),
+                records[1].to_evidence(),
+                records[2].to_evidence(),
             ),
+            supplement_records=(crossref_record("10.5555/one"),),
             issues=(),
         )
 
@@ -1174,7 +1359,7 @@ def test_canonicalize_runs_full_pipeline_and_emits_canonical_ndjson(
         return CanonicalizationResult(papers=(canonical_paper(),), issues=())
 
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.enrich_records", fake_enrich
+        "literature_monitor.cli.assemble_provider_evidence", fake_assemble
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.canonicalize_records", fake_canonicalize
@@ -1197,15 +1382,16 @@ def test_canonicalize_runs_full_pipeline_and_emits_canonical_ndjson(
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     rows = [json.loads(line) for line in captured.out.splitlines()]
     assert result == 0
-    assert [record.external_ids.openalex for record in received_by_enrichment] == [
+    assert [record.external_ids.openalex for record in received_by_assembly] == [
         "https://openalex.org/W1",
+        "https://openalex.org/W2",
         "https://openalex.org/W3",
     ]
     assert [
         record.provenance.provider for record in received_by_canonicalization
-    ] == ["openalex", "crossref", "openalex"]
-    assert received_by_canonicalization[1].supplements[0].record_id == (
-        received_by_enrichment[0].provenance.record_id
+    ] == ["crossref", "openalex", "openalex"]
+    assert received_by_canonicalization[0].supplements[0].record_id == (
+        received_by_assembly[0].provenance.record_id
     )
     assert len(rows) == 1
     assert rows[0]["metadata"]["title"] == "Canonical paper"
@@ -1213,14 +1399,16 @@ def test_canonicalize_runs_full_pipeline_and_emits_canonical_ndjson(
         "source": "doi",
         "identifier": "10.5555/one",
     }
-    assert "2 retained, 1 enriched, 1 canonical papers" in captured.err
+    assert "3 evidence clusters, 2 retained clusters" in captured.err
+    assert "1 Crossref DOI supplement records" in captured.err
 
 
-def test_canonicalize_override_is_applied_before_enrichment(
+def test_canonicalize_override_is_applied_to_unified_projection(
     monkeypatch: object, capsys: object
 ) -> None:
     repository_root = Path(__file__).resolve().parents[1]
-    received: list[OpenAlexWorkRecord] = []
+    received_by_assembly: list[OpenAlexWorkRecord] = []
+    received_by_canonicalization: list[ProviderWorkEvidence] = []
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.discover_journals",
         lambda *args: enrichment_diagnostic_result(),
@@ -1229,23 +1417,44 @@ def test_canonicalize_override_is_applied_before_enrichment(
         "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
     )
 
-    def fake_enrich(
-        client: object, records: tuple[OpenAlexWorkRecord, ...]
-    ) -> EnrichmentResult:
-        received.extend(records)
-        return EnrichmentResult(
-            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
-            issues=(),
+    rescue = CrossrefWorkRecord(
+        doi="10.5555/one",
+        title="Crossref title",
+        journal="Biometrics",
+        abstract="Crossref rescue",
+        authors=(Author(name="Ada Author"),),
+        provenance=MetadataSource(
+            provider="crossref",
+            record_id="10.5555/one",
+            retrieved_at=datetime(2026, 9, 18, tzinfo=timezone.utc),
+        ),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_crossref_journals",
+        lambda *args: crossref_discovery_result((rescue,)),
+    )
+
+    def fake_assemble(
+        client: object,
+        records: tuple[OpenAlexWorkRecord, ...],
+        discovered: tuple[CrossrefWorkRecord, ...],
+    ) -> EvidenceRetrievalResult:
+        received_by_assembly.extend(records)
+        return assembled_evidence(records, discovered)
+
+    def fake_canonicalize(
+        records: tuple[ProviderWorkEvidence, ...],
+    ) -> CanonicalizationResult:
+        received_by_canonicalization.extend(records)
+        return CanonicalizationResult(
+            papers=(canonical_paper("10.5555/one"),), issues=()
         )
 
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.enrich_records", fake_enrich
+        "literature_monitor.cli.assemble_provider_evidence", fake_assemble
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.canonicalize_records",
-        lambda records: CanonicalizationResult(
-            papers=(canonical_paper("10.5555/two"),), issues=()
-        ),
+        "literature_monitor.cli.canonicalize_records", fake_canonicalize
     )
 
     result = main(
@@ -1258,15 +1467,142 @@ def test_canonicalize_override_is_applied_before_enrichment(
             "--to-date",
             "2026-01-31",
             "--keyword-expression",
-            '"excluded paper"',
+            '"crossref rescue"',
         )
     )
 
     capsys.readouterr()  # type: ignore[attr-defined]
     assert result == 0
-    assert [record.external_ids.openalex for record in received] == [
-        "https://openalex.org/W2"
+    assert [record.external_ids.openalex for record in received_by_assembly] == [
+        "https://openalex.org/W1",
+        "https://openalex.org/W2",
+        "https://openalex.org/W3",
     ]
+    assert [
+        record.provenance.provider for record in received_by_canonicalization
+    ] == ["crossref", "openalex"]
+
+
+def test_canonicalize_emits_openalex_rescue_and_crossref_only_candidate(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    timestamp = datetime(2026, 9, 18, tzinfo=timezone.utc)
+    openalex_record = OpenAlexWorkRecord(
+        metadata=CanonicalMetadata(title="Unrelated title", journal="Biometrics"),
+        external_ids=ExternalIds(
+            openalex="https://openalex.org/W1",
+            doi="10.5555/rescue",
+        ),
+        authors=(Author(name="Ada Author"),),
+        source_id="https://openalex.org/S8265502",
+        provenance=MetadataSource(
+            provider="openalex",
+            record_id="https://openalex.org/W1",
+            retrieved_at=timestamp,
+        ),
+    )
+    openalex_result = DiscoveryResult(
+        sources=diagnostic_result().sources,
+        records=(openalex_record,),
+        issues=(),
+    )
+    rescue = crossref_candidate(
+        "10.5555/rescue",
+        title="Still unrelated",
+        abstract="Unified rescue phrase",
+    )
+    crossref_only = crossref_candidate(
+        "10.5555/crossref-only",
+        title="Unified rescue phrase in Crossref",
+        abstract="Provider-only abstract",
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals", lambda *args: openalex_result
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_crossref_journals",
+        lambda *args: crossref_discovery_result((rescue, crossref_only)),
+    )
+
+    result = main(
+        (
+            "canonicalize",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--journal",
+            "Biometrics",
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+            "--keyword-expression",
+            '"unified rescue phrase"',
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    rows = [json.loads(line) for line in captured.out.splitlines()]
+    assert result == 0
+    assert {row["external_ids"]["doi"] for row in rows} == {
+        "10.5555/rescue",
+        "10.5555/crossref-only",
+    }
+    assert "2 evidence clusters, 2 retained clusters, 2 canonical papers" in captured.err
+
+
+def test_canonicalize_keeps_crossref_candidate_when_openalex_fails(
+    monkeypatch: object, capsys: object
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    openalex_error = DiscoveryIssue(
+        severity=IssueSeverity.ERROR,
+        stage="work_retrieval",
+        journal="Biometrics",
+        message="OpenAlex unavailable",
+    )
+    openalex_result = DiscoveryResult(sources=(), records=(), issues=(openalex_error,))
+    crossref_only = crossref_candidate(
+        "10.5555/crossref-only",
+        title="Crossref-only rescue",
+        abstract="Provider-only evidence",
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals", lambda *args: openalex_result
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_crossref_journals",
+        lambda *args: crossref_discovery_result((crossref_only,)),
+    )
+
+    result = main(
+        (
+            "canonicalize",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--journal",
+            "Biometrics",
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+            "--keyword-expression",
+            '"crossref-only rescue"',
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 1
+    assert json.loads(captured.out)["external_ids"]["doi"] == (
+        "10.5555/crossref-only"
+    )
+    assert "OpenAlex unavailable" in captured.err
 
 
 @pytest.mark.parametrize(
@@ -1356,6 +1692,7 @@ def test_canonicalize_warnings_keep_low_confidence_outputs_and_zero_exit(
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
     )
+    install_multisource_mocks(monkeypatch)
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.enrich_records",
         lambda client, records: EnrichmentResult(
@@ -1393,7 +1730,8 @@ def test_canonicalize_warnings_keep_low_confidence_outputs_and_zero_exit(
     assert result == 0
     assert len(captured.out.splitlines()) == 2
     assert "blocked_match" in captured.err
-    assert "2 canonical papers, 1 canonicalization issues" in captured.err
+    assert "2 canonical papers" in captured.err
+    assert "1 canonicalization issues" in captured.err
 
 
 def test_canonicalize_partial_upstream_failure_still_emits_successful_papers(
@@ -1407,6 +1745,7 @@ def test_canonicalize_partial_upstream_failure_still_emits_successful_papers(
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
     )
+    install_multisource_mocks(monkeypatch)
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.enrich_records",
         lambda client, records: EnrichmentResult(
@@ -1470,6 +1809,18 @@ def test_canonicalize_crossref_error_still_emits_successful_papers(
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.enrich_records", fake_enrich
     )
+    install_multisource_mocks(
+        monkeypatch,
+        retrieval_issues=(
+            EnrichmentIssue(
+                severity=EnrichmentIssueSeverity.ERROR,
+                stage="request_failure",
+                message="server unavailable",
+                record_id="https://openalex.org/W1",
+                doi="10.5555/one",
+            ),
+        ),
+    )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.canonicalize_records",
         lambda records: CanonicalizationResult(
@@ -1501,30 +1852,28 @@ def test_materialize_runs_full_pipeline_in_order_without_stdout(
     repository_root = Path(__file__).resolve().parents[1]
     output_dir = tmp_path / "Vault"
     events: list[str] = []
-    received_by_enrichment: list[OpenAlexWorkRecord] = []
     received_by_materialization: list[CanonicalPaper] = []
     canonical = canonical_paper("10.5555/two")
 
     def fake_discover(*args: object) -> DiscoveryResult:
-        events.append("discover")
+        events.append("openalex_discover")
         return enrichment_diagnostic_result()
 
-    def fake_enrich(
-        client: object, records: tuple[OpenAlexWorkRecord, ...]
-    ) -> EnrichmentResult:
-        events.append("enrich")
-        received_by_enrichment.extend(records)
-        return EnrichmentResult(
-            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
-            issues=(),
-        )
+    def fake_consolidate(records: tuple[ProviderWorkEvidence, ...]) -> object:
+        events.append("consolidate")
+        return consolidate_evidence(records)
+
+    def fake_filter(expression: object, projection: object) -> bool:
+        if "filter" not in events:
+            events.append("filter")
+        return evaluate_searchable_projection(expression, projection)  # type: ignore[arg-type]
 
     def fake_canonicalize(
         records: tuple[ProviderWorkEvidence, ...],
     ) -> CanonicalizationResult:
         events.append("canonicalize")
         assert [record.external_ids.openalex for record in records] == [
-            record.external_ids.openalex for record in received_by_enrichment
+            "https://openalex.org/W2"
         ]
         return CanonicalizationResult(papers=(canonical,), issues=())
 
@@ -1549,8 +1898,12 @@ def test_materialize_runs_full_pipeline_in_order_without_stdout(
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
     )
+    install_multisource_mocks(monkeypatch, events=events)
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.enrich_records", fake_enrich
+        "literature_monitor.cli.consolidate_evidence", fake_consolidate
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.evaluate_searchable_projection", fake_filter
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.canonicalize_records", fake_canonicalize
@@ -1577,9 +1930,14 @@ def test_materialize_runs_full_pipeline_in_order_without_stdout(
 
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert result == 0
-    assert events == ["discover", "enrich", "canonicalize", "materialize"]
-    assert [record.external_ids.openalex for record in received_by_enrichment] == [
-        "https://openalex.org/W2"
+    assert events == [
+        "openalex_discover",
+        "crossref_discover",
+        "supplement",
+        "consolidate",
+        "filter",
+        "canonicalize",
+        "materialize",
     ]
     assert received_by_materialization == [canonical]
     assert captured.out == ""
@@ -1688,6 +2046,7 @@ def test_materialize_canonicalization_warning_is_nonfatal(
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
     )
+    install_multisource_mocks(monkeypatch)
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.enrich_records",
         lambda client, records: EnrichmentResult(
@@ -1763,6 +2122,10 @@ def test_materialize_partial_upstream_error_still_materializes_papers(
             doi="10.5555/one",
         ),
     ) if upstream == "crossref" else ()
+    install_multisource_mocks(
+        monkeypatch,
+        retrieval_issues=enrichment_issues,
+    )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.enrich_records",
         lambda client, records: EnrichmentResult(
@@ -1829,6 +2192,7 @@ def test_materialize_issue_severity_controls_exit_code(
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
     )
+    install_multisource_mocks(monkeypatch)
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.enrich_records",
         lambda client, records: EnrichmentResult(
@@ -1877,12 +2241,8 @@ def test_materialize_issue_severity_controls_exit_code(
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert result == expected_exit
     assert "materialization diagnostic" in captured.err
-    expected_label = (
-        "1 materialization warnings, 0 materialization errors"
-        if severity is MaterializationIssueSeverity.WARNING
-        else "0 materialization warnings, 1 materialization errors"
-    )
-    assert expected_label in captured.err
+    assert "1 materialization issues" in captured.err
+    assert severity.value.upper() in captured.err
 
 
 def test_export_kept_cli_writes_entries_without_entering_provider_pipeline(

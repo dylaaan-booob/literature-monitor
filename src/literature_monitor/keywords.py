@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TypeAlias
 
-from literature_monitor.models import CanonicalMetadata
+from literature_monitor.models import CanonicalMetadata, ProviderWorkEvidence
 
 
 class KeywordSyntaxError(ValueError):
@@ -45,6 +45,17 @@ class Or:
 
 
 KeywordExpression: TypeAlias = Term | Phrase | Not | And | Or
+
+
+@dataclass(frozen=True)
+class SearchableProjection:
+    titles: tuple[str, ...] = ()
+    author_keywords: tuple[str, ...] = ()
+    abstracts: tuple[str, ...] = ()
+
+    @property
+    def units(self) -> tuple[str, ...]:
+        return (*self.titles, *self.author_keywords, *self.abstracts)
 
 
 class _TokenKind(Enum):
@@ -234,17 +245,47 @@ def _unit_contains_literal(unit: str, literal: str) -> bool:
         start = index + 1
 
 
-def evaluate_keyword_expression(
-    expression: KeywordExpression,
-    metadata: CanonicalMetadata,
-) -> bool:
-    """Evaluate an expression against independent title/keyword/abstract units."""
+def _deduplicate_units(values: tuple[str | None, ...]) -> tuple[str, ...]:
+    units: dict[str, set[str]] = {}
+    for value in values:
+        if value is None or not (normalized := _normalize_search_text(value)):
+            continue
+        units.setdefault(normalized, set()).add(value.strip())
+    return tuple(
+        min(units[key], key=lambda value: (value.casefold(), value))
+        for key in sorted(units)
+    )
 
-    values = (metadata.title, *metadata.author_keywords, metadata.abstract)
+
+def build_searchable_projection(
+    evidence: tuple[ProviderWorkEvidence, ...],
+) -> SearchableProjection:
+    """Build independent searchable units from all provider evidence."""
+
+    return SearchableProjection(
+        titles=_deduplicate_units(tuple(record.title for record in evidence)),
+        author_keywords=_deduplicate_units(
+            tuple(
+                keyword
+                for record in evidence
+                for keyword in record.author_keywords
+            )
+        ),
+        abstracts=_deduplicate_units(
+            tuple(record.abstract for record in evidence)
+        ),
+    )
+
+
+def evaluate_keyword_units(
+    expression: KeywordExpression,
+    values: tuple[str, ...],
+) -> bool:
+    """Evaluate an expression against independent searchable text units."""
+
     units = tuple(
         normalized
         for value in values
-        if value is not None
         if (normalized := _normalize_search_text(value))
     )
 
@@ -261,3 +302,24 @@ def evaluate_keyword_expression(
         raise TypeError(f"unsupported keyword expression node: {type(node).__name__}")
 
     return evaluate(expression)
+
+
+def evaluate_searchable_projection(
+    expression: KeywordExpression,
+    projection: SearchableProjection,
+) -> bool:
+    return evaluate_keyword_units(expression, projection.units)
+
+
+def evaluate_keyword_expression(
+    expression: KeywordExpression,
+    metadata: CanonicalMetadata,
+) -> bool:
+    """Evaluate an expression against independent title/keyword/abstract units."""
+
+    values = tuple(
+        value
+        for value in (metadata.title, *metadata.author_keywords, metadata.abstract)
+        if value is not None
+    )
+    return evaluate_keyword_units(expression, values)

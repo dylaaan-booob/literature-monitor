@@ -9,6 +9,7 @@ import pytest
 from literature_monitor.canonicalize import (
     CanonicalizationResult,
     canonicalize_records,
+    consolidate_evidence,
 )
 from literature_monitor.crossref import (
     CrossrefPartialDate,
@@ -90,6 +91,7 @@ def crossref(
     title: str | None = None,
     journal: str | None = None,
     abstract: str | None = None,
+    authors: tuple[Author, ...] = (),
     dates: tuple[CrossrefPartialDate, ...] = (),
     relations: tuple[CrossrefRelation, ...] = (),
     retrieved_at: datetime = NOW,
@@ -99,6 +101,7 @@ def crossref(
         title=title,
         journal=journal,
         abstract=abstract,
+        authors=authors,
         dates=dates,
         relations=relations,
         provenance=MetadataSource(
@@ -173,6 +176,97 @@ def test_non_openalex_evidence_can_create_a_canonical_paper() -> None:
     assert paper.metadata.title == "Provider-neutral study"
     assert paper.external_ids.model_dump()["independent"] == "work-1"
     assert paper.sources == (evidence.provenance,)
+
+
+def test_public_consolidation_groups_same_doi_deterministically() -> None:
+    openalex_evidence = openalex("W1", doi="10.5555/same").to_evidence()
+    crossref_evidence = crossref(
+        "10.5555/same",
+        title="Crossref title",
+        journal="Biometrics",
+        authors=(author(),),
+    ).to_evidence()
+
+    forward = consolidate_evidence((openalex_evidence, crossref_evidence))
+    reverse = consolidate_evidence((crossref_evidence, openalex_evidence))
+
+    assert len(forward.clusters) == 1
+    assert [
+        (record.provenance.provider, record.provenance.record_id)
+        for record in forward.clusters[0].evidence
+    ] == [
+        (record.provenance.provider, record.provenance.record_id)
+        for record in reverse.clusters[0].evidence
+    ]
+    assert forward.issues == reverse.issues
+
+
+def test_public_consolidation_keeps_conflicting_dois_separate() -> None:
+    first = openalex("W1", doi="10.5555/a").to_evidence()
+    second = crossref(
+        "10.5555/b",
+        title="A Study",
+        journal="Biometrics",
+        authors=(author(),),
+    ).to_evidence()
+
+    result = consolidate_evidence((first, second))
+
+    assert len(result.clusters) == 2
+    assert any(issue.stage == "identifier_conflict" for issue in result.issues)
+
+
+def test_crossref_only_sufficient_evidence_canonicalizes() -> None:
+    evidence = crossref(
+        "10.5555/crossref-only",
+        title="Crossref-only study",
+        journal="Biometrics",
+        authors=(author("Ada Author", orcid="https://orcid.org/O1"),),
+        dates=(partial_date("published-online", 2026, 3, 4),),
+    ).to_evidence()
+
+    result = canonicalize_records((evidence,))
+
+    assert not [
+        issue for issue in result.issues if issue.stage == "insufficient_metadata"
+    ]
+    assert len(result.papers) == 1
+    paper = result.papers[0]
+    assert paper.metadata.title == "Crossref-only study"
+    assert paper.external_ids.doi == "10.5555/crossref-only"
+    assert paper.authors[0].orcid == "https://orcid.org/O1"
+    assert [source.provider for source in paper.sources] == ["crossref"]
+
+
+def test_compatible_cross_provider_authors_merge_stable_ids() -> None:
+    openalex_record = openalex(
+        "W1",
+        doi="10.5555/authors",
+        authors=(author("Ada Author", openalex_id="https://openalex.org/A1"),),
+    )
+    crossref_record = crossref(
+        "10.5555/authors",
+        title="A Study",
+        journal="Biometrics",
+        abstract="Richer abstract",
+        authors=(
+            author(
+                "Ada Author",
+                orcid="https://orcid.org/0000-0002-1825-0097",
+            ),
+        ),
+        dates=(partial_date("published-online", 2026, 3, 4),),
+    )
+
+    paper = canonicalize((enriched(openalex_record, crossref_record),)).papers[0]
+
+    assert paper.authors == (
+        author(
+            "Ada Author",
+            openalex_id="https://openalex.org/A1",
+            orcid="https://orcid.org/0000-0002-1825-0097",
+        ),
+    )
 
 
 def test_title_fallback_does_not_use_evidence_without_authors() -> None:

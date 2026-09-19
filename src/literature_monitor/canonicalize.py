@@ -92,6 +92,17 @@ class CanonicalizationResult:
 
 
 @dataclass(frozen=True)
+class EvidenceCluster:
+    evidence: tuple[ProviderWorkEvidence, ...]
+
+
+@dataclass(frozen=True)
+class EvidenceConsolidationResult:
+    clusters: tuple[EvidenceCluster, ...]
+    issues: tuple[CanonicalizationIssue, ...]
+
+
+@dataclass(frozen=True)
 class _BuiltVersion:
     version: PaperVersion
     representative: ProviderWorkEvidence
@@ -919,6 +930,24 @@ def _metadata_issues(
                 _normalize_abstract,
             ),
         )
+        if _author_lists_conflict(representative.authors, record.authors):
+            issues.append(
+                CanonicalizationIssue(
+                    stage="metadata_conflict",
+                    record_ids=tuple(
+                        sorted(
+                            {
+                                representative.provenance.record_id,
+                                record.provenance.record_id,
+                            }
+                        )
+                    ),
+                    message=(
+                        f"{left_provider} and {right_provider} conflict on "
+                        f"nonempty authors; kept {left_provider}"
+                    ),
+                )
+            )
         for field, left_value, right_value, normalizer in comparisons:
             if (
                 left_value is not None
@@ -977,6 +1006,25 @@ def _merged_external_ids(
     return ExternalIds.model_validate(values)
 
 
+def _merged_authors(
+    representative: ProviderWorkEvidence,
+    records: Sequence[ProviderWorkEvidence],
+) -> tuple[Author, ...]:
+    authors = list(representative.authors)
+    for record in sorted(records, key=_record_key):
+        if not record.authors or _author_lists_conflict(authors, record.authors):
+            continue
+        authors = [
+            Author(
+                name=current.name,
+                openalex_id=current.openalex_id or additional.openalex_id,
+                orcid=current.orcid or additional.orcid,
+            )
+            for current, additional in zip(authors, record.authors, strict=True)
+        ]
+    return tuple(authors)
+
+
 def _build_paper(
     component: Sequence[int],
     records: Sequence[ProviderWorkEvidence],
@@ -1030,7 +1078,7 @@ def _build_paper(
             representative,
             preferred.base_evidence,
         ),
-        authors=representative.authors,
+        authors=_merged_authors(representative, preferred.base_evidence),
         versions=tuple(built.version for built in built_versions),
         sources=_deduplicate_sources(records[index] for index in component),
         preferred_version=VersionRef(
@@ -1045,8 +1093,7 @@ def canonicalize_records(
 ) -> CanonicalizationResult:
     """Consolidate provider-neutral evidence into canonical papers."""
 
-    normalized, issues = _normalize_retrievals(records)
-    components, roles = _group_records(normalized, issues)
+    normalized, components, roles, issues = _consolidation_parts(records)
     papers = tuple(
         paper
         for component in components
@@ -1057,3 +1104,38 @@ def canonicalize_records(
         key=lambda issue: (issue.stage, issue.record_ids, issue.message),
     )
     return CanonicalizationResult(papers=papers, issues=tuple(unique_issues))
+
+
+def _consolidation_parts(
+    records: Sequence[ProviderWorkEvidence],
+) -> tuple[
+    list[ProviderWorkEvidence],
+    list[tuple[int, ...]],
+    dict[int, set[str]],
+    list[CanonicalizationIssue],
+]:
+    normalized, issues = _normalize_retrievals(records)
+    components, roles = _group_records(normalized, issues)
+    return normalized, components, roles, issues
+
+
+def consolidate_evidence(
+    records: Sequence[ProviderWorkEvidence],
+) -> EvidenceConsolidationResult:
+    """Normalize snapshots and group provider evidence by conservative identity."""
+
+    normalized, components, _roles, issues = _consolidation_parts(records)
+    clusters = tuple(
+        EvidenceCluster(
+            evidence=tuple(normalized[index] for index in component)
+        )
+        for component in components
+    )
+    unique_issues = sorted(
+        set(issues),
+        key=lambda issue: (issue.stage, issue.record_ids, issue.message),
+    )
+    return EvidenceConsolidationResult(
+        clusters=clusters,
+        issues=tuple(unique_issues),
+    )
