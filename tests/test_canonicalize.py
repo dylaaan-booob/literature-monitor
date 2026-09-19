@@ -22,6 +22,7 @@ from literature_monitor.models import (
     CanonicalMetadata,
     ExternalIds,
     MetadataSource,
+    ProviderTopic,
     ProviderWorkEvidence,
     VersionKind,
 )
@@ -267,6 +268,144 @@ def test_compatible_cross_provider_authors_merge_stable_ids() -> None:
             orcid="https://orcid.org/0000-0002-1825-0097",
         ),
     )
+
+
+def semantic_scholar_evidence(
+    paper_id: str,
+    *,
+    doi: str | None = None,
+    topics: tuple[ProviderTopic, ...] = (),
+) -> ProviderWorkEvidence:
+    return ProviderWorkEvidence(
+        provenance=MetadataSource(
+            provider="semantic_scholar",
+            record_id=paper_id,
+            retrieved_at=NOW,
+        ),
+        title="A Study",
+        journal="Biometrics",
+        abstract="Semantic Scholar abstract",
+        authors=(
+            author(
+                "Ada Author",
+                orcid="https://orcid.org/0000-0002-1825-0097",
+            ),
+        ),
+        external_ids=ExternalIds.model_validate(
+            {"semantic_scholar": paper_id, "doi": doi}
+        ),
+        provider_topics=topics,
+        fields_of_study=("Medicine",) if topics else (),
+    )
+
+
+def test_three_provider_same_doi_is_one_order_independent_paper() -> None:
+    openalex_evidence = openalex(
+        "W1",
+        doi="10.5555/three",
+        authors=(author(openalex_id="https://openalex.org/A1"),),
+    ).to_evidence()
+    crossref_evidence = crossref(
+        "10.5555/three",
+        title="A Study",
+        journal="Biometrics",
+        authors=(author(),),
+    ).to_evidence()
+    semantic_evidence = semantic_scholar_evidence(
+        "S2-1",
+        doi="10.5555/three",
+    )
+    records = (openalex_evidence, crossref_evidence, semantic_evidence)
+
+    forward = canonicalize_records(records)
+    reverse = canonicalize_records(tuple(reversed(records)))
+
+    assert len(forward.papers) == 1
+    assert paper_projection(forward.papers[0]) == paper_projection(reverse.papers[0])
+    paper = forward.papers[0]
+    assert paper.external_ids.model_dump(exclude_none=True) == {
+        "openalex": "https://openalex.org/W1",
+        "doi": "10.5555/three",
+        "crossref": "10.5555/three",
+        "semantic_scholar": "S2-1",
+    }
+    assert {source.provider for source in paper.sources} == {
+        "openalex",
+        "crossref",
+        "semantic_scholar",
+    }
+    assert paper.authors[0].openalex_id == "https://openalex.org/A1"
+    assert paper.authors[0].orcid == "https://orcid.org/0000-0002-1825-0097"
+
+
+def test_semantic_scholar_only_evidence_canonicalizes_and_taxonomy_has_no_authority() -> None:
+    plain = semantic_scholar_evidence("S2-only")
+    tagged = semantic_scholar_evidence(
+        "S2-only",
+        topics=(ProviderTopic(value="Statistics", source="s2-fos-model"),),
+    )
+
+    plain_result = canonicalize_records((plain,))
+    tagged_result = canonicalize_records((tagged,))
+
+    assert len(tagged_result.papers) == 1
+    assert paper_projection(tagged_result.papers[0]) == paper_projection(
+        plain_result.papers[0]
+    )
+    assert tagged_result.papers[0].external_ids.model_dump()[
+        "semantic_scholar"
+    ] == "S2-only"
+    assert [source.provider for source in tagged_result.papers[0].sources] == [
+        "semantic_scholar"
+    ]
+
+
+def test_taxonomy_does_not_affect_equal_snapshot_selection() -> None:
+    base = semantic_scholar_evidence("S2-equal")
+    ada = base.model_copy(
+        update={"authors": (author("Ada Author"),)}
+    )
+    zoe = base.model_copy(
+        update={"authors": (author("Zoe Author"),)}
+    )
+    alpha_topic = (ProviderTopic(value="Alpha", source="s2-fos-model"),)
+    zulu_topic = (ProviderTopic(value="Zulu", source="s2-fos-model"),)
+
+    first = canonicalize_records(
+        (
+            ada.model_copy(
+                update={
+                    "provider_topics": zulu_topic,
+                    "fields_of_study": ("Zulu",),
+                }
+            ),
+            zoe.model_copy(
+                update={
+                    "provider_topics": alpha_topic,
+                    "fields_of_study": ("Alpha",),
+                }
+            ),
+        )
+    )
+    swapped = canonicalize_records(
+        (
+            ada.model_copy(
+                update={
+                    "provider_topics": alpha_topic,
+                    "fields_of_study": ("Alpha",),
+                }
+            ),
+            zoe.model_copy(
+                update={
+                    "provider_topics": zulu_topic,
+                    "fields_of_study": ("Zulu",),
+                }
+            ),
+        )
+    )
+
+    assert paper_projection(first.papers[0]) == paper_projection(swapped.papers[0])
+    assert [item.name for item in first.papers[0].authors] == ["Ada Author"]
 
 
 def test_title_fallback_does_not_use_evidence_without_authors() -> None:

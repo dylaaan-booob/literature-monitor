@@ -148,6 +148,13 @@ class EvidenceVersionHint(DomainModel):
     url: NonEmptyStr | None = None
 
 
+class ProviderTopic(DomainModel):
+    """Reconstructible provider taxonomy, distinct from author keywords."""
+
+    value: NonEmptyStr
+    source: NonEmptyStr | None = None
+
+
 class ProviderWorkEvidence(DomainModel):
     """Transient provider-neutral evidence consumed by canonicalization."""
 
@@ -157,6 +164,8 @@ class ProviderWorkEvidence(DomainModel):
     publication_date: Date | None = None
     abstract: str | None = None
     author_keywords: tuple[NonEmptyStr, ...] = ()
+    provider_topics: tuple[ProviderTopic, ...] = ()
+    fields_of_study: tuple[NonEmptyStr, ...] = ()
     authors: tuple[Author, ...] = ()
     external_ids: ExternalIds = Field(default_factory=ExternalIds)
     dates: tuple[EvidenceDate, ...] = ()

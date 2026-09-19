@@ -10,6 +10,7 @@ from literature_monitor.keywords import (
     Phrase,
     SearchableProjection,
     Term,
+    broad_positive_query,
     build_searchable_projection,
     evaluate_keyword_expression,
     evaluate_searchable_projection,
@@ -18,6 +19,7 @@ from literature_monitor.keywords import (
 from literature_monitor.models import (
     CanonicalMetadata,
     MetadataSource,
+    ProviderTopic,
     ProviderWorkEvidence,
 )
 
@@ -46,6 +48,8 @@ def provider_evidence(
     title: str | None = None,
     abstract: str | None = None,
     author_keywords: tuple[str, ...] = (),
+    provider_topics: tuple[ProviderTopic, ...] = (),
+    fields_of_study: tuple[str, ...] = (),
 ) -> ProviderWorkEvidence:
     return ProviderWorkEvidence(
         provenance=MetadataSource(
@@ -56,6 +60,8 @@ def provider_evidence(
         title=title,
         abstract=abstract,
         author_keywords=author_keywords,
+        provider_topics=provider_topics,
+        fields_of_study=fields_of_study,
     )
 
 
@@ -238,3 +244,57 @@ def test_crossref_abstract_rescues_openalex_search_miss() -> None:
         projection,
     )
     assert not matches('"Cox regression"', title="Unrelated title")
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("causal", "causal"),
+        ('"causal inference"', '"causal inference"'),
+        ("causal AND genomics", "(causal) + (genomics)"),
+        ("causal OR bayesian", "(causal) | (bayesian)"),
+        (
+            "(causal OR bayesian) AND genomics",
+            "((causal) | (bayesian)) + (genomics)",
+        ),
+        ("causal AND NOT review", "causal"),
+        ("(causal OR bayesian) AND NOT editorial", "(causal) | (bayesian)"),
+        ("NOT review", None),
+    ],
+)
+def test_broad_positive_query_derivation(
+    expression: str,
+    expected: str | None,
+) -> None:
+    assert broad_positive_query(parse_keyword_expression(expression)) == expected
+
+
+def test_broad_positive_query_sanitizes_provider_operators() -> None:
+    expression = And(
+        Term("causal|review"),
+        Phrase('genomics + -editorial (survey) "quoted"'),
+    )
+
+    assert broad_positive_query(expression) == (
+        '(causal review) + ("genomics editorial survey quoted")'
+    )
+
+
+def test_provider_taxonomy_is_not_searchable() -> None:
+    projection = build_searchable_projection(
+        (
+            provider_evidence(
+                "semantic_scholar",
+                title="Unrelated",
+                provider_topics=(
+                    ProviderTopic(value="Causal inference", source="s2-fos-model"),
+                ),
+                fields_of_study=("Genomics",),
+            ),
+        )
+    )
+
+    assert not evaluate_searchable_projection(
+        parse_keyword_expression("causal OR genomics"),
+        projection,
+    )

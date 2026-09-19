@@ -44,6 +44,12 @@ from literature_monitor.openalex import (
     resolve_journal_source,
 )
 from literature_monitor.retrieval import assemble_provider_evidence
+from literature_monitor.semantic_scholar import (
+    SemanticScholarIssue,
+    SemanticScholarIssueSeverity,
+    augment_with_semantic_scholar,
+    create_semantic_scholar_client,
+)
 
 
 def _date_argument(value: str) -> date:
@@ -198,6 +204,26 @@ def _log_canonicalization_issue(
         issue.stage,
         detail,
     )
+
+
+def _log_semantic_scholar_issues(
+    logger: logging.Logger,
+    issues: Sequence[SemanticScholarIssue],
+) -> None:
+    for issue in issues:
+        detail = issue.message
+        if issue.doi is not None:
+            detail = f"DOI {issue.doi}: {detail}"
+        if issue.paper_id is not None:
+            detail = f"{issue.paper_id}: {detail}"
+        if issue.journal is not None:
+            detail = f"{issue.journal}: {detail}"
+        log = (
+            logger.error
+            if issue.severity is SemanticScholarIssueSeverity.ERROR
+            else logger.warning
+        )
+        log("Semantic Scholar [%s]: %s", issue.stage, detail)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -414,7 +440,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             crossref.records,
         )
         _log_enrichment_issues(logger, retrieval.issues)
-        consolidation = consolidate_evidence(retrieval.evidence)
+        semantic_scholar_client = create_semantic_scholar_client(
+            os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
+        )
+        semantic_scholar = augment_with_semantic_scholar(
+            semantic_scholar_client,
+            retrieval.evidence,
+            journals,
+            args.from_date,
+            args.to_date,
+            keyword_ast,
+        )
+        _log_semantic_scholar_issues(logger, semantic_scholar.issues)
+        all_evidence = (*retrieval.evidence, *semantic_scholar.evidence)
+        consolidation = consolidate_evidence(all_evidence)
         for issue in consolidation.issues:
             _log_canonicalization_issue(logger, "Consolidation", issue)
         retained_clusters = tuple(
@@ -435,7 +474,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             _log_canonicalization_issue(logger, "Canonicalization", issue)
 
         provider_errors = (
-            openalex.has_errors or crossref.has_errors or retrieval.has_errors
+            openalex.has_errors
+            or crossref.has_errors
+            or retrieval.has_errors
+            or semantic_scholar.has_errors
+        )
+        provider_issue_count = (
+            len(openalex.issues)
+            + len(crossref.issues)
+            + len(retrieval.issues)
+            + len(semantic_scholar.issues)
         )
         if args.command == "canonicalize":
             for paper in canonicalization.papers:
@@ -443,18 +491,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             logger.info(
                 "Canonicalization diagnostic completed: %d OpenAlex records, "
                 "%d Crossref discovery records, %d Crossref DOI supplement "
-                "records, %d evidence clusters, %d retained clusters, "
-                "%d canonical papers, %d consolidation issues, "
-                "%d canonicalization issues, %d provider issues",
+                "records, %d Semantic Scholar batch supplement records, "
+                "%d Semantic Scholar discovery records, %d evidence clusters, "
+                "%d retained clusters, %d canonical papers, %d consolidation "
+                "issues, %d canonicalization issues, %d provider issues",
                 len(openalex.records),
                 len(crossref.records),
                 len(retrieval.supplement_records),
+                len(semantic_scholar.supplement_records),
+                len(semantic_scholar.discovered_records),
                 len(consolidation.clusters),
                 len(retained_clusters),
                 len(canonicalization.papers),
                 len(consolidation.issues),
                 len(canonicalization.issues),
-                len(openalex.issues) + len(crossref.issues) + len(retrieval.issues),
+                provider_issue_count,
             )
             return 1 if provider_errors else 0
 
@@ -471,14 +522,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             log("Materialization [%s]: %s", issue.path, issue.message)
         logger.info(
             "Materialization completed: %d OpenAlex records, %d Crossref "
-            "discovery records, %d Crossref DOI supplement records, %d evidence "
-            "clusters, %d retained clusters, %d canonical papers, %d paper files "
-            "created, %d paper files matched, %d paper files updated, %d author "
-            "files created, %d author files existing, %d materialization issues, "
-            "%d consolidation issues, %d canonicalization issues, %d provider issues",
+            "discovery records, %d Crossref DOI supplement records, %d Semantic "
+            "Scholar batch supplement records, %d Semantic Scholar discovery "
+            "records, %d evidence clusters, %d retained clusters, %d canonical papers, "
+            "%d paper files created, %d paper files matched, %d paper files updated, "
+            "%d author files created, %d author files existing, %d materialization "
+            "issues, %d consolidation issues, %d canonicalization issues, %d "
+            "provider issues",
             len(openalex.records),
             len(crossref.records),
             len(retrieval.supplement_records),
+            len(semantic_scholar.supplement_records),
+            len(semantic_scholar.discovered_records),
             len(consolidation.clusters),
             len(retained_clusters),
             len(canonicalization.papers),
@@ -490,7 +545,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             len(materialization.issues),
             len(consolidation.issues),
             len(canonicalization.issues),
-            len(openalex.issues) + len(crossref.issues) + len(retrieval.issues),
+            provider_issue_count,
         )
         return 1 if provider_errors or materialization.has_errors else 0
     return 2

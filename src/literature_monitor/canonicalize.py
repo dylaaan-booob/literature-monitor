@@ -156,7 +156,11 @@ def _record_key(record: ProviderWorkEvidence) -> tuple[str, str]:
 
 
 def _provider_label(provider: str) -> str:
-    labels = {"openalex": "OpenAlex", "crossref": "Crossref"}
+    labels = {
+        "openalex": "OpenAlex",
+        "crossref": "Crossref",
+        "semantic_scholar": "Semantic Scholar",
+    }
     normalized = provider.strip().casefold()
     return labels.get(normalized, provider.strip())
 
@@ -191,7 +195,12 @@ def _choose_evidence(
     candidates = [
         record for record in candidates if _completeness(record) == completeness
     ]
-    return min(candidates, key=lambda record: record.model_dump_json())
+    return min(
+        candidates,
+        key=lambda record: record.model_copy(
+            update={"provider_topics": (), "fields_of_study": ()}
+        ).model_dump_json(),
+    )
 
 
 def _nonempty_conflicts(

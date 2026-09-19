@@ -83,6 +83,7 @@ _OPERATORS = {
 }
 
 _WHITESPACE_PATTERN = re.compile(r"\s+")
+_PROVIDER_LITERAL_SEPARATOR = re.compile(r"[^\w\s]", re.UNICODE)
 
 
 def _tokenize(text: str) -> tuple[_Token, ...]:
@@ -207,6 +208,39 @@ class _Parser:
 
 def parse_keyword_expression(text: str) -> KeywordExpression:
     return _Parser(text).parse()
+
+
+def _provider_literal(value: str, *, phrase: bool) -> str | None:
+    normalized = unicodedata.normalize("NFKC", value)
+    sanitized = _PROVIDER_LITERAL_SEPARATOR.sub(" ", normalized)
+    sanitized = _WHITESPACE_PATTERN.sub(" ", sanitized).strip()
+    if not sanitized:
+        return None
+    return f'"{sanitized}"' if phrase else sanitized
+
+
+def broad_positive_query(expression: KeywordExpression) -> str | None:
+    """Derive a safe positive-only Semantic Scholar bulk-search query."""
+
+    def convert(node: KeywordExpression) -> str | None:
+        if isinstance(node, Term):
+            return _provider_literal(node.value, phrase=False)
+        if isinstance(node, Phrase):
+            return _provider_literal(node.value, phrase=True)
+        if isinstance(node, Not):
+            return None
+        if isinstance(node, (And, Or)):
+            left = convert(node.left)
+            right = convert(node.right)
+            if left is None:
+                return right
+            if right is None:
+                return left
+            operator = "+" if isinstance(node, And) else "|"
+            return f"({left}) {operator} ({right})"
+        raise TypeError(f"unsupported keyword expression node: {type(node).__name__}")
+
+    return convert(expression)
 
 
 def _normalize_search_text(value: str) -> str:

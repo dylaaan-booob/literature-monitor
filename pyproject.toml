@@ -9,6 +9,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "pydantic>=2,<3",
     "PyYAML>=6,<7",
+    "semanticscholar>=0.12,<0.13",
 ]
 
 [project.scripts]

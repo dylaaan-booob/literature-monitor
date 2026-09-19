@@ -188,6 +188,7 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     output_dir = tmp_path / "vault"
     openalex_openers: list[SequenceOpener] = []
     crossref_openers: list[SequenceOpener] = []
+    semantic_clients: list[object] = []
     matching_payload = fixture("crossref", "work_complete.json")["message"]
     matching_payload["author"] = [{"given": "Thomas", "family": "Ding"}]
     matching_payload["ISSN"] = ["0006-341X"]
@@ -228,10 +229,88 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
             sleep=lambda _delay: None,
         )
 
+    class FakeSemanticScholar:
+        def __init__(self, *, fail_search: bool) -> None:
+            self.fail_search = fail_search
+            self.batch_calls: list[list[str]] = []
+            self.search_calls: list[dict[str, object]] = []
+
+        def get_papers(
+            self,
+            paper_ids: list[str],
+            **kwargs: object,
+        ) -> tuple[list[dict[str, object]], list[str]]:
+            self.batch_calls.append(paper_ids)
+            requested = {identifier.casefold() for identifier in paper_ids}
+            records: list[dict[str, object]] = []
+            if "doi:10.1093/biomtc/ujag004" in requested:
+                records.append(
+                    {
+                        "paperId": "S2-three-provider",
+                        "corpusId": 1001,
+                        "externalIds": {"DOI": "10.1093/biomtc/ujag004"},
+                        "title": "A Semiparametric Approach to the Cox Model",
+                        "abstract": "Semantic rescue evidence for the retained paper.",
+                        "authors": [{"name": "Thomas Ding"}],
+                        "publicationDate": "2026-01-10",
+                        "year": 2026,
+                        "journal": {"name": "Biometrics"},
+                        "publicationVenue": {
+                            "name": "Biometrics",
+                            "issn": "0006-341X",
+                        },
+                        "venue": "Biometrics",
+                        "fieldsOfStudy": ["Medicine"],
+                        "s2FieldsOfStudy": [
+                            {"category": "Medicine", "source": "s2-fos-model"}
+                        ],
+                    }
+                )
+            missing = [
+                identifier
+                for identifier in paper_ids
+                if identifier.casefold() != "doi:10.1093/biomtc/ujag004"
+            ]
+            return records, missing
+
+        def search_paper(self, query: str, **kwargs: object) -> list[dict[str, object]]:
+            self.search_calls.append({"query": query, **kwargs})
+            if self.fail_search:
+                raise ConnectionError("Semantic Scholar search unavailable")
+            return [
+                {
+                    "paperId": "S2-only",
+                    "corpusId": 1002,
+                    "externalIds": {"DOI": "10.5555/s2-only"},
+                    "title": "Semantic only supplemental study",
+                    "abstract": "Provider-only discovery evidence.",
+                    "authors": [{"name": "Semantic Author"}],
+                    "publicationDate": "2026-01-22",
+                    "year": 2026,
+                    "journal": {"name": "Biometrics"},
+                    "publicationVenue": {
+                        "name": "Biometrics",
+                        "issn": "0006-341X",
+                    },
+                    "venue": "Biometrics",
+                    "fieldsOfStudy": [],
+                    "s2FieldsOfStudy": [],
+                }
+            ]
+
+    def semantic_scholar_client(api_key: str | None) -> FakeSemanticScholar:
+        client = FakeSemanticScholar(fail_search=bool(semantic_clients))
+        semantic_clients.append(client)
+        return client
+
     monkeypatch.delenv("OPENALEX_API_KEY", raising=False)
     monkeypatch.delenv("CROSSREF_MAILTO", raising=False)
     monkeypatch.setattr("literature_monitor.cli.OpenAlexClient", openalex_client)
     monkeypatch.setattr("literature_monitor.cli.CrossrefClient", crossref_client)
+    monkeypatch.setattr(
+        "literature_monitor.cli.create_semantic_scholar_client",
+        semantic_scholar_client,
+    )
 
     materialize_args = (
         "materialize",
@@ -244,7 +323,7 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
         "--to-date",
         "2026-01-31",
         "--keyword-expression",
-        '"important result" OR "crossref only"',
+        '"semantic rescue" OR "semantic only"',
         "--output-dir",
         str(output_dir),
     )
@@ -282,22 +361,24 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
         for path, values in values_by_path.items()
         if values["doi"] == "10.1093/biomtc/ujag004"
     )
-    crossref_only_path = next(
+    semantic_only_path = next(
         path
         for path, values in values_by_path.items()
-        if values["doi"] == "10.5555/crossref-only"
+        if values["doi"] == "10.5555/s2-only"
     )
     doi_values = values_by_path[doi_path]
     assert doi_values["doi"] == "10.1093/biomtc/ujag004"
     assert doi_values["external_ids"]["crossref"] == "10.1093/biomtc/ujag004"
+    assert doi_values["external_ids"]["semantic_scholar"] == "S2-three-provider"
     assert {source["provider"] for source in doi_values["sources"]} == {
         "crossref",
         "openalex",
+        "semantic_scholar",
     }
     assert {
         source["provider"]
-        for source in values_by_path[crossref_only_path]["sources"]
-    } == {"crossref"}
+        for source in values_by_path[semantic_only_path]["sources"]
+    } == {"semantic_scholar"}
     assert "The Cox model" in doi_path.read_text(encoding="utf-8")
 
     replace_once(
@@ -311,9 +392,9 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
         "## Notes\n\nHuman kept note.\n\n"
         "## Review Context\n\nRetain this custom section.\n",
     )
-    replace_once(crossref_only_path, "status: candidate\n", "status: rejected\n")
+    replace_once(semantic_only_path, "status: candidate\n", "status: rejected\n")
     replace_once(
-        crossref_only_path,
+        semantic_only_path,
         "## Notes\n",
         "## Notes\n\nHuman rejected note.\n",
     )
@@ -322,7 +403,7 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     expected_ids = dict(ids_by_path)
     expected_authors = set(author_paths)
 
-    assert main(materialize_args) == 0
+    assert main(materialize_args) == 1
     second_cli = capsys.readouterr()
     assert second_cli.out == ""
 
@@ -335,16 +416,20 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     } == expected_ids
 
     kept_contents = doi_path.read_text(encoding="utf-8")
-    rejected_contents = crossref_only_path.read_text(encoding="utf-8")
+    rejected_contents = semantic_only_path.read_text(encoding="utf-8")
     assert frontmatter(doi_path)["status"] == "kept"
     assert frontmatter(doi_path)["reviewer_state"] == {"priority": "high"}
     assert "Human kept note." in kept_contents
     assert "## Review Context\n\nRetain this custom section." in kept_contents
-    assert frontmatter(crossref_only_path)["status"] == "rejected"
+    assert frontmatter(semantic_only_path)["status"] == "rejected"
     assert "Human rejected note." in rejected_contents
 
     assert len(openalex_openers) == 2
     assert len(crossref_openers) == 2
+    assert len(semantic_clients) == 2
+    assert semantic_clients[0].search_calls  # type: ignore[attr-defined]
+    assert semantic_clients[1].search_calls  # type: ignore[attr-defined]
+    assert "Semantic Scholar search unavailable" in second_cli.err
     for opener in openalex_openers:
         assert opener.payloads == []
         parsed_requests = [urlparse(request.full_url) for request, _ in opener.requests]
@@ -538,6 +623,17 @@ def test_representative_multi_journal_cycle_handles_overlapping_rerun(
     monkeypatch.delenv("CROSSREF_MAILTO", raising=False)
     monkeypatch.setattr("literature_monitor.cli.OpenAlexClient", openalex_client)
     monkeypatch.setattr("literature_monitor.cli.CrossrefClient", crossref_client)
+    monkeypatch.setattr(
+        "literature_monitor.cli.create_semantic_scholar_client",
+        lambda api_key: type(
+            "EmptySemanticScholar",
+            (),
+            {
+                "get_papers": lambda self, paper_ids, **kwargs: ([], []),
+                "search_paper": lambda self, query, **kwargs: [],
+            },
+        )(),
+    )
 
     def materialize(from_date: str, to_date: str) -> int:
         return main(

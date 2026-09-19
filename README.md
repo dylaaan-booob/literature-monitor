@@ -1,10 +1,10 @@
 # Literature Monitor
 
 This repository contains the journal-monitoring workflow specified in
-`SPEC.md`. The workflow retrieves date-bounded journal evidence independently
-from OpenAlex and Crossref, consolidates provider evidence before local keyword
-filtering, canonicalizes retained papers and versions, incrementally updates
-durable Paper and Author Markdown, and exports kept papers.
+`SPEC.md`. The workflow retrieves journal evidence from OpenAlex, Crossref, and
+Semantic Scholar, consolidates provider evidence before local keyword filtering,
+canonicalizes retained papers and versions, incrementally updates durable Paper
+and Author Markdown, and exports kept papers.
 
 ## Setup
 
@@ -43,10 +43,11 @@ The default `uv run pytest` suite includes a deterministic full-cycle CLI
 regression using local HTTP fixtures. The Task 9 acceptance coverage includes
 a representative multi-journal full cycle and a partially overlapping rerun.
 The normal CLI commands can also be used for manual smoke validation against
-the real OpenAlex and Crossref providers, but those results depend on external
-service availability and are not part of the deterministic default suite.
-Optional credentials and contact details are supplied only through
-`OPENALEX_API_KEY` and `CROSSREF_MAILTO` environment variables.
+the real OpenAlex, Crossref, and Semantic Scholar providers, but those results
+depend on external service availability and are not part of the deterministic
+default suite. Optional credentials and contact details are supplied only
+through `OPENALEX_API_KEY`, `CROSSREF_MAILTO`, and
+`SEMANTIC_SCHOLAR_API_KEY` environment variables.
 
 ## Diagnose OpenAlex discovery
 
@@ -162,11 +163,14 @@ materialization, Zotero integration, or persistence.
 
 ## Diagnose canonicalization and versions
 
-The canonicalization diagnostic retrieves journal/date evidence from both
-OpenAlex and Crossref, performs bounded DOI supplementation for OpenAlex gaps,
-consolidates identities, and then evaluates the local keyword expression over
-all provider titles, author keywords, and abstracts. Retained clusters become
-canonical papers. Matching is conservative and evidence-based:
+The canonicalization diagnostic retrieves journal/date evidence from OpenAlex
+and Crossref, performs Crossref DOI supplementation, then uses Semantic Scholar
+for DOI batch supplementation and venue/date-bounded supplemental discovery.
+Provider search expands coverage only: all evidence is consolidated before the
+existing local keyword expression evaluates provider titles, true author
+keywords, and abstracts. Semantic Scholar fields of study remain provider
+taxonomy and are not treated as author keywords or searchable text. Retained
+clusters become canonical papers. Matching is conservative and evidence-based:
 exact identifiers and explicit version relations take priority, while the
 title-and-author fallback requires compatible ordered author identities.
 
@@ -189,9 +193,11 @@ stable UUID recovery across independent runs, or Zotero export.
 
 ## Materialize Obsidian Markdown
 
-The materialize command runs the same multi-source consolidation-before-filter
-pipeline and creates or incrementally updates Paper and Author notes under an
-Obsidian-compatible output directory:
+The materialize command runs the same three-provider
+consolidation-before-filter pipeline and creates or incrementally updates Paper
+and Author notes under an Obsidian-compatible output directory. Semantic
+Scholar access is anonymous by default; set `SEMANTIC_SCHOLAR_API_KEY` in the
+environment when using an API key:
 
 ```bash
 uv run literature-monitor materialize \

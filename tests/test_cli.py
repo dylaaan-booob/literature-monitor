@@ -48,6 +48,11 @@ from literature_monitor.openalex import (
     ResolvedSource,
 )
 from literature_monitor.retrieval import EvidenceRetrievalResult
+from literature_monitor.semantic_scholar import (
+    SemanticScholarIssue,
+    SemanticScholarIssueSeverity,
+    SemanticScholarRetrievalResult,
+)
 
 
 def application_handlers() -> list[logging.Handler]:
@@ -460,6 +465,7 @@ def install_multisource_mocks(
     crossref_records: tuple[CrossrefWorkRecord, ...] = (),
     crossref_issues: tuple[CrossrefDiscoveryIssue, ...] = (),
     retrieval_issues: tuple[EnrichmentIssue, ...] = (),
+    semantic_result: SemanticScholarRetrievalResult | None = None,
     events: list[str] | None = None,
 ) -> None:
     def discover(*args: object) -> CrossrefDiscoveryResult:
@@ -482,6 +488,101 @@ def install_multisource_mocks(
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.assemble_provider_evidence", assemble
     )
+    install_semantic_scholar_mock(
+        monkeypatch,
+        result=semantic_result,
+        events=events,
+    )
+
+
+def install_semantic_scholar_mock(
+    monkeypatch: object,
+    *,
+    result: SemanticScholarRetrievalResult | None = None,
+    events: list[str] | None = None,
+) -> None:
+    semantic_result = result or SemanticScholarRetrievalResult(
+        evidence=(),
+        supplement_records=(),
+        discovered_records=(),
+        issues=(),
+    )
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.create_semantic_scholar_client",
+        lambda api_key: object(),
+    )
+
+    def augment(*args: object, **kwargs: object) -> SemanticScholarRetrievalResult:
+        if events is not None:
+            events.append("semantic_scholar")
+        return semantic_result
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.augment_with_semantic_scholar",
+        augment,
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "openalex-discover",
+        "openalex-filter",
+        "crossref-discover",
+        "crossref-enrich",
+    ),
+)
+def test_historical_diagnostics_do_not_construct_semantic_scholar(
+    command: str,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+
+    def unexpected_semantic_scholar(*args: object, **kwargs: object) -> object:
+        raise AssertionError("historical diagnostics must not construct S2")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.OpenAlexClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: diagnostic_result(),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_crossref_journals",
+        lambda *args: crossref_discovery_result(),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.enrich_records",
+        lambda client, records: EnrichmentResult(
+            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
+            issues=(),
+        ),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.create_semantic_scholar_client",
+        unexpected_semantic_scholar,
+    )
+
+    result = main(
+        (
+            command,
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
 
 
 def test_openalex_discover_cli_writes_diagnostic_ndjson_and_logs_to_stderr(
@@ -926,6 +1027,8 @@ def test_crossref_enrich_invalid_override_constructs_no_clients(
     for name in (
         "OpenAlexClient",
         "CrossrefClient",
+        "create_semantic_scholar_client",
+        "augment_with_semantic_scholar",
         "discover_journals",
         "enrich_records",
     ):
@@ -1364,6 +1467,7 @@ def test_canonicalize_runs_full_pipeline_and_emits_canonical_ndjson(
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.canonicalize_records", fake_canonicalize
     )
+    install_semantic_scholar_mock(monkeypatch)
 
     result = main(
         (
@@ -1456,6 +1560,7 @@ def test_canonicalize_override_is_applied_to_unified_projection(
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.canonicalize_records", fake_canonicalize
     )
+    install_semantic_scholar_mock(monkeypatch)
 
     result = main(
         (
@@ -1527,6 +1632,7 @@ def test_canonicalize_emits_openalex_rescue_and_crossref_only_candidate(
         "literature_monitor.cli.discover_crossref_journals",
         lambda *args: crossref_discovery_result((rescue, crossref_only)),
     )
+    install_semantic_scholar_mock(monkeypatch)
 
     result = main(
         (
@@ -1580,6 +1686,7 @@ def test_canonicalize_keeps_crossref_candidate_when_openalex_fails(
         "literature_monitor.cli.discover_crossref_journals",
         lambda *args: crossref_discovery_result((crossref_only,)),
     )
+    install_semantic_scholar_mock(monkeypatch)
 
     result = main(
         (
@@ -1623,8 +1730,12 @@ def test_canonicalize_invalid_input_stops_before_provider_path(
     for name in (
         "OpenAlexClient",
         "CrossrefClient",
+        "create_semantic_scholar_client",
+        "augment_with_semantic_scholar",
         "discover_journals",
         "enrich_records",
+        "create_semantic_scholar_client",
+        "augment_with_semantic_scholar",
         "canonicalize_records",
     ):
         monkeypatch.setattr(  # type: ignore[attr-defined]
@@ -1658,6 +1769,8 @@ def test_canonicalize_invalid_config_stops_before_provider_path(
         "CrossrefClient",
         "discover_journals",
         "enrich_records",
+        "create_semantic_scholar_client",
+        "augment_with_semantic_scholar",
         "canonicalize_records",
     ):
         monkeypatch.setattr(  # type: ignore[attr-defined]
@@ -1846,6 +1959,182 @@ def test_canonicalize_crossref_error_still_emits_successful_papers(
     assert "server unavailable" in captured.err
 
 
+def test_canonicalize_uses_semantic_scholar_after_r2_and_before_filtering(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    timestamp = datetime(2026, 9, 19, tzinfo=timezone.utc)
+    openalex_record = OpenAlexWorkRecord(
+        metadata=CanonicalMetadata(title="Unrelated title", journal="Biometrics"),
+        external_ids=ExternalIds(
+            openalex="https://openalex.org/W-S2",
+            doi="10.5555/s2-rescue",
+        ),
+        authors=(Author(name="Ada Author", openalex_id="https://openalex.org/A1"),),
+        source_id="https://openalex.org/S8265502",
+        provenance=MetadataSource(
+            provider="openalex",
+            record_id="https://openalex.org/W-S2",
+            retrieved_at=timestamp,
+        ),
+    )
+    openalex_result = DiscoveryResult(
+        sources=diagnostic_result().sources,
+        records=(openalex_record,),
+        issues=(),
+    )
+    rescue = ProviderWorkEvidence(
+        provenance=MetadataSource(
+            provider="semantic_scholar",
+            record_id="S2-rescue",
+            retrieved_at=timestamp,
+        ),
+        title="Still unrelated",
+        journal="Biometrics",
+        abstract="Semantic rescue phrase",
+        authors=(Author(name="Ada Author"),),
+        external_ids=ExternalIds.model_validate(
+            {
+                "semantic_scholar": "S2-rescue",
+                "doi": "10.5555/s2-rescue",
+            }
+        ),
+    )
+    semantic_only = ProviderWorkEvidence(
+        provenance=MetadataSource(
+            provider="semantic_scholar",
+            record_id="S2-only",
+            retrieved_at=timestamp,
+        ),
+        title="Semantic rescue phrase in provider-only paper",
+        journal="Biometrics",
+        authors=(Author(name="Sole Author"),),
+        external_ids=ExternalIds.model_validate(
+            {"semantic_scholar": "S2-only", "doi": "10.5555/s2-only"}
+        ),
+    )
+    semantic_result = SemanticScholarRetrievalResult(
+        evidence=(rescue, semantic_only),
+        supplement_records=(),  # counts are tested independently of record models
+        discovered_records=(),
+        issues=(),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals", lambda *args: openalex_result
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+    install_multisource_mocks(monkeypatch, semantic_result=semantic_result)
+    api_keys: list[str | None] = []
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.create_semantic_scholar_client",
+        lambda api_key: api_keys.append(api_key) or object(),
+    )
+    monkeypatch.setenv("SEMANTIC_SCHOLAR_API_KEY", "test-s2-key")  # type: ignore[attr-defined]
+
+    result = main(
+        (
+            "canonicalize",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--journal",
+            "Biometrics",
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+            "--keyword-expression",
+            '"semantic rescue phrase"',
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    rows = [json.loads(line) for line in captured.out.splitlines()]
+    assert result == 0
+    assert api_keys == ["test-s2-key"]
+    assert {row["external_ids"]["doi"] for row in rows} == {
+        "10.5555/s2-rescue",
+        "10.5555/s2-only",
+    }
+    rescued = next(
+        row for row in rows if row["external_ids"]["doi"] == "10.5555/s2-rescue"
+    )
+    assert rescued["external_ids"]["openalex"] == "https://openalex.org/W-S2"
+    assert rescued["external_ids"]["semantic_scholar"] == "S2-rescue"
+
+
+@pytest.mark.parametrize(
+    ("severity", "expected_exit"),
+    [
+        (SemanticScholarIssueSeverity.WARNING, 0),
+        (SemanticScholarIssueSeverity.ERROR, 1),
+    ],
+)
+def test_canonicalize_semantic_scholar_issue_controls_exit_without_suppressing_output(
+    severity: SemanticScholarIssueSeverity,
+    expected_exit: int,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: enrichment_diagnostic_result(),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+    install_multisource_mocks(
+        monkeypatch,
+        semantic_result=SemanticScholarRetrievalResult(
+            evidence=(),
+            supplement_records=(),
+            discovered_records=(),
+            issues=(
+                SemanticScholarIssue(
+                    severity=severity,
+                    stage=(
+                        "search_failure"
+                        if expected_exit
+                        else "unsupported_venue_filter"
+                    ),
+                    message="provider diagnostic",
+                    journal=(
+                        None
+                        if expected_exit
+                        else "IEEE Transactions on Systems, Man and Cybernetics: Systems"
+                    ),
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.canonicalize_records",
+        lambda records: CanonicalizationResult(
+            papers=(canonical_paper(),), issues=()
+        ),
+    )
+
+    result = main(
+        (
+            "canonicalize",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == expected_exit
+    assert json.loads(captured.out)["metadata"]["title"] == "Canonical paper"
+    assert "provider diagnostic" in captured.err
+
+
 def test_materialize_runs_full_pipeline_in_order_without_stdout(
     tmp_path: Path, monkeypatch: object, capsys: object
 ) -> None:
@@ -1898,7 +2187,25 @@ def test_materialize_runs_full_pipeline_in_order_without_stdout(
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
     )
-    install_multisource_mocks(monkeypatch, events=events)
+    install_multisource_mocks(
+        monkeypatch,
+        events=events,
+        semantic_result=SemanticScholarRetrievalResult(
+            evidence=(),
+            supplement_records=(),
+            discovered_records=(),
+            issues=(
+                SemanticScholarIssue(
+                    severity=SemanticScholarIssueSeverity.WARNING,
+                    stage="unsupported_venue_filter",
+                    journal=(
+                        "IEEE Transactions on Systems, Man and Cybernetics: Systems"
+                    ),
+                    message="supplemental discovery was skipped",
+                ),
+            ),
+        ),
+    )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.consolidate_evidence", fake_consolidate
     )
@@ -1934,6 +2241,7 @@ def test_materialize_runs_full_pipeline_in_order_without_stdout(
         "openalex_discover",
         "crossref_discover",
         "supplement",
+        "semantic_scholar",
         "consolidate",
         "filter",
         "canonicalize",
@@ -1941,6 +2249,7 @@ def test_materialize_runs_full_pipeline_in_order_without_stdout(
     ]
     assert received_by_materialization == [canonical]
     assert captured.out == ""
+    assert "Semantic Scholar [unsupported_venue_filter]" in captured.err
     assert "1 canonical papers, 1 paper files created" in captured.err
     assert "1 author files created, 0 author files existing" in captured.err
 
@@ -1973,6 +2282,8 @@ def test_materialize_invalid_input_stops_before_provider_and_materializer(
     for name in (
         "OpenAlexClient",
         "CrossrefClient",
+        "create_semantic_scholar_client",
+        "augment_with_semantic_scholar",
         "discover_journals",
         "enrich_records",
         "canonicalize_records",
@@ -2008,6 +2319,8 @@ def test_materialize_invalid_config_stops_before_provider_and_materializer(
 
     for name in (
         "OpenAlexClient",
+        "create_semantic_scholar_client",
+        "augment_with_semantic_scholar",
         "discover_journals",
         "materialize_papers",
     ):
@@ -2255,6 +2568,8 @@ def test_export_kept_cli_writes_entries_without_entering_provider_pipeline(
         "load_config",
         "OpenAlexClient",
         "CrossrefClient",
+        "create_semantic_scholar_client",
+        "augment_with_semantic_scholar",
         "discover_journals",
         "enrich_records",
         "canonicalize_records",
