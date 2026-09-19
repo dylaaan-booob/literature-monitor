@@ -13,7 +13,7 @@ from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from pydantic import ValidationError
@@ -34,10 +34,15 @@ SOURCE_FIELDS = (
     "id,display_name,issn_l,issn,type,alternate_titles,abbreviated_title"
 )
 WORK_FIELDS = (
-    "id,doi,title,publication_date,abstract_inverted_index,authorships,primary_location"
+    "id,doi,title,publication_date,abstract_inverted_index,authorships,"
+    "primary_location,locations"
 )
 _OPENALEX_ID_PATTERN = re.compile(
     r"^(?:https://openalex\.org/)?([SAW]\d+)$", re.IGNORECASE
+)
+_ARXIV_LOCATION_ID = re.compile(
+    r"^pmh:oai:arxiv\.org:(.+)$",
+    re.IGNORECASE,
 )
 
 
@@ -68,6 +73,19 @@ class ResolvedSource:
     issn: tuple[str, ...]
 
 
+class OpenAlexVersion(str, Enum):
+    PUBLISHED = "publishedVersion"
+    ACCEPTED = "acceptedVersion"
+    SUBMITTED = "submittedVersion"
+
+
+class OpenAlexVersionHint(DomainModel):
+    source: NonEmptyStr
+    identifier: NonEmptyStr
+    version: OpenAlexVersion
+    url: NonEmptyStr | None = None
+
+
 class OpenAlexWorkRecord(DomainModel):
     """Provider record that deliberately has no canonical UUID or workflow state."""
 
@@ -76,6 +94,7 @@ class OpenAlexWorkRecord(DomainModel):
     authors: tuple[Author, ...]
     source_id: NonEmptyStr
     provenance: MetadataSource
+    version_hints: tuple[OpenAlexVersionHint, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -460,6 +479,81 @@ def _optional_openalex_id(value: Any, prefix: str) -> str | None:
     return _canonical_openalex_id(value, prefix)
 
 
+def _location_identity(value: Any) -> tuple[str, str] | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    identifier = value.strip()
+    if identifier.casefold().startswith("doi:"):
+        try:
+            doi = normalize_doi(identifier[4:])
+        except ValueError:
+            return None
+        return ("doi", doi) if doi is not None else None
+    arxiv = _ARXIV_LOCATION_ID.fullmatch(identifier)
+    if arxiv is not None and arxiv.group(1).strip():
+        return "arxiv", arxiv.group(1).strip()
+    return "openalex_location", identifier
+
+
+def _location_url(location: dict[str, Any]) -> tuple[str | None, bool]:
+    invalid = False
+    for field in ("landing_page_url", "pdf_url"):
+        value = location.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            invalid = True
+            continue
+        parsed = urlparse(value.strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            invalid = True
+            continue
+        return value.strip(), invalid
+    return None, invalid
+
+
+def _normalize_version_hints(
+    value: Any,
+) -> tuple[tuple[OpenAlexVersionHint, ...], tuple[str, ...]]:
+    if value is None:
+        return (), ()
+    if not isinstance(value, list):
+        return (), ("invalid locations was ignored",)
+    hints: dict[tuple[str, str, OpenAlexVersion], OpenAlexVersionHint] = {}
+    warnings: list[str] = []
+    for index, location in enumerate(value):
+        if not isinstance(location, dict):
+            warnings.append(f"ignored malformed location at index {index}")
+            continue
+        try:
+            version = OpenAlexVersion(location.get("version"))
+        except ValueError:
+            warnings.append(
+                f"ignored location at index {index} without a recognized version"
+            )
+            continue
+        identity = _location_identity(location.get("id"))
+        if identity is None:
+            warnings.append(
+                f"ignored location at index {index} without a stable identity"
+            )
+            continue
+        url, invalid_url = _location_url(location)
+        if invalid_url:
+            warnings.append(f"ignored invalid location URL at index {index}")
+        hint = OpenAlexVersionHint(
+            source=identity[0],
+            identifier=identity[1],
+            version=version,
+            url=url,
+        )
+        key = (hint.source, hint.identifier, hint.version)
+        current = hints.get(key)
+        if current is None or (current.url is None and hint.url is not None):
+            hints[key] = hint
+    return tuple(hints[key] for key in sorted(hints)), tuple(warnings)
+
+
 def _normalize_work(
     payload: Any,
     source: ResolvedSource,
@@ -498,6 +592,10 @@ def _normalize_work(
     except ValueError:
         abstract = None
         warnings.append("invalid abstract_inverted_index was treated as missing")
+    version_hints, location_warnings = _normalize_version_hints(
+        payload.get("locations")
+    )
+    warnings.extend(location_warnings)
 
     authorships = payload.get("authorships")
     if not isinstance(authorships, list):
@@ -543,6 +641,7 @@ def _normalize_work(
                 record_id=work_id,
                 retrieved_at=retrieved_at,
             ),
+            version_hints=version_hints,
         ),
         tuple(warnings),
     )

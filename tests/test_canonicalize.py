@@ -19,7 +19,11 @@ from literature_monitor.models import (
     MetadataSource,
     VersionKind,
 )
-from literature_monitor.openalex import OpenAlexWorkRecord
+from literature_monitor.openalex import (
+    OpenAlexVersion,
+    OpenAlexVersionHint,
+    OpenAlexWorkRecord,
+)
 
 
 NOW = datetime(2026, 9, 18, tzinfo=timezone.utc)
@@ -46,6 +50,7 @@ def openalex(
     author_keywords: tuple[str, ...] = (),
     retrieved_at: datetime = NOW,
     external_ids: dict[str, str] | None = None,
+    version_hints: tuple[OpenAlexVersionHint, ...] = (),
 ) -> OpenAlexWorkRecord:
     values: dict[str, Any] = {
         "openalex": f"https://openalex.org/{identifier}",
@@ -70,6 +75,7 @@ def openalex(
             record_id=f"https://openalex.org/{identifier}",
             retrieved_at=retrieved_at,
         ),
+        version_hints=version_hints,
     )
 
 
@@ -417,6 +423,68 @@ def test_online_evidence_outweighs_generic_published_for_kind() -> None:
 
     assert version.kind is VersionKind.JOURNAL_ONLINE
     assert version.date == date(2026, 4, 2)
+
+
+def test_one_openalex_work_builds_distinct_inline_location_versions() -> None:
+    record = openalex(
+        "W1",
+        doi="https://doi.org/10.5555/FINAL",
+        publication_date=date(2026, 9, 1),
+        version_hints=(
+            OpenAlexVersionHint(
+                source="doi",
+                identifier="10.5555/final",
+                version=OpenAlexVersion.PUBLISHED,
+                url="https://doi.org/10.5555/final",
+            ),
+            OpenAlexVersionHint(
+                source="arxiv",
+                identifier="2601.01234",
+                version=OpenAlexVersion.SUBMITTED,
+                url="https://arxiv.org/abs/2601.01234",
+            ),
+            OpenAlexVersionHint(
+                source="openalex_location",
+                identifier="pmh:oai:repository.example:item-1",
+                version=OpenAlexVersion.ACCEPTED,
+                url="https://repository.example/item-1",
+            ),
+        ),
+    )
+    evidence = crossref(
+        "10.5555/final",
+        dates=(partial_date("published-online", 2026, 8, 15),),
+    )
+
+    paper = canonicalize_records((enriched(record, evidence),)).papers[0]
+
+    versions = {
+        (version.source, version.identifier): version for version in paper.versions
+    }
+    assert set(versions) == {
+        ("arxiv", "2601.01234"),
+        ("doi", "10.5555/final"),
+        ("openalex_location", "pmh:oai:repository.example:item-1"),
+    }
+    assert versions[("doi", "10.5555/final")].kind is VersionKind.JOURNAL_ONLINE
+    assert versions[("doi", "10.5555/final")].date == date(2026, 8, 15)
+    assert versions[("arxiv", "2601.01234")].kind is VersionKind.PREPRINT
+    assert versions[("arxiv", "2601.01234")].date is None
+    assert (
+        versions[("openalex_location", "pmh:oai:repository.example:item-1")].kind
+        is VersionKind.ACCEPTED_MANUSCRIPT
+    )
+    assert (
+        versions[("openalex_location", "pmh:oai:repository.example:item-1")].date
+        is None
+    )
+    assert paper.external_ids.doi == "https://doi.org/10.5555/FINAL"
+    assert paper.external_ids.arxiv is None
+    assert paper.preferred_version is not None
+    assert (paper.preferred_version.source, paper.preferred_version.identifier) == (
+        "doi",
+        "10.5555/final",
+    )
 
 
 def test_partial_online_date_classifies_without_fabricating_version_date() -> None:

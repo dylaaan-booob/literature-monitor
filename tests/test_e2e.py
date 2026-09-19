@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from uuid import UUID
 
 import pytest
@@ -51,6 +52,16 @@ class SequenceOpener:
         return FakeResponse(self.payloads.pop(0))
 
 
+class RoutingOpener:
+    def __init__(self, route: Callable[[Any], object]) -> None:
+        self.route = route
+        self.requests: list[tuple[Any, float]] = []
+
+    def __call__(self, request: Any, *, timeout: float) -> FakeResponse:
+        self.requests.append((request, timeout))
+        return FakeResponse(self.route(request))
+
+
 def frontmatter(path: Path) -> dict[str, Any]:
     opening, payload, _body = path.read_text(encoding="utf-8").split(
         "---", maxsplit=2
@@ -71,6 +82,88 @@ def snapshot_files(root: Path) -> dict[Path, bytes]:
     return {
         path.relative_to(root): path.read_bytes()
         for path in sorted(root.rglob("*.md"))
+    }
+
+
+def source_payload(
+    source_id: str,
+    display_name: str,
+    issn_l: str,
+    issns: list[str],
+) -> dict[str, object]:
+    return {
+        "id": f"https://openalex.org/{source_id}",
+        "display_name": display_name,
+        "issn_l": issn_l,
+        "issn": issns,
+        "type": "journal",
+        "alternate_titles": [],
+        "abbreviated_title": None,
+    }
+
+
+def work_payload(
+    work_id: str,
+    doi: str,
+    title: str,
+    publication_date: str,
+    source_id: str,
+    journal: str,
+    author_id: str,
+    author_name: str,
+) -> dict[str, object]:
+    return {
+        "id": f"https://openalex.org/{work_id}",
+        "doi": f"https://doi.org/{doi}",
+        "title": title,
+        "publication_date": publication_date,
+        "abstract_inverted_index": None,
+        "authorships": [
+            {
+                "author": {
+                    "id": f"https://openalex.org/{author_id}",
+                    "display_name": author_name,
+                    "orcid": None,
+                },
+                "raw_author_name": author_name,
+            }
+        ],
+        "primary_location": {
+            "source": {
+                "id": f"https://openalex.org/{source_id}",
+                "display_name": journal,
+            }
+        },
+    }
+
+
+def works_payload(work: dict[str, object]) -> dict[str, object]:
+    return {
+        "meta": {"count": 1, "per_page": 100, "next_cursor": None},
+        "results": [work],
+        "group_by": [],
+    }
+
+
+def crossref_payload(
+    doi: str,
+    title: str,
+    journal: str,
+    publication_date: tuple[int, int, int],
+) -> dict[str, object]:
+    return {
+        "status": "ok",
+        "message-type": "work",
+        "message-version": "1.0.0",
+        "message": {
+            "DOI": doi,
+            "title": [title],
+            "container-title": [journal],
+            "abstract": "<jats:p>Fixture abstract.</jats:p>",
+            "published": {"date-parts": [[*publication_date]]},
+            "relation": {},
+            "type": "journal-article",
+        },
     }
 
 
@@ -255,3 +348,285 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     assert second_export.out == ""
     assert "Kept export completed: 0 entries, 0 issues" in second_export.err
     assert snapshot_files(output_dir) == after_manual_import
+
+
+def test_representative_multi_journal_cycle_handles_overlapping_rerun(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    whitelist_path = tmp_path / "representative-list.md"
+    whitelist_path.write_text(
+        "# Representative journals\n\n"
+        "## Journals\n\n"
+        "| Journal | ISSN/EISSN |\n"
+        "| --- | --- |\n"
+        "| BIOMETRICS | 0006-341X |\n"
+        "| IEEE Transactions on Pattern Analysis and Machine Intelligence "
+        "| 0162-8828 |\n"
+        "| Nature Methods | 1548-7091 / 1548-7105 |\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "venue_whitelist: representative-list.md\n"
+        "keyword_expression: biomarker OR vision OR genomics\n"
+        "log_level: INFO\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "vault"
+
+    sources = {
+        "0006-341X": source_payload(
+            "S8265502", "Biometrics", "0006-341X", ["0006-341X", "1541-0420"]
+        ),
+        "0162-8828": source_payload(
+            "S199944782",
+            "IEEE Transactions on Pattern Analysis and Machine Intelligence",
+            "0162-8828",
+            ["0162-8828", "1939-3539", "2160-9292"],
+        ),
+        "1548-7091": source_payload(
+            "S127827428",
+            "Nature Methods",
+            "1548-7091",
+            ["1548-7091", "1548-7105"],
+        ),
+        "1548-7105": source_payload(
+            "S127827428",
+            "Nature Methods",
+            "1548-7091",
+            ["1548-7091", "1548-7105"],
+        ),
+    }
+    works = {
+        "S8265502": work_payload(
+            "W900000001",
+            "10.1000/biometrics-overlap",
+            "Biomarker models for survival studies",
+            "2026-01-16",
+            "S8265502",
+            "Biometrics",
+            "A900000001",
+            "Ada Statistician",
+        ),
+        "S199944782": work_payload(
+            "W900000002",
+            "10.1000/tpami-overlap",
+            "Vision representations for robust recognition",
+            "2026-01-17",
+            "S199944782",
+            "IEEE Transactions on Pattern Analysis and Machine Intelligence",
+            "A900000002",
+            "Grace Vision",
+        ),
+        "S127827428": work_payload(
+            "W900000003",
+            "10.1000/nature-methods-overlap",
+            "Genomics workflows for single cells",
+            "2026-01-18",
+            "S127827428",
+            "Nature Methods",
+            "A900000003",
+            "Lin Methodologist",
+        ),
+    }
+    crossref_works = {
+        "10.1000/biometrics-overlap": crossref_payload(
+            "10.1000/biometrics-overlap",
+            "Biomarker models for survival studies",
+            "Biometrics",
+            (2026, 1, 16),
+        ),
+        "10.1000/tpami-overlap": crossref_payload(
+            "10.1000/tpami-overlap",
+            "Vision representations for robust recognition",
+            "IEEE Transactions on Pattern Analysis and Machine Intelligence",
+            (2026, 1, 17),
+        ),
+        "10.1000/nature-methods-overlap": crossref_payload(
+            "10.1000/nature-methods-overlap",
+            "Genomics workflows for single cells",
+            "Nature Methods",
+            (2026, 1, 18),
+        ),
+    }
+
+    def route_openalex(request: Any) -> object:
+        parsed = urlparse(request.full_url)
+        if parsed.path.startswith("/sources/issn:"):
+            return sources[parsed.path.removeprefix("/sources/issn:")]
+        assert parsed.path == "/works"
+        query = parse_qs(parsed.query)
+        filters = query["filter"][0].split(",")
+        source_id = filters[0].removeprefix("primary_location.source.id:")
+        assert filters[1] in {
+            "from_publication_date:2026-01-01",
+            "from_publication_date:2026-01-15",
+        }
+        assert filters[2] in {
+            "to_publication_date:2026-01-20",
+            "to_publication_date:2026-01-31",
+        }
+        return works_payload(works[source_id])
+
+    def route_crossref(request: Any) -> object:
+        parsed = urlparse(request.full_url)
+        doi = unquote(parsed.path.removeprefix("/v1/works/")).casefold()
+        return crossref_works[doi]
+
+    openalex_opener = RoutingOpener(route_openalex)
+    crossref_opener = RoutingOpener(route_crossref)
+
+    def openalex_client(**kwargs: object) -> OpenAlexClient:
+        return OpenAlexClient(
+            api_key=kwargs.get("api_key"),  # type: ignore[arg-type]
+            opener=openalex_opener,
+            sleep=lambda _delay: None,
+        )
+
+    def crossref_client(**kwargs: object) -> CrossrefClient:
+        return CrossrefClient(
+            mailto=kwargs.get("mailto"),  # type: ignore[arg-type]
+            opener=crossref_opener,
+            sleep=lambda _delay: None,
+        )
+
+    monkeypatch.delenv("OPENALEX_API_KEY", raising=False)
+    monkeypatch.delenv("CROSSREF_MAILTO", raising=False)
+    monkeypatch.setattr("literature_monitor.cli.OpenAlexClient", openalex_client)
+    monkeypatch.setattr("literature_monitor.cli.CrossrefClient", crossref_client)
+
+    def materialize(from_date: str, to_date: str) -> int:
+        return main(
+            (
+                "materialize",
+                "--config",
+                str(config_path),
+                "--from-date",
+                from_date,
+                "--to-date",
+                to_date,
+                "--output-dir",
+                str(output_dir),
+            )
+        )
+
+    assert materialize("2026-01-01", "2026-01-20") == 0
+    first_cli = capsys.readouterr()
+    assert first_cli.out == ""
+
+    paper_paths = tuple(sorted((output_dir / "Papers").glob("*.md")))
+    author_paths = tuple(sorted((output_dir / "Authors").glob("*.md")))
+    assert len(paper_paths) == 3
+    assert len(author_paths) == 3
+    paths_by_journal = {
+        str(frontmatter(path)["journal"]): path for path in paper_paths
+    }
+    assert set(paths_by_journal) == {
+        "Biometrics",
+        "IEEE Transactions on Pattern Analysis and Machine Intelligence",
+        "Nature Methods",
+    }
+    for path in paper_paths:
+        values = frontmatter(path)
+        assert values["status"] == "candidate"
+        assert values["doi"] in crossref_works
+        assert {source["provider"] for source in values["sources"]} == {
+            "crossref",
+            "openalex",
+        }
+
+    kept_path = paths_by_journal["Biometrics"]
+    rejected_path = paths_by_journal[
+        "IEEE Transactions on Pattern Analysis and Machine Intelligence"
+    ]
+    replace_once(
+        kept_path,
+        "status: candidate\n",
+        "status: kept\nreviewer_state:\n  priority: high\n",
+    )
+    replace_once(kept_path, "## Notes\n", "## Notes\n\nHuman kept note.\n")
+    replace_once(rejected_path, "status: candidate\n", "status: rejected\n")
+    replace_once(
+        rejected_path,
+        "## Notes\n",
+        "## Notes\n\nHuman rejected note.\n",
+    )
+
+    expected_paths = set(paper_paths)
+    expected_ids = {
+        path: UUID(str(frontmatter(path)["id"])) for path in paper_paths
+    }
+    expected_authors = set(author_paths)
+
+    assert materialize("2026-01-15", "2026-01-31") == 0
+    second_cli = capsys.readouterr()
+    assert second_cli.out == ""
+
+    rerun_paths = set((output_dir / "Papers").glob("*.md"))
+    rerun_authors = set((output_dir / "Authors").glob("*.md"))
+    assert rerun_paths == expected_paths
+    assert rerun_authors == expected_authors
+    assert {
+        path: UUID(str(frontmatter(path)["id"])) for path in rerun_paths
+    } == expected_ids
+    assert frontmatter(kept_path)["status"] == "kept"
+    assert frontmatter(kept_path)["reviewer_state"] == {"priority": "high"}
+    assert "Human kept note." in kept_path.read_text(encoding="utf-8")
+    assert frontmatter(rejected_path)["status"] == "rejected"
+    assert "Human rejected note." in rejected_path.read_text(encoding="utf-8")
+
+    openalex_requests = [
+        urlparse(request.full_url) for request, _timeout in openalex_opener.requests
+    ]
+    source_requests = [
+        request for request in openalex_requests if request.path.startswith("/sources/")
+    ]
+    assert [request.path for request in source_requests] == [
+        "/sources/issn:0006-341X",
+        "/sources/issn:0162-8828",
+        "/sources/issn:1548-7091",
+        "/sources/issn:1548-7105",
+    ] * 2
+    works_requests = [
+        request for request in openalex_requests if request.path == "/works"
+    ]
+    assert len(works_requests) == 6
+    expected_filters = [
+        (
+            f"primary_location.source.id:{source_id},"
+            "from_publication_date:2026-01-01,"
+            "to_publication_date:2026-01-20"
+        )
+        for source_id in ("S8265502", "S199944782", "S127827428")
+    ] + [
+        (
+            f"primary_location.source.id:{source_id},"
+            "from_publication_date:2026-01-15,"
+            "to_publication_date:2026-01-31"
+        )
+        for source_id in ("S8265502", "S199944782", "S127827428")
+    ]
+    for request, expected_filter in zip(works_requests, expected_filters):
+        query = parse_qs(request.query)
+        assert "search" not in query
+        assert "q" not in query
+        assert query["filter"] == [expected_filter]
+
+    crossref_requests = [
+        unquote(urlparse(request.full_url).path.removeprefix("/v1/works/"))
+        for request, _timeout in crossref_opener.requests
+    ]
+    assert crossref_requests == [
+        "10.1000/biometrics-overlap",
+        "10.1000/tpami-overlap",
+        "10.1000/nature-methods-overlap",
+    ] * 2
+
+    before_export = snapshot_files(output_dir)
+    assert main(("export-kept", "--output-dir", str(output_dir))) == 0
+    exported = capsys.readouterr()
+    assert exported.out == "10.1000/biometrics-overlap\n"
+    assert "Kept export completed: 1 entries, 0 issues" in exported.err
+    assert snapshot_files(output_dir) == before_export

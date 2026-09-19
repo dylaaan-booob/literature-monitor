@@ -10,12 +10,15 @@ import pytest
 from pydantic import ValidationError
 
 import literature_monitor.openalex as openalex_module
+from literature_monitor.canonicalize import canonicalize_records
 from literature_monitor.config import JournalConfig
-from literature_monitor.models import CanonicalMetadata
+from literature_monitor.crossref import EnrichedWorkRecord
+from literature_monitor.models import CanonicalMetadata, VersionKind
 from literature_monitor.openalex import (
     IssueSeverity,
     OpenAlexClient,
     OpenAlexRequestError,
+    OpenAlexVersion,
     discover_journals,
     resolve_journal_source,
 )
@@ -331,7 +334,8 @@ def test_discovery_pages_normalizes_records_and_builds_venue_first_query() -> No
             "from_publication_date:2026-01-01,to_publication_date:2026-09-18"
         ],
         "select": [
-            "id,doi,title,publication_date,abstract_inverted_index,authorships,primary_location"
+            "id,doi,title,publication_date,abstract_inverted_index,authorships,"
+            "primary_location,locations"
         ],
         "per_page": ["100"],
         "cursor": ["*"],
@@ -341,6 +345,121 @@ def test_discovery_pages_normalizes_records_and_builds_venue_first_query() -> No
         "search" not in parse_qs(urlparse(request.full_url).query)
         for request in work_requests
     )
+
+
+def test_normalization_preserves_inline_location_version_hints() -> None:
+    page = deepcopy(fixture("works_page_1.json"))
+    page["meta"]["next_cursor"] = None
+    work = page["results"][0]
+    work["doi"] = "https://doi.org/10.5555/FINAL"
+    work["keywords"] = [{"display_name": "Generated keyword"}]
+    work["topics"] = [{"display_name": "Generated topic"}]
+    work["locations"] = [
+        {
+            "id": "doi:10.5555/FINAL",
+            "version": "publishedVersion",
+            "landing_page_url": "https://doi.org/10.5555/final",
+        },
+        {
+            "id": "pmh:oai:arXiv.org:2601.01234",
+            "version": "submittedVersion",
+            "landing_page_url": "https://arxiv.org/abs/2601.01234",
+        },
+        {
+            "id": "pmh:oai:repository.example:item-1",
+            "version": "acceptedVersion",
+            "landing_page_url": "https://repository.example/item-1",
+        },
+    ]
+    client, _ = make_client(fixture("source_biometrics.json"), page)
+
+    result = discover_journals(
+        client,
+        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+    assert not result.has_errors
+    record = result.records[0]
+    assert record.external_ids.doi == "10.5555/final"
+    assert record.external_ids.arxiv is None
+    assert record.metadata.author_keywords == ()
+    assert {
+        (hint.source, hint.identifier, hint.version)
+        for hint in record.version_hints
+    } == {
+        ("doi", "10.5555/final", OpenAlexVersion.PUBLISHED),
+        ("arxiv", "2601.01234", OpenAlexVersion.SUBMITTED),
+        (
+            "openalex_location",
+            "pmh:oai:repository.example:item-1",
+            OpenAlexVersion.ACCEPTED,
+        ),
+    }
+
+    paper = canonicalize_records((EnrichedWorkRecord(openalex=record),)).papers[0]
+    versions = {
+        (version.source, version.identifier): version for version in paper.versions
+    }
+    assert versions[("doi", "10.5555/final")].kind is VersionKind.JOURNAL_FINAL
+    assert versions[("arxiv", "2601.01234")].kind is VersionKind.PREPRINT
+    assert versions[("arxiv", "2601.01234")].date is None
+    assert (
+        versions[("openalex_location", "pmh:oai:repository.example:item-1")].kind
+        is VersionKind.ACCEPTED_MANUSCRIPT
+    )
+    assert paper.preferred_version is not None
+    assert (paper.preferred_version.source, paper.preferred_version.identifier) == (
+        "doi",
+        "10.5555/final",
+    )
+
+
+def test_malformed_locations_fail_soft_without_dropping_work() -> None:
+    page = deepcopy(fixture("works_page_1.json"))
+    page["meta"]["next_cursor"] = None
+    invalid_collection = page["results"][0]
+    invalid_collection["locations"] = {"not": "a list"}
+    mixed = deepcopy(invalid_collection)
+    mixed["id"] = "https://openalex.org/W100"
+    mixed["locations"] = [
+        {
+            "id": "doi:10.5555/valid",
+            "version": "publishedVersion",
+        },
+        "malformed",
+        {"id": "pmh:oai:arXiv.org:2601.99999", "version": "unknownVersion"},
+        {"id": None, "version": "submittedVersion"},
+        {"id": "pmh:oai:arXiv.org:2601.88888"},
+    ]
+    page["results"] = [invalid_collection, mixed]
+    client, _ = make_client(fixture("source_biometrics.json"), page)
+
+    result = discover_journals(
+        client,
+        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+    assert len(result.records) == 2
+    assert not result.has_errors
+    assert result.records[0].metadata.title
+    mixed_record = next(
+        record
+        for record in result.records
+        if record.external_ids.openalex == "https://openalex.org/W100"
+    )
+    assert [
+        (hint.source, hint.identifier, hint.version)
+        for hint in mixed_record.version_hints
+    ] == [("doi", "10.5555/valid", OpenAlexVersion.PUBLISHED)]
+    warning_messages = [issue.message for issue in result.issues]
+    assert "invalid locations was ignored" in warning_messages
+    assert any("malformed location" in message for message in warning_messages)
+    assert any("without a recognized version" in message for message in warning_messages)
+    assert any("without a stable identity" in message for message in warning_messages)
 
 
 def test_normalization_preserves_author_order_orcid_and_abstract_positions() -> None:

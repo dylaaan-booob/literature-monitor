@@ -7,6 +7,8 @@ from uuid import UUID
 import pytest
 import yaml
 
+import literature_monitor.materialize as materialize_module
+from literature_monitor.kept_export import export_kept_papers
 from literature_monitor.materialize import (
     MISSING_ABSTRACT,
     MaterializationIssue,
@@ -93,6 +95,7 @@ def manifestation(
     version_source: str,
     version_identifier: str,
     version_date: date | None,
+    external_doi: str | None = None,
     author: Author = Author(name="Ada Author"),
     shared_record_id: str = "shared-work",
 ) -> CanonicalPaper:
@@ -111,7 +114,7 @@ def manifestation(
             abstract=f"{title} abstract",
             author_keywords=(title.casefold(),),
         ),
-        external_ids=ExternalIds(),
+        external_ids=ExternalIds(doi=external_doi),
         authors=(author,),
         versions=(version,),
         sources=(
@@ -595,9 +598,18 @@ def test_preferred_version_upgrade_updates_bibliographic_snapshot(
         "16345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         title="Preprint title",
         kind=VersionKind.PREPRINT,
-        version_source="arxiv",
-        version_identifier="2601.00001",
+        version_source="doi",
+        version_identifier="10.5555/preprint",
         version_date=date(2026, 1, 1),
+        external_doi="10.5555/preprint",
+    )
+    preprint = preprint.model_copy(
+        update={
+            "workflow": Workflow(
+                status=WorkflowStatus.KEPT,
+                discovered_at=NOW,
+            )
+        }
     )
     final = manifestation(
         "17345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
@@ -606,6 +618,7 @@ def test_preferred_version_upgrade_updates_bibliographic_snapshot(
         version_source="doi",
         version_identifier="10.5555/final",
         version_date=date(2026, 9, 10),
+        external_doi="HTTPS://DOI.ORG/10.5555/FINAL",
     )
     first = materialize_papers((preprint,), tmp_path)
 
@@ -621,8 +634,35 @@ def test_preferred_version_upgrade_updates_bibliographic_snapshot(
         "source": "doi",
         "identifier": "10.5555/final",
     }
-    assert len(values["versions"]) == 2  # type: ignore[arg-type]
+    assert values["doi"] == "10.5555/final"
+    assert values["external_ids"]["doi"] == "10.5555/final"  # type: ignore[index]
+    assert {
+        (version["kind"], version["source"], version["identifier"])
+        for version in values["versions"]  # type: ignore[union-attr]
+    } == {
+        ("preprint", "doi", "10.5555/preprint"),
+        ("journal_final", "doi", "10.5555/final"),
+    }
+    assert any(
+        issue.message == "doi changed with the effective preferred version"
+        for issue in result.issues
+    )
+    assert not any(
+        issue.message == "external ID doi conflicts with durable value"
+        for issue in result.issues
+    )
     assert not result.has_errors
+
+    stable_bytes = first.created_papers[0].read_bytes()
+    stable_rerun = materialize_papers((final,), tmp_path)
+
+    assert stable_rerun.updated_papers == ()
+    assert first.created_papers[0].read_bytes() == stable_bytes
+
+    exported = export_kept_papers(tmp_path)
+
+    assert exported.entries == ("10.5555/final",)
+    assert exported.issues == ()
 
 
 def test_lower_priority_rerun_preserves_effective_preferred_snapshot(
@@ -635,14 +675,16 @@ def test_lower_priority_rerun_preserves_effective_preferred_snapshot(
         version_source="doi",
         version_identifier="10.5555/final",
         version_date=date(2026, 9, 10),
+        external_doi="10.5555/final",
     )
     preprint = manifestation(
         "19345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         title="Preprint title",
         kind=VersionKind.PREPRINT,
-        version_source="arxiv",
-        version_identifier="2601.00001",
+        version_source="doi",
+        version_identifier="10.5555/preprint",
         version_date=date(2026, 1, 1),
+        external_doi="10.5555/preprint",
     )
     first = materialize_papers((final,), tmp_path)
 
@@ -656,9 +698,17 @@ def test_lower_priority_rerun_preserves_effective_preferred_snapshot(
         "source": "doi",
         "identifier": "10.5555/final",
     }
-    assert len(values["versions"]) == 2  # type: ignore[arg-type]
+    assert values["external_ids"]["doi"] == "10.5555/final"  # type: ignore[index]
+    assert {
+        version["identifier"]
+        for version in values["versions"]  # type: ignore[union-attr]
+    } == {"10.5555/preprint", "10.5555/final"}
     assert any(
         issue.severity is MaterializationIssueSeverity.WARNING
+        for issue in result.issues
+    )
+    assert any(
+        issue.message == "external ID doi conflicts with durable value"
         for issue in result.issues
     )
     assert not result.has_errors
@@ -1024,6 +1074,72 @@ def test_atomic_replace_failure_preserves_original_paper(
     assert path.read_bytes() == before
 
 
+def test_concurrent_paper_edit_aborts_update_without_blocking_other_papers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial = paper("22945678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    first = materialize_papers((initial,), tmp_path)
+    path = first.created_papers[0]
+    changed = initial.model_copy(
+        update={
+            "metadata": initial.metadata.model_copy(
+                update={"title": "Stale Generated Title"}
+            )
+        }
+    )
+    independent = paper(
+        "22a45678-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        title="Independent Paper",
+        authors=(
+            Author(name="Grace", openalex_id="https://openalex.org/A-independent"),
+        ),
+    ).model_copy(
+        update={
+            "external_ids": ExternalIds(doi="10.5555/independent"),
+            "versions": (),
+            "sources": (),
+            "preferred_version": None,
+        }
+    )
+    render_updated_paper = materialize_module._render_updated_paper
+    edit_injected = False
+
+    def render_then_edit(*args: object, **kwargs: object) -> str:
+        nonlocal edit_injected
+        contents = render_updated_paper(*args, **kwargs)  # type: ignore[arg-type]
+        state = args[0]
+        if not edit_injected and state.path == path:  # type: ignore[union-attr]
+            concurrent = path.read_text(encoding="utf-8").replace(
+                "## Notes\n",
+                "## Notes\n\nConcurrent human note.\n",
+            )
+            path.write_text(concurrent, encoding="utf-8")
+            edit_injected = True
+        return contents
+
+    monkeypatch.setattr(materialize_module, "_render_updated_paper", render_then_edit)
+
+    result = materialize_papers((changed, independent), tmp_path)
+
+    contents = path.read_text(encoding="utf-8")
+    conflict_errors = [
+        issue
+        for issue in result.issues
+        if issue.path == path
+        and issue.severity is MaterializationIssueSeverity.ERROR
+    ]
+    assert result.has_errors
+    assert result.updated_papers == ()
+    assert len(conflict_errors) == 1
+    assert "changed on disk after it was scanned" in conflict_errors[0].message
+    assert "Concurrent human note." in contents
+    assert "Stale Generated Title" not in contents
+    assert len(result.created_papers) == 1
+    assert result.created_papers[0].name.startswith("independent-paper--")
+    assert result.created_papers[0].is_file()
+
+
 def test_issue_severity_controls_has_errors(tmp_path: Path) -> None:
     warning = MaterializationIssue(
         tmp_path,
@@ -1116,6 +1232,8 @@ def test_external_ids_and_sources_union_preserve_durable_conflicts(
                     retrieved_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
                 ),
             ),
+            "versions": (),
+            "preferred_version": None,
         }
     )
     first = materialize_papers((initial,), tmp_path)

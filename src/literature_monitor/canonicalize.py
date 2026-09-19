@@ -25,7 +25,11 @@ from literature_monitor.models import (
     VersionKind,
     VersionRef,
 )
-from literature_monitor.openalex import OpenAlexWorkRecord
+from literature_monitor.openalex import (
+    OpenAlexVersion,
+    OpenAlexVersionHint,
+    OpenAlexWorkRecord,
+)
 
 
 _VERSION_RELATIONS = {
@@ -79,6 +83,12 @@ _VERSION_PRIORITY = {
     VersionKind.UNKNOWN: 0,
 }
 
+_OPENALEX_VERSION_ROLES = {
+    OpenAlexVersion.PUBLISHED: "publication",
+    OpenAlexVersion.ACCEPTED: "manuscript",
+    OpenAlexVersion.SUBMITTED: "preprint",
+}
+
 
 @dataclass(frozen=True)
 class CanonicalizationIssue:
@@ -108,6 +118,12 @@ class _BuiltVersion:
     version: PaperVersion
     representative: _Record
     crossref: CrossrefWorkRecord | None
+
+
+@dataclass(frozen=True)
+class _VersionEvidence:
+    record_index: int
+    hint: OpenAlexVersionHint | None = None
 
 
 class _UnionFind:
@@ -150,6 +166,7 @@ def _openalex_completeness(record: OpenAlexWorkRecord) -> tuple[int, ...]:
         int(bool(record.metadata.author_keywords)),
         sum(author.openalex_id is not None for author in record.authors),
         sum(author.orcid is not None for author in record.authors),
+        len(record.version_hints),
     )
 
 
@@ -597,6 +614,16 @@ def _version_key(record: _Record) -> tuple[str, str]:
     return "openalex", external_ids.openalex
 
 
+def _hint_version_key(hint: OpenAlexVersionHint) -> tuple[str, str]:
+    source = hint.source.strip().casefold()
+    if source == "doi":
+        doi = normalize_doi(hint.identifier)
+        if doi is None:
+            raise ValueError("OpenAlex DOI version hint is empty")
+        return source, doi
+    return source, hint.identifier.strip()
+
+
 def _representative(records: Sequence[_Record]) -> _Record:
     completeness = max(_openalex_completeness(record.openalex) for record in records)
     candidates = [
@@ -725,9 +752,11 @@ def _version_kind(
     records: Sequence[_Record],
     roles: dict[int, set[str]],
     indexes: Sequence[int],
+    hints: Sequence[OpenAlexVersionHint],
     issues: list[CanonicalizationIssue],
 ) -> VersionKind:
     evidence = set().union(*(roles.get(index, set()) for index in indexes))
+    evidence.update(_OPENALEX_VERSION_ROLES[hint.version] for hint in hints)
     if key[0] == "arxiv":
         evidence.add("preprint")
     explicit_roles = evidence & {"preprint", "manuscript", "publication"}
@@ -767,6 +796,8 @@ def _resolved_version_date(
     representative: _Record,
     issues: list[CanonicalizationIssue],
 ) -> date | None:
+    if not records:
+        return None
     by_kind: dict[CrossrefDateKind, set[date]] = defaultdict(set)
     for record in records:
         if record.crossref is None:
@@ -804,22 +835,48 @@ def _build_versions(
     roles: dict[int, set[str]],
     issues: list[CanonicalizationIssue],
 ) -> list[_BuiltVersion]:
-    grouped: dict[tuple[str, str], list[int]] = defaultdict(list)
+    grouped: dict[tuple[str, str], list[_VersionEvidence]] = defaultdict(list)
     for index in component:
-        grouped[_version_key(records[index])].append(index)
+        grouped[_version_key(records[index])].append(_VersionEvidence(index))
+        for hint in records[index].openalex.version_hints:
+            grouped[_hint_version_key(hint)].append(
+                _VersionEvidence(index, hint)
+            )
 
     built: list[_BuiltVersion] = []
     for key in sorted(grouped):
-        indexes = grouped[key]
+        evidence = grouped[key]
+        indexes = sorted({item.record_index for item in evidence})
+        base_indexes = sorted(
+            {
+                item.record_index
+                for item in evidence
+                if item.hint is None
+            }
+        )
+        hints = tuple(
+            item.hint for item in evidence if item.hint is not None
+        )
         version_records = [records[index] for index in indexes]
+        base_records = [records[index] for index in base_indexes]
         issues.extend(_version_evidence_issues(key, version_records))
         representative = _representative(version_records)
-        kind = _version_kind(key, version_records, roles, indexes, issues)
+        kind = _version_kind(
+            key,
+            version_records,
+            roles,
+            base_indexes,
+            hints,
+            issues,
+        )
         version_date = _resolved_version_date(
             kind,
-            version_records,
+            base_records,
             representative,
             issues,
+        )
+        hint_urls = sorted(
+            {hint.url for hint in hints if hint.url is not None}
         )
         built.append(
             _BuiltVersion(
@@ -827,10 +884,11 @@ def _build_versions(
                     kind=kind,
                     source=key[0],
                     identifier=key[1],
+                    url=hint_urls[0] if hint_urls else None,
                     date=version_date,
                 ),
                 representative=representative,
-                crossref=_version_crossref(version_records),
+                crossref=_version_crossref(base_records),
             )
         )
     return built

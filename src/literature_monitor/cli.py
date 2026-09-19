@@ -30,6 +30,7 @@ from literature_monitor.openalex import (
     IssueSeverity,
     OpenAlexClient,
     discover_journals,
+    resolve_journal_source,
 )
 
 
@@ -53,7 +54,10 @@ def _add_discovery_arguments(parser: argparse.ArgumentParser) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="literature-monitor")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    validate = subparsers.add_parser("validate", help="validate local configuration")
+    validate = subparsers.add_parser(
+        "validate",
+        help="validate configuration and OpenAlex venue resolution",
+    )
     validate.add_argument("--config", type=Path, required=True)
     discover = subparsers.add_parser(
         "openalex-discover",
@@ -129,13 +133,44 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         logger = configure_logging(config.log_level.value)
         issn_count = sum(len(journal.issn) for journal in config.journals)
+        client = OpenAlexClient(api_key=os.environ.get("OPENALEX_API_KEY"))
+        resolved_count = 0
+        warning_count = 0
+        error_count = 0
+        for journal in config.journals:
+            source, issues = resolve_journal_source(client, journal)
+            if source is not None:
+                resolved_count += 1
+                logger.info(
+                    "resolved %s to %s (%s)",
+                    source.journal,
+                    source.display_name,
+                    source.openalex_id,
+                )
+            for issue in issues:
+                detail = issue.message
+                if issue.issn is not None:
+                    detail = f"ISSN {issue.issn}: {detail}"
+                log = (
+                    logger.error
+                    if issue.severity is IssueSeverity.ERROR
+                    else logger.warning
+                )
+                log("%s [%s]: %s", issue.journal, issue.stage, detail)
+                if issue.severity is IssueSeverity.ERROR:
+                    error_count += 1
+                else:
+                    warning_count += 1
         logger.info(
-            "validated %d journals and %d ISSNs from %s",
+            "Validation completed: %d configured journals, %d configured ISSNs, "
+            "%d resolved sources, %d warnings, %d errors",
             len(config.journals),
             issn_count,
-            config.venue_whitelist,
+            resolved_count,
+            warning_count,
+            error_count,
         )
-        return 0
+        return 1 if error_count else 0
     if args.command in {
         "openalex-discover",
         "openalex-filter",

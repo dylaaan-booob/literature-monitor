@@ -18,7 +18,10 @@ uv sync
 ## Validate configuration
 
 `config.example.yaml` contains a syntax example, not a real research query.
-The command reads only the `Journals` section of `list.md`.
+The command validates the local configuration and the `Journals` section of
+`list.md`, then contacts OpenAlex to resolve every configured journal Source.
+It does not request Works or run discovery. OpenAlex supports anonymous Source
+lookups; set `OPENALEX_API_KEY` in the environment to use an API key.
 
 ```bash
 uv run literature-monitor validate --config config.example.yaml
@@ -30,18 +33,20 @@ uv run literature-monitor validate --config config.example.yaml
 uv run pytest
 ```
 
-Task 1 performs no network requests and does not implement discovery,
-Markdown materialization, Zotero integration, conference monitoring, or a
-database.
+Validation performs only OpenAlex Source resolution; it does not perform Works
+discovery, Markdown materialization, Zotero integration, conference monitoring,
+or database operations.
 
 ## End-to-end validation
 
 The default `uv run pytest` suite includes a deterministic full-cycle CLI
-regression using local HTTP fixtures. Task 9 also validates the same workflow
-against the real OpenAlex and Crossref providers, but live provider checks are
-kept outside the default test suite because they depend on external service
-availability. Optional credentials and contact details are supplied only
-through `OPENALEX_API_KEY` and `CROSSREF_MAILTO` environment variables.
+regression using local HTTP fixtures. The Task 9 acceptance coverage includes
+a representative multi-journal full cycle and a partially overlapping rerun.
+The normal CLI commands can also be used for manual smoke validation against
+the real OpenAlex and Crossref providers, but those results depend on external
+service availability and are not part of the deterministic default suite.
+Optional credentials and contact details are supplied only through
+`OPENALEX_API_KEY` and `CROSSREF_MAILTO` environment variables.
 
 ## Diagnose OpenAlex discovery
 

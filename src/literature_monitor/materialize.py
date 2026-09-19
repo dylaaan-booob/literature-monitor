@@ -254,6 +254,20 @@ def _read_text_exact(path: Path) -> str:
     return path.read_bytes().decode("utf-8")
 
 
+def _replace_paper_if_unchanged(
+    path: Path,
+    contents: str,
+    original: str,
+) -> str | None:
+    try:
+        current = _read_text_exact(path)
+    except (OSError, UnicodeError) as error:
+        return f"cannot verify Paper before update: {error}"
+    if current != original:
+        return "Paper changed on disk after it was scanned; update safely aborted"
+    return _atomic_replace(path, contents)
+
+
 def _scan_papers(
     papers_dir: Path,
     authors_dir: Path,
@@ -975,7 +989,11 @@ def materialize_papers(
 
     for pending in pending_paper_writes:
         if pending.original is not None:
-            error = _atomic_replace(pending.path, pending.contents)
+            error = _replace_paper_if_unchanged(
+                pending.path,
+                pending.contents,
+                pending.original,
+            )
             if error is None:
                 updated_papers.append(pending.path)
             else:

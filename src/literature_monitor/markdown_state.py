@@ -867,6 +867,23 @@ def _version_for_preferred(
     )
 
 
+def _align_external_doi_with_preferred(
+    external_ids: ExternalIds,
+    preferred: VersionRef | None,
+) -> tuple[ExternalIds, bool]:
+    preferred_key = _preferred_key(preferred)
+    if preferred_key is None or preferred_key[0] != "doi":
+        return external_ids, False
+    current_doi = normalize_doi(external_ids.doi)
+    if current_doi == preferred_key[1]:
+        return external_ids, False
+    replaced_durable_doi = external_ids.doi is not None
+    return (
+        external_ids.model_copy(update={"doi": preferred_key[1]}),
+        replaced_durable_doi,
+    )
+
+
 def _changed(left: Any, right: Any) -> bool:
     if isinstance(left, str) and isinstance(right, str):
         return normalize_text(left) != normalize_text(right)
@@ -889,6 +906,17 @@ def merge_paper_state(
     external_ids, external_warnings = _merge_external_ids(
         state.external_ids or ExternalIds(), paper.external_ids
     )
+    external_ids, replaced_durable_doi = _align_external_doi_with_preferred(
+        external_ids,
+        preferred,
+    )
+    if replaced_durable_doi:
+        external_warnings = tuple(
+            warning
+            for warning in external_warnings
+            if warning != "external ID doi conflicts with durable value"
+        )
+        warnings.append("doi changed with the effective preferred version")
     warnings.extend(external_warnings)
     sources = merge_sources(state.sources, paper.sources)
 

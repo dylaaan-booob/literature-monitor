@@ -10,7 +10,7 @@ from literature_monitor.canonicalize import (
     CanonicalizationResult,
 )
 from literature_monitor.cli import main
-from literature_monitor.config import load_config
+from literature_monitor.config import JournalConfig, load_config
 from literature_monitor.crossref import (
     CrossrefWorkRecord,
     EnrichedWorkRecord,
@@ -63,25 +63,172 @@ def test_logging_configuration_is_idempotent() -> None:
     assert logging.getLogger(LOGGER_NAME).level == logging.DEBUG
 
 
-def test_validate_cli_reports_dynamic_counts(capsys: object) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-    config_path = repository_root / "config.example.yaml"
-    config = load_config(config_path)
-    expected = (
-        f"validated {len(config.journals)} journals and "
-        f"{sum(len(journal.issn) for journal in config.journals)} ISSNs"
+def validate_config(tmp_path: Path) -> tuple[Path, object]:
+    whitelist = tmp_path / "journals.md"
+    whitelist.write_text(
+        "# List\n\n"
+        "## Journals\n\n"
+        "| Journal | ISSN/EISSN |\n"
+        "|---|---|\n"
+        "| Biometrics | 0006-341X / 1541-0420 |\n"
+        "| Annals of Statistics | 0090-5364 |\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "venue_whitelist: journals.md\n"
+        "keyword_expression: statistics\n"
+        "log_level: INFO\n",
+        encoding="utf-8",
+    )
+    return config_path, load_config(config_path)
+
+
+def resolved_source(journal: JournalConfig) -> ResolvedSource:
+    return ResolvedSource(
+        journal=journal.name,
+        configured_issns=journal.issn,
+        resolved_issns=journal.issn,
+        unresolved_issns=(),
+        openalex_id=f"https://openalex.org/S-{journal.name.replace(' ', '-')}",
+        display_name=journal.name,
+        issn_l=journal.issn[0],
+        issn=journal.issn,
+    )
+
+
+def test_validate_cli_reports_resolutions_and_dynamic_counts(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path, config = validate_config(tmp_path)
+    client = object()
+    api_keys: list[str | None] = []
+    calls: list[tuple[object, JournalConfig]] = []
+
+    def fake_client(*, api_key: str | None = None) -> object:
+        api_keys.append(api_key)
+        return client
+
+    def fake_resolve(
+        received_client: object,
+        journal: JournalConfig,
+    ) -> tuple[ResolvedSource, tuple[DiscoveryIssue, ...]]:
+        calls.append((received_client, journal))
+        return resolved_source(journal), ()
+
+    def unexpected_discovery(*args: object, **kwargs: object) -> object:
+        raise AssertionError("validate must not request Works discovery")
+
+    monkeypatch.setenv("OPENALEX_API_KEY", "test-key")  # type: ignore[attr-defined]
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.OpenAlexClient", fake_client
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.resolve_journal_source", fake_resolve
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals", unexpected_discovery
     )
 
     assert main(("validate", "--config", str(config_path))) == 0
     captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert expected in captured.err
+    assert api_keys == ["test-key"]
+    assert [journal for _, journal in calls] == list(config.journals)  # type: ignore[attr-defined]
+    assert all(received_client is client for received_client, _ in calls)
+    assert "resolved Biometrics to Biometrics" in captured.err
+    assert "resolved Annals of Statistics to Annals of Statistics" in captured.err
+    assert "2 configured journals, 3 configured ISSNs, 2 resolved sources" in captured.err
+    assert "0 warnings, 0 errors" in captured.err
+
+
+def test_validate_cli_resolution_error_does_not_stop_later_journal(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path, config = validate_config(tmp_path)
+    calls: list[str] = []
+
+    def fake_resolve(
+        client: object,
+        journal: JournalConfig,
+    ) -> tuple[ResolvedSource | None, tuple[DiscoveryIssue, ...]]:
+        calls.append(journal.name)
+        if journal.name == "Biometrics":
+            return None, (
+                DiscoveryIssue(
+                    severity=IssueSeverity.ERROR,
+                    stage="source_resolution",
+                    journal=journal.name,
+                    message="configured ISSNs resolve to conflicting Sources",
+                ),
+            )
+        return resolved_source(journal), ()
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.resolve_journal_source", fake_resolve
+    )
+
+    assert main(("validate", "--config", str(config_path))) == 1
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert calls == [journal.name for journal in config.journals]  # type: ignore[attr-defined]
+    assert "configured ISSNs resolve to conflicting Sources" in captured.err
+    assert "resolved Annals of Statistics to Annals of Statistics" in captured.err
+    assert "1 resolved sources, 0 warnings, 1 errors" in captured.err
+
+
+def test_validate_cli_warning_only_resolution_returns_zero(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path, _config = validate_config(tmp_path)
+
+    def fake_resolve(
+        client: object,
+        journal: JournalConfig,
+    ) -> tuple[ResolvedSource, tuple[DiscoveryIssue, ...]]:
+        issues: tuple[DiscoveryIssue, ...] = ()
+        if journal.name == "Biometrics":
+            issues = (
+                DiscoveryIssue(
+                    severity=IssueSeverity.WARNING,
+                    stage="source_resolution",
+                    journal=journal.name,
+                    issn=journal.issn[1],
+                    message="ISSN is unresolved; using the consistent Source",
+                ),
+            )
+        return resolved_source(journal), issues
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.resolve_journal_source", fake_resolve
+    )
+
+    assert main(("validate", "--config", str(config_path))) == 0
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert "WARNING" in captured.err
+    assert "ISSN 1541-0420" in captured.err
+    assert "2 resolved sources, 1 warnings, 0 errors" in captured.err
 
 
 def test_validate_cli_returns_two_and_logs_configuration_error(
-    tmp_path: Path, capsys: object
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
 ) -> None:
     config_path = tmp_path / "bad.yaml"
     config_path.write_text("keyword_expression: alpha\n", encoding="utf-8")
+
+    def unexpected_call(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider path must not be reached")
+
+    for name in ("OpenAlexClient", "resolve_journal_source", "discover_journals"):
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            f"literature_monitor.cli.{name}", unexpected_call
+        )
 
     assert main(("validate", "--config", str(config_path))) == 2
     captured = capsys.readouterr()  # type: ignore[attr-defined]
