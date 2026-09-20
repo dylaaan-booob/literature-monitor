@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — MVP Specification v1.2
 
-**Status:** Active; v0.2.1 released and R0–R3 implemented and audited
+**Status:** Active; v0.2.1 remains the latest released version
 
-**Stage:** v0.3.0 release preparation and closeout
+**Stage:** v0.3.1 release preparation and closeout
 **Scope:** Journal monitoring only; conferences are excluded from MVP
 
 ---
@@ -1438,8 +1438,18 @@ For v0.3.0 Track A, this also means:
 
 ## 27. Next Project Step
 
-R0–R3, the v0.2.1 lexical-search evolution, and the v0.3.0 Track A Review Inbox evolution are complete and reviewed. v0.2.1 remains the latest released version.
+R0–R3 are complete and reviewed. The v0.2.1 lexical-search evolution is complete and released. The v0.3.0 Track A Review Inbox evolution and the v0.3.1 Prefix / Proximity search evolution are complete and reviewed. v0.2.1 remains the latest released version.
 
-The next bounded project step is v0.3.0 release preparation and closeout. The version bump, final release metadata, commit, tag, push, and GitHub release remain pending and are separate release actions.
+The current bounded project step is v0.3.1 release preparation and closeout. It prepares one release candidate containing both the completed v0.3.0 Review Inbox evolution and the completed v0.3.1 Prefix / Proximity search evolution; it does not retroactively publish v0.3.0.
 
-Future Track B features are not pending implementation and require a separate proposal before entering scope.
+The remaining release actions are separate later steps and have not occurred:
+
+```text
+release-preparation commit
+→ tag
+→ push main
+→ push tag
+→ GitHub Release
+```
+
+Future Track B remains outside the current release scope and requires a separate proposal before entering scope.
