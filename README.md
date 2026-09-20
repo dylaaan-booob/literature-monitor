@@ -127,6 +127,17 @@ uv run literature-monitor openalex-filter \
   --keyword-expression '"multiview learning"'
 ```
 
+Prefix and Proximity operands may be combined with the same Boolean grammar:
+
+```bash
+uv run literature-monitor openalex-filter \
+  --config config.example.yaml \
+  --journal "Biometrics" \
+  --from-date 2026-01-20 \
+  --to-date 2026-01-25 \
+  --keyword-expression 'statist* AND "causal inference"~1'
+```
+
 The local keyword filtering diagnostic does not perform Crossref enrichment,
 canonicalization, Markdown materialization, Zotero integration, conference
 monitoring, or persistence.
@@ -138,29 +149,54 @@ Keywords, and Abstract. Each title, abstract, and individual author keyword is
 an independent searchable unit. Provider topics, fields of study, and inferred
 topics are not searchable.
 
-Expressions support Terms, quoted phrases, `AND`, `OR`, `NOT`, and parentheses.
-Before matching, text is normalized with Unicode NFKC, Unicode casefold, and
-whitespace normalization, then tokenized with SQLite FTS5 `unicode61` semantics.
-Each Term's complete token sequence must occur contiguously within one searchable
-unit. For example, `strasse` matches `Straße`. Punctuation is a tokenizer
-boundary, so `high-dimensional` can match both `high-dimensional` and
-`high dimensional`. This is lexical token equivalence, not fuzzy matching.
+Expressions support Terms, quoted phrases, Prefix operands such as `statist*`,
+Proximity operands such as `"causal inference"~1`, `AND`, `OR`, `NOT`, and
+parentheses. Before matching, text is normalized with Unicode NFKC, Unicode
+casefold, and whitespace normalization, then tokenized with SQLite FTS5
+`unicode61` semantics. Each Term's complete token sequence must occur
+contiguously within one searchable unit. For example, `strasse` matches
+`Straße`. Punctuation is a tokenizer boundary, so `high-dimensional` can
+match both `high-dimensional` and `high dimensional`. This is lexical token
+equivalence, not fuzzy matching.
 
 A quoted phrase must occur as one complete contiguous token sequence inside a
 single searchable unit. Given a title unit `deep` and an abstract unit
 `learning`, `"deep learning"` is false, while `deep AND learning` is true.
-Boolean operators are evaluated for the consolidated work, so in the
-multi-provider `canonicalize` and `materialize` pipeline one operand may match
-an OpenAlex title and another may match a Crossref or Semantic Scholar abstract.
-A phrase still cannot span fields or provider records.
+Exact Phrase matching remains ordered and adjacent.
+
+A Prefix uses exactly one trailing `*` and matches a lexical token prefix, not
+an arbitrary substring. For example, `statist*` matches `statist`,
+`statistic`, `statistics`, and `statistical`, but not `biostatistics`.
+After normalization the Prefix base must contain at least three lexical
+characters, contain only letters or digits, and produce one lexical token.
+Leading wildcards, mid-word wildcards, and multiple `*` characters are not
+supported. A quoted `"statist*"` remains a Phrase, and `?` is not a wildcard.
+
+A Proximity operand uses a quoted lexical sequence followed by an integer
+distance from 0 through 50. `"causal inference"~0` means unordered adjacency:
+`causal inference` and `inference causal` match, while
+`causal robust inference` does not. `"causal inference"~1` permits one
+additional intervening token, so `causal robust inference` matches. The
+quoted content must produce at least two real `unicode61` lexical tokens.
+Prefix syntax inside quoted Proximity content has no Prefix meaning.
+
+Each Term, Phrase, Prefix, or Proximity match must be satisfied wholly inside
+one searchable unit. In particular, a single Proximity operand cannot span a
+title and abstract, two author keywords, or records from different providers.
+Boolean operators are evaluated for the consolidated work, so operands may
+combine matches from different searchable units or provider evidence. For
+example, `statist* AND "causal inference"~1` may match the Prefix in one
+provider title and the Proximity operand in another provider abstract.
 
 Each filtering stage builds a transient in-memory SQLite FTS5 index and discards
 it after the run. The index is rebuilt as needed, writes no persistent search
 database, and is not a second durable source of truth beside Markdown. If the
 current Python SQLite runtime lacks FTS5, commands that require local filtering
 report a clear error and exit without falling back to the previous substring
-matcher. Local matching does not provide synonym expansion, stemming, `NEAR`,
-wildcard or prefix syntax, BM25 ranking, fuzzy search, or semantic search.
+matcher. Local matching does not provide synonym expansion, stemming, arbitrary
+user-facing FTS5 `NEAR(...)` syntax, wildcard forms beyond the defined trailing
+`*` Prefix, `?` wildcard syntax, BM25 ranking, fuzzy search, or semantic
+search.
 
 ## Diagnose Crossref DOI enrichment
 
@@ -204,6 +240,11 @@ and Crossref, performs Crossref DOI supplementation, then uses Semantic Scholar
 for DOI batch supplementation and venue/date-bounded supplemental discovery.
 Provider search expands coverage only: all evidence is consolidated before the
 local FTS5 filter evaluates the searchable projection using the rules above.
+For Semantic Scholar supplemental discovery, Prefix operands retain their
+trailing `*`, while Proximity operands are reduced to broad positive `AND`
+terms rather than provider-specific proximity syntax. This provider query only
+expands recall; final inclusion is always decided by the complete local
+expression.
 Semantic Scholar fields of study remain provider taxonomy and are not treated
 as author keywords or searchable text. Retained clusters become canonical
 papers. Matching is conservative and evidence-based:

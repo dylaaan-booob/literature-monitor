@@ -369,6 +369,40 @@ def test_discovery_uses_bulk_query_filters_and_isolates_journals() -> None:
     assert all(call[1]["fields"] == list(SEMANTIC_SCHOLAR_FIELDS) for call in client.calls)
 
 
+def test_discovery_preserves_prefix_in_broad_positive_query() -> None:
+    client = SearchClient({"Biometrics": []})
+
+    discover_semantic_scholar_journals(
+        client,
+        (BIOMETRICS,),
+        date(2026, 1, 1),
+        date(2026, 12, 31),
+        parse_keyword_expression("statist*"),
+        retrieved_at=TIMESTAMP,
+    )
+
+    assert [call[0] for call in client.calls] == ["statist*"]
+
+
+def test_discovery_lowers_proximity_and_removes_not_subtree() -> None:
+    client = SearchClient({"Biometrics": []})
+
+    discover_semantic_scholar_journals(
+        client,
+        (BIOMETRICS,),
+        date(2026, 1, 1),
+        date(2026, 12, 31),
+        parse_keyword_expression('"causal inference"~5 AND NOT review'),
+        retrieved_at=TIMESTAMP,
+    )
+
+    query = client.calls[0][0]
+    assert query == "(causal) + (inference)"
+    assert "~5" not in query
+    assert "NEAR" not in query
+    assert "review" not in query
+
+
 def test_comma_bearing_venue_is_skipped_without_global_search() -> None:
     journal = JournalConfig(
         name="IEEE Transactions on Systems, Man and Cybernetics: Systems",

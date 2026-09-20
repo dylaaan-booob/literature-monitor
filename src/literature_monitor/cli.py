@@ -44,10 +44,12 @@ from literature_monitor.openalex import (
 from literature_monitor.retrieval import assemble_provider_evidence
 from literature_monitor.search import (
     SearchBackendError,
+    SearchExpressionError,
     SearchableProjection,
     build_metadata_searchable_projection,
     build_searchable_projection,
     match_searchable_projections,
+    validate_search_expression,
 )
 from literature_monitor.semantic_scholar import (
     SemanticScholarIssue,
@@ -238,6 +240,9 @@ def _match_local_search(
 ) -> tuple[bool, ...] | None:
     try:
         return match_searchable_projections(expression, projections)
+    except SearchExpressionError as error:
+        logger.error("Invalid local search expression: %s", error)
+        return None
     except SearchBackendError as error:
         logger.error("Local search / FTS5 backend failure: %s", error)
         return None
@@ -321,16 +326,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         logger = configure_logging(config.log_level.value)
 
         keyword_ast = config.keyword_ast
-        if (
-            args.command
-            in {"openalex-filter", "crossref-enrich", "canonicalize", "materialize"}
-            and args.keyword_expression is not None
-        ):
+        if args.command in {
+            "openalex-filter",
+            "crossref-enrich",
+            "canonicalize",
+            "materialize",
+        }:
             try:
-                keyword_ast = parse_keyword_expression(args.keyword_expression)
-            except KeywordSyntaxError as error:
-                logger.error("--keyword-expression: %s", error)
+                validate_search_expression(config.keyword_ast)
+            except SearchExpressionError as error:
+                logger.error(
+                    "%s: field 'keyword_expression': %s",
+                    args.config,
+                    error,
+                )
                 return 2
+            except SearchBackendError as error:
+                logger.error("Local search / FTS5 backend failure: %s", error)
+                return 2
+
+            if args.keyword_expression is not None:
+                try:
+                    keyword_ast = parse_keyword_expression(args.keyword_expression)
+                except KeywordSyntaxError as error:
+                    logger.error("--keyword-expression: %s", error)
+                    return 2
+                try:
+                    validate_search_expression(keyword_ast)
+                except SearchExpressionError as error:
+                    logger.error("--keyword-expression: %s", error)
+                    return 2
+                except SearchBackendError as error:
+                    logger.error("Local search / FTS5 backend failure: %s", error)
+                    return 2
 
         if args.from_date > args.to_date:
             logger.error("--from-date must not be after --to-date")

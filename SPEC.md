@@ -97,6 +97,7 @@ MVP includes:
 - provider-neutral identity/evidence consolidation;
 - local keyword filtering after available evidence is consolidated;
 - a transient, reconstructible SQLite FTS5 runtime index for local lexical filtering;
+- Prefix/truncation and Proximity operands within local lexical filtering;
 - provider, journal, and request failure isolation;
 - canonical paper identity;
 - basic cross-source deduplication;
@@ -132,8 +133,8 @@ MVP does **not** include:
 - LLM query expansion;
 - relevance ranking, including BM25 or LLM-based ranking;
 - field-specific query syntax;
-- user-facing `NEAR` syntax;
-- user-facing wildcard or prefix syntax;
+- arbitrary user-facing FTS5 `NEAR(...)` syntax beyond the defined `"a b"~N` Proximity operand;
+- wildcard forms other than the defined single trailing-`*` Prefix operand;
 - automatic idea generation;
 - automatic paper summarization;
 - automatic PDF download for candidates;
@@ -242,6 +243,8 @@ Responsibilities:
 
 A broad positive query may be used only to expand provider coverage. Every returned record must still pass the configured date boundary and venue validation, and final inclusion is always decided by the unified local keyword expression.
 
+When the local expression is projected into a Semantic Scholar supplemental-discovery query, Prefix operands retain their single trailing `*`. Proximity operands are not sent using provider-specific proximity syntax; each Proximity operand is reduced to a broad `AND` query containing all of its positive lexical terms. As with the existing broad-positive-query behavior, `NOT` subtrees are removed from the provider query rather than used to exclude provider results. This projection affects discovery recall only and never changes final local Boolean evaluation. OpenAlex and Crossref remain venue/date retrieval paths and do not acquire keyword-query responsibilities from this projection.
+
 Venue validation must prefer ISSN/EISSN. Only when the provider record has no usable ISSN/EISSN may a strict normalized journal-name match be used as a fallback; ambiguous or mismatched venues must not enter the candidate universe.
 
 ### 6.4 Publisher fallback
@@ -312,13 +315,15 @@ MVP supports:
 
 - Terms as defined by the existing keyword grammar, including punctuation-containing Terms such as `x/y`, `a-b`, `p>>n`, and `high-dimensional`;
 - quoted phrases;
+- Prefix operands using `term*`;
+- Proximity operands using `"a b"~N`;
 - `AND`;
 - `OR`;
 - `NOT`;
 - parentheses;
 - case-insensitive matching.
 
-Before lexical matching, every searchable unit and the content of every atomic Term or quoted-phrase operand are normalized in this order:
+Before lexical matching, every searchable unit and the lexical content of every atomic Term, Phrase, Prefix, or Proximity operand are normalized in this order:
 
 ```text
 Unicode NFKC
@@ -328,9 +333,7 @@ Unicode NFKC
 
 Whitespace normalization strips leading and trailing whitespace and collapses each internal whitespace run to one space. SQLite FTS5 `unicode61` lexical tokenization occurs only after this normalization. The implementation must apply Unicode casefold before tokenization rather than relying on `unicode61` case handling alone; for example, `strasse` must match `Straße`.
 
-The existing expression grammar defines Term boundaries and remains unchanged. Each normalized Term is tokenized with `unicode61`. If it produces one or more lexical tokens, that complete ordered token sequence must occur contiguously within one searchable unit for the Term to match. A Term cannot span searchable units. If a Term produces no lexical tokens, that atomic operand does not match any research work. Term content must be treated as lexical input and must not be interpolated verbatim into SQLite FTS5 query syntax.
-
-Boolean operators combine atomic operand truth values at the consolidated work level, so `A AND B` may match different searchable units or evidence supplied by different providers. `NOT` retains these work-level Boolean semantics: it negates whether its operand matches the work, not merely whether it matches the same searchable unit as another operand.
+The existing Term boundary rules remain unchanged. Each normalized Term is tokenized with `unicode61`. If it produces one or more lexical tokens, that complete ordered token sequence must occur contiguously within one searchable unit for the Term to match. A Term cannot span searchable units. If a Term produces no lexical tokens, that atomic operand does not match any research work. Term content must be treated as lexical input and must not be interpolated verbatim into SQLite FTS5 query syntax.
 
 A quoted phrase represents one contiguous lexical token sequence and must occur completely within one searchable unit. A phrase must not span title and abstract, two author keywords, or records from different providers. For example:
 
@@ -342,7 +345,28 @@ abstract unit: learning
 deep AND learning → true
 ```
 
-Punctuation is handled as a `unicode61` tokenizer boundary; character-for-character punctuation-sensitive substring equivalence is not required. Consequently, the Term `high-dimensional` matches both `high-dimensional` and `high dimensional` when they produce the same contiguous lexical token sequence. A Term such as `p>>n` is handled by its resulting `unicode61` token sequence in the same way. This is lexical token matching, not fuzzy matching, and punctuation-containing Terms remain valid user syntax.
+A Prefix operand uses exactly one trailing `*`, as in `statist*`. The Prefix base is normalized with NFKC and Unicode casefold before validation and tokenization. After normalization, the base must contain at least three lexical characters, consist only of Unicode letters or digits, and produce exactly one `unicode61` lexical token. Leading wildcards, mid-word wildcards, and multiple `*` characters are invalid Prefix syntax. `?` has no wildcard meaning. An `*` inside a quoted operand has no Prefix meaning.
+
+Prefix matching is lexical token-prefix matching, not substring matching. For example:
+
+```text
+statist* → statist, statistic, statistics, statistical
+statist* → does not match biostatistics
+```
+
+A Proximity operand uses a quoted lexical sequence followed by an explicit distance, as in `"causal inference"~0`. Whitespace is permitted between the closing quote and `~N`. `N` must be an integer in the inclusive range `0 <= N <= 50`. After normalization and `unicode61` tokenization, the quoted content must contain at least two lexical tokens; a single-token Proximity operand is invalid and does not provide fuzzy-search semantics.
+
+Proximity token order is not significant. The user distance `N` counts the additional intervening tokens permitted beyond the most compact arrangement of the operand tokens. Therefore `"causal inference"~0` means unordered adjacency, while the exact Phrase `"causal inference"` remains ordered adjacency. For a Proximity operand containing `k` lexical tokens, the equivalent FTS5 NEAR distance is:
+
+```text
+fts_near_distance = user_distance + k - 2
+```
+
+Every Prefix or Proximity match must be satisfied wholly inside one searchable unit. In particular, Proximity cannot span title and abstract, two author keyword values, or records from different providers.
+
+Boolean operators combine atomic operand truth values at the consolidated work level, so `A AND B` may match different searchable units or evidence supplied by different providers regardless of whether those operands are Terms, Phrases, Prefixes, or Proximity expressions. `NOT` retains these work-level Boolean semantics: it negates whether its operand matches the work, not merely whether it matches the same searchable unit as another operand.
+
+Punctuation is handled as a `unicode61` tokenizer boundary; character-for-character punctuation-sensitive substring equivalence is not required. Consequently, the Term `high-dimensional` matches both `high-dimensional` and `high dimensional` when they produce the same contiguous lexical token sequence. A Term such as `p>>n` is handled by its resulting `unicode61` token sequence in the same way. This remains lexical token matching rather than fuzzy matching, and punctuation-containing Terms remain valid user syntax.
 
 MVP does not require:
 
@@ -352,14 +376,13 @@ MVP does not require:
 - semantic search or LLM query expansion;
 - relevance or BM25 ranking;
 - field-specific query syntax;
-- user-facing proximity/`NEAR` syntax;
-- user-facing wildcard or prefix syntax;
+- arbitrary user-facing FTS5 `NEAR(...)` syntax beyond the defined `"a b"~N` Proximity operand;
+- wildcard forms other than the defined single trailing-`*` Prefix operand;
 - automatic topic inference;
 
-SQLite FTS5 may implement this contract only through a transient, reconstructible runtime index. The index is disposable and must not become a persistent search database, durable workflow state, or another mandatory source of truth.
+SQLite FTS5 may implement this contract only through a transient, reconstructible runtime index. User input must be parsed and compiled from the defined expression grammar; no Term, Phrase, Prefix, Proximity, distance, Boolean subtree, or other user-supplied text may be inserted as arbitrary FTS5 `MATCH` syntax. The index is disposable and must not become a persistent search database, durable workflow state, or another mandatory source of truth. If the current Python SQLite runtime lacks FTS5, commands that require local filtering must continue to use the existing explicit error path rather than silently changing matching semantics.
 
 The keyword expression must be configuration, not hard-coded logic.
-
 ---
 
 ## 8. Canonical Paper Identity
@@ -1149,7 +1172,7 @@ For a selected date window:
 
 ### 23.3 Evidence consolidation and keyword filtering
 
-Given a test expression using `AND`, `OR`, `NOT`, phrases, and parentheses:
+Given test expressions using Terms, Phrases, Prefix, Proximity, `AND`, `OR`, `NOT`, and parentheses:
 
 - records with the same normalized DOI consolidate into one identity cluster;
 - available provider evidence is consolidated before local filtering;
@@ -1157,13 +1180,26 @@ Given a test expression using `AND`, `OR`, `NOT`, phrases, and parentheses:
 - an eligible field supplied by any provider in the cluster participates in filtering as its own searchable unit;
 - a missing abstract or author keywords degrades safely and does not by itself exclude the work;
 - provider-derived keywords, topics, or fields of study remain non-searchable and are not silently substituted for author keywords;
-- Boolean operands may match across searchable units and across providers within the consolidated work;
+- Boolean operands, including Prefix and Proximity operands, compose at the consolidated-work level and may match across searchable units and across providers when the Boolean structure permits it;
 - the existing grammar continues to accept punctuation-containing Terms, and Term content is never interpreted verbatim as SQLite FTS5 query syntax;
 - after normalization, a Term's complete nonempty `unicode61` token sequence must occur contiguously within one searchable unit and cannot span units;
 - a Term that produces no lexical tokens does not match any research work;
 - a quoted phrase matches only when its full token sequence occurs within one searchable unit and cannot span fields, keywords, or provider records;
 - lexical normalization applies NFKC, then Unicode casefold, then whitespace normalization before `unicode61` tokenization, preserving matches such as `strasse` against `Straße`;
 - punctuation follows SQLite FTS5 `unicode61` token semantics, including lexical equivalence between token sequences such as `high-dimensional` and `high dimensional`;
+- Prefix accepts exactly one trailing `*`; after NFKC and casefold its base contains at least three lexical characters, contains only Unicode letters or digits, and tokenizes to exactly one `unicode61` token;
+- leading wildcards, mid-word wildcards, multiple `*` characters, and invalid Prefix bases are rejected; `?` has no wildcard meaning and quoted `*` has no Prefix meaning;
+- Prefix matches a lexical token prefix rather than an arbitrary substring, so `statist*` matches `statist`, `statistic`, `statistics`, and `statistical` but not `biostatistics`;
+- Proximity accepts `"a b"~N` with optional whitespace between the closing quote and `~N`, requires an explicit integer `N` in `0 <= N <= 50`, and requires at least two lexical tokens after normalization and tokenization;
+- Proximity is unordered and interprets `N` as additional intervening tokens beyond the most compact arrangement, so `"causal inference"~0` is unordered adjacency while the exact Phrase `"causal inference"` remains ordered adjacency;
+- a `k`-token Proximity operand compiles with `fts_near_distance = user_distance + k - 2`;
+- each Prefix or Proximity match is satisfied within one searchable unit, and Proximity cannot cross title/abstract boundaries, author keyword values, or provider records;
+- a single-token Proximity operand is invalid and is not treated as fuzzy search;
+- generated FTS5 queries are compiled from parsed operands and never accept user input as arbitrary `MATCH` or `NEAR(...)` syntax;
+- Semantic Scholar supplemental discovery preserves the trailing `*` of valid Prefix operands, lowers each Proximity operand to a broad `AND` query over all of its positive lexical terms, and removes `NOT` subtrees from the broad positive provider query;
+- Semantic Scholar query projection affects discovery recall only: provider evidence is still consolidated before local filtering, and provider-neutral final inclusion is determined only by the complete local Boolean expression;
+- OpenAlex and Crossref retain their existing venue/date retrieval responsibilities and do not use the Semantic Scholar query projection;
+- if the current Python SQLite runtime lacks FTS5, commands that require local filtering use the existing explicit error path rather than silently changing matching semantics;
 - the local search index is transient, reconstructible runtime state and is not a durable or mandatory source of truth.
 
 ### 23.4 Candidate creation
@@ -1332,6 +1368,26 @@ A0 Specification alignment
 ```
 
 This sequence added the creation-only Review Inbox presentation without changing Paper Markdown's ownership of durable workflow state or entering Track B scope.
+
+### 24.5 Completed v0.3.1 Prefix / Proximity search evolution
+
+The bounded v0.3.1 Prefix / Proximity search evolution is completed history:
+
+```text
+S0 Specification alignment
+→ S1 Grammar / AST / provider query projection
+→ S2 Local FTS5 matching / validation integration
+→ S3 Documentation / final feature audit
+```
+
+This sequence added explicit Prefix and Proximity grammar/AST nodes, safe
+Semantic Scholar broad-positive query projection, transient FTS5 token-prefix
+matching, and unordered Proximity matching with the defined distance semantics.
+Repeated Proximity tokens preserve occurrence multiplicity using transient FTS5
+position evidence. Local-filter commands validate lexical constraints before
+provider work, while searchable-unit boundaries, provider-neutral final local
+matching, and reconstructible in-memory search state remain unchanged. README
+and specification history were synchronized as the final bounded step.
 
 ---
 

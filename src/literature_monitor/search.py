@@ -5,16 +5,30 @@ from __future__ import annotations
 import re
 import sqlite3
 import unicodedata
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 
-from literature_monitor.keywords import And, KeywordExpression, Not, Or, Phrase, Term
+from literature_monitor.keywords import (
+    And,
+    KeywordExpression,
+    Not,
+    Or,
+    Phrase,
+    Prefix,
+    Proximity,
+    Term,
+)
 from literature_monitor.models import CanonicalMetadata, ProviderWorkEvidence
 
 
 class SearchBackendError(RuntimeError):
     """Raised when the configured lexical-search backend cannot run."""
+
+
+class SearchExpressionError(ValueError):
+    """Raised when an AST operand violates the local lexical-search contract."""
 
 
 @dataclass(frozen=True)
@@ -98,6 +112,14 @@ def _create_fts5_schema(connection: sqlite3.Connection) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE VIRTUAL TABLE searchable_unit_tokens USING fts5vocab(
+                searchable_units,
+                'instance'
+            )
+            """
+        )
     except sqlite3.OperationalError as error:
         raise SearchBackendError(
             "SQLite FTS5 is unavailable in the current runtime"
@@ -176,11 +198,57 @@ def _quoted_fts5_phrase(tokens: tuple[str, ...]) -> str:
     return f'"{escaped}"'
 
 
+def _validated_operand_tokens(
+    connection: sqlite3.Connection,
+    node: Term | Phrase | Prefix | Proximity,
+    token_cache: dict[str, tuple[str, ...]],
+) -> tuple[str, ...]:
+    normalized = _normalize_lexical_text(node.value)
+    if normalized not in token_cache:
+        token_cache[normalized] = (
+            _tokenize_atomic_operand(connection, normalized)
+            if normalized
+            else ()
+        )
+    tokens = token_cache[normalized]
+
+    if isinstance(node, Prefix) and len(tokens) != 1:
+        raise SearchExpressionError(
+            f"prefix operand {node.value!r} must produce exactly one lexical token; "
+            f"found {len(tokens)}"
+        )
+    if isinstance(node, Proximity):
+        if len(tokens) < 2:
+            raise SearchExpressionError(
+                f"proximity operand {node.value!r} must contain at least two lexical "
+                f"tokens; found {len(tokens)}"
+            )
+        if not 0 <= node.distance <= 50:
+            raise SearchExpressionError(
+                f"proximity operand {node.value!r} distance must be between 0 and 50"
+            )
+    return tokens
+
+
+def _fts5_query_for_operand(
+    node: Term | Phrase | Prefix | Proximity,
+    tokens: tuple[str, ...],
+) -> str:
+    if isinstance(node, Prefix):
+        return f"{_quoted_fts5_phrase(tokens)}*"
+    if isinstance(node, Proximity):
+        quoted_tokens = " ".join(
+            _quoted_fts5_phrase((token,)) for token in tokens
+        )
+        fts_near_distance = node.distance + len(tokens) - 2
+        return f"NEAR({quoted_tokens}, {fts_near_distance})"
+    return _quoted_fts5_phrase(tokens)
+
+
 def _matching_document_ids(
     connection: sqlite3.Connection,
-    tokens: tuple[str, ...],
+    query: str,
 ) -> frozenset[int]:
-    query = _quoted_fts5_phrase(tokens)
     return frozenset(
         row[0]
         for row in connection.execute(
@@ -192,6 +260,91 @@ def _matching_document_ids(
             (query,),
         )
     )
+
+
+def _repeated_proximity_row_matches(
+    connection: sqlite3.Connection,
+    row_id: int,
+    tokens: tuple[str, ...],
+    user_distance: int,
+) -> bool:
+    required = Counter(tokens)
+    max_span = len(tokens) + user_distance
+    relevant_by_column: dict[str, list[tuple[int, str]]] = {}
+    for term, column, offset in connection.execute(
+        """
+        SELECT term, col, offset
+        FROM searchable_unit_tokens
+        WHERE doc = ?
+        ORDER BY col, offset
+        """,
+        (row_id,),
+    ):
+        if term in required:
+            relevant_by_column.setdefault(column, []).append((offset, term))
+
+    for occurrences in relevant_by_column.values():
+        observed: Counter[str] = Counter()
+        left = 0
+        for right_offset, right_term in occurrences:
+            observed[right_term] += 1
+            while right_offset - occurrences[left][0] + 1 > max_span:
+                left_term = occurrences[left][1]
+                observed[left_term] -= 1
+                left += 1
+            if all(observed[term] >= count for term, count in required.items()):
+                return True
+    return False
+
+
+def _matching_repeated_proximity_document_ids(
+    connection: sqlite3.Connection,
+    query: str,
+    tokens: tuple[str, ...],
+    user_distance: int,
+) -> frozenset[int]:
+    matched: set[int] = set()
+    for row_id, document_id in connection.execute(
+        """
+        SELECT rowid, CAST(document_id AS INTEGER)
+        FROM searchable_units
+        WHERE searchable_units MATCH ?
+        """,
+        (query,),
+    ):
+        if _repeated_proximity_row_matches(
+            connection,
+            row_id,
+            tokens,
+            user_distance,
+        ):
+            matched.add(document_id)
+    return frozenset(matched)
+
+
+def validate_search_expression(expression: KeywordExpression) -> None:
+    """Validate FTS5-dependent lexical constraints without evaluating documents."""
+
+    with closing(sqlite3.connect(":memory:")) as connection:
+        _create_fts5_schema(connection)
+        token_cache: dict[str, tuple[str, ...]] = {}
+
+        def validate(node: KeywordExpression) -> None:
+            if isinstance(node, (Term, Phrase, Prefix, Proximity)):
+                _validated_operand_tokens(connection, node, token_cache)
+                return
+            if isinstance(node, (And, Or)):
+                validate(node.left)
+                validate(node.right)
+                return
+            if isinstance(node, Not):
+                validate(node.operand)
+                return
+            raise TypeError(
+                f"unsupported keyword expression node: {type(node).__name__}"
+            )
+
+        validate(expression)
 
 
 def match_searchable_projections(
@@ -209,27 +362,47 @@ def match_searchable_projections(
 
         universe = frozenset(range(len(projections)))
         token_cache: dict[str, tuple[str, ...]] = {}
-        match_cache: dict[tuple[str, ...], frozenset[int]] = {}
+        match_cache: dict[
+            tuple[str, tuple[str, ...], int | None],
+            frozenset[int],
+        ] = {}
 
-        def atomic_matches(value: str) -> frozenset[int]:
-            normalized = _normalize_lexical_text(value)
-            if not normalized:
-                return frozenset()
-            if normalized not in token_cache:
-                token_cache[normalized] = _tokenize_atomic_operand(
-                    connection,
-                    normalized,
-                )
-            tokens = token_cache[normalized]
+        def atomic_matches(
+            node: Term | Phrase | Prefix | Proximity,
+        ) -> frozenset[int]:
+            tokens = _validated_operand_tokens(connection, node, token_cache)
             if not tokens:
                 return frozenset()
-            if tokens not in match_cache:
-                match_cache[tokens] = _matching_document_ids(connection, tokens)
-            return match_cache[tokens]
+            if isinstance(node, Prefix):
+                cache_key = ("prefix", tokens, None)
+            elif isinstance(node, Proximity):
+                cache_key = ("proximity", tokens, node.distance)
+            else:
+                cache_key = ("exact", tokens, None)
+            if cache_key not in match_cache:
+                query = _fts5_query_for_operand(node, tokens)
+                # FTS5 NEAR 会让重复 phrase 复用同一个 token occurrence。
+                # 候选仍由受控 NEAR 查询产生，但重复 token 需要再用同一索引的
+                # position evidence 验证实际 occurrence 数量和用户距离。
+                if isinstance(node, Proximity) and len(set(tokens)) != len(tokens):
+                    match_cache[cache_key] = (
+                        _matching_repeated_proximity_document_ids(
+                            connection,
+                            query,
+                            tokens,
+                            node.distance,
+                        )
+                    )
+                else:
+                    match_cache[cache_key] = _matching_document_ids(
+                        connection,
+                        query,
+                    )
+            return match_cache[cache_key]
 
         def evaluate(node: KeywordExpression) -> frozenset[int]:
-            if isinstance(node, (Term, Phrase)):
-                return atomic_matches(node.value)
+            if isinstance(node, (Term, Phrase, Prefix, Proximity)):
+                return atomic_matches(node)
             if isinstance(node, And):
                 return evaluate(node.left) & evaluate(node.right)
             if isinstance(node, Or):

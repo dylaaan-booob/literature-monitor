@@ -108,6 +108,18 @@ def validate_config(tmp_path: Path) -> tuple[Path, object]:
     return config_path, load_config(config_path)
 
 
+def config_with_keyword_expression(tmp_path: Path, expression: str) -> Path:
+    config_path, _config = validate_config(tmp_path)
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "keyword_expression: statistics",
+            f"keyword_expression: {json.dumps(expression)}",
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
 def resolved_source(journal: JournalConfig) -> ResolvedSource:
     return ResolvedSource(
         journal=journal.name,
@@ -765,6 +777,90 @@ def test_openalex_filter_uses_config_expression_and_reports_counts(
     assert "3 discovered, 1 retained, 2 filtered out" in captured.err
 
 
+@pytest.mark.parametrize(
+    ("expression", "expected_openalex_id"),
+    [
+        ("statist*", "https://openalex.org/W10"),
+        ('"bayesian multiview"~0', "https://openalex.org/W11"),
+    ],
+)
+def test_openalex_filter_prefix_and_proximity_overrides_use_local_search(
+    expression: str,
+    expected_openalex_id: str,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    config_path = repository_root / "config.example.yaml"
+    before = config_path.read_bytes()
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: filter_diagnostic_result(),
+    )
+
+    result = main(
+        (
+            "openalex-filter",
+            "--config",
+            str(config_path),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+            "--keyword-expression",
+            expression,
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    rows = [json.loads(line) for line in captured.out.splitlines()]
+    assert result == 0
+    assert [row["external_ids"]["openalex"] for row in rows] == [
+        expected_openalex_id
+    ]
+    assert config_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected_openalex_id"),
+    [
+        ("statist*", "https://openalex.org/W10"),
+        ('"bayesian multiview"~0', "https://openalex.org/W11"),
+    ],
+)
+def test_openalex_filter_uses_configured_prefix_and_proximity(
+    expression: str,
+    expected_openalex_id: str,
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = config_with_keyword_expression(tmp_path, expression)
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: filter_diagnostic_result(),
+    )
+
+    result = main(
+        (
+            "openalex-filter",
+            "--config",
+            str(config_path),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    rows = [json.loads(line) for line in captured.out.splitlines()]
+    assert result == 0
+    assert [row["external_ids"]["openalex"] for row in rows] == [
+        expected_openalex_id
+    ]
+
+
 def test_openalex_filter_batches_all_records_and_preserves_retained_order(
     monkeypatch: object,
     capsys: object,
@@ -963,6 +1059,220 @@ def test_openalex_filter_invalid_override_does_not_construct_client_or_discover(
     assert result == 2
     assert "--keyword-expression" in captured.err
     assert "column" in captured.err
+
+
+@pytest.mark.parametrize(
+    "command",
+    ("openalex-filter", "crossref-enrich", "canonicalize", "materialize"),
+)
+def test_lexically_invalid_override_stops_before_provider_clients(
+    command: str,
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+
+    def unexpected_call(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider path must not be reached")
+
+    for name in (
+        "OpenAlexClient",
+        "CrossrefClient",
+        "create_semantic_scholar_client",
+        "discover_journals",
+        "discover_crossref_journals",
+        "augment_with_semantic_scholar",
+    ):
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            f"literature_monitor.cli.{name}",
+            unexpected_call,
+        )
+
+    arguments = [
+        command,
+        "--config",
+        str(repository_root / "config.example.yaml"),
+        "--from-date",
+        "2026-01-01",
+        "--to-date",
+        "2026-01-31",
+        "--keyword-expression",
+        '"causal"~2',
+    ]
+    if command == "materialize":
+        arguments.extend(("--output-dir", str(tmp_path / "Vault")))
+
+    result = main(tuple(arguments))
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert captured.out == ""
+    assert "--keyword-expression" in captured.err
+    assert "at least two lexical tokens" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_lexically_invalid_config_stops_before_provider_clients(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = config_with_keyword_expression(tmp_path, '"causal"~2')
+
+    def unexpected_call(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider path must not be reached")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.OpenAlexClient",
+        unexpected_call,
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        unexpected_call,
+    )
+
+    result = main(
+        (
+            "openalex-filter",
+            "--config",
+            str(config_path),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert captured.out == ""
+    assert str(config_path) in captured.err
+    assert "keyword_expression" in captured.err
+    assert "at least two lexical tokens" in captured.err
+    assert "Traceback" not in captured.err
+
+
+@pytest.mark.parametrize(
+    "command",
+    ("openalex-filter", "crossref-enrich", "canonicalize", "materialize"),
+)
+def test_lexically_invalid_config_cannot_be_hidden_by_valid_override(
+    command: str,
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = config_with_keyword_expression(tmp_path, '"causal"~2')
+
+    def unexpected_call(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider path must not be reached")
+
+    for name in (
+        "OpenAlexClient",
+        "CrossrefClient",
+        "create_semantic_scholar_client",
+        "discover_journals",
+        "discover_crossref_journals",
+        "augment_with_semantic_scholar",
+    ):
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            f"literature_monitor.cli.{name}",
+            unexpected_call,
+        )
+
+    arguments = [
+        command,
+        "--config",
+        str(config_path),
+        "--from-date",
+        "2026-01-01",
+        "--to-date",
+        "2026-01-31",
+        "--keyword-expression",
+        "statist*",
+    ]
+    if command == "materialize":
+        arguments.extend(("--output-dir", str(tmp_path / "Vault")))
+
+    result = main(tuple(arguments))
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert captured.out == ""
+    assert str(config_path) in captured.err
+    assert "keyword_expression" in captured.err
+    assert "at least two lexical tokens" in captured.err
+    assert "--keyword-expression" not in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_discovery_command_does_not_require_local_lexical_preflight(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = config_with_keyword_expression(tmp_path, '"causal"~2')
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: diagnostic_result(),
+    )
+
+    result = main(
+        (
+            "openalex-discover",
+            "--config",
+            str(config_path),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+
+
+def test_local_filter_preflight_preserves_fts5_backend_error_style(
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+
+    def fail_validation(*args: object) -> None:
+        raise SearchBackendError("SQLite FTS5 is unavailable")
+
+    def unexpected_call(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider path must not be reached")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.validate_search_expression",
+        fail_validation,
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.OpenAlexClient",
+        unexpected_call,
+    )
+
+    result = main(
+        (
+            "openalex-filter",
+            "--config",
+            str(repository_root / "config.example.yaml"),
+            "--from-date",
+            "2026-01-01",
+            "--to-date",
+            "2026-01-31",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert captured.out == ""
+    assert "Local search / FTS5 backend failure" in captured.err
+    assert "SQLite FTS5 is unavailable" in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_openalex_filter_validates_config_before_override(
