@@ -12,6 +12,7 @@ import yaml
 
 from literature_monitor.cli import main
 from literature_monitor.crossref import CrossrefClient
+from literature_monitor.inbox import render_default_inbox_base
 from literature_monitor.naming import paper_filename
 from literature_monitor.openalex import OpenAlexClient
 
@@ -334,8 +335,10 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
 
     paper_paths = tuple(sorted((output_dir / "Papers").glob("*.md")))
     author_paths = tuple(sorted((output_dir / "Authors").glob("*.md")))
+    inbox_path = output_dir / "Inbox.base"
     assert len(paper_paths) == 2
     assert len(author_paths) == 2
+    assert inbox_path.read_text(encoding="utf-8") == render_default_inbox_base()
 
     values_by_path = {path: frontmatter(path) for path in paper_paths}
     ids_by_path = {
@@ -398,6 +401,8 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
         "## Notes\n",
         "## Notes\n\nHuman rejected note.\n",
     )
+    custom_inbox = b"human-owned custom Inbox bytes\n"
+    inbox_path.write_bytes(custom_inbox)
 
     expected_paths = set(paper_paths)
     expected_ids = dict(ids_by_path)
@@ -423,6 +428,8 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     assert "## Review Context\n\nRetain this custom section." in kept_contents
     assert frontmatter(semantic_only_path)["status"] == "rejected"
     assert "Human rejected note." in rejected_contents
+    assert inbox_path.read_bytes() == custom_inbox
+    assert list(output_dir.glob("*.base")) == [inbox_path]
 
     assert len(openalex_openers) == 2
     assert len(crossref_openers) == 2
@@ -465,6 +472,7 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     assert first_export.out == "10.1093/biomtc/ujag004\n"
     assert "Kept export completed: 1 entries, 0 issues" in first_export.err
     assert snapshot_files(output_dir) == before_export
+    assert inbox_path.read_bytes() == custom_inbox
 
     replace_once(doi_path, "status: kept\n", "status: in_zotero\n")
     after_manual_import = snapshot_files(output_dir)

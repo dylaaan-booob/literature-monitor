@@ -250,8 +250,10 @@ uv run literature-monitor materialize \
 The command writes to:
 
 ```text
-<output-dir>/Papers
-<output-dir>/Authors
+<output-dir>/
+├── Inbox.base
+├── Papers/
+└── Authors/
 ```
 
 Incremental materialization scans existing Markdown and recovers Paper identity
@@ -273,6 +275,24 @@ Malformed but identity-readable Papers still block duplicate creation. Unsafe
 or ambiguous matches are reported as errors and left unchanged, while
 recoverable metadata conflicts are warnings. Incremental materialization does
 not automatically merge, delete, or rename historical duplicates.
+
+### Review candidates in Obsidian
+
+Open `<output-dir>/Inbox.base`, review candidate papers in the **Inbox** view,
+and change each Paper's `status` to `kept` or `rejected`. The Paper moves
+automatically between the status-derived **Inbox**, **Kept**, **Rejected**, and
+**In Zotero** views. Use `export-kept` for the Zotero handoff.
+
+Paper Markdown remains the durable workflow state. `Inbox.base` contains only
+presentation configuration, so there is no Inbox synchronization command. It
+is user-customizable: columns, sorting, filters, formulas, and view layout may
+all be adjusted. Literature Monitor creates `Inbox.base` only when it is
+absent; an existing regular `Inbox.base` is never overwritten.
+
+The Review Inbox uses Obsidian Bases and was validated with Obsidian Desktop
+1.13.7. Bases is the only additional presentation capability used. No
+community plugin, Dataview, custom CSS, or additional Python runtime dependency
+is required.
 
 ## Export Kept Papers for Zotero
 

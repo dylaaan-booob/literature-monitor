@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 import literature_monitor.materialize as materialize_module
+from literature_monitor.inbox import render_default_inbox_base
 from literature_monitor.kept_export import export_kept_papers
 from literature_monitor.materialize import (
     MISSING_ABSTRACT,
@@ -209,6 +210,10 @@ def test_materializes_complete_paper_and_minimal_author_notes(tmp_path: Path) ->
     assert "## Sources\n\n- openalex: https://openalex.org/W123" in contents
     assert contents.endswith("## Notes\n")
 
+    assert (tmp_path / "Inbox.base").read_text(encoding="utf-8") == (
+        render_default_inbox_base()
+    )
+
     author_values = frontmatter(expected_author.read_text(encoding="utf-8"))
     assert author_values == {
         "type": "author",
@@ -216,6 +221,92 @@ def test_materializes_complete_paper_and_minimal_author_notes(tmp_path: Path) ->
         "openalex_id": "https://openalex.org/A123456",
         "orcid": "https://orcid.org/0000-0002-1825-0097",
     }
+
+
+def test_empty_materialization_initializes_workspace_and_inbox(
+    tmp_path: Path,
+) -> None:
+    result = materialize_papers((), tmp_path)
+
+    assert (tmp_path / "Papers").is_dir()
+    assert (tmp_path / "Authors").is_dir()
+    assert (tmp_path / "Inbox.base").read_text(encoding="utf-8") == (
+        render_default_inbox_base()
+    )
+    assert result.issues == ()
+
+
+def test_rerun_preserves_custom_inbox_bytes_without_validation(
+    tmp_path: Path,
+) -> None:
+    first = materialize_papers((), tmp_path)
+    inbox_path = tmp_path / "Inbox.base"
+    custom_bytes = b"\xffhuman-owned custom Base bytes\n"
+    inbox_path.write_bytes(custom_bytes)
+
+    second = materialize_papers((), tmp_path)
+
+    assert first.issues == ()
+    assert second.issues == ()
+    assert inbox_path.read_bytes() == custom_bytes
+    assert list(tmp_path.glob("*.base")) == [inbox_path]
+
+
+def test_inbox_directory_collision_is_reported_without_replacement(
+    tmp_path: Path,
+) -> None:
+    inbox_path = tmp_path / "Inbox.base"
+    inbox_path.mkdir()
+    marker = inbox_path / "human-owned"
+    marker.write_bytes(b"preserve")
+
+    result = materialize_papers((), tmp_path)
+
+    assert result.has_errors
+    assert [(issue.path, issue.message) for issue in result.issues] == [
+        (inbox_path, "target exists but is not a regular file")
+    ]
+    assert inbox_path.is_dir()
+    assert marker.read_bytes() == b"preserve"
+    assert list(tmp_path.glob("*.base")) == [inbox_path]
+
+
+def test_inbox_creation_failure_preserves_created_paper_and_author(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = paper("13345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    inbox_path = tmp_path / "Inbox.base"
+    create_file = materialize_module._create_file
+
+    def fail_inbox_creation(path: Path, contents: str) -> tuple[str | None, str | None]:
+        if path == inbox_path:
+            return None, "simulated Inbox write failure"
+        return create_file(path, contents)
+
+    monkeypatch.setattr(materialize_module, "_create_file", fail_inbox_creation)
+
+    result = materialize_papers((source,), tmp_path)
+
+    assert result.has_errors
+    assert [(issue.path, issue.message) for issue in result.issues] == [
+        (inbox_path, "simulated Inbox write failure")
+    ]
+    assert len(result.created_papers) == 1
+    assert len(result.created_authors) == 1
+    assert result.created_papers[0].is_file()
+    assert result.created_authors[0].is_file()
+    assert not inbox_path.exists()
+
+
+def test_invalid_workspace_does_not_create_inbox(tmp_path: Path) -> None:
+    (tmp_path / "Papers").write_bytes(b"not a directory")
+
+    result = materialize_papers((), tmp_path)
+
+    assert result.has_errors
+    assert [issue.path for issue in result.issues] == [tmp_path / "Papers"]
+    assert not (tmp_path / "Inbox.base").exists()
 
 
 def test_missing_abstract_and_empty_summaries_are_explicit() -> None:

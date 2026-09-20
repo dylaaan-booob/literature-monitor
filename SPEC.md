@@ -1,8 +1,8 @@
-# Literature Monitoring Workflow — MVP Specification v1.1
+# Literature Monitoring Workflow — MVP Specification v1.2
 
-**Status:** Active; v0.2.0 released and R0–R3 implemented and audited
+**Status:** Active; v0.2.1 released and R0–R3 implemented and audited
 
-**Stage:** v0.2.1 release closeout and validation
+**Stage:** v0.3.0 release preparation and closeout
 **Scope:** Journal monitoring only; conferences are excluded from MVP
 
 ---
@@ -42,6 +42,8 @@ One candidate paper → one Markdown file
     ↓
 Author wikilinks + author notes
     ↓
+Review Inbox presentation in Obsidian Bases
+    ↓
 Human triage in Obsidian
     ↓
 rejected / kept
@@ -73,9 +75,10 @@ A normal run should:
 6. merge each included cluster and its known versions into one canonical paper;
 7. create one Markdown file per new candidate paper;
 8. create/update author notes and author links;
-9. preserve all prior human decisions and notes;
-10. allow the user to mark papers as `rejected`, `kept`, or later `in_zotero`;
-11. export identifiers for `kept` papers so existing Zotero DOI/identifier import functionality can be used.
+9. create the default Review Inbox presentation when it is absent;
+10. preserve all prior human decisions, notes, and an existing user-customized Review Inbox;
+11. allow the user to mark papers as `rejected`, `kept`, or later `in_zotero`;
+12. export identifiers for `kept` papers so existing Zotero DOI/identifier import functionality can be used.
 
 ---
 
@@ -103,6 +106,7 @@ MVP includes:
 - candidate workflow states;
 - persistent rejected records;
 - author wikilinks and author notes;
+- an Obsidian Bases Review Inbox derived from Paper Markdown state;
 - safe incremental reruns;
 - export of `kept` paper identifiers for Zotero;
 - logs sufficient to inspect unresolved journals, failed enrichment, and partial metadata.
@@ -722,6 +726,8 @@ candidate ──human──> kept
 kept      ──human──> in_zotero
 ```
 
+Review Inbox does not change this state machine. It must not add Track B states or durable workflow fields, including `maybe`, `deferred`, `reviewing`, `screened`, `archived`, `reviewed_at`, `review_batch`, `review_priority`, `rejection_reason`, `inbox_seen`, or `inbox_order`.
+
 ### 15.1 candidate
 
 The paper matched the configured journal/date/keyword rules and has a Markdown record awaiting review.
@@ -807,7 +813,138 @@ The durable state unit is the **paper**, not the journal issue.
 
 ---
 
-## 18. Kept-Paper Export for Zotero
+## 18. Review Inbox Presentation
+
+### 18.1 Product role and workspace boundary
+
+Review Inbox is an Obsidian Bases presentation artifact:
+
+```text
+Papers/*.md
+→ Inbox.base
+→ Obsidian review interface
+```
+
+Paper Markdown remains the only durable user-facing workflow state. `Inbox.base` stores presentation configuration such as filters, views, sorting, columns, presentation formulas, and layout; it must not become a second workflow-state store or membership database.
+
+The Inbox observes only Paper Markdown files in the `Papers/` directory belonging to the same Literature Monitor output workspace as `Inbox.base`. Its scope is semantically equivalent to all of the following:
+
+- the item is a Markdown file;
+- the file belongs to `<output-dir>/Papers/`;
+- the file has `type == paper`.
+
+`output-dir` may be nested inside an Obsidian vault. For example:
+
+```text
+Vault/
+└── Research/
+    └── LiteratureMonitor/
+        ├── Inbox.base
+        ├── Papers/
+        └── Authors/
+```
+
+In this example, the Inbox observes only `Research/LiteratureMonitor/Papers/`. It must not observe another `Papers/` directory at the vault root, another Literature Monitor workspace, `Authors/`, ordinary notes, README files, `.base` files, or attachments.
+
+This specification freezes the observable workspace boundary, not the concrete Obsidian `.base` serialization.
+
+### 18.2 Default views and presentation
+
+The default `Inbox.base` provides these views and opens `Inbox` by default:
+
+| View | Membership derived from Paper Markdown |
+| --- | --- |
+| Inbox | `status == candidate` |
+| Kept | `status == kept` |
+| Rejected | `status == rejected` |
+| In Zotero | `status == in_zotero` |
+
+Literature Monitor stores no separate Inbox membership. After a user edits a Paper Markdown `status`, Obsidian recalculates view membership without a synchronization command or synchronization state.
+
+The default presentation exposes these labels using the existing Paper properties:
+
+| Presentation label | Paper property |
+| --- | --- |
+| Paper | `title` |
+| Journal | `journal` |
+| Publication Date | `publication_date` |
+| Authors | `authors` |
+| Author Keywords | `author_keywords` |
+| Discovered At | `discovered_at` |
+| Status | `status` |
+
+The Paper column is presentation-only navigation: its display text prefers the existing `title` and opens the corresponding Paper Markdown. A `.base` file may use formula or display configuration for this behavior, but materialization must not add durable properties such as `inbox_title` or `display_title`.
+
+Default sorting has this precedence:
+
+```text
+discovered_at DESC
+publication_date DESC
+title ASC
+```
+
+The concrete `.base` YAML representation remains an A1 implementation detail and must be based on the format generated by the then-current Obsidian Desktop, not guessed from unofficial examples.
+
+### 18.3 Ownership, creation, and idempotency
+
+`Inbox.base` follows creation-only ownership:
+
+```text
+missing
+→ create the default Inbox.base exactly once
+
+existing regular file
+→ preserve byte-for-byte
+
+concurrent creation race
+→ preserve the winner or otherwise report safely
+
+existing non-regular or unsafe filesystem target
+→ report MaterializationIssue; do not replace or delete it
+```
+
+For an existing regular file, materialization does not read it to judge validity, merge it, modify it, restore defaults, or inspect/rebuild the user's layout. User-customized views, filters, sorting, layout, and formulas survive every rerun.
+
+Creation uses exclusive-create semantics and the existing materialization pattern rather than a new persistence framework. It must not create alternative files such as `Inbox (1).base`, `Inbox-2.base`, or `Inbox.default.base`.
+
+The Inbox lifecycle belongs to a successfully initialized, valid output workspace rather than to the current result count. A zero-candidate materialization still creates a missing `Inbox.base`. After the first successful creation, later runs preserve the existing file byte-for-byte and neither create duplicates nor reset presentation configuration.
+
+### 18.4 Failure semantics
+
+Inbox creation is isolated from Paper and Author writes. If Papers and Authors succeed but Inbox creation fails:
+
+- successful Paper and Author writes remain;
+- a `MaterializationIssue` is recorded;
+- the `materialize` command exits non-zero.
+
+An existing regular `Inbox.base` requires no read or write and is not an error.
+
+### 18.5 Architectural boundary and Track B exclusions
+
+Review Inbox occurs only at the presentation end of the existing pipeline:
+
+```text
+retrieval
+→ canonicalization
+→ Papers / Authors materialization
+→ ensure default Inbox presentation
+```
+
+It does not participate in provider retrieval, search filtering, evidence consolidation, `CanonicalPaper`, canonicalization, identity matching, version consolidation, candidate inclusion, or workflow-state semantics. The normal entry point remains the existing `literature-monitor materialize ...`; v0.3.0 Track A adds no `inbox-sync`, `review`, `rebuild-inbox`, or other CLI workflow.
+
+The following remain excluded unless a future independent Track B proposal changes scope:
+
+- Maybe / Deferred states, rejection reasons, review labels, reviewer identity, review batches, review sessions, reviewed timestamps, bulk screening workflow, and priority state;
+- BM25, semantic, citation, or LLM ranking;
+- automatic summaries, relevance explanations, and recommendations;
+- PDF preview or download;
+- Zotero API integration;
+- an Obsidian plugin or custom GUI;
+- a persistent Inbox database.
+
+---
+
+## 19. Kept-Paper Export for Zotero
 
 MVP deliberately reuses Zotero's existing identifier-import capabilities instead of reimplementing them.
 
@@ -823,7 +960,7 @@ and excluding:
 in_zotero
 ```
 
-### 18.1 Preferred export identifier
+### 19.1 Preferred export identifier
 
 Priority:
 
@@ -835,7 +972,7 @@ DOI
 
 The exact export format may be a plain text file, Markdown list, or similarly simple artifact, but it must be easy to paste/use with Zotero's existing DOI/identifier import workflow.
 
-### 18.2 Out of scope
+### 19.2 Out of scope
 
 The project does not:
 
@@ -850,20 +987,20 @@ The user changes the status to `in_zotero` after successful downstream import.
 
 ---
 
-## 19. CLI / Execution Surface
+## 20. CLI / Execution Surface
 
 MVP may be implemented as a CLI application or equivalent scriptable command surface.
 
 It must support at least these operations conceptually:
 
-### 19.1 Validate configuration
+### 20.1 Validate configuration
 
 - validate journal whitelist;
 - resolve/report provider-specific venue/source identifiers where applicable;
 - report unresolved or ambiguous venues per provider;
 - validate keyword expression syntax.
 
-### 19.2 Discover/update candidates
+### 20.2 Discover/update candidates
 
 Input:
 
@@ -879,9 +1016,10 @@ Output:
 - new candidate Markdown files;
 - safe enrichment of existing files;
 - author notes;
+- a default Review Inbox when absent;
 - run summary/log.
 
-### 19.3 Export kept papers
+### 20.3 Export kept papers
 
 Output identifiers for papers with:
 
@@ -895,7 +1033,7 @@ Exact command names are implementation details and need not be frozen in the spe
 
 ---
 
-## 20. Error Handling
+## 21. Error Handling
 
 A partial failure must not invalidate the whole run.
 
@@ -922,9 +1060,9 @@ Requirements:
 
 ---
 
-## 21. Reuse and Prior-Art Boundary
+## 22. Reuse and Prior-Art Boundary
 
-### 21.1 Gian-Hacher/Paper_tracker
+### 22.1 Gian-Hacher/Paper_tracker
 
 Borrow design ideas for:
 
@@ -942,7 +1080,7 @@ Do not reuse as the core data model/state layer:
 
 If its repository lacks a clear license, implementation should be independently written rather than copied.
 
-### 21.2 zcz718/PaperRadar
+### 22.2 zcz718/PaperRadar
 
 MIT-licensed components may be reused where appropriate, preserving required license notices.
 
@@ -962,7 +1100,7 @@ Do not adopt its orchestration assumptions:
 
 Its Zotero write/attachment code is not needed in MVP because Zotero ingestion has been removed from project scope.
 
-### 21.3 ansatzX/PaperTrack
+### 22.3 ansatzX/PaperTrack
 
 Borrow design ideas for:
 
@@ -978,7 +1116,7 @@ Do not adopt:
 - issue-level Markdown rendering;
 - GPL code unless the project intentionally accepts the relevant licensing consequences.
 
-### 21.4 Zotero
+### 22.4 Zotero
 
 Reuse Zotero's existing DOI/identifier import workflow and existing Zotero plugins where useful.
 
@@ -986,11 +1124,11 @@ Do not build a new Zotero ingestion subsystem in MVP.
 
 ---
 
-## 22. Acceptance Criteria
+## 23. Acceptance Criteria
 
 MVP is complete only when the following are demonstrated.
 
-### 22.1 Whitelist and venue validation
+### 23.1 Whitelist and venue validation
 
 Given the supplied journal whitelist with conferences excluded:
 
@@ -999,7 +1137,7 @@ Given the supplied journal whitelist with conferences excluded:
 - ISSN/EISSN is preferred for venue identity, with strict normalized journal-name fallback only when a provider record lacks usable ISSN/EISSN;
 - no journal is silently dropped.
 
-### 22.2 Journal/date multi-source retrieval
+### 23.2 Journal/date multi-source retrieval
 
 For a selected date window:
 
@@ -1009,7 +1147,7 @@ For a selected date window:
 - global keyword search is not used to define the candidate universe;
 - Semantic Scholar broad positive queries do not decide final inclusion.
 
-### 22.3 Evidence consolidation and keyword filtering
+### 23.3 Evidence consolidation and keyword filtering
 
 Given a test expression using `AND`, `OR`, `NOT`, phrases, and parentheses:
 
@@ -1028,7 +1166,7 @@ Given a test expression using `AND`, `OR`, `NOT`, phrases, and parentheses:
 - punctuation follows SQLite FTS5 `unicode61` token semantics, including lexical equivalence between token sequences such as `high-dimensional` and `high dimensional`;
 - the local search index is transient, reconstructible runtime state and is not a durable or mandatory source of truth.
 
-### 22.4 Candidate creation
+### 23.4 Candidate creation
 
 For each newly matched work:
 
@@ -1041,7 +1179,7 @@ For each newly matched work:
 - authors appear as Obsidian wikilinks;
 - required Author notes are created/reused.
 
-### 22.5 Safe rerun
+### 23.5 Safe rerun
 
 Run the same overlapping query twice:
 
@@ -1052,7 +1190,7 @@ Run the same overlapping query twice:
 - human notes are preserved;
 - metadata enrichment may improve existing records.
 
-### 22.6 Rejected persistence
+### 23.6 Rejected persistence
 
 After manually changing a paper to:
 
@@ -1062,7 +1200,7 @@ status: rejected
 
 rerunning discovery must not create a new candidate or revert its status.
 
-### 22.7 Version consolidation
+### 23.7 Version consolidation
 
 Given two records known to represent the same work:
 
@@ -1079,7 +1217,7 @@ journal final
 
 - only one Paper Markdown exists.
 
-### 22.8 Provider-neutral canonicalization
+### 23.8 Provider-neutral canonicalization
 
 Given valid evidence from multiple providers or from Crossref/Semantic Scholar without OpenAlex:
 
@@ -1089,7 +1227,7 @@ Given valid evidence from multiple providers or from Crossref/Semantic Scholar w
 - first-seen provider order does not determine canonical authority;
 - no missing metadata is invented.
 
-### 22.9 Provider failure isolation
+### 23.9 Provider failure isolation
 
 When one provider, journal, or request fails:
 
@@ -1098,11 +1236,11 @@ When one provider, journal, or request fails:
 - the failure is reported without invalidating unrelated results;
 - rerunning after recovery does not create duplicate canonical papers.
 
-### 22.10 Low-confidence dedup safety
+### 23.10 Low-confidence dedup safety
 
 Two papers with similar titles but insufficient identifier/author evidence must not be silently merged.
 
-### 22.11 Kept export
+### 23.11 Kept export
 
 After manually setting:
 
@@ -1115,15 +1253,30 @@ status: kept
 - DOI is preferred when present;
 - lack of DOI does not delete or invalidate the paper record.
 
-### 22.12 User-edit safety
+### 23.12 User-edit safety
 
 After adding arbitrary human notes to a Paper Markdown, running the updater again must not erase or replace those notes.
 
+### 23.13 Review Inbox
+
+Given a valid Literature Monitor output workspace:
+
+- `materialize` creates `Inbox.base` when it is absent, including on a zero-candidate run;
+- the default Inbox view shows only Paper Markdown with `status == candidate` from that workspace's own `Papers/` directory;
+- Kept, Rejected, and In Zotero membership is derived respectively from the existing `kept`, `rejected`, and `in_zotero` statuses;
+- editing a Paper Markdown `status` changes view membership without an additional synchronization command or state;
+- rediscovered `rejected` or `kept` papers do not re-enter Inbox;
+- an existing regular `Inbox.base` remains byte-for-byte unchanged, preserving all user customization on rerun;
+- a nested `output-dir` observes only its own `Papers/` and not similarly named directories elsewhere in the vault;
+- Inbox creation failure preserves successful Paper and Author writes, records a `MaterializationIssue`, and makes `materialize` exit non-zero;
+- the feature adds no workflow states, durable Inbox membership, second source of truth, external service, Obsidian community plugin, or Python runtime dependency;
+- `export-kept` behavior remains unchanged.
+
 ---
 
-## 23. Suggested Implementation Sequence
+## 24. Suggested Implementation Sequence
 
-### 23.1 Completed v0.1.0 history
+### 24.1 Completed v0.1.0 history
 
 The original MVP tasks are completed history, not pending implementation steps:
 
@@ -1139,7 +1292,7 @@ The original MVP tasks are completed history, not pending implementation steps:
 
 This list records the shipped v0.1.0 sequence. It does not give OpenAlex or the original post-filter Crossref enrichment path authority over the revised multi-source candidate universe.
 
-### 23.2 Completed multi-source retrieval evolution
+### 24.2 Completed multi-source retrieval evolution
 
 R0–R3 are completed, separately reviewed history:
 
@@ -1157,19 +1310,32 @@ R0 Specification alignment
 
 Each R0–R3 task was implemented and reviewed as a separate bounded change. This sequence is retained as project history, not as a pending implementation plan.
 
-### 23.3 Completed v0.2.1 lexical-search evolution
+### 24.3 Completed v0.2.1 lexical-search evolution
 
 The bounded v0.2.1 lexical-search evolution is implemented:
 
-1. the observable lexical-search contract was aligned with §7 and §22.3;
+1. the observable lexical-search contract was aligned with §7 and §23.3;
 2. the transient SQLite FTS5 batch backend was implemented;
 3. all local filtering entry points were integrated with that backend after the appropriate metadata or evidence consolidation stage.
 
 This work does not retroactively alter the completed R0–R3 history or bring other SQLite FTS5 capabilities into product scope.
 
+### 24.4 Completed v0.3.0 Review Inbox evolution
+
+The bounded v0.3.0 Track A Review Inbox evolution is completed and reviewed history:
+
+```text
+A0 Specification alignment
+→ A1 Minimal Base artifact
+→ A2 Materialization integration
+→ A3 Documentation / real Obsidian validation
+```
+
+This sequence added the creation-only Review Inbox presentation without changing Paper Markdown's ownership of durable workflow state or entering Track B scope.
+
 ---
 
-## 24. Non-blocking Implementation Details
+## 25. Non-blocking Implementation Details
 
 The following do not block implementation and may be decided locally as long as the specification's observable behavior is preserved:
 
@@ -1186,13 +1352,13 @@ These details should not change the core workflow or introduce additional scope.
 
 ---
 
-## 25. Definition of MVP Done
+## 26. Definition of MVP Done
 
 The MVP is done when a user can take the real journal whitelist, a keyword expression, and a date window and reliably perform this cycle:
 
 ```text
 run discovery
-→ review new candidate Markdown files in Obsidian
+→ review new candidate Markdown files through Inbox.base in Obsidian
 → mark some rejected and some kept
 → rerun without losing decisions or notes
 → export kept identifiers
@@ -1202,10 +1368,22 @@ run discovery
 
 No additional infrastructure is required for MVP completion.
 
+For v0.3.0 Track A, this also means:
+
+- `materialize` initializes a missing default Review Inbox even when no candidate is produced;
+- Inbox, Kept, Rejected, and In Zotero are projections of the existing Paper Markdown statuses, so status edits need no synchronization step and rediscovery does not reset prior decisions;
+- a nested workspace observes only its own `Papers/` files with `type == paper`;
+- Paper Markdown remains the only durable user-facing workflow state;
+- existing `Inbox.base` content and user customization are preserved byte-for-byte on rerun;
+- Inbox creation failures are reported as materialization issues, produce a non-zero command result, and do not roll back successful Paper or Author writes;
+- no Track B state, second source of truth, external service, community plugin, Python runtime dependency, or `export-kept` regression is introduced.
+
 ---
 
-## 26. Next Project Step
+## 27. Next Project Step
 
-R0–R3 are complete and audited, and v0.2.0 has been released. The v0.2.1 lexical-search contract alignment, transient FTS5 backend, and pipeline integration are complete.
+R0–R3, the v0.2.1 lexical-search evolution, and the v0.3.0 Track A Review Inbox evolution are complete and reviewed. v0.2.1 remains the latest released version.
 
-The current bounded project step is v0.2.1 release closeout and validation. Commit, tag, push, and publication remain separate release actions after this release candidate is audited; v0.2.1 is not yet released.
+The next bounded project step is v0.3.0 release preparation and closeout. The version bump, final release metadata, commit, tag, push, and GitHub release remain pending and are separate release actions.
+
+Future Track B features are not pending implementation and require a separate proposal before entering scope.

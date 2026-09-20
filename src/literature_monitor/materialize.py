@@ -15,6 +15,7 @@ from uuid import UUID
 import yaml
 
 from literature_monitor.identifiers import normalize_doi
+from literature_monitor.inbox import render_default_inbox_base
 from literature_monitor.markdown_state import (
     MISSING_ABSTRACT,
     AuthorLink,
@@ -1013,6 +1014,15 @@ def materialize_papers(
             issues.append(
                 MaterializationIssue(pending.path, error or "write failed")
             )
+
+    if authors_directory_issue is None and papers_directory_issue is None:
+        inbox_path = output_dir / "Inbox.base"
+        _outcome, error = _create_file(
+            inbox_path,
+            render_default_inbox_base(),
+        )
+        if error is not None:
+            issues.append(MaterializationIssue(inbox_path, error))
 
     return MaterializationResult(
         created_papers=tuple(created_papers),
