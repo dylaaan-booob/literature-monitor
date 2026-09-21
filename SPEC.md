@@ -2,7 +2,7 @@
 
 **Status:** Active; v0.3.1 is the latest released version
 
-**Stage:** v0.3.2 Persistent Monitor Definition — implementation complete / final audit closeout
+**Stage:** v0.3.2 release preparation and closeout
 **Scope:** Journal monitoring only; conferences are excluded from MVP
 
 ---
@@ -1728,13 +1728,17 @@ For v0.3.0 Track A, this also means:
 
 R0–R3, v0.2.1 lexical search, v0.3.0 Track A Review Inbox, and v0.3.1 Prefix / Proximity search are completed history. v0.3.1 is released and remains the latest released version.
 
-The bounded v0.3.2 Persistent Monitor Definition feature implementation is complete through P0–A4. The next step is:
+The bounded v0.3.2 Persistent Monitor Definition feature implementation is complete through P0–A4. The remaining release sequence is:
 
 ```text
-v0.3.2 final commit review / release preparation
+release-preparation commit
+→ tag
+→ push main
+→ push tag
+→ GitHub Release
 ```
 
-This status does not mark v0.3.2 as released. Release version changes, commits,
-tags, pushes, and release publication are separate follow-up work.
+This status does not mark v0.3.2 as released. Until that sequence completes,
+v0.3.1 remains the latest released version.
 
 Future Track B remains outside the current v0.3.2 scope and requires a separate proposal before entering scope.
