@@ -1,4 +1,7 @@
 # Syntax example only; replace this expression before a real monitoring run.
+name: Statistical ML
 venue_whitelist: list.md
-keyword_expression: '"high-dimensional" AND statistics'
+keyword_expression: 'statist* AND "high dimensional"~0'
+output_dir: ./workspace
+window_days: 14
 log_level: INFO

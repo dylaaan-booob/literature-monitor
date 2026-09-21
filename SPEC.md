@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — MVP Specification v1.2
 
-**Status:** Active; v0.2.1 remains the latest released version
+**Status:** Active; v0.3.1 is the latest released version
 
-**Stage:** v0.3.1 release preparation and closeout
+**Stage:** v0.3.2 Persistent Monitor Definition — implementation complete / final audit closeout
 **Scope:** Journal monitoring only; conferences are excluded from MVP
 
 ---
@@ -61,11 +61,18 @@ MVP success means this complete workflow works reliably on the journal whitelist
 
 The user maintains:
 
-1. a relatively stable journal whitelist;
-2. a relatively stable keyword expression;
-3. a rolling date range, such as the last 6 months, 1 year, or 3 years.
+1. one local YAML monitor definition;
+2. a relatively stable journal whitelist referenced by that monitor;
+3. a relatively stable keyword expression;
+4. a persistent date policy or an ephemeral CLI date override.
 
-A normal run should:
+A normal run uses:
+
+```bash
+literature-monitor run --config monitor.yaml
+```
+
+and should:
 
 1. validate the journal whitelist and resolve any provider-specific venue identifiers;
 2. retrieve journal/date evidence independently from the configured providers;
@@ -88,6 +95,7 @@ A normal run should:
 
 MVP includes:
 
+- a local-first persistent monitor definition stored as one YAML file;
 - journal whitelist configuration;
 - ISSN/EISSN-based venue resolution;
 - multi-source evidence retrieval within the journal/date boundary;
@@ -148,6 +156,17 @@ MVP does **not** include:
 - journal ranking;
 - durable database or another mandatory source of truth;
 - persistent search database;
+- inline journal definitions in monitor YAML;
+- monitor UUIDs or monitor versioning;
+- query versioning;
+- persisted last-run or last-successful-run timestamps;
+- persisted last-used date ranges, provider cursors, checkpoints, run history, delta / What's New state, notification state, scheduler state, or automatic retry state;
+- a persistent execution database;
+- scheduler, daemon, or cron management;
+- notifications;
+- multi-monitor dashboard;
+- Zotero API integration;
+- Paper Markdown schema changes in v0.3.2;
 - Track B workflow/state expansion beyond the current Markdown lifecycle;
 
 SQLite FTS5 is permitted only as transient, reconstructible runtime state. It must not become durable workflow state or a mandatory second source of truth.
@@ -953,7 +972,7 @@ retrieval
 → ensure default Inbox presentation
 ```
 
-It does not participate in provider retrieval, search filtering, evidence consolidation, `CanonicalPaper`, canonicalization, identity matching, version consolidation, candidate inclusion, or workflow-state semantics. The normal entry point remains the existing `literature-monitor materialize ...`; v0.3.0 Track A adds no `inbox-sync`, `review`, `rebuild-inbox`, or other CLI workflow.
+It does not participate in provider retrieval, search filtering, evidence consolidation, `CanonicalPaper`, canonicalization, identity matching, version consolidation, candidate inclusion, or workflow-state semantics. As of v0.3.2, the normal persistent-monitor entry point is `literature-monitor run --config monitor.yaml`; `materialize` remains an explicit legacy / diagnostic-style execution entry. v0.3.0 Track A itself added no `inbox-sync`, `review`, `rebuild-inbox`, or other CLI workflow.
 
 The following remain excluded unless a future independent Track B proposal changes scope:
 
@@ -1012,37 +1031,256 @@ The user changes the status to `in_zotero` after successful downstream import.
 
 ## 20. CLI / Execution Surface
 
-MVP may be implemented as a CLI application or equivalent scriptable command surface.
+The v0.3.2 normal user entry point is:
 
-It must support at least these operations conceptually:
+```bash
+literature-monitor run --config monitor.yaml
+```
 
-### 20.1 Validate configuration
+Existing diagnostic commands remain available. `materialize` remains an explicit legacy / diagnostic-style execution entry, and its existing explicit `--output-dir` behavior is not redesigned in v0.3.2.
 
-- validate journal whitelist;
-- resolve/report provider-specific venue/source identifiers where applicable;
-- report unresolved or ambiguous venues per provider;
-- validate keyword expression syntax.
+### 20.1 Persistent monitor definition
 
-### 20.2 Discover/update candidates
+A monitor is defined by one YAML file. The supported monitor fields are:
 
-Input:
+```yaml
+name:
+venue_whitelist:
+keyword_expression:
+output_dir:
+from_date:
+to_date:
+window_days:
+log_level:
+```
 
-- journal whitelist;
-- keyword expression;
-- `from_date`;
-- `to_date`.
+`keyword_expression` is the only core field without a default and therefore the only field required in a minimal monitor definition.
 
-Output:
+The monitor definition is local-first configuration: it is intended to be movable, copyable, and suitable for version control. The configuration file does not contain execution identity or durable run state. In particular, v0.3.2 must not introduce:
 
-- independently retrieved provider evidence;
-- identity/evidence consolidation and a local-filtering summary;
-- new candidate Markdown files;
-- safe enrichment of existing files;
-- author notes;
-- a default Review Inbox when absent;
-- run summary/log.
+```text
+monitor_id
+monitor_version
+last_successful_run
+last_run_at
+last_seen_at
+last_used_range
+cursor
+checkpoint
+run_history
+delta state
+notification state
+scheduler state
+persistent execution database
+```
 
-### 20.3 Export kept papers
+Paper Markdown remains the durable workflow state and retains ownership of stable Paper UUIDs, `rejected` / `kept` / `in_zotero` status, and human-authored notes.
+
+Monitor configuration uses strict validation. Unknown fields are errors. For example, `window_day: 14` must fail rather than silently falling back to the `window_days` default.
+
+Missing fields and explicit YAML `null` are distinct. Defaults apply only when the corresponding field or date-policy fields are absent. Explicit `null` is invalid for every monitor field; for date fields it does not count as absence and must not activate the default rolling window.
+
+The configuration defaults are:
+
+- `name`: the monitor config filename stem. For `/research/causal-inference.yaml`, the default name is `causal-inference`. The name is used only for display, logging, and future UI. It does not define monitor identity, workspace paths, Paper identity, or date calculation. An explicit empty string or `null` is invalid.
+- `venue_whitelist`: `<config-directory>/list.md`. A relative explicit path is also resolved from the monitor config directory. The loader must not search parent directories, shell cwd, a global list, or other Markdown files. If the default or explicit resolved file does not exist, configuration loading fails and reports the resolved path. Explicit `null` is invalid.
+- `keyword_expression`: no default. Missing, `null`, or an empty string is invalid and must fail before any provider network request. It must never be interpreted as match-all.
+- `output_dir`: `<config-directory>/workspace`. A relative explicit path is resolved from the monitor config directory. It must not default to shell cwd, HOME, an Obsidian vault, or another machine-specific fixed path. Explicit `null` is invalid. A missing output directory is initialized by the existing materialization behavior when materialization occurs.
+- date policy: when `from_date`, `to_date`, and `window_days` are all absent, the config/domain layer applies `window_days = 14`. This default is resolved in memory and is not written back to YAML.
+- `log_level`: `INFO`. Existing case normalization remains in force. An invalid value or explicit `null` is an error.
+
+Absolute paths remain valid. Relative `venue_whitelist` and `output_dir` semantics depend only on `config_path.parent`, never on the shell cwd.
+
+`--journal` remains part of existing diagnostic behavior only and does not enter the persistent monitor definition. API keys, Crossref mailto, and similar runtime/environment settings also remain outside monitor YAML. Existing keyword-expression CLI override behavior is not redesigned by v0.3.2.
+
+### 20.2 Date policy and resolved runtime range
+
+The persistent date policy has exactly two degrees of freedom. Date ranges are inclusive:
+
+```text
+window_days = (to_date - from_date).days + 1
+from_date = to_date - (window_days - 1 days)
+to_date = from_date + (window_days - 1 days)
+```
+
+Legal persistent forms are:
+
+```text
+no date fields
+window_days
+from_date + to_date
+from_date + window_days
+to_date + window_days
+```
+
+No date fields means the default rolling `window_days = 14`.
+
+The following forms are invalid:
+
+```text
+from_date only
+to_date only
+from_date + to_date + window_days
+window_days < 1
+from_date > to_date
+```
+
+All three fields must be rejected even when they are mathematically consistent. There is no precedence rule among three simultaneously configured date fields.
+
+A rolling policy resolves at runtime as:
+
+```text
+window_days: N
+→ to_date = today
+→ from_date = today - (N - 1 days)
+```
+
+Date arithmetic uses standard `datetime.date` semantics. This includes `window_days = 1`, leap days, month boundaries, and year boundaries. Resolved runtime dates are ephemeral and must not be written back to the monitor config.
+
+The persistent policy and the resolved runtime range are distinct concepts. Defaults belong to the config/domain contract; CLI commands, provider adapters, materialization code, and any future GUI must not define competing default semantics. A future GUI, if separately brought into scope, must obey this same two-degrees-of-freedom date model.
+
+### 20.3 CLI date override contract
+
+The date-bearing commands are:
+
+```text
+run
+openalex-discover
+crossref-discover
+openalex-filter
+crossref-enrich
+canonicalize
+materialize
+```
+
+`validate` and `export-kept` are not date-bearing commands.
+
+Every date-bearing command supports:
+
+```text
+--from-date
+--to-date
+--window-days
+```
+
+Date precedence has only two layers:
+
+```text
+no CLI date args
+→ use the monitor config date policy
+
+at least one CLI date arg
+→ the CLI date args form a complete override
+→ all config date fields are ignored for this invocation
+```
+
+CLI and config date fields must never be merged field-by-field. For example:
+
+```text
+config: window_days = 14
+CLI: --to-date 2026-09-01
+→ error
+```
+
+The CLI may not borrow `window_days` or another missing date component from the config once any CLI date argument is present.
+
+Legal CLI overrides are:
+
+```text
+--window-days N
+--from-date X --to-date Y
+--from-date X --window-days N
+--to-date Y --window-days N
+```
+
+Invalid CLI overrides are:
+
+```text
+--from-date X
+--to-date Y
+all three date fields
+--window-days 0
+from_date > to_date
+```
+
+All three CLI date fields are invalid even when they are mathematically consistent.
+
+The legacy form:
+
+```bash
+literature-monitor openalex-discover \
+  --config monitor.yaml \
+  --from-date 2026-01-01 \
+  --to-date 2026-01-31
+```
+
+must retain the same observable behavior. CLI overrides are ephemeral runtime input: they are not written to YAML and do not create a last-used range or any other override state.
+
+All date-bearing commands must share the same observable date-resolution semantics; internal resolver names, class names, and file layout are not product contracts.
+
+### 20.4 Normal run and production-pipeline reuse
+
+`literature-monitor run --config monitor.yaml` is the normal persistent-monitor execution path. It obtains the following from the monitor definition after defaults and path/date resolution:
+
+```text
+journals
+keyword expression
+output directory
+date policy
+log level
+```
+
+Its production flow is:
+
+```text
+load monitor
+→ resolve journals
+→ resolve effective date range
+→ retrieve provider evidence
+→ consolidate evidence
+→ local FTS5 filtering
+→ canonicalize
+→ materialize Papers / Authors / Inbox
+```
+
+`run` must reuse the existing complete materialization production pipeline. v0.3.2 must not create a second implementation of retrieval, Semantic Scholar supplementation, filtering, canonicalization, or materialization.
+
+Existing diagnostic commands remain available. `materialize` remains an explicit legacy / diagnostic-style execution entry. Its existing explicit `--output-dir` behavior is preserved rather than redesigned here.
+
+### 20.5 Validate configuration
+
+Validation must cover the monitor definition and its resolved configuration, including:
+
+- strict monitor-field validation and required `keyword_expression`;
+- journal whitelist existence and syntax;
+- provider-specific venue/source identifier resolution where applicable;
+- unresolved or ambiguous venues per provider;
+- keyword expression syntax;
+- date-policy validity.
+
+Configuration errors that can be determined locally, including a missing/empty keyword expression and an invalid date policy, must be reported before provider network requests.
+
+### 20.6 Existing behavior preserved
+
+v0.3.2 does not change the observable behavior of:
+
+- OpenAlex retrieval;
+- Crossref retrieval;
+- Semantic Scholar supplementation;
+- provider evidence consolidation;
+- local FTS5 lexical filtering;
+- v0.3.1 Prefix semantics;
+- v0.3.1 Proximity semantics;
+- canonicalization;
+- Paper / Author materialization;
+- Review Inbox behavior;
+- `export-kept`;
+- Paper Markdown durable-state ownership;
+- Paper UUID stability;
+- persistence of `rejected`, `kept`, and `in_zotero`;
+- preservation of human notes.
+
+### 20.7 Export kept papers
 
 Output identifiers for papers with:
 
@@ -1051,8 +1289,6 @@ status = kept
 ```
 
 while skipping `in_zotero`.
-
-Exact command names are implementation details and need not be frozen in the specification.
 
 ---
 
@@ -1308,6 +1544,38 @@ Given a valid Literature Monitor output workspace:
 - the feature adds no workflow states, durable Inbox membership, second source of truth, external service, Obsidian community plugin, or Python runtime dependency;
 - `export-kept` behavior remains unchanged.
 
+### 23.14 Persistent monitor definition and date resolution
+
+Given v0.3.2 monitor definitions and CLI invocations:
+
+- a minimal monitor requires only a valid `keyword_expression` as an explicit YAML field; omitted fields use their defined defaults, subject to the resolved default `list.md` existing;
+- a missing `name` resolves to the config filename stem, while explicit empty string or `null` is rejected;
+- a missing `venue_whitelist` resolves exactly to `<config-directory>/list.md`, and loading fails with the resolved path when that file does not exist;
+- a missing `output_dir` resolves exactly to `<config-directory>/workspace`;
+- relative `venue_whitelist` and `output_dir` paths resolve from `config_path.parent` and produce the same result regardless of shell cwd;
+- a missing, `null`, or empty `keyword_expression` fails before any provider network request and never becomes match-all;
+- with all date fields missing, the effective persistent policy is rolling 14 days without mutating the YAML;
+- a missing `log_level` resolves to `INFO`, existing case normalization remains valid, and an invalid or explicit-null level is rejected;
+- explicit `null` never activates a missing-field default, including the default rolling date policy;
+- unknown monitor fields are rejected, including a misspelled `window_day`;
+- all legal persistent date forms are accepted: no date fields, `window_days`, `from_date + to_date`, `from_date + window_days`, and `to_date + window_days`;
+- `from_date` alone, `to_date` alone, all three date fields together, `window_days < 1`, and `from_date > to_date` are rejected;
+- date arithmetic is inclusive and satisfies `window_days = (to_date - from_date).days + 1`, including one-day windows and ranges crossing leap days, month boundaries, or year boundaries;
+- a rolling `window_days: N` resolves to `to_date = today` and `from_date = today - (N - 1 days)`;
+- resolved runtime dates are not written back to the monitor YAML;
+- `literature-monitor run --config monitor.yaml` is the normal persistent-monitor execution entry and obtains journals, keyword expression, output directory, date policy, and log level from that monitor;
+- all date-bearing commands expose `--from-date`, `--to-date`, and `--window-days` with the same date-resolution semantics;
+- when no CLI date argument is supplied, the monitor date policy is used;
+- once any CLI date argument is supplied, CLI date arguments completely replace the monitor date policy for that invocation and may not borrow missing components from config;
+- `--window-days N`, `--from-date X --to-date Y`, `--from-date X --window-days N`, and `--to-date Y --window-days N` are valid complete CLI overrides;
+- CLI `--from-date X` alone, `--to-date Y` alone, all three CLI date fields, zero/negative window sizes, and reversed ranges are rejected;
+- the legacy `openalex-discover --config ... --from-date ... --to-date ...` form preserves its observable from/to behavior;
+- CLI date overrides remain ephemeral and create no config mutation, last-used range, checkpoint, or other durable run state;
+- `run` reuses the existing retrieval, Semantic Scholar supplementation, evidence consolidation, local filtering, canonicalization, and materialization production path rather than implementing a second pipeline;
+- `materialize` remains an explicit legacy / diagnostic-style entry and its existing explicit `--output-dir` behavior is preserved;
+- no monitor UUID, monitor version, last-run semantics, run history, scheduler/notification state, provider cursor persistence, or persistent execution database is introduced;
+- Paper Markdown remains the durable workflow state, with no Paper Markdown schema change in v0.3.2 and no regression to UUID stability, statuses, or human-note preservation.
+
 ---
 
 ## 24. Suggested Implementation Sequence
@@ -1389,6 +1657,27 @@ provider work, while searchable-unit boundaries, provider-neutral final local
 matching, and reconstructible in-memory search state remain unchanged. README
 and specification history were synchronized as the final bounded step.
 
+### 24.6 Completed v0.3.2 Persistent Monitor Definition evolution
+
+The completed v0.3.2 sequence is:
+
+```text
+P0 Specification alignment
+→ A1 Monitor config / date domain
+→ A2 Unified CLI date overrides
+→ A3 Persistent run entrypoint / production-pipeline reuse
+→ A4 Documentation / E2E / final feature audit
+```
+
+This evolution added one local YAML monitor definition with config-relative
+paths, a shared inclusive date-policy model, unified ephemeral CLI date
+overrides, and `literature-monitor run --config monitor.yaml` as the normal
+entry point. `run` reuses the existing production retrieval, evidence,
+filtering, canonicalization, and materialization pipeline rather than creating a
+second orchestration path. No durable execution state, monitor identity, run
+history, provider cursor persistence, scheduler state, or second workflow source
+of truth was added.
+
 ---
 
 ## 25. Non-blocking Implementation Details
@@ -1397,7 +1686,6 @@ The following do not block implementation and may be decided locally as long as 
 
 - programming language/package layout, provided the chosen stack can reuse relevant prior art cleanly;
 - exact short-UUID length, provided collisions are checked;
-- exact CLI command names;
 - exact cache format;
 - exact Markdown section ordering;
 - exact format of the kept-paper export;
@@ -1410,10 +1698,10 @@ These details should not change the core workflow or introduce additional scope.
 
 ## 26. Definition of MVP Done
 
-The MVP is done when a user can take the real journal whitelist, a keyword expression, and a date window and reliably perform this cycle:
+The MVP is done when a user can take a monitor definition and reliably perform this cycle:
 
 ```text
-run discovery
+literature-monitor run --config monitor.yaml
 → review new candidate Markdown files through Inbox.base in Obsidian
 → mark some rejected and some kept
 → rerun without losing decisions or notes
@@ -1438,18 +1726,15 @@ For v0.3.0 Track A, this also means:
 
 ## 27. Next Project Step
 
-R0–R3 are complete and reviewed. The v0.2.1 lexical-search evolution is complete and released. The v0.3.0 Track A Review Inbox evolution and the v0.3.1 Prefix / Proximity search evolution are complete and reviewed. v0.2.1 remains the latest released version.
+R0–R3, v0.2.1 lexical search, v0.3.0 Track A Review Inbox, and v0.3.1 Prefix / Proximity search are completed history. v0.3.1 is released and remains the latest released version.
 
-The current bounded project step is v0.3.1 release preparation and closeout. It prepares one release candidate containing both the completed v0.3.0 Review Inbox evolution and the completed v0.3.1 Prefix / Proximity search evolution; it does not retroactively publish v0.3.0.
-
-The remaining release actions are separate later steps and have not occurred:
+The bounded v0.3.2 Persistent Monitor Definition feature implementation is complete through P0–A4. The next step is:
 
 ```text
-release-preparation commit
-→ tag
-→ push main
-→ push tag
-→ GitHub Release
+v0.3.2 final commit review / release preparation
 ```
 
-Future Track B remains outside the current release scope and requires a separate proposal before entering scope.
+This status does not mark v0.3.2 as released. Release version changes, commits,
+tags, pushes, and release publication are separate follow-up work.
+
+Future Track B remains outside the current v0.3.2 scope and requires a separate proposal before entering scope.

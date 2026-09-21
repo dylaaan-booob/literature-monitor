@@ -15,6 +15,106 @@ brew install uv
 uv sync
 ```
 
+## Run a persistent monitor
+
+The normal v0.3.2 entry point is:
+
+```bash
+uv run literature-monitor run --config config.example.yaml
+```
+
+`run` reads the journal whitelist, keyword expression, output directory, date
+policy, and log level from the monitor YAML. It then runs the complete production
+path: OpenAlex and Crossref retrieval, provider evidence supplementation,
+Semantic Scholar supplementation/discovery, evidence consolidation, local FTS5
+filtering, canonicalization, and Paper / Author / Inbox materialization.
+
+The selected output directory contains:
+
+```text
+<output-dir>/
+├── Inbox.base
+├── Papers/
+└── Authors/
+```
+
+Paper Markdown is the durable workflow state: UUIDs, review status, human notes,
+unknown human-owned frontmatter, and unmanaged sections survive reruns according
+to the existing materialization rules. `Inbox.base` is presentation only. It is
+created when missing and an existing customized file is preserved.
+
+### Persistent monitor fields and defaults
+
+A monitor accepts `name`, `venue_whitelist`, `keyword_expression`,
+`output_dir`, `from_date`, `to_date`, `window_days`, and `log_level`.
+`keyword_expression` is the only core field without a default and must not be
+missing, null, or empty.
+
+| Field | Default when omitted |
+| --- | --- |
+| `name` | monitor config filename stem |
+| `venue_whitelist` | `<config-directory>/list.md` |
+| `output_dir` | `<config-directory>/workspace` |
+| date policy | rolling 14 days |
+| `log_level` | `INFO` |
+
+Relative `venue_whitelist` and `output_dir` paths are always resolved from
+the monitor config directory, not the shell working directory. The loader does
+not search parent directories or other locations for a replacement `list.md`.
+
+A minimal monitor is therefore:
+
+```yaml
+keyword_expression: 'statist*'
+```
+
+This is usable only when a valid `list.md` exists beside the monitor file. Its
+effective defaults are the config filename stem for `name`, `./workspace`
+relative to the config file for output, a rolling 14-day window, and `INFO`
+logging.
+
+### Date policy and temporary CLI overrides
+
+Persistent date policy supports five forms: no date fields, `window_days` only,
+`from_date + to_date`, `from_date + window_days`, or
+`to_date + window_days`. Date ranges are inclusive. For example, with
+`window_days: 14` and today equal to 2026-09-21, the resolved range is
+2026-09-08 through 2026-09-21 inclusive.
+
+`from_date` alone, `to_date` alone, all three date fields together,
+`window_days < 1`, and `from_date > to_date` are invalid.
+
+`run` and the existing date-bearing diagnostic commands accept temporary
+`--from-date`, `--to-date`, and `--window-days` overrides:
+
+```bash
+uv run literature-monitor run \
+  --config monitor.yaml \
+  --window-days 30
+
+uv run literature-monitor run \
+  --config monitor.yaml \
+  --from-date 2026-01-01 \
+  --to-date 2026-06-30
+```
+
+Once any CLI date field is supplied, the CLI fields form the complete date
+policy for that invocation; missing pieces are not borrowed from the monitor
+YAML. Thus config `window_days: 14` combined with CLI
+`--to-date 2026-09-01` is invalid. CLI date overrides are ephemeral and are
+never written back to the monitor file.
+
+### Runtime environment and non-features
+
+Optional provider credentials/contact information remain environment settings,
+not monitor fields: `OPENALEX_API_KEY`, `CROSSREF_MAILTO`, and
+`SEMANTIC_SCHOLAR_API_KEY`.
+
+v0.3.2 does not persist last-run timestamps, run history, provider cursors,
+incremental delta / “What's New” state, monitor UUID/version, scheduler or daemon
+state, notifications, or an execution database. It also does not provide a
+GUI/dashboard or write directly to the Zotero API.
+
 ## Validate configuration
 
 `config.example.yaml` contains a syntax example, not a real research query.
@@ -39,15 +139,22 @@ or database operations.
 
 ## End-to-end validation
 
-The default `uv run pytest` suite includes a deterministic full-cycle CLI
-regression using local HTTP fixtures. The end-to-end acceptance coverage includes
-a representative multi-journal full cycle and a partially overlapping rerun.
-The normal CLI commands can also be used for manual smoke validation against
-the real OpenAlex, Crossref, and Semantic Scholar providers, but those results
+The default `uv run pytest` suite includes deterministic full-cycle CLI
+regressions using local HTTP fixtures. The representative persistent-monitor
+lifecycle enters through `run --config`, while explicit `materialize` coverage
+remains for the legacy / diagnostic surface and an overlapping multi-journal
+rerun. The CLI can also be used for manual smoke validation against the real
+OpenAlex, Crossref, and Semantic Scholar providers, but those results
 depend on external service availability and are not part of the deterministic
 default suite. Optional credentials and contact details are supplied only
 through `OPENALEX_API_KEY`, `CROSSREF_MAILTO`, and
 `SEMANTIC_SCHOLAR_API_KEY` environment variables.
+
+## Diagnostic and lower-level commands
+
+`run` is the normal persistent-monitor entry point. The commands below remain
+available as explicit diagnostic or lower-level surfaces for provider inspection,
+search diagnostics, canonicalization diagnostics, and legacy materialization.
 
 ## Diagnose OpenAlex discovery
 
@@ -269,14 +376,17 @@ The canonicalization diagnostic does not implement Markdown materialization,
 persistent rerun state, stable UUID recovery across independent runs, or Zotero
 export.
 
-## Materialize Obsidian Markdown
+## Legacy / diagnostic materialization
 
-The materialize command runs the same three-provider
-consolidation-before-filter pipeline and the same local FTS5 matching rules,
-then creates or incrementally updates Paper and Author notes under an
-Obsidian-compatible output directory. Semantic Scholar access is anonymous by
-default; set `SEMANTIC_SCHOLAR_API_KEY` in the
-environment when using an API key:
+`materialize` remains an explicit legacy / diagnostic-style entry point. It
+runs the same three-provider consolidation-before-filter production pipeline as
+`run`, but it still requires an explicit CLI `--output-dir` and continues to
+support the existing diagnostic `--journal` and `--keyword-expression`
+overrides. The normal `run` command instead takes its output directory,
+journal whitelist, and keyword expression from the monitor definition.
+
+Semantic Scholar access is anonymous by default; set
+`SEMANTIC_SCHOLAR_API_KEY` in the environment when using an API key:
 
 ```bash
 uv run literature-monitor materialize \

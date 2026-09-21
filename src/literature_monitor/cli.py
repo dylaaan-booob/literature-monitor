@@ -23,6 +23,12 @@ from literature_monitor.crossref import (
     discover_crossref_journals,
     enrich_records,
 )
+from literature_monitor.date_range import (
+    DateRangeError,
+    DateRangeSpec,
+    ResolvedDateRange,
+    resolve_date_range,
+)
 from literature_monitor.keywords import (
     KeywordExpression,
     KeywordSyntaxError,
@@ -66,10 +72,15 @@ def _date_argument(value: str) -> date:
         raise argparse.ArgumentTypeError(f"expected YYYY-MM-DD, got {value!r}") from error
 
 
-def _add_discovery_arguments(parser: argparse.ArgumentParser) -> None:
+def _add_monitor_date_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--from-date", type=_date_argument, required=True)
-    parser.add_argument("--to-date", type=_date_argument, required=True)
+    parser.add_argument("--from-date", type=_date_argument)
+    parser.add_argument("--to-date", type=_date_argument)
+    parser.add_argument("--window-days", type=int)
+
+
+def _add_discovery_arguments(parser: argparse.ArgumentParser) -> None:
+    _add_monitor_date_arguments(parser)
     parser.add_argument(
         "--journal",
         help="limit diagnostics to one exact configured journal name",
@@ -84,6 +95,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="validate configuration and OpenAlex venue resolution",
     )
     validate.add_argument("--config", type=Path, required=True)
+    run_parser = subparsers.add_parser(
+        "run",
+        help="run a persistent monitor and materialize its workspace",
+    )
+    _add_monitor_date_arguments(run_parser)
     discover = subparsers.add_parser(
         "openalex-discover",
         help="diagnose OpenAlex discovery (NDJSON output is not a stable export)",
@@ -248,6 +264,38 @@ def _match_local_search(
         return None
 
 
+def _resolve_invocation_date_range(
+    args: argparse.Namespace,
+    config_spec: DateRangeSpec,
+) -> ResolvedDateRange:
+    has_cli_override = (
+        args.from_date is not None
+        or args.to_date is not None
+        or args.window_days is not None
+    )
+    spec = (
+        DateRangeSpec(
+            from_date=args.from_date,
+            to_date=args.to_date,
+            window_days=args.window_days,
+        )
+        if has_cli_override
+        else config_spec
+    )
+    return resolve_date_range(spec, today=date.today())
+
+
+def _format_cli_date_error(error: DateRangeError) -> str:
+    message = str(error)
+    for field, flag in (
+        ("from_date", "--from-date"),
+        ("to_date", "--to-date"),
+        ("window_days", "--window-days"),
+    ):
+        message = message.replace(field, flag)
+    return message
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     logger = configure_logging()
@@ -317,6 +365,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "crossref-enrich",
         "canonicalize",
         "materialize",
+        "run",
     }:
         try:
             config = load_config(args.config)
@@ -331,6 +380,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "crossref-enrich",
             "canonicalize",
             "materialize",
+            "run",
         }:
             try:
                 validate_search_expression(config.keyword_ast)
@@ -345,7 +395,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 logger.error("Local search / FTS5 backend failure: %s", error)
                 return 2
 
-            if args.keyword_expression is not None:
+            if args.command != "run" and args.keyword_expression is not None:
                 try:
                     keyword_ast = parse_keyword_expression(args.keyword_expression)
                 except KeywordSyntaxError as error:
@@ -360,12 +410,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     logger.error("Local search / FTS5 backend failure: %s", error)
                     return 2
 
-        if args.from_date > args.to_date:
-            logger.error("--from-date must not be after --to-date")
+        try:
+            resolved_date_range = _resolve_invocation_date_range(
+                args,
+                config.date_spec,
+            )
+        except DateRangeError as error:
+            logger.error("%s", _format_cli_date_error(error))
             return 2
 
         journals = config.journals
-        if args.journal is not None:
+        if args.command != "run" and args.journal is not None:
             journals = tuple(
                 journal
                 for journal in journals
@@ -381,6 +436,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "crossref-enrich",
             "canonicalize",
             "materialize",
+            "run",
         }:
             crossref_client = CrossrefClient(
                 mailto=os.environ.get("CROSSREF_MAILTO")
@@ -391,8 +447,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             discovery = discover_crossref_journals(
                 crossref_client,
                 journals,
-                args.from_date,
-                args.to_date,
+                resolved_date_range.from_date,
+                resolved_date_range.to_date,
             )
             _log_crossref_discovery_issues(logger, discovery.issues)
             for record in discovery.records:
@@ -410,8 +466,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         openalex = discover_journals(
             openalex_client,
             journals,
-            args.from_date,
-            args.to_date,
+            resolved_date_range.from_date,
+            resolved_date_range.to_date,
         )
         _log_openalex_discovery(logger, openalex)
 
@@ -483,8 +539,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         crossref = discover_crossref_journals(
             crossref_client,
             journals,
-            args.from_date,
-            args.to_date,
+            resolved_date_range.from_date,
+            resolved_date_range.to_date,
         )
         _log_crossref_discovery_issues(logger, crossref.issues)
         retrieval = assemble_provider_evidence(
@@ -500,8 +556,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             semantic_scholar_client,
             retrieval.evidence,
             journals,
-            args.from_date,
-            args.to_date,
+            resolved_date_range.from_date,
+            resolved_date_range.to_date,
             keyword_ast,
         )
         _log_semantic_scholar_issues(logger, semantic_scholar.issues)
@@ -567,10 +623,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 1 if provider_errors else 0
 
-        materialization = materialize_papers(
-            canonicalization.papers,
-            args.output_dir,
-        )
+        output_dir = config.output_dir if args.command == "run" else args.output_dir
+        materialization = materialize_papers(canonicalization.papers, output_dir)
         for issue in materialization.issues:
             log = (
                 logger.error

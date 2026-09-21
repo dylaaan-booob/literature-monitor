@@ -1,9 +1,11 @@
+from datetime import date
 from pathlib import Path
 import re
 
 import pytest
 
 from literature_monitor.config import ConfigurationError, load_config, parse_journal_whitelist
+from literature_monitor.date_range import DateRangeSpec
 from literature_monitor.keywords import And, Phrase, Term
 
 
@@ -25,8 +27,12 @@ JOURNAL_FIXTURE = """\
 """
 
 
-def write_whitelist(tmp_path: Path, contents: str = JOURNAL_FIXTURE) -> Path:
-    path = tmp_path / "venues.md"
+def write_whitelist(
+    tmp_path: Path,
+    contents: str = JOURNAL_FIXTURE,
+    filename: str = "venues.md",
+) -> Path:
+    path = tmp_path / filename
     path.write_text(contents, encoding="utf-8")
     return path
 
@@ -41,6 +47,16 @@ def write_config(tmp_path: Path, whitelist: str = "venues.md", **values: str) ->
         f"log_level: {log_level}\n",
         encoding="utf-8",
     )
+    return path
+
+
+def write_monitor_config(
+    tmp_path: Path,
+    contents: str,
+    filename: str = "monitor.yaml",
+) -> Path:
+    path = tmp_path / filename
+    path.write_text(contents, encoding="utf-8")
     return path
 
 
@@ -66,6 +82,258 @@ def test_load_config_resolves_relative_path_and_parses_keyword(tmp_path: Path) -
     assert config.venue_whitelist == whitelist.resolve()
     assert config.keyword_ast == And(Phrase("high-dimensional"), Term("statistics"))
     assert config.log_level.value == "DEBUG"
+
+
+def test_minimal_monitor_uses_config_defaults(tmp_path: Path) -> None:
+    whitelist = write_whitelist(tmp_path, filename="list.md")
+    config_path = write_monitor_config(
+        tmp_path,
+        "keyword_expression: causal\n",
+        filename="my-monitor.yaml",
+    )
+
+    config = load_config(config_path)
+
+    assert config.name == "my-monitor"
+    assert config.venue_whitelist == whitelist.resolve()
+    assert config.keyword_expression == "causal"
+    assert config.keyword_ast == Term("causal")
+    assert config.output_dir == (tmp_path / "workspace").resolve()
+    assert config.date_spec == DateRangeSpec(window_days=14)
+    assert config.log_level.value == "INFO"
+    assert [journal.name for journal in config.journals] == [
+        "Biometrics",
+        "Annals of Applied Statistics",
+    ]
+    assert not config.output_dir.exists()
+
+
+def test_monitor_defaults_are_independent_of_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    research_dir = tmp_path / "research"
+    research_dir.mkdir()
+    cwd_dir = tmp_path / "elsewhere"
+    cwd_dir.mkdir()
+
+    config_list = JOURNAL_FIXTURE.replace("Biometrics", "Config Journal", 1)
+    cwd_list = JOURNAL_FIXTURE.replace("Biometrics", "Cwd Journal", 1)
+    whitelist = write_whitelist(research_dir, config_list, filename="list.md")
+    write_whitelist(cwd_dir, cwd_list, filename="list.md")
+    config_path = write_monitor_config(
+        research_dir,
+        "keyword_expression: causal\n",
+    )
+
+    monkeypatch.chdir(cwd_dir)
+    config = load_config(config_path)
+
+    assert config.venue_whitelist == whitelist.resolve()
+    assert config.output_dir == (research_dir / "workspace").resolve()
+    assert config.journals[0].name == "Config Journal"
+
+
+def test_explicit_monitor_paths_are_config_relative_or_absolute(tmp_path: Path) -> None:
+    config_dir = tmp_path / "research"
+    config_dir.mkdir()
+    relative_dir = config_dir / "config"
+    relative_dir.mkdir()
+    whitelist = write_whitelist(relative_dir)
+    absolute_output = (tmp_path / "absolute-workspace").resolve()
+    config_path = write_monitor_config(
+        config_dir,
+        "venue_whitelist: config/venues.md\n"
+        "keyword_expression: causal\n"
+        f"output_dir: {absolute_output}\n",
+    )
+
+    config = load_config(config_path)
+
+    assert config.venue_whitelist == whitelist.resolve()
+    assert config.output_dir == absolute_output
+
+
+def test_absolute_whitelist_and_relative_output_dir_are_supported(tmp_path: Path) -> None:
+    config_dir = tmp_path / "research"
+    config_dir.mkdir()
+    whitelist = write_whitelist(tmp_path).resolve()
+    config_path = write_monitor_config(
+        config_dir,
+        f"venue_whitelist: {whitelist}\n"
+        "keyword_expression: causal\n"
+        "output_dir: ./monitor-workspace\n",
+    )
+
+    config = load_config(config_path)
+
+    assert config.venue_whitelist == whitelist
+    assert config.output_dir == (config_dir / "monitor-workspace").resolve()
+
+
+def test_empty_name_is_rejected(tmp_path: Path) -> None:
+    write_whitelist(tmp_path, filename="list.md")
+    config_path = write_monitor_config(
+        tmp_path,
+        "keyword_expression: causal\nname: ''\n",
+    )
+
+    with pytest.raises(ConfigurationError, match="field 'name'"):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "log_level: INFO\n",
+        "keyword_expression: ''\n",
+        "keyword_expression: null\n",
+        "keyword_expression: '   '\n",
+    ],
+)
+def test_keyword_expression_is_required_and_nonempty(
+    tmp_path: Path,
+    contents: str,
+) -> None:
+    write_whitelist(tmp_path, filename="list.md")
+    config_path = write_monitor_config(tmp_path, contents)
+
+    with pytest.raises(ConfigurationError, match="keyword_expression"):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "name",
+        "venue_whitelist",
+        "output_dir",
+        "from_date",
+        "to_date",
+        "window_days",
+        "log_level",
+    ],
+)
+def test_explicit_null_never_activates_monitor_defaults(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    write_whitelist(tmp_path, filename="list.md")
+    config_path = write_monitor_config(
+        tmp_path,
+        f"keyword_expression: causal\n{field}: null\n",
+    )
+
+    with pytest.raises(ConfigurationError) as captured:
+        load_config(config_path)
+
+    assert str(config_path.resolve()) in str(captured.value)
+    assert f"field '{field}'" in str(captured.value)
+    assert "must not be null" in str(captured.value)
+
+
+def test_unknown_monitor_field_is_rejected_before_defaults(tmp_path: Path) -> None:
+    write_whitelist(tmp_path, filename="list.md")
+    config_path = write_monitor_config(
+        tmp_path,
+        "keyword_expression: causal\nwindow_day: 14\n",
+    )
+
+    with pytest.raises(ConfigurationError, match="field 'window_day'.*Extra inputs"):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    ("date_fields", "expected"),
+    [
+        ("", DateRangeSpec(window_days=14)),
+        ("window_days: 14\n", DateRangeSpec(window_days=14)),
+        (
+            "from_date: 2026-09-01\nto_date: 2026-09-21\n",
+            DateRangeSpec(
+                from_date=date(2026, 9, 1),
+                to_date=date(2026, 9, 21),
+            ),
+        ),
+        (
+            "from_date: 2026-09-01\nwindow_days: 21\n",
+            DateRangeSpec(
+                from_date=date(2026, 9, 1),
+                window_days=21,
+            ),
+        ),
+        (
+            "to_date: 2026-09-21\nwindow_days: 14\n",
+            DateRangeSpec(
+                to_date=date(2026, 9, 21),
+                window_days=14,
+            ),
+        ),
+    ],
+)
+def test_config_accepts_all_legal_date_policy_forms(
+    tmp_path: Path,
+    date_fields: str,
+    expected: DateRangeSpec,
+) -> None:
+    write_whitelist(tmp_path, filename="list.md")
+    config_path = write_monitor_config(
+        tmp_path,
+        f"keyword_expression: causal\n{date_fields}",
+    )
+
+    assert load_config(config_path).date_spec == expected
+
+
+@pytest.mark.parametrize(
+    ("date_fields", "field"),
+    [
+        ("from_date: 2026-09-01\n", "from_date"),
+        ("to_date: 2026-09-21\n", "to_date"),
+        (
+            "from_date: 2026-09-01\nto_date: 2026-09-21\nwindow_days: 21\n",
+            "date_range",
+        ),
+        ("window_days: 0\n", "window_days"),
+        ("window_days: -1\n", "window_days"),
+        (
+            "from_date: 2026-09-22\nto_date: 2026-09-21\n",
+            "from_date",
+        ),
+    ],
+)
+def test_config_rejects_all_illegal_date_policy_forms(
+    tmp_path: Path,
+    date_fields: str,
+    field: str,
+) -> None:
+    write_whitelist(tmp_path, filename="list.md")
+    config_path = write_monitor_config(
+        tmp_path,
+        f"keyword_expression: causal\n{date_fields}",
+    )
+
+    with pytest.raises(ConfigurationError) as captured:
+        load_config(config_path)
+
+    assert str(config_path.resolve()) in str(captured.value)
+    assert f"field '{field}'" in str(captured.value)
+
+
+def test_invalid_date_value_keeps_config_path_and_field_context(tmp_path: Path) -> None:
+    write_whitelist(tmp_path, filename="list.md")
+    config_path = write_monitor_config(
+        tmp_path,
+        "keyword_expression: causal\n"
+        "from_date: not-a-date\n"
+        "window_days: 14\n",
+    )
+
+    with pytest.raises(ConfigurationError) as captured:
+        load_config(config_path)
+
+    assert str(config_path.resolve()) in str(captured.value)
+    assert "field 'from_date'" in str(captured.value)
 
 
 @pytest.mark.parametrize(
@@ -151,6 +419,16 @@ def test_missing_whitelist_reports_resolved_path(tmp_path: Path) -> None:
     config_path = write_config(tmp_path, whitelist="missing.md")
     with pytest.raises(ConfigurationError, match=str(tmp_path / "missing.md")):
         load_config(config_path)
+
+
+def test_missing_default_whitelist_reports_resolved_path(tmp_path: Path) -> None:
+    config_path = write_monitor_config(tmp_path, "keyword_expression: causal\n")
+
+    with pytest.raises(ConfigurationError) as captured:
+        load_config(config_path)
+
+    assert "field 'venue_whitelist'" in str(captured.value)
+    assert str((tmp_path / "list.md").resolve()) in str(captured.value)
 
 
 def test_repository_list_smoke_parses_and_excludes_conference_names() -> None:

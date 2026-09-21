@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -106,6 +106,21 @@ def validate_config(tmp_path: Path) -> tuple[Path, object]:
         encoding="utf-8",
     )
     return config_path, load_config(config_path)
+
+
+def config_with_date_policy(tmp_path: Path, date_policy: str) -> Path:
+    config_path, _config = validate_config(tmp_path)
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8") + date_policy,
+        encoding="utf-8",
+    )
+    return config_path
+
+
+class FixedDate(date):
+    @classmethod
+    def today(cls) -> date:
+        return cls(2026, 9, 21)
 
 
 def config_with_keyword_expression(tmp_path: Path, expression: str) -> Path:
@@ -547,6 +562,695 @@ def install_semantic_scholar_mock(
         "literature_monitor.cli.augment_with_semantic_scholar",
         augment,
     )
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "openalex-discover",
+        "crossref-discover",
+        "openalex-filter",
+        "crossref-enrich",
+        "canonicalize",
+        "materialize",
+        "run",
+    ),
+)
+def test_date_bearing_commands_parse_without_cli_date_args(command: str) -> None:
+    arguments = [command, "--config", "monitor.yaml"]
+    if command == "materialize":
+        arguments.extend(("--output-dir", "workspace"))
+
+    args = _build_parser().parse_args(arguments)
+
+    assert args.from_date is None
+    assert args.to_date is None
+    assert args.window_days is None
+
+
+def test_date_bearing_parser_accepts_window_days_override() -> None:
+    args = _build_parser().parse_args(
+        ("openalex-discover", "--config", "monitor.yaml", "--window-days", "30")
+    )
+
+    assert args.from_date is None
+    assert args.to_date is None
+    assert args.window_days == 30
+
+
+@pytest.mark.parametrize(
+    "date_arguments",
+    (
+        ("--window-days", "30"),
+        ("--from-date", "2026-01-01", "--to-date", "2026-01-31"),
+        ("--from-date", "2026-09-01", "--window-days", "21"),
+        ("--to-date", "2026-09-21", "--window-days", "14"),
+    ),
+)
+def test_run_parser_accepts_shared_date_override_forms(
+    date_arguments: tuple[str, ...],
+) -> None:
+    args = _build_parser().parse_args(
+        ("run", "--config", "monitor.yaml", *date_arguments)
+    )
+
+    assert args.command == "run"
+
+
+@pytest.mark.parametrize(
+    "forbidden_arguments",
+    (
+        ("--journal", "Biometrics"),
+        ("--keyword-expression", "causal"),
+        ("--output-dir", "other-workspace"),
+    ),
+)
+def test_run_parser_rejects_diagnostic_and_output_overrides(
+    forbidden_arguments: tuple[str, ...],
+) -> None:
+    with pytest.raises(SystemExit) as captured:
+        _build_parser().parse_args(
+            ("run", "--config", "monitor.yaml", *forbidden_arguments)
+        )
+
+    assert captured.value.code == 2
+
+
+def test_materialize_parser_still_requires_output_dir() -> None:
+    with pytest.raises(SystemExit) as captured:
+        _build_parser().parse_args(("materialize", "--config", "monitor.yaml"))
+
+    assert captured.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        ("validate", "--config", "monitor.yaml", "--window-days", "14"),
+        ("export-kept", "--output-dir", "workspace", "--window-days", "14"),
+    ),
+)
+def test_non_date_commands_do_not_accept_date_arguments(
+    arguments: tuple[str, ...],
+) -> None:
+    with pytest.raises(SystemExit) as captured:
+        _build_parser().parse_args(arguments)
+
+    assert captured.value.code == 2
+
+
+@pytest.mark.parametrize(
+    ("date_policy", "expected"),
+    [
+        ("", (date(2026, 9, 8), date(2026, 9, 21))),
+        (
+            "from_date: 2026-01-01\nto_date: 2026-01-31\n",
+            (date(2026, 1, 1), date(2026, 1, 31)),
+        ),
+        (
+            "to_date: 2026-09-21\nwindow_days: 14\n",
+            (date(2026, 9, 8), date(2026, 9, 21)),
+        ),
+    ],
+)
+def test_openalex_discover_without_cli_dates_uses_config_policy(
+    date_policy: str,
+    expected: tuple[date, date],
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = (
+        config_with_date_policy(tmp_path, date_policy)
+        if date_policy
+        else validate_config(tmp_path)[0]
+    )
+    received_ranges: list[tuple[date, date]] = []
+
+    def fake_discover(
+        client: object,
+        journals: tuple[object, ...],
+        from_date: date,
+        to_date: date,
+    ) -> DiscoveryResult:
+        received_ranges.append((from_date, to_date))
+        return diagnostic_result()
+
+    monkeypatch.setattr("literature_monitor.cli.date", FixedDate)  # type: ignore[attr-defined]
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.OpenAlexClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals", fake_discover
+    )
+
+    result = main(("openalex-discover", "--config", str(config_path)))
+
+    capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert received_ranges == [expected]
+
+
+@pytest.mark.parametrize(
+    ("date_arguments", "expected"),
+    [
+        (
+            ("--window-days", "30"),
+            (date(2026, 8, 23), date(2026, 9, 21)),
+        ),
+        (
+            ("--from-date", "2026-01-01", "--to-date", "2026-01-31"),
+            (date(2026, 1, 1), date(2026, 1, 31)),
+        ),
+        (
+            ("--from-date", "2026-09-01", "--window-days", "21"),
+            (date(2026, 9, 1), date(2026, 9, 21)),
+        ),
+        (
+            ("--to-date", "2026-09-21", "--window-days", "14"),
+            (date(2026, 9, 8), date(2026, 9, 21)),
+        ),
+    ],
+)
+def test_cli_date_override_forms_resolve_without_merging_config(
+    date_arguments: tuple[str, ...],
+    expected: tuple[date, date],
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = config_with_date_policy(tmp_path, "window_days: 14\n")
+    received_ranges: list[tuple[date, date]] = []
+
+    def fake_discover(
+        client: object,
+        journals: tuple[object, ...],
+        from_date: date,
+        to_date: date,
+    ) -> DiscoveryResult:
+        received_ranges.append((from_date, to_date))
+        return diagnostic_result()
+
+    monkeypatch.setattr("literature_monitor.cli.date", FixedDate)  # type: ignore[attr-defined]
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.OpenAlexClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals", fake_discover
+    )
+
+    result = main(
+        ("openalex-discover", "--config", str(config_path), *date_arguments)
+    )
+
+    capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert received_ranges == [expected]
+
+
+@pytest.mark.parametrize(
+    ("config_policy", "date_arguments"),
+    [
+        (
+            "window_days: 14\n",
+            ("--to-date", "2026-09-01"),
+        ),
+        (
+            "to_date: 2026-09-21\nwindow_days: 14\n",
+            ("--from-date", "2026-01-01"),
+        ),
+    ],
+)
+def test_partial_cli_date_override_does_not_borrow_config_fields(
+    config_policy: str,
+    date_arguments: tuple[str, ...],
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = config_with_date_policy(tmp_path, config_policy)
+
+    def unexpected_provider(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider path must not be reached")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.OpenAlexClient", unexpected_provider
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals", unexpected_provider
+    )
+
+    result = main(
+        ("openalex-discover", "--config", str(config_path), *date_arguments)
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert "must be combined with another date field" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("date_arguments", "message"),
+    [
+        (
+            (
+                "--from-date",
+                "2026-09-01",
+                "--to-date",
+                "2026-09-21",
+                "--window-days",
+                "21",
+            ),
+            "cannot all be specified",
+        ),
+        (("--window-days", "0"), "--window-days must be at least 1"),
+        (("--window-days", "-1"), "--window-days must be at least 1"),
+        (
+            ("--from-date", "2026-09-21", "--to-date", "2026-09-01"),
+            "--from-date must not be after --to-date",
+        ),
+    ],
+)
+def test_invalid_cli_date_overrides_fail_before_provider_work(
+    date_arguments: tuple[str, ...],
+    message: str,
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = validate_config(tmp_path)[0]
+
+    def unexpected_provider(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider path must not be reached")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.OpenAlexClient", unexpected_provider
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals", unexpected_provider
+    )
+
+    result = main(
+        ("openalex-discover", "--config", str(config_path), *date_arguments)
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert message in captured.err
+
+
+@pytest.mark.parametrize("command", ("canonicalize", "materialize", "run"))
+def test_pipeline_commands_without_cli_dates_propagate_config_range(
+    command: str,
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = config_with_date_policy(
+        tmp_path,
+        "from_date: 2026-01-01\nto_date: 2026-01-31\n",
+    )
+    expected = (date(2026, 1, 1), date(2026, 1, 31))
+    received: list[tuple[str, date, date]] = []
+
+    def fake_openalex(
+        client: object,
+        journals: tuple[object, ...],
+        from_date: date,
+        to_date: date,
+    ) -> DiscoveryResult:
+        received.append(("openalex", from_date, to_date))
+        return DiscoveryResult(sources=(), records=(), issues=())
+
+    def fake_crossref(
+        client: object,
+        journals: tuple[object, ...],
+        from_date: date,
+        to_date: date,
+    ) -> CrossrefDiscoveryResult:
+        received.append(("crossref", from_date, to_date))
+        return crossref_discovery_result()
+
+    def fake_semantic_scholar(
+        client: object,
+        evidence: tuple[object, ...],
+        journals: tuple[object, ...],
+        from_date: date,
+        to_date: date,
+        expression: object,
+    ) -> SemanticScholarRetrievalResult:
+        received.append(("semantic_scholar", from_date, to_date))
+        return SemanticScholarRetrievalResult(
+            evidence=(),
+            supplement_records=(),
+            discovered_records=(),
+            issues=(),
+        )
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.OpenAlexClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals", fake_openalex
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_crossref_journals", fake_crossref
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.assemble_provider_evidence",
+        lambda client, openalex, crossref: EvidenceRetrievalResult(
+            evidence=(),
+            supplement_records=(),
+            issues=(),
+        ),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.create_semantic_scholar_client",
+        lambda api_key: object(),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.augment_with_semantic_scholar",
+        fake_semantic_scholar,
+    )
+    if command == "materialize":
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            "literature_monitor.cli.materialize_papers",
+            lambda papers, output_dir: MaterializationResult((), (), (), (), (), ()),
+        )
+
+    arguments = [command, "--config", str(config_path)]
+    if command == "materialize":
+        arguments.extend(("--output-dir", str(tmp_path / "Vault")))
+    result = main(tuple(arguments))
+
+    capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert received == [
+        ("openalex", *expected),
+        ("crossref", *expected),
+        ("semantic_scholar", *expected),
+    ]
+    if command == "run":
+        assert (tmp_path / "workspace" / "Inbox.base").exists()
+
+
+@pytest.mark.parametrize(
+    ("date_arguments", "expected"),
+    [
+        ((), (date(2026, 9, 8), date(2026, 9, 21))),
+        (
+            ("--window-days", "30"),
+            (date(2026, 8, 23), date(2026, 9, 21)),
+        ),
+    ],
+)
+def test_run_uses_shared_config_and_cli_date_resolution(
+    date_arguments: tuple[str, ...],
+    expected: tuple[date, date],
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = config_with_date_policy(tmp_path, "window_days: 14\n")
+    received: list[tuple[str, date, date]] = []
+
+    def fake_openalex(
+        client: object,
+        journals: tuple[object, ...],
+        from_date: date,
+        to_date: date,
+    ) -> DiscoveryResult:
+        received.append(("openalex", from_date, to_date))
+        return DiscoveryResult(sources=(), records=(), issues=())
+
+    def fake_crossref(
+        client: object,
+        journals: tuple[object, ...],
+        from_date: date,
+        to_date: date,
+    ) -> CrossrefDiscoveryResult:
+        received.append(("crossref", from_date, to_date))
+        return crossref_discovery_result()
+
+    def fake_semantic_scholar(
+        client: object,
+        evidence: tuple[object, ...],
+        journals: tuple[object, ...],
+        from_date: date,
+        to_date: date,
+        expression: object,
+    ) -> SemanticScholarRetrievalResult:
+        received.append(("semantic_scholar", from_date, to_date))
+        return SemanticScholarRetrievalResult(
+            evidence=(),
+            supplement_records=(),
+            discovered_records=(),
+            issues=(),
+        )
+
+    monkeypatch.setattr("literature_monitor.cli.date", FixedDate)  # type: ignore[attr-defined]
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.OpenAlexClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals", fake_openalex
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_crossref_journals", fake_crossref
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.assemble_provider_evidence",
+        lambda client, openalex, crossref: EvidenceRetrievalResult(
+            evidence=(),
+            supplement_records=(),
+            issues=(),
+        ),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.create_semantic_scholar_client",
+        lambda api_key: object(),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.augment_with_semantic_scholar",
+        fake_semantic_scholar,
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.materialize_papers",
+        lambda papers, output_dir: MaterializationResult((), (), (), (), (), ()),
+    )
+
+    result = main(
+        ("run", "--config", str(config_path), *date_arguments)
+    )
+
+    capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert received == [
+        ("openalex", *expected),
+        ("crossref", *expected),
+        ("semantic_scholar", *expected),
+    ]
+
+
+def test_run_partial_cli_date_override_does_not_borrow_config_fields(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = config_with_date_policy(tmp_path, "window_days: 14\n")
+
+    def unexpected_provider(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider path must not be reached")
+
+    for name in ("OpenAlexClient", "CrossrefClient", "discover_journals"):
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            f"literature_monitor.cli.{name}", unexpected_provider
+        )
+
+    result = main(
+        (
+            "run",
+            "--config",
+            str(config_path),
+            "--to-date",
+            "2026-09-01",
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert "must be combined with another date field" in captured.err
+
+
+def test_run_uses_resolved_config_output_dir(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = config_with_date_policy(
+        tmp_path,
+        "output_dir: ./run-workspace\n"
+        "from_date: 2026-01-01\n"
+        "to_date: 2026-01-31\n",
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    received_destinations: list[Path] = []
+
+    monkeypatch.chdir(elsewhere)  # type: ignore[attr-defined]
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.OpenAlexClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: DiscoveryResult(sources=(), records=(), issues=()),
+    )
+    install_multisource_mocks(monkeypatch)
+
+    def fake_materialize(
+        papers: tuple[CanonicalPaper, ...],
+        output_dir: Path,
+    ) -> MaterializationResult:
+        received_destinations.append(output_dir)
+        return MaterializationResult((), (), (), (), (), ())
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.materialize_papers", fake_materialize
+    )
+
+    result = main(("run", "--config", str(config_path)))
+
+    capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert received_destinations == [(tmp_path / "run-workspace").resolve()]
+
+
+def test_run_invalid_config_stops_before_provider_work(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = tmp_path / "bad.yaml"
+    config_path.write_text("keyword_expression: causal\n", encoding="utf-8")
+
+    def unexpected_provider(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider path must not be reached")
+
+    for name in (
+        "OpenAlexClient",
+        "CrossrefClient",
+        "create_semantic_scholar_client",
+        "discover_journals",
+        "materialize_papers",
+    ):
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            f"literature_monitor.cli.{name}", unexpected_provider
+        )
+
+    result = main(("run", "--config", str(config_path)))
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert "venue_whitelist" in captured.err
+
+
+def test_run_provider_error_still_materializes_and_returns_one(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = config_with_date_policy(
+        tmp_path,
+        "from_date: 2026-01-01\nto_date: 2026-01-31\n",
+    )
+    received: list[CanonicalPaper] = []
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: enrichment_diagnostic_result(with_error=True),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+    install_multisource_mocks(monkeypatch)
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.canonicalize_records",
+        lambda records: CanonicalizationResult(
+            papers=(canonical_paper(),),
+            issues=(),
+        ),
+    )
+
+    def fake_materialize(
+        papers: tuple[CanonicalPaper, ...],
+        output_dir: Path,
+    ) -> MaterializationResult:
+        received.extend(papers)
+        return MaterializationResult((), (), (), (), (), ())
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.materialize_papers", fake_materialize
+    )
+
+    result = main(("run", "--config", str(config_path)))
+
+    capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 1
+    assert len(received) == 1
+
+
+def test_run_materialization_error_returns_one(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = config_with_date_policy(
+        tmp_path,
+        "from_date: 2026-01-01\nto_date: 2026-01-31\n",
+    )
+    issue_path = tmp_path / "workspace" / "Papers" / "failed.md"
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.OpenAlexClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.discover_journals",
+        lambda *args: DiscoveryResult(sources=(), records=(), issues=()),
+    )
+    install_multisource_mocks(monkeypatch)
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.materialize_papers",
+        lambda papers, output_dir: MaterializationResult(
+            created_papers=(),
+            existing_papers=(),
+            updated_papers=(),
+            created_authors=(),
+            existing_authors=(),
+            issues=(
+                MaterializationIssue(
+                    issue_path,
+                    "materialization diagnostic",
+                    MaterializationIssueSeverity.ERROR,
+                ),
+            ),
+        ),
+    )
+
+    result = main(("run", "--config", str(config_path)))
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 1
+    assert "materialization diagnostic" in captured.err
 
 
 @pytest.mark.parametrize(
@@ -1113,7 +1817,9 @@ def test_lexically_invalid_override_stops_before_provider_clients(
     assert "Traceback" not in captured.err
 
 
+@pytest.mark.parametrize("command", ("openalex-filter", "run"))
 def test_lexically_invalid_config_stops_before_provider_clients(
+    command: str,
     tmp_path: Path,
     monkeypatch: object,
     capsys: object,
@@ -1134,7 +1840,7 @@ def test_lexically_invalid_config_stops_before_provider_clients(
 
     result = main(
         (
-            "openalex-filter",
+            command,
             "--config",
             str(config_path),
             "--from-date",
@@ -2613,18 +3319,33 @@ def test_canonicalize_semantic_scholar_issue_controls_exit_without_suppressing_o
     assert "provider diagnostic" in captured.err
 
 
-def test_materialize_runs_full_pipeline_in_order_without_stdout(
-    tmp_path: Path, monkeypatch: object, capsys: object
+@pytest.mark.parametrize("command", ("materialize", "run"))
+def test_materialize_and_run_share_full_pipeline_in_order_without_stdout(
+    command: str,
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
 ) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-    output_dir = tmp_path / "Vault"
+    config_path, config = validate_config(tmp_path)
+    materialize_output_dir = tmp_path / "Vault"
+    output_dir = (
+        (tmp_path / "workspace").resolve()
+        if command == "run"
+        else materialize_output_dir
+    )
+    config_before = config_path.read_bytes()
     events: list[str] = []
     filter_batches: list[tuple[SearchableProjection, ...]] = []
     received_by_materialization: list[CanonicalPaper] = []
     canonical = canonical_paper("10.5555/two")
 
-    def fake_discover(*args: object) -> DiscoveryResult:
+    def fake_discover(
+        client: object,
+        journals: tuple[JournalConfig, ...],
+        *args: object,
+    ) -> DiscoveryResult:
         events.append("openalex_discover")
+        assert journals == config.journals
         return enrichment_diagnostic_result()
 
     def fake_consolidate(records: tuple[ProviderWorkEvidence, ...]) -> object:
@@ -2637,6 +3358,8 @@ def test_materialize_runs_full_pipeline_in_order_without_stdout(
     ) -> tuple[bool, ...]:
         events.append("filter")
         filter_batches.append(projections)
+        if command == "run":
+            assert expression == config.keyword_ast
         assert [projection.titles for projection in projections] == [
             ("High-dimensional models",),
             ("Excluded paper",),
@@ -2706,21 +3429,26 @@ def test_materialize_runs_full_pipeline_in_order_without_stdout(
         "literature_monitor.cli.materialize_papers", fake_materialize
     )
 
-    result = main(
-        (
-            "materialize",
-            "--config",
-            str(repository_root / "config.example.yaml"),
-            "--from-date",
-            "2026-01-01",
-            "--to-date",
-            "2026-01-31",
-            "--keyword-expression",
-            '"excluded paper"',
-            "--output-dir",
-            str(output_dir),
+    arguments = [
+        command,
+        "--config",
+        str(config_path),
+        "--from-date",
+        "2026-01-01",
+        "--to-date",
+        "2026-01-31",
+    ]
+    if command == "materialize":
+        arguments.extend(
+            (
+                "--keyword-expression",
+                '"excluded paper"',
+                "--output-dir",
+                str(materialize_output_dir),
+            )
         )
-    )
+
+    result = main(tuple(arguments))
 
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert result == 0
@@ -2736,6 +3464,7 @@ def test_materialize_runs_full_pipeline_in_order_without_stdout(
     ]
     assert received_by_materialization == [canonical]
     assert len(filter_batches) == 1
+    assert config_path.read_bytes() == config_before
     assert captured.out == ""
     assert "Semantic Scholar [unsupported_venue_filter]" in captured.err
     assert "1 canonical papers, 1 paper files created" in captured.err

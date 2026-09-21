@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any
@@ -11,6 +12,12 @@ from typing import Annotated, Any
 import yaml
 from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError, field_validator
 
+from literature_monitor.date_range import (
+    DEFAULT_WINDOW_DAYS,
+    DateRangeError,
+    DateRangeSpec,
+    validate_date_range_spec,
+)
 from literature_monitor.keywords import KeywordExpression, KeywordSyntaxError, parse_keyword_expression
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -47,9 +54,31 @@ class JournalConfig(BaseModel):
 class _Settings(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    venue_whitelist: Path
+    name: NonEmptyStr | None = None
+    venue_whitelist: Path | None = None
     keyword_expression: NonEmptyStr
+    output_dir: Path | None = None
+    from_date: date | None = None
+    to_date: date | None = None
+    window_days: int | None = None
     log_level: LogLevel = LogLevel.INFO
+
+    @field_validator(
+        "name",
+        "venue_whitelist",
+        "keyword_expression",
+        "output_dir",
+        "from_date",
+        "to_date",
+        "window_days",
+        "log_level",
+        mode="before",
+    )
+    @classmethod
+    def reject_explicit_null(cls, value: Any) -> Any:
+        if value is None:
+            raise ValueError("must not be null")
+        return value
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -59,9 +88,12 @@ class _Settings(BaseModel):
 
 @dataclass(frozen=True)
 class LoadedConfig:
+    name: str
     venue_whitelist: Path
     keyword_expression: str
     keyword_ast: KeywordExpression
+    output_dir: Path
+    date_spec: DateRangeSpec
     log_level: LogLevel
     journals: tuple[JournalConfig, ...]
 
@@ -185,6 +217,13 @@ def _format_validation_error(path: Path, error: ValidationError) -> Configuratio
     return ConfigurationError(f"{path}: field {field!r}: {detail['msg']}")
 
 
+def _resolve_config_path(config_path: Path, value: Path | None, default_name: str) -> Path:
+    candidate = value if value is not None else Path(default_name)
+    if not candidate.is_absolute():
+        candidate = config_path.parent / candidate
+    return candidate.resolve()
+
+
 def load_config(path: Path) -> LoadedConfig:
     path = path.resolve()
     contents = _read_text(path)
@@ -202,10 +241,27 @@ def load_config(path: Path) -> LoadedConfig:
     except ValidationError as error:
         raise _format_validation_error(path, error) from error
 
-    whitelist = settings.venue_whitelist
-    if not whitelist.is_absolute():
-        whitelist = path.parent / whitelist
-    whitelist = whitelist.resolve()
+    name = settings.name if settings.name is not None else path.stem
+    whitelist = _resolve_config_path(path, settings.venue_whitelist, "list.md")
+    output_dir = _resolve_config_path(path, settings.output_dir, "workspace")
+
+    date_spec = DateRangeSpec(
+        from_date=settings.from_date,
+        to_date=settings.to_date,
+        window_days=settings.window_days,
+    )
+    if (
+        date_spec.from_date is None
+        and date_spec.to_date is None
+        and date_spec.window_days is None
+    ):
+        date_spec = DateRangeSpec(window_days=DEFAULT_WINDOW_DAYS)
+    try:
+        validate_date_range_spec(date_spec)
+    except DateRangeError as error:
+        raise ConfigurationError(
+            f"{path}: field {error.field!r}: {error}"
+        ) from error
 
     try:
         keyword_ast = parse_keyword_expression(settings.keyword_expression)
@@ -214,11 +270,20 @@ def load_config(path: Path) -> LoadedConfig:
             f"{path}: field 'keyword_expression': {error}"
         ) from error
 
-    journals = parse_journal_whitelist(whitelist)
+    try:
+        journals = parse_journal_whitelist(whitelist)
+    except ConfigurationError as error:
+        raise ConfigurationError(
+            f"{path}: field 'venue_whitelist': {error}"
+        ) from error
+
     return LoadedConfig(
+        name=name,
         venue_whitelist=whitelist,
         keyword_expression=settings.keyword_expression,
         keyword_ast=keyword_ast,
+        output_dir=output_dir,
+        date_spec=date_spec,
         log_level=settings.log_level,
         journals=journals,
     )

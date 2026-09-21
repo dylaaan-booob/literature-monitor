@@ -179,14 +179,30 @@ def crossref_list_payload(messages: list[dict[str, object]]) -> dict[str, object
     }
 
 
-def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
+def test_run_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-    config_path = repository_root / "config.example.yaml"
-    output_dir = tmp_path / "vault"
+    whitelist_path = tmp_path / "list.md"
+    whitelist_path.write_text(
+        "# E2E journals\n\n"
+        "## Journals\n\n"
+        "| Journal | ISSN/EISSN |\n"
+        "| --- | --- |\n"
+        "| Biometrics | 0006-341X |\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "monitor.yaml"
+    config_path.write_text(
+        "keyword_expression: '\"semantic rescue\" OR \"semantic only\"'\n"
+        "output_dir: ./workspace\n"
+        "from_date: 2026-01-01\n"
+        "to_date: 2026-01-31\n"
+        "log_level: INFO\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "workspace"
     openalex_openers: list[SequenceOpener] = []
     crossref_openers: list[SequenceOpener] = []
     semantic_clients: list[object] = []
@@ -313,23 +329,9 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
         semantic_scholar_client,
     )
 
-    materialize_args = (
-        "materialize",
-        "--config",
-        str(config_path),
-        "--journal",
-        "Biometrics",
-        "--from-date",
-        "2026-01-01",
-        "--to-date",
-        "2026-01-31",
-        "--keyword-expression",
-        '"semantic rescue" OR "semantic only"',
-        "--output-dir",
-        str(output_dir),
-    )
+    run_args = ("run", "--config", str(config_path))
 
-    assert main(materialize_args) == 0
+    assert main(run_args) == 0
     first_cli = capsys.readouterr()
     assert first_cli.out == ""
 
@@ -408,7 +410,7 @@ def test_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     expected_ids = dict(ids_by_path)
     expected_authors = set(author_paths)
 
-    assert main(materialize_args) == 1
+    assert main(run_args) == 1
     second_cli = capsys.readouterr()
     assert second_cli.out == ""
 
