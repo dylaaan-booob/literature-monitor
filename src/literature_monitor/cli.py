@@ -60,6 +60,10 @@ from literature_monitor.search import (
     validate_search_expression,
 )
 
+_GUI_HOST = "127.0.0.1"
+_GUI_PORT = 8000
+_GUI_WORKERS = 1
+
 
 def _date_argument(value: str) -> date:
     try:
@@ -91,6 +95,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="validate configuration and OpenAlex venue resolution",
     )
     validate.add_argument("--config", type=Path, required=True)
+    gui_parser = subparsers.add_parser(
+        "gui",
+        help="launch the local Web UI",
+    )
+    gui_parser.add_argument("--config", type=Path, required=True)
     run_parser = subparsers.add_parser(
         "run",
         help="run a persistent monitor and materialize its workspace",
@@ -436,6 +445,20 @@ def _format_cli_date_error(error: DateRangeError) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     logger = configure_logging()
+    if args.command == "gui":
+        import uvicorn
+
+        from literature_monitor.web.app import create_app
+
+        app = create_app(args.config)
+        logger.info("Local Web UI: http://%s:%d", _GUI_HOST, _GUI_PORT)
+        uvicorn.run(
+            app,
+            host=_GUI_HOST,
+            port=_GUI_PORT,
+            workers=_GUI_WORKERS,
+        )
+        return 0
     if args.command == "export-kept":
         result = export_kept_papers(args.output_dir)
         for entry in result.entries:

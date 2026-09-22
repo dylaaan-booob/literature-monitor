@@ -13,6 +13,7 @@ dependencies = [
     "python-multipart>=0.0.20,<1",
     "PyYAML>=6,<7",
     "semanticscholar>=0.12,<0.13",
+    "uvicorn>=0.30,<1",
 ]
 
 [project.scripts]
