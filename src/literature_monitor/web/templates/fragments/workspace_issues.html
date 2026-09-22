@@ -1,0 +1,14 @@
+<section class="panel issues" id="workspace-issues">
+  <h2>Workspace issues</h2>
+  {% if config_error %}
+    <div class="notice warning">{{ config_error }}</div>
+  {% elif workspace and workspace.issues %}
+    <ul>
+      {% for issue in workspace.issues %}
+        <li><strong>{{ issue.path }}</strong>: {{ issue.message }}</li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="muted">No workspace issues.</p>
+  {% endif %}
+</section>

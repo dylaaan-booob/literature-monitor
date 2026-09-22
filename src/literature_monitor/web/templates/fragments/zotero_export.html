@@ -1,0 +1,18 @@
+{% if config_error %}
+  <div class="notice warning">{{ config_error }}</div>
+{% elif export_result %}
+  {% if export_result.entries %}
+    <label for="zotero-export-text">Copy-friendly export</label>
+    <textarea id="zotero-export-text" readonly rows="{{ [export_result.entries|length + 1, 8]|min }}">{{ export_result.entries | join('\n') }}</textarea>
+  {% else %}
+    <p class="empty-state">No kept Papers to export.</p>
+  {% endif %}
+  {% if export_result.issues %}
+    <h3>Export issues</h3>
+    <ul>
+      {% for issue in export_result.issues %}
+        <li><strong>{{ issue.path }}</strong>: {{ issue.message }}</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+{% endif %}

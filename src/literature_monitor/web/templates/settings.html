@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Settings · Literature Monitor{% endblock %}
+{% block content %}
+<section class="panel">
+  <h1>Settings</h1>
+  <p class="muted">Editing and Save/Validate actions arrive in the next Web task.</p>
+  {% if settings_state.issues %}
+    <div class="notice warning">
+      <strong>Configuration needs attention.</strong>
+      <ul>
+        {% for issue in settings_state.issues %}
+          <li>{{ issue.message }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+  <dl class="details">
+    <dt>Name</dt><dd>{{ settings_state.draft.name }}</dd>
+    <dt>Keyword expression</dt><dd>{{ settings_state.draft.keyword_expression or "Not configured" }}</dd>
+    <dt>Output workspace</dt><dd>{{ settings_state.draft.output_dir }}</dd>
+    <dt>Journal entries</dt><dd>{{ settings_state.draft.journals|length }}</dd>
+    <dt>Log level</dt><dd>{{ settings_state.draft.log_level.value if settings_state.draft.log_level.value is defined else settings_state.draft.log_level }}</dd>
+  </dl>
+</section>
+{% endblock %}

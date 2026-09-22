@@ -1,0 +1,47 @@
+<section id="workspace-root">
+  {% if decision_result %}
+    <div class="notice {{ 'success' if decision_result.outcome.value == 'UPDATED' else 'warning' }}">
+      {{ decision_result.message }}
+    </div>
+  {% elif decision_message %}
+    <div class="notice warning">{{ decision_message }}</div>
+  {% endif %}
+
+  {% if config_error %}
+    <div class="notice warning">
+      <strong>Configuration needs attention.</strong>
+      <p>{{ config_error }}</p>
+      <p><a href="/settings">Open Settings</a></p>
+    </div>
+  {% else %}
+    <nav class="view-tabs" aria-label="Workspace views">
+      {% for key, label in (("inbox", "Inbox"), ("kept", "Kept"), ("rejected", "Rejected"), ("in-zotero", "In Zotero")) %}
+        <a href="/?view={{ key }}"
+           class="{{ 'active' if active_view == key else '' }}"
+           hx-get="/fragments/workspace?view={{ key }}"
+           hx-target="#workspace-root"
+           hx-swap="outerHTML">{{ label }}</a>
+      {% endfor %}
+    </nav>
+
+    <div class="workspace-grid">
+      {% include "fragments/paper_list.html" %}
+      {% include "fragments/paper_detail.html" %}
+    </div>
+
+    {% include "fragments/workspace_issues.html" %}
+
+    <section class="panel export-shell">
+      <div class="section-heading">
+        <h2>Zotero export</h2>
+        <button type="button"
+                hx-get="/fragments/zotero-export"
+                hx-target="#zotero-export"
+                hx-swap="innerHTML">Load export</button>
+      </div>
+      <div id="zotero-export">
+        <p class="muted">Read-only export of currently kept Papers.</p>
+      </div>
+    </section>
+  {% endif %}
+</section>

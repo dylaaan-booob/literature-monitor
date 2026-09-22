@@ -1,0 +1,85 @@
+<section class="panel paper-detail" id="paper-detail">
+  {% if selected_paper %}
+    {% set paper = selected_paper %}
+    <h2>{{ paper.title }}</h2>
+    <p class="paper-subtitle">{{ paper.journal }} · {{ paper.publication_date.isoformat() if paper.publication_date else "Publication date unavailable" }}</p>
+
+    <dl class="details">
+      <dt>Status</dt><dd>{{ paper.status.value }}</dd>
+      <dt>Authors</dt><dd>{{ paper.authors | map(attribute='name') | join(', ') }}</dd>
+      <dt>Author keywords</dt><dd>{{ paper.author_keywords | join(', ') if paper.author_keywords else "None supplied" }}</dd>
+      <dt>Abstract</dt><dd>{{ paper.abstract if paper.abstract else "Abstract unavailable" }}</dd>
+      <dt>Zotero key</dt><dd>{{ paper.zotero_key if paper.zotero_key else "Not marked in Zotero" }}</dd>
+    </dl>
+
+    <h3>External IDs</h3>
+    {% set external_ids = paper.external_ids.model_dump(exclude_none=True) %}
+    {% if external_ids %}
+      <ul>
+        {% for key, value in external_ids.items() %}
+          <li><strong>{{ key }}</strong>: {{ value }}</li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="muted">No external identifiers.</p>
+    {% endif %}
+
+    <h3>Versions</h3>
+    {% if paper.versions %}
+      <ul>
+        {% for version in paper.versions %}
+          <li>{{ version.source }} · {{ version.identifier }} · {{ version.kind.value }}{% if version.date %} · {{ version.date.isoformat() }}{% endif %}{% if version.url %} · <a href="{{ version.url }}">link</a>{% endif %}</li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="muted">No versions recorded.</p>
+    {% endif %}
+
+    <h3>Sources</h3>
+    {% if paper.sources %}
+      <ul>
+        {% for source in paper.sources %}
+          <li>{{ source.provider }} · {{ source.record_id }}</li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="muted">No source records.</p>
+    {% endif %}
+
+    <div class="decision-actions">
+      {% if paper.status.value == "candidate" %}
+        <form method="post"
+              hx-post="/papers/{{ paper.paper_id }}/keep"
+              hx-target="#workspace-root"
+              hx-swap="outerHTML">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="expected_status" value="{{ paper.status.value }}">
+          <input type="hidden" name="view" value="{{ active_view }}">
+          <button type="submit">Keep</button>
+        </form>
+        <form method="post"
+              hx-post="/papers/{{ paper.paper_id }}/reject"
+              hx-target="#workspace-root"
+              hx-swap="outerHTML">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="expected_status" value="{{ paper.status.value }}">
+          <input type="hidden" name="view" value="{{ active_view }}">
+          <button type="submit" class="secondary">Reject</button>
+        </form>
+      {% elif paper.status.value == "kept" %}
+        <form method="post"
+              hx-post="/papers/{{ paper.paper_id }}/mark-in-zotero"
+              hx-target="#workspace-root"
+              hx-swap="outerHTML">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="expected_status" value="{{ paper.status.value }}">
+          <input type="hidden" name="view" value="{{ active_view }}">
+          <button type="submit">Mark in Zotero</button>
+        </form>
+      {% endif %}
+    </div>
+  {% else %}
+    <h2>Paper detail</h2>
+    <p class="empty-state">{{ detail_message if detail_message else "Select a Paper to review its details." }}</p>
+  {% endif %}
+</section>

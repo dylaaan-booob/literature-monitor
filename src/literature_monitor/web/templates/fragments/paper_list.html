@@ -1,0 +1,27 @@
+<section class="panel paper-list" id="paper-list">
+  <div class="section-heading">
+    <h1>{{ {"inbox": "Inbox", "kept": "Kept", "rejected": "Rejected", "in-zotero": "In Zotero"}[active_view] }}</h1>
+    <span class="count">{{ papers|length }}</span>
+  </div>
+  {% if papers %}
+    <ol class="paper-items">
+      {% for paper in papers %}
+        <li>
+          <a href="/?view={{ active_view }}&paper={{ paper.paper_id }}"
+             hx-get="/fragments/papers/{{ paper.paper_id }}?view={{ active_view }}"
+             hx-target="#paper-detail"
+             hx-swap="outerHTML">
+            <strong>{{ paper.title }}</strong>
+            <span>{{ paper.journal }}</span>
+            <span>{{ paper.publication_date.isoformat() if paper.publication_date else "Publication date unavailable" }}</span>
+            <span>{{ paper.authors | map(attribute='name') | join(', ') }}</span>
+            <span>Status: {{ paper.status.value }}</span>
+            <span>Discovered: {{ paper.discovered_at.date().isoformat() }}</span>
+          </a>
+        </li>
+      {% endfor %}
+    </ol>
+  {% else %}
+    <p class="empty-state">No Papers in this view.</p>
+  {% endif %}
+</section>

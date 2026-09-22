@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Literature Monitor{% endblock %}</title>
+  <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}">
+  <script src="{{ request.url_for('static', path='vendor/htmx.min.js') }}" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/">Literature Monitor</a>
+    <nav class="top-nav" aria-label="Primary">
+      <a href="/?view=inbox">Inbox</a>
+      <a href="/?view=kept">Kept</a>
+      <a href="/?view=rejected">Rejected</a>
+      <a href="/?view=in-zotero">In Zotero</a>
+      <a href="/settings">Settings</a>
+    </nav>
+    <button type="button" disabled title="Run controls are added in the next Web task">Run</button>
+  </header>
+  <main class="page-shell">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>
