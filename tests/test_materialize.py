@@ -1157,7 +1157,7 @@ def test_atomic_replace_failure_preserves_original_paper(
     def fail_replace(source: object, destination: object) -> None:
         raise OSError("replace failed")
 
-    monkeypatch.setattr("literature_monitor.materialize.os.replace", fail_replace)
+    monkeypatch.setattr("literature_monitor.safe_write.os.replace", fail_replace)
     result = materialize_papers((changed,), tmp_path)
 
     assert result.updated_papers == ()

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import stat
-import tempfile
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -42,6 +39,13 @@ from literature_monitor.models import (
     PaperVersion,
 )
 from literature_monitor.naming import paper_filename
+from literature_monitor.safe_write import (
+    CompareReadError,
+    ContentChangedError,
+    atomic_replace_text,
+    read_text_exact,
+    replace_text_if_unchanged,
+)
 
 
 class MaterializationIssueSeverity(str, Enum):
@@ -225,50 +229,6 @@ def _create_file(path: Path, contents: str) -> tuple[str | None, str | None]:
     return "created", None
 
 
-def _atomic_replace(path: Path, contents: str) -> str | None:
-    temporary: Path | None = None
-    try:
-        mode = stat.S_IMODE(path.stat().st_mode)
-        descriptor, temporary_name = tempfile.mkstemp(
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-        )
-        temporary = Path(temporary_name)
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
-            handle.write(contents)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, mode)
-        os.replace(temporary, path)
-    except OSError as error:
-        if temporary is not None:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
-        return str(error)
-    return None
-
-
-def _read_text_exact(path: Path) -> str:
-    return path.read_bytes().decode("utf-8")
-
-
-def _replace_paper_if_unchanged(
-    path: Path,
-    contents: str,
-    original: str,
-) -> str | None:
-    try:
-        current = _read_text_exact(path)
-    except (OSError, UnicodeError) as error:
-        return f"cannot verify Paper before update: {error}"
-    if current != original:
-        return "Paper changed on disk after it was scanned; update safely aborted"
-    return _atomic_replace(path, contents)
-
-
 def _scan_papers(
     papers_dir: Path,
     authors_dir: Path,
@@ -284,7 +244,7 @@ def _scan_papers(
             )
             continue
         try:
-            contents = _read_text_exact(path)
+            contents = read_text_exact(path)
         except (OSError, UnicodeError) as error:
             issues.append(MaterializationIssue(path, f"cannot read Paper: {error}"))
             continue
@@ -313,7 +273,7 @@ def _scan_authors(
         if not path.is_file():
             continue
         try:
-            state = parse_author_state(path, _read_text_exact(path))
+            state = parse_author_state(path, read_text_exact(path))
         except (OSError, UnicodeError):
             state = None
         if state is None:
@@ -595,9 +555,10 @@ def _enrich_author_state(
     if not changed:
         return state
     contents = serialize_document(frontmatter, state.body)
-    error = _atomic_replace(state.path, contents)
-    if error is not None:
-        issues.append(MaterializationIssue(state.path, error))
+    try:
+        atomic_replace_text(state.path, contents)
+    except OSError as error:
+        issues.append(MaterializationIssue(state.path, str(error)))
         return None
     return parse_author_state(state.path, contents)
 
@@ -738,7 +699,7 @@ def _resolve_author_links(
                 issues.append(MaterializationIssue(target, error or "write failed"))
                 return None
             try:
-                parsed = parse_author_state(target, _read_text_exact(target))
+                parsed = parse_author_state(target, read_text_exact(target))
             except (OSError, UnicodeError):
                 parsed = None
             if parsed is not None:
@@ -990,15 +951,30 @@ def materialize_papers(
 
     for pending in pending_paper_writes:
         if pending.original is not None:
-            error = _replace_paper_if_unchanged(
-                pending.path,
-                pending.contents,
-                pending.original,
-            )
-            if error is None:
-                updated_papers.append(pending.path)
+            try:
+                replace_text_if_unchanged(
+                    pending.path,
+                    pending.contents,
+                    expected_contents=pending.original,
+                )
+            except CompareReadError as error:
+                issues.append(
+                    MaterializationIssue(
+                        pending.path,
+                        f"cannot verify Paper before update: {error}",
+                    )
+                )
+            except ContentChangedError:
+                issues.append(
+                    MaterializationIssue(
+                        pending.path,
+                        "Paper changed on disk after it was scanned; update safely aborted",
+                    )
+                )
+            except OSError as error:
+                issues.append(MaterializationIssue(pending.path, str(error)))
             else:
-                issues.append(MaterializationIssue(pending.path, error))
+                updated_papers.append(pending.path)
             continue
         outcome, error = _create_file(pending.path, pending.contents)
         if outcome == "created":
