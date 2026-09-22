@@ -3,8 +3,11 @@
 This repository contains the journal-monitoring workflow specified in
 `SPEC.md`. The workflow retrieves journal evidence from OpenAlex, Crossref, and
 Semantic Scholar, consolidates provider evidence before local keyword filtering,
-canonicalizes retained papers and versions, incrementally updates durable Paper
+canonicalizes retained papers and versions, safely updates durable Paper
 and Author Markdown, and exports kept papers.
+
+v0.3.2 is the latest released baseline. Current development is the bounded
+v0.3.3 Pre-GUI Correctness Hardening stage.
 
 ## Setup
 
@@ -17,7 +20,7 @@ uv sync
 
 ## Run a persistent monitor
 
-The normal v0.3.2 entry point is:
+The normal persistent-monitor entry point is:
 
 ```bash
 uv run literature-monitor run --config config.example.yaml
@@ -28,6 +31,19 @@ policy, and log level from the monitor YAML. It then runs the complete productio
 path: OpenAlex and Crossref retrieval, provider evidence supplementation,
 Semantic Scholar supplementation/discovery, evidence consolidation, local FTS5
 filtering, canonicalization, and Paper / Author / Inbox materialization.
+
+Discovery windows are publication-date-only. The monitor does not use Crossref
+update-date, created-date, index-date, provider update timestamps, or persisted
+cursor/watermark/checkpoint state to recover late-indexed records. For Semantic
+Scholar supplemental discovery, an exact publication date takes precedence. If
+the exact date is missing and only year `Y` is available, `Y-01-01` is used
+only to validate provider filtering membership against the query window. That
+filtering interpretation is not stored as the paper's publication date, is not
+propagated into provider evidence or canonical metadata, and is not written to
+Paper Markdown. If both publication date and year are missing, the record is
+excluded because date-window membership cannot be established. A normal
+year-only record does not produce a warning solely because this filtering rule
+was used.
 
 The selected output directory contains:
 
@@ -42,6 +58,13 @@ Paper Markdown is the durable workflow state: UUIDs, review status, human notes,
 unknown human-owned frontmatter, and unmanaged sections survive reruns according
 to the existing materialization rules. `Inbox.base` is presentation only. It is
 created when missing and an existing customized file is preserved.
+
+The supported decision model is one monitor to one decision workspace. Paper
+UUID stability, `candidate` / `rejected` / `kept` / `in_zotero`
+decisions, human notes, and other durable Paper state are local to that
+workspace. The same research work is not guaranteed to receive the same UUID in
+another workspace, and Reject/Keep decisions are not inherited across monitors.
+There is no global cross-monitor decision registry.
 
 ### Persistent monitor fields and defaults
 
@@ -61,6 +84,14 @@ missing, null, or empty.
 Relative `venue_whitelist` and `output_dir` paths are always resolved from
 the monitor config directory, not the shell working directory. The loader does
 not search parent directories or other locations for a replacement `list.md`.
+
+For multiple monitors, use one monitor per config directory or configure a
+different `output_dir` for each monitor. If two monitor YAML files live in the
+same directory and both omit `output_dir`, the existing default rule resolves
+both to the same `<config-directory>/workspace`. The program does not reject
+that arrangement, but shared-workspace multi-monitor operation is unsupported /
+undefined advanced usage and has no cross-monitor UUID or decision-semantics
+guarantee.
 
 A minimal monitor is therefore:
 
@@ -110,32 +141,45 @@ Optional provider credentials/contact information remain environment settings,
 not monitor fields: `OPENALEX_API_KEY`, `CROSSREF_MAILTO`, and
 `SEMANTIC_SCHOLAR_API_KEY`.
 
-v0.3.2 does not persist last-run timestamps, run history, provider cursors,
-incremental delta / “What's New” state, monitor UUID/version, scheduler or daemon
-state, notifications, or an execution database. It also does not provide a
-GUI/dashboard or write directly to the Zotero API.
+The v0.3.3 correctness hardening does not add monitor/workspace UUIDs, workspace
+ownership markers, a global research-work or decision registry, last-successful-
+run state, provider cursors/watermarks/checkpoints, incremental delta /
+“What's New” state, scheduler or daemon state, notifications, or an execution
+database. It also does not add a GUI/dashboard or write directly to the Zotero
+API.
 
 ## Validate configuration
 
 `config.example.yaml` contains a syntax example, not a real research query.
-The command validates the local configuration and the `Journals` section of
-`list.md`, then contacts OpenAlex to resolve every configured journal Source.
-It does not request Works or run discovery. OpenAlex supports anonymous Source
-lookups; set `OPENALEX_API_KEY` in the environment to use an API key.
+Before making any provider request, `validate` loads the monitor and journal
+whitelist, validates keyword parser syntax and date-policy form, runs the same
+FTS5-dependent lexical semantic validation used by production local filtering,
+and resolves the monitor's effective runtime date range. This catches
+parser-valid but lexically invalid Prefix/Proximity operands, an unavailable
+SQLite FTS5 backend, and date arithmetic outside the supported
+`datetime.date` bounds before provider work begins.
 
 ```bash
 uv run literature-monitor validate --config config.example.yaml
 ```
+
+After local preflight succeeds, the command contacts OpenAlex only to resolve
+every configured journal Source. OpenAlex supports anonymous Source lookups; set
+`OPENALEX_API_KEY` in the environment to use an API key. Local configuration
+or runtime-preflight failures exit with status `2`; OpenAlex Source-resolution
+errors exit with status `1`; warning-only and fully valid validation exit with
+status `0`.
+
+`validate` does not request OpenAlex Works, contact Crossref or Semantic
+Scholar, check whether `output_dir` is writable, create a workspace, or
+materialize Paper, Author, or Inbox files. OpenAlex Source resolution is its
+only network/provider validation.
 
 ## Run tests
 
 ```bash
 uv run pytest
 ```
-
-Validation performs only OpenAlex Source resolution; it does not perform Works
-discovery, Markdown materialization, Zotero integration, conference monitoring,
-or database operations.
 
 ## End-to-end validation
 

@@ -154,6 +154,7 @@ def test_validate_cli_reports_resolutions_and_dynamic_counts(
     capsys: object,
 ) -> None:
     config_path, config = validate_config(tmp_path)
+    output_dir = config.output_dir  # type: ignore[attr-defined]
     client = object()
     api_keys: list[str | None] = []
     calls: list[tuple[object, JournalConfig]] = []
@@ -182,9 +183,18 @@ def test_validate_cli_reports_resolutions_and_dynamic_counts(
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.discover_journals", unexpected_discovery
     )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.CrossrefClient", unexpected_discovery
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.create_semantic_scholar_client",
+        unexpected_discovery,
+    )
 
+    assert not output_dir.exists()
     assert main(("validate", "--config", str(config_path))) == 0
     captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert not output_dir.exists()
     assert api_keys == ["test-key"]
     assert [journal for _, journal in calls] == list(config.journals)  # type: ignore[attr-defined]
     assert all(received_client is client for received_client, _ in calls)
@@ -285,6 +295,108 @@ def test_validate_cli_returns_two_and_logs_configuration_error(
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert "ERROR" in captured.err
     assert "venue_whitelist" in captured.err
+
+
+def test_validate_cli_rejects_lexically_invalid_config_before_openalex(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = config_with_keyword_expression(tmp_path, '"causal"~2')
+
+    def unexpected_call(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider path must not be reached")
+
+    for name in (
+        "OpenAlexClient",
+        "resolve_journal_source",
+        "CrossrefClient",
+        "create_semantic_scholar_client",
+    ):
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            f"literature_monitor.cli.{name}", unexpected_call
+        )
+
+    result = main(("validate", "--config", str(config_path)))
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert captured.out == ""
+    assert str(config_path) in captured.err
+    assert "keyword_expression" in captured.err
+    assert "at least two lexical tokens" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_validate_cli_reports_fts5_backend_failure_before_openalex(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = validate_config(tmp_path)[0]
+
+    def fail_validation(*args: object) -> None:
+        raise SearchBackendError("SQLite FTS5 is unavailable")
+
+    def unexpected_call(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider path must not be reached")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.validate_search_expression", fail_validation
+    )
+    for name in (
+        "OpenAlexClient",
+        "resolve_journal_source",
+        "CrossrefClient",
+        "create_semantic_scholar_client",
+    ):
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            f"literature_monitor.cli.{name}", unexpected_call
+        )
+
+    result = main(("validate", "--config", str(config_path)))
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert captured.out == ""
+    assert "Local search / FTS5 backend failure" in captured.err
+    assert "SQLite FTS5 is unavailable" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_validate_cli_resolves_runtime_date_policy_before_openalex(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = config_with_date_policy(
+        tmp_path,
+        "from_date: 9999-12-31\nwindow_days: 2\n",
+    )
+
+    def unexpected_call(*args: object, **kwargs: object) -> object:
+        raise AssertionError("provider path must not be reached")
+
+    for name in (
+        "OpenAlexClient",
+        "resolve_journal_source",
+        "CrossrefClient",
+        "create_semantic_scholar_client",
+    ):
+        monkeypatch.setattr(  # type: ignore[attr-defined]
+            f"literature_monitor.cli.{name}", unexpected_call
+        )
+
+    result = main(("validate", "--config", str(config_path)))
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 2
+    assert captured.out == ""
+    assert str(config_path) in captured.err
+    assert "field 'window_days'" in captured.err
+    assert "date range exceeds supported datetime.date bounds" in captured.err
+    assert "--window-days" not in captured.err
+    assert "Traceback" not in captured.err
 
 
 def diagnostic_result(*, with_error: bool = False) -> DiscoveryResult:

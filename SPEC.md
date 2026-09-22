@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — MVP Specification v1.2
 
-**Status:** Active; v0.3.1 is the latest released version
+**Status:** Active; v0.3.2 is the latest released version
 
-**Stage:** v0.3.2 release preparation and closeout
+**Stage:** v0.3.3 Pre-GUI Correctness Hardening
 **Scope:** Journal monitoring only; conferences are excluded from MVP
 
 ---
@@ -116,7 +116,7 @@ MVP includes:
 - persistent rejected records;
 - author wikilinks and author notes;
 - an Obsidian Bases Review Inbox derived from Paper Markdown state;
-- safe incremental reruns;
+- safe overlapping reruns;
 - export of `kept` paper identifiers for Zotero;
 - logs sufficient to inspect unresolved journals, failed enrichment, and partial metadata.
 
@@ -158,15 +158,21 @@ MVP does **not** include:
 - persistent search database;
 - inline journal definitions in monitor YAML;
 - monitor UUIDs or monitor versioning;
+- workspace UUIDs, workspace ownership markers, or a workspace registry;
+- a global research-work registry or cross-workspace Paper UUID identity;
+- per-monitor decision objects, monitor membership state, or decision inheritance across monitors;
+- defined rejected-paper resurfacing semantics across different workspaces;
+- new workflow statuses beyond `candidate`, `rejected`, `kept`, and `in_zotero`;
 - query versioning;
+- Crossref update-date, created-date, index-date, or another provider update timestamp as a discovery date;
 - persisted last-run or last-successful-run timestamps;
-- persisted last-used date ranges, provider cursors, checkpoints, run history, delta / What's New state, notification state, scheduler state, or automatic retry state;
+- persisted last-used date ranges, provider cursors, provider watermarks, late-index recovery cursors, checkpoints, run history, delta / What's New state, notification state, scheduler state, or automatic retry state;
 - a persistent execution database;
 - scheduler, daemon, or cron management;
 - notifications;
 - multi-monitor dashboard;
 - Zotero API integration;
-- Paper Markdown schema changes in v0.3.2;
+- Paper Markdown schema changes in v0.3.3;
 - Track B workflow/state expansion beyond the current Markdown lifecycle;
 
 SQLite FTS5 is permitted only as transient, reconstructible runtime state. It must not become durable workflow state or a mandatory second source of truth.
@@ -209,6 +215,8 @@ No global `research_article_only` assumption should be hard-coded because the wh
 ## 6. Data Source Policy
 
 All retrieval remains journal-whitelist-first and date-bounded. OpenAlex, Crossref, and Semantic Scholar may each contribute evidence to the candidate universe. No provider has implicit canonical authority merely because its record was retrieved first.
+
+Discovery date membership remains publication-date-only. Literature Monitor does not use Crossref update-date, created-date, index-date, provider update timestamps, or persisted synchronization metadata to expand a date window. v0.3.3 therefore does not provide late-index recovery, provider watermarks, checkpoints, or incremental-sync semantics. Semantic Scholar year-only records use the provider-specific filtering interpretation defined in §6.3 without fabricating a bibliographic publication date.
 
 ### 6.1 OpenAlex
 
@@ -265,6 +273,10 @@ A broad positive query may be used only to expand provider coverage. Every retur
 When the local expression is projected into a Semantic Scholar supplemental-discovery query, Prefix operands retain their single trailing `*`. Proximity operands are not sent using provider-specific proximity syntax; each Proximity operand is reduced to a broad `AND` query containing all of its positive lexical terms. As with the existing broad-positive-query behavior, `NOT` subtrees are removed from the provider query rather than used to exclude provider results. This projection affects discovery recall only and never changes final local Boolean evaluation. OpenAlex and Crossref remain venue/date retrieval paths and do not acquire keyword-query responsibilities from this projection.
 
 Venue validation must prefer ISSN/EISSN. Only when the provider record has no usable ISSN/EISSN may a strict normalized journal-name match be used as a fallback; ambiguous or mismatched venues must not enter the candidate universe.
+
+Supplemental-discovery date validation follows Semantic Scholar's `publicationDateOrYear` contract. When a normalized record has an exact `publication_date`, that exact date alone determines inclusive membership in the configured date window, even when `publication_year` is also present. When the exact date is absent and only `publication_year = Y` is available, local provider-result validation interprets the filtering date as `Y-01-01`; the record is accepted only when that date falls inside the inclusive query window. When both date and year are absent, the record cannot prove date-window membership and is excluded.
+
+`Y-01-01` is only a filtering interpretation for Semantic Scholar supplemental discovery. It is not a bibliographic publication date and must not be written to `SemanticScholarWorkRecord.publication_date`, `ProviderWorkEvidence.publication_date`, canonical metadata, or Paper Markdown. A valid year-only record does not produce a warning merely because this filtering rule was used.
 
 ### 6.4 Publisher fallback
 
@@ -408,9 +420,9 @@ The keyword expression must be configuration, not hard-coded logic.
 
 ### 8.1 Stable internal primary key
 
-Every canonical research work receives an **internal UUID**.
+Every canonical research work materialized in an output workspace receives an **internal UUID**.
 
-This UUID is the only permanent internal primary key.
+This UUID is the permanent internal primary key within that workspace. Its stability contract is workspace-local: Literature Monitor does not promise that the same research work materialized independently in two different workspaces will receive the same UUID.
 
 External identifiers such as DOI, OpenAlex ID, arXiv ID, Crossref ID, or publisher IDs are attributes and matching evidence; they are not the internal primary key.
 
@@ -637,6 +649,26 @@ SQLite FTS5 may be used only for the transient runtime index described in §7; n
 
 An implementation may use disposable caches or indexes for speed, but they must be reconstructible from configuration, source APIs, and the Markdown corpus.
 
+The supported product relationship is:
+
+```text
+Monitor definition
+→ discovery/query configuration
+
+one monitor
+→ one decision workspace
+
+Workspace
+→ durable research corpus + decision context
+
+Paper Markdown
+→ workspace-local Paper identity
+→ candidate / rejected / kept / in_zotero
+→ human notes and other durable Paper state
+```
+
+Paper UUID stability, workflow decisions, human-authored notes, and other durable Paper state are scoped to the workspace. The product does not promise a shared UUID for the same research work across different workspaces, does not inherit Reject/Keep decisions from one monitor's workspace into another, and has no cross-monitor global decision registry.
+
 ---
 
 ## 13. Paper Markdown Schema
@@ -834,9 +866,11 @@ The purpose is to allow Obsidian Graph/Local Graph to reveal repeated authors an
 
 ---
 
-## 17. Incremental Update Semantics
+## 17. Safe Rerun Semantics
 
 Repeated runs over overlapping date windows are normal and must be safe.
+
+These are idempotent overlapping-rerun semantics, not provider incremental synchronization. Literature Monitor does not persist a cursor, watermark, last-successful-run timestamp, last-seen timestamp, or other state that changes the publication-date discovery window.
 
 Requirements:
 
@@ -1031,13 +1065,13 @@ The user changes the status to `in_zotero` after successful downstream import.
 
 ## 20. CLI / Execution Surface
 
-The v0.3.2 normal user entry point is:
+The normal user entry point is:
 
 ```bash
 literature-monitor run --config monitor.yaml
 ```
 
-Existing diagnostic commands remain available. `materialize` remains an explicit legacy / diagnostic-style execution entry, and its existing explicit `--output-dir` behavior is not redesigned in v0.3.2.
+Existing diagnostic commands remain available. `materialize` remains an explicit legacy / diagnostic-style execution entry, and its existing explicit `--output-dir` behavior is unchanged.
 
 ### 20.1 Persistent monitor definition
 
@@ -1056,16 +1090,19 @@ log_level:
 
 `keyword_expression` is the only core field without a default and therefore the only field required in a minimal monitor definition.
 
-The monitor definition is local-first configuration: it is intended to be movable, copyable, and suitable for version control. The configuration file does not contain execution identity or durable run state. In particular, v0.3.2 must not introduce:
+The monitor definition is local-first configuration: it is intended to be movable, copyable, and suitable for version control. The configuration file does not contain execution identity or durable run state. In particular, the current product does not introduce:
 
 ```text
 monitor_id
 monitor_version
+workspace_id
+workspace_owner
 last_successful_run
 last_run_at
 last_seen_at
 last_used_range
 cursor
+watermark
 checkpoint
 run_history
 delta state
@@ -1074,7 +1111,7 @@ scheduler state
 persistent execution database
 ```
 
-Paper Markdown remains the durable workflow state and retains ownership of stable Paper UUIDs, `rejected` / `kept` / `in_zotero` status, and human-authored notes.
+Paper Markdown remains the durable workflow state and retains ownership of workspace-local stable Paper UUIDs, `rejected` / `kept` / `in_zotero` status, and human-authored notes.
 
 Monitor configuration uses strict validation. Unknown fields are errors. For example, `window_day: 14` must fail rather than silently falling back to the `window_days` default.
 
@@ -1090,6 +1127,10 @@ The configuration defaults are:
 - `log_level`: `INFO`. Existing case normalization remains in force. An invalid value or explicit `null` is an error.
 
 Absolute paths remain valid. Relative `venue_whitelist` and `output_dir` semantics depend only on `config_path.parent`, never on the shell cwd.
+
+The supported decision model is one monitor per decision workspace. The recommended layout is one monitor config directory per monitor, which naturally gives each monitor its own default `<config-directory>/workspace`, or an explicitly distinct `output_dir` for every monitor.
+
+The existing path rule is not reinterpreted: if two monitor YAML files are in the same directory and both omit `output_dir`, both resolve to that directory's same `workspace` path. The current version does not reject this arrangement and does not add owner validation, a monitor marker, or a workspace registry. Explicitly or implicitly sharing one workspace across multiple monitors is unsupported / undefined advanced usage; no cross-monitor Paper-UUID, membership, Reject/Keep inheritance, or other decision-semantics guarantee is provided.
 
 `--journal` remains part of existing diagnostic behavior only and does not enter the persistent monitor definition. API keys, Crossref mailto, and similar runtime/environment settings also remain outside monitor YAML. Existing keyword-expression CLI override behavior is not redesigned by v0.3.2.
 
@@ -1249,24 +1290,35 @@ Existing diagnostic commands remain available. `materialize` remains an explicit
 
 ### 20.5 Validate configuration
 
-Validation must cover the monitor definition and its resolved configuration, including:
+Running:
 
-- strict monitor-field validation and required `keyword_expression`;
-- journal whitelist existence and syntax;
-- provider-specific venue/source identifier resolution where applicable;
-- unresolved or ambiguous venues per provider;
-- keyword expression syntax;
-- date-policy validity.
+```bash
+literature-monitor validate --config monitor.yaml
+```
 
-Configuration errors that can be determined locally, including a missing/empty keyword expression and an invalid date policy, must be reported before provider network requests.
+has a strict boundary:
+
+```text
+load config / whitelist
+→ deterministic local runtime preflight
+→ OpenAlex Source resolution
+```
+
+Before any OpenAlex Source-resolution network request, validation must complete all deterministic checks required by a normal persistent `run`: strict monitor-field and whitelist loading, keyword parser syntax validation, date-policy form validation, FTS5-dependent lexical semantic validation of the configured keyword expression, and effective runtime date-range resolution from the monitor's `date_spec`.
+
+Parser-valid expressions may still fail local semantic validation after SQLite FTS5 `unicode61` tokenization. Invalid Prefix or Proximity operands, including a Proximity operand that produces only one lexical token, are local validation errors. A Python SQLite runtime without FTS5 is a local runtime-preflight failure. Runtime date resolution that exceeds the supported `datetime.date` bounds is also a local runtime-preflight failure.
+
+Configuration and deterministic local preflight failures exit with code `2` and must occur before any provider path is constructed or called. OpenAlex Source-resolution errors retain exit code `1`. Warning-only OpenAlex validation and fully valid validation both exit with code `0`.
+
+`validate` performs no OpenAlex Works discovery, Crossref connectivity check, Semantic Scholar connectivity check, `output_dir` writability check, workspace creation, or Paper / Author / Inbox materialization. Its only provider/network validation is OpenAlex Source resolution.
 
 ### 20.6 Existing behavior preserved
 
-v0.3.2 does not change the observable behavior of:
+The v0.3.3 hardening preserves the existing observable behavior of:
 
 - OpenAlex retrieval;
 - Crossref retrieval;
-- Semantic Scholar supplementation;
+- Semantic Scholar DOI/batch supplementation;
 - provider evidence consolidation;
 - local FTS5 lexical filtering;
 - v0.3.1 Prefix semantics;
@@ -1276,7 +1328,7 @@ v0.3.2 does not change the observable behavior of:
 - Review Inbox behavior;
 - `export-kept`;
 - Paper Markdown durable-state ownership;
-- Paper UUID stability;
+- workspace-local Paper UUID stability;
 - persistence of `rejected`, `kept`, and `in_zotero`;
 - preservation of human notes.
 
@@ -1400,8 +1452,12 @@ Given the supplied journal whitelist with conferences excluded:
 
 For a selected date window:
 
+- discovery membership uses publication date only; Crossref update-date, created-date, index-date, provider update timestamps, and persisted sync state do not extend the window;
 - OpenAlex and Crossref can each contribute journal/date candidates independently;
 - Semantic Scholar can supplement metadata and contribute supplemental candidates that pass venue/date validation;
+- Semantic Scholar records with an exact publication date use that date even when a year is also present;
+- a Semantic Scholar record with no exact date and only year `Y` uses `Y-01-01` solely for supplemental-discovery filtering membership; the interpretation is not stored as bibliographic metadata and does not itself produce a warning;
+- a Semantic Scholar record with neither publication date nor year is excluded because date-window membership cannot be proven;
 - a candidate is not required to exist in OpenAlex first;
 - global keyword search is not used to define the candidate universe;
 - Semantic Scholar broad positive queries do not decide final inclusion.
@@ -1544,9 +1600,9 @@ Given a valid Literature Monitor output workspace:
 - the feature adds no workflow states, durable Inbox membership, second source of truth, external service, Obsidian community plugin, or Python runtime dependency;
 - `export-kept` behavior remains unchanged.
 
-### 23.14 Persistent monitor definition and date resolution
+### 23.14 Persistent monitor definition, validation, and workspace boundary
 
-Given v0.3.2 monitor definitions and CLI invocations:
+Given the v0.3.2 persistent-monitor model with the v0.3.3 correctness hardening:
 
 - a minimal monitor requires only a valid `keyword_expression` as an explicit YAML field; omitted fields use their defined defaults, subject to the resolved default `list.md` existing;
 - a missing `name` resolves to the config filename stem, while explicit empty string or `null` is rejected;
@@ -1563,6 +1619,9 @@ Given v0.3.2 monitor definitions and CLI invocations:
 - date arithmetic is inclusive and satisfies `window_days = (to_date - from_date).days + 1`, including one-day windows and ranges crossing leap days, month boundaries, or year boundaries;
 - a rolling `window_days: N` resolves to `to_date = today` and `from_date = today - (N - 1 days)`;
 - resolved runtime dates are not written back to the monitor YAML;
+- `validate --config` performs FTS5 lexical semantic validation and effective runtime date-range resolution before constructing or calling the OpenAlex Source-resolution path;
+- local configuration, FTS5 semantic/backend, and runtime date-resolution failures from `validate` exit `2`; OpenAlex Source-resolution errors exit `1`; warning-only and fully valid validation exit `0`;
+- `validate` does not perform OpenAlex Works discovery, Crossref or Semantic Scholar connectivity checks, output-directory writability checks, workspace creation, or Paper / Author / Inbox materialization;
 - `literature-monitor run --config monitor.yaml` is the normal persistent-monitor execution entry and obtains journals, keyword expression, output directory, date policy, and log level from that monitor;
 - all date-bearing commands expose `--from-date`, `--to-date`, and `--window-days` with the same date-resolution semantics;
 - when no CLI date argument is supplied, the monitor date policy is used;
@@ -1573,8 +1632,12 @@ Given v0.3.2 monitor definitions and CLI invocations:
 - CLI date overrides remain ephemeral and create no config mutation, last-used range, checkpoint, or other durable run state;
 - `run` reuses the existing retrieval, Semantic Scholar supplementation, evidence consolidation, local filtering, canonicalization, and materialization production path rather than implementing a second pipeline;
 - `materialize` remains an explicit legacy / diagnostic-style entry and its existing explicit `--output-dir` behavior is preserved;
-- no monitor UUID, monitor version, last-run semantics, run history, scheduler/notification state, provider cursor persistence, or persistent execution database is introduced;
-- Paper Markdown remains the durable workflow state, with no Paper Markdown schema change in v0.3.2 and no regression to UUID stability, statuses, or human-note preservation.
+- one monitor to one decision workspace is the supported product relationship; Paper UUIDs, statuses, notes, and other durable Paper state are workspace-local;
+- different workspaces are not promised the same UUID for the same research work and do not inherit Reject/Keep decisions from one another;
+- one monitor per config directory, or explicitly distinct `output_dir` values, is the recommended multi-monitor layout;
+- two monitor YAML files in the same directory that both omit `output_dir` continue to resolve to the same `<config-directory>/workspace`; this is not rejected, but shared-workspace multi-monitor operation is unsupported / undefined advanced usage with no cross-monitor decision guarantee;
+- no monitor UUID, workspace UUID, ownership marker, workspace registry, global research-work registry, cross-monitor Paper UUID, per-monitor decision object, monitor membership state, decision inheritance, last-run semantics, run history, scheduler/notification state, provider cursor/watermark/checkpoint persistence, or persistent execution database is introduced;
+- Paper Markdown remains the durable workflow state, with no Paper Markdown schema change in v0.3.3 and no regression to workspace-local UUID stability, statuses, or human-note preservation.
 
 ---
 
@@ -1678,6 +1741,18 @@ second orchestration path. No durable execution state, monitor identity, run
 history, provider cursor persistence, scheduler state, or second workflow source
 of truth was added.
 
+### 24.7 v0.3.3 Pre-GUI Correctness Hardening
+
+The current bounded hardening work freezes three pre-GUI contracts without adding a GUI or durable execution state:
+
+```text
+A1 Semantic Scholar year-only date-membership semantics
+→ A2 validate deterministic runtime preflight
+→ A3 contract documentation
+```
+
+Discovery remains publication-date-only. Semantic Scholar year-only records use `Y-01-01` only for provider filtering membership and do not acquire a fabricated bibliographic date. `validate --config` now exercises the deterministic local FTS5 and runtime date checks required before provider work. The supported durable-state boundary is one monitor to one decision workspace, with workspace-local Paper UUIDs, statuses, and human notes.
+
 ---
 
 ## 25. Non-blocking Implementation Details
@@ -1726,19 +1801,8 @@ For v0.3.0 Track A, this also means:
 
 ## 27. Next Project Step
 
-R0–R3, v0.2.1 lexical search, v0.3.0 Track A Review Inbox, and v0.3.1 Prefix / Proximity search are completed history. v0.3.1 is released and remains the latest released version.
+R0–R3, v0.2.1 lexical search, v0.3.0 Track A Review Inbox, v0.3.1 Prefix / Proximity search, and v0.3.2 Persistent Monitor Definition are completed release history. v0.3.2 is released and remains the latest released version.
 
-The bounded v0.3.2 Persistent Monitor Definition feature implementation is complete through P0–A4. The remaining release sequence is:
+The current work stage is v0.3.3 Pre-GUI Correctness Hardening as described in §24.7. It does not add GUI behavior, durable execution state, incremental synchronization, or cross-monitor decision infrastructure.
 
-```text
-release-preparation commit
-→ tag
-→ push main
-→ push tag
-→ GitHub Release
-```
-
-This status does not mark v0.3.2 as released. Until that sequence completes,
-v0.3.1 remains the latest released version.
-
-Future Track B remains outside the current v0.3.2 scope and requires a separate proposal before entering scope.
+Future Track B remains outside the current v0.3.3 scope and requires a separate proposal before entering scope.

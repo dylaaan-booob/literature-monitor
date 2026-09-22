@@ -539,11 +539,48 @@ def test_malformed_discovery_record_does_not_stop_peer() -> None:
 @pytest.mark.parametrize(
     ("payload", "from_date", "to_date", "accepted"),
     [
-        (paper("inside", publication_date="2026-06-01"), date(2026, 1, 1), date(2026, 12, 31), True),
-        (paper("outside", publication_date="2025-12-31"), date(2026, 1, 1), date(2026, 12, 31), False),
-        (paper("year", publication_date=None, year=2026), date(2026, 1, 1), date(2026, 12, 31), True),
-        (paper("partial", publication_date=None, year=2026), date(2026, 1, 15), date(2026, 1, 31), False),
-        (paper("missing", publication_date=None, year=None), date(2026, 1, 1), date(2026, 12, 31), False),
+        (
+            paper("exact-inside", publication_date="2026-01-14"),
+            date(2026, 1, 1),
+            date(2026, 1, 14),
+            True,
+        ),
+        (
+            paper("exact-outside", publication_date="2026-01-15"),
+            date(2026, 1, 1),
+            date(2026, 1, 14),
+            False,
+        ),
+        (
+            paper("exact-precedence", publication_date="2025-12-31", year=2026),
+            date(2026, 1, 1),
+            date(2026, 1, 14),
+            False,
+        ),
+        (
+            paper("year-jan-1", publication_date=None, year=2026),
+            date(2026, 1, 1),
+            date(2026, 1, 14),
+            True,
+        ),
+        (
+            paper("year-after-jan-1", publication_date=None, year=2026),
+            date(2026, 1, 2),
+            date(2026, 1, 14),
+            False,
+        ),
+        (
+            paper("year-other-year", publication_date=None, year=2026),
+            date(2025, 1, 1),
+            date(2025, 12, 31),
+            False,
+        ),
+        (
+            paper("missing", publication_date=None, year=None),
+            date(2026, 1, 1),
+            date(2026, 12, 31),
+            False,
+        ),
     ],
 )
 def test_discovery_date_validation(
@@ -557,6 +594,22 @@ def test_discovery_date_validation(
     assert bool(result.discovered_records) is accepted  # type: ignore[attr-defined]
     if not accepted:
         assert any(issue.stage == "date_validation" for issue in result.issues)  # type: ignore[attr-defined]
+
+
+def test_year_only_discovery_keeps_bibliographic_date_unknown() -> None:
+    result = discover_one(
+        paper("year-only", publication_date=None, year=2026),
+        from_date=date(2026, 1, 1),
+        to_date=date(2026, 1, 14),
+    )
+
+    assert len(result.discovered_records) == 1  # type: ignore[attr-defined]
+    record = result.discovered_records[0]  # type: ignore[attr-defined]
+    assert record.publication_date is None
+    assert record.publication_year == 2026
+    assert len(result.evidence) == 1  # type: ignore[attr-defined]
+    assert result.evidence[0].publication_date is None  # type: ignore[attr-defined]
+    assert result.issues == ()  # type: ignore[attr-defined]
 
 
 def test_discovery_venue_validation_prefers_issn_then_strict_names() -> None:

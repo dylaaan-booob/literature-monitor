@@ -319,6 +319,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
 
         logger = configure_logging(config.log_level.value)
+        try:
+            validate_search_expression(config.keyword_ast)
+        except SearchExpressionError as error:
+            logger.error(
+                "%s: field 'keyword_expression': %s",
+                args.config,
+                error,
+            )
+            return 2
+        except SearchBackendError as error:
+            logger.error("Local search / FTS5 backend failure: %s", error)
+            return 2
+
+        try:
+            resolve_date_range(config.date_spec, today=date.today())
+        except DateRangeError as error:
+            logger.error(
+                "%s: field '%s': %s",
+                args.config,
+                error.field,
+                error,
+            )
+            return 2
+
         issn_count = sum(len(journal.issn) for journal in config.journals)
         client = OpenAlexClient(api_key=os.environ.get("OPENALEX_API_KEY"))
         resolved_count = 0

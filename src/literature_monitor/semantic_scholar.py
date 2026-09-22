@@ -662,10 +662,7 @@ def _date_matches(
         return from_date <= record.publication_date <= to_date
     if record.publication_year is None:
         return False
-    return (
-        from_date <= date(record.publication_year, 1, 1)
-        and date(record.publication_year, 12, 31) <= to_date
-    )
+    return from_date <= date(record.publication_year, 1, 1) <= to_date
 
 
 def _venue_matches(
