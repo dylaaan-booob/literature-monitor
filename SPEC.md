@@ -2,7 +2,7 @@
 
 **Status:** Active; v0.3.2 is the latest released version
 
-**Stage:** v0.3.3 Pre-GUI Correctness Hardening
+**Stage:** v0.3.3 release preparation and closeout
 **Scope:** Journal monitoring only; conferences are excluded from MVP
 
 ---
@@ -1743,7 +1743,7 @@ of truth was added.
 
 ### 24.7 v0.3.3 Pre-GUI Correctness Hardening
 
-The current bounded hardening work freezes three pre-GUI contracts without adding a GUI or durable execution state:
+The completed bounded hardening work freezes three pre-GUI contracts without adding a GUI or durable execution state:
 
 ```text
 A1 Semantic Scholar year-only date-membership semantics
@@ -1803,6 +1803,16 @@ For v0.3.0 Track A, this also means:
 
 R0–R3, v0.2.1 lexical search, v0.3.0 Track A Review Inbox, v0.3.1 Prefix / Proximity search, and v0.3.2 Persistent Monitor Definition are completed release history. v0.3.2 is released and remains the latest released version.
 
-The current work stage is v0.3.3 Pre-GUI Correctness Hardening as described in §24.7. It does not add GUI behavior, durable execution state, incremental synchronization, or cross-monitor decision infrastructure.
+The v0.3.3 Pre-GUI Correctness Hardening feature implementation and reviewed feature commit are complete. The current stage is release preparation / closeout. The remaining release transaction is:
+
+```text
+release-preparation commit
+→ tag
+→ push main
+→ push tag
+→ GitHub Release
+```
+
+This status does not mark v0.3.3 as released. Until that transaction completes, v0.3.2 remains the latest released version.
 
 Future Track B remains outside the current v0.3.3 scope and requires a separate proposal before entering scope.
