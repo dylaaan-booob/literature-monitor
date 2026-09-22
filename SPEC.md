@@ -1,9 +1,9 @@
-# Literature Monitoring Workflow — MVP Specification v1.2
+# Literature Monitoring Workflow — Specification v1.3
 
-**Status:** Active; v0.3.2 is the latest released version
+**Status:** Active; v0.3.3 is the current released and completed baseline
 
-**Stage:** v0.3.3 release preparation and closeout
-**Scope:** Journal monitoring only; conferences are excluded from MVP
+**Stage:** v0.4.0 Python Local Web UI implementation
+**Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
 
@@ -42,9 +42,11 @@ One candidate paper → one Markdown file
     ↓
 Author wikilinks + author notes
     ↓
-Review Inbox presentation in Obsidian Bases
+Workspace presentation adapters
+    ├─ local Python Web UI
+    └─ Obsidian Bases Review Inbox
     ↓
-Human triage in Obsidian
+Human-directed triage recorded in Paper Markdown
     ↓
 rejected / kept
     ↓
@@ -53,7 +55,7 @@ Export kept identifiers for Zotero import
 Human confirmation → in_zotero
 ```
 
-MVP success means this complete workflow works reliably on the journal whitelist without requiring a separate GUI, Obsidian plugin, publisher scraper framework, or custom Zotero ingestion implementation.
+The v0.3.3 journal-monitoring model remains the core. v0.4.0 adds a local Web application as another adapter over the same configuration, canonical production pipeline, Markdown workspace, and decision state. It does not replace the CLI, require an Obsidian plugin, introduce publisher scraping, or implement custom Zotero ingestion.
 
 ---
 
@@ -116,6 +118,9 @@ MVP includes:
 - persistent rejected records;
 - author wikilinks and author notes;
 - an Obsidian Bases Review Inbox derived from Paper Markdown state;
+- a local Python Web UI adapter implemented with FastAPI, Jinja2, and vendored HTMX;
+- stable application-layer boundaries shared by the CLI and Web application;
+- transient process-local run coordination with no persistent run history;
 - safe overlapping reruns;
 - export of `kept` paper identifiers for Zotero;
 - logs sufficient to inspect unresolved journals, failed enrichment, and partial metadata.
@@ -125,6 +130,7 @@ MVP includes:
 MVP does **not** include:
 
 - conference monitoring;
+- systematic-review collaboration or multi-reviewer screening workflow;
 - Google Scholar scraping;
 - global keyword-first literature search;
 - proactive arXiv-wide monitoring;
@@ -148,9 +154,10 @@ MVP does **not** include:
 - automatic PDF download for candidates;
 - custom DOI-to-Zotero ingestion code;
 - custom Zotero attachment handling;
-- GUI;
-- web application;
 - Obsidian plugin;
+- LAN/server deployment of the v0.4.0 Web UI;
+- login/password or multi-user account systems;
+- desktop application wrappers;
 - recommendation ranking;
 - citation-count ranking;
 - journal ranking;
@@ -669,6 +676,24 @@ Paper Markdown
 
 Paper UUID stability, workflow decisions, human-authored notes, and other durable Paper state are scoped to the workspace. The product does not promise a shared UUID for the same research work across different workspaces, does not inherit Reject/Keep decisions from one monitor's workspace into another, and has no cross-monitor global decision registry.
 
+The long-term sources of truth remain:
+
+```text
+monitor.yaml
+→ Monitor configuration
+
+journal data file
+→ Journal configuration
+
+workspace/Papers/*.md
+→ Paper identity, bibliographic metadata, and workflow decisions
+
+workspace/Authors/*.md
+→ Author durable materialization
+```
+
+The local Web UI must derive its state from these files and the current run process. It must not add a GUI database, persisted Inbox membership, run history, generic job records, frontend workflow state, or a second durable Paper decision state. The concrete journal data-file syntax remains a storage/parser concern and is not frozen by v0.4.0.
+
 ---
 
 ## 13. Paper Markdown Schema
@@ -792,7 +817,7 @@ kept
 in_zotero
 ```
 
-State transitions in MVP are human-controlled:
+State transitions are human-directed. They may be recorded by editing Paper Markdown directly, by the Obsidian workflow, or by the v0.4.0 decision application boundary, but the durable state remains the Paper Markdown `status` field:
 
 ```text
 candidate ──human──> rejected
@@ -889,7 +914,7 @@ The durable state unit is the **paper**, not the journal issue.
 
 ---
 
-## 18. Review Inbox Presentation
+## 18. Obsidian Review Inbox Presentation
 
 ### 18.1 Product role and workspace boundary
 
@@ -1008,15 +1033,17 @@ retrieval
 
 It does not participate in provider retrieval, search filtering, evidence consolidation, `CanonicalPaper`, canonicalization, identity matching, version consolidation, candidate inclusion, or workflow-state semantics. As of v0.3.2, the normal persistent-monitor entry point is `literature-monitor run --config monitor.yaml`; `materialize` remains an explicit legacy / diagnostic-style execution entry. v0.3.0 Track A itself added no `inbox-sync`, `review`, `rebuild-inbox`, or other CLI workflow.
 
-The following remain excluded unless a future independent Track B proposal changes scope:
+The following remain excluded from the workflow-state model:
 
 - Maybe / Deferred states, rejection reasons, review labels, reviewer identity, review batches, review sessions, reviewed timestamps, bulk screening workflow, and priority state;
 - BM25, semantic, citation, or LLM ranking;
 - automatic summaries, relevance explanations, and recommendations;
 - PDF preview or download;
 - Zotero API integration;
-- an Obsidian plugin or custom GUI;
+- an Obsidian plugin;
 - a persistent Inbox database.
+
+The v0.4.0 local Web UI is a separate presentation/application adapter over the same Paper Markdown state. It does not alter these Obsidian-specific creation-only semantics or create another Inbox membership store.
 
 ---
 
@@ -1178,7 +1205,7 @@ window_days: N
 
 Date arithmetic uses standard `datetime.date` semantics. This includes `window_days = 1`, leap days, month boundaries, and year boundaries. Resolved runtime dates are ephemeral and must not be written back to the monitor config.
 
-The persistent policy and the resolved runtime range are distinct concepts. Defaults belong to the config/domain contract; CLI commands, provider adapters, materialization code, and any future GUI must not define competing default semantics. A future GUI, if separately brought into scope, must obey this same two-degrees-of-freedom date model.
+The persistent policy and the resolved runtime range are distinct concepts. Defaults belong to the config/domain contract; CLI commands, provider adapters, materialization code, and the v0.4.0 Web UI must not define competing default semantics. GUI Run always uses the persisted Monitor date policy and offers no temporary date override.
 
 ### 20.3 CLI date override contract
 
@@ -1261,7 +1288,7 @@ All date-bearing commands must share the same observable date-resolution semanti
 
 ### 20.4 Normal run and production-pipeline reuse
 
-`literature-monitor run --config monitor.yaml` is the normal persistent-monitor execution path. It obtains the following from the monitor definition after defaults and path/date resolution:
+`literature-monitor run --config monitor.yaml` remains the normal CLI persistent-monitor execution path. In v0.4.0, both CLI Run and GUI Run call the stable `application.monitor.run_monitor(...) -> RunResult` boundary. It obtains the following from the monitor definition after defaults and path/date resolution:
 
 ```text
 journals
@@ -1271,22 +1298,37 @@ date policy
 log level
 ```
 
-Its production flow is:
+The shared canonical production core is:
 
 ```text
 load monitor
 → resolve journals
 → resolve effective date range
-→ retrieve provider evidence
-→ consolidate evidence
-→ local FTS5 filtering
-→ canonicalize
-→ materialize Papers / Authors / Inbox
+→ retrieval
+→ provider evidence consolidation
+→ local matching
+→ canonicalization
 ```
 
-`run` must reuse the existing complete materialization production pipeline. v0.3.2 must not create a second implementation of retrieval, Semantic Scholar supplementation, filtering, canonicalization, or materialization.
+CLI `run`, GUI Run, CLI `canonicalize`, and CLI `materialize` must reuse this common core rather than copying its provider retrieval, evidence consolidation, local matching, or canonicalization orchestration.
 
-Existing diagnostic commands remain available. `materialize` remains an explicit legacy / diagnostic-style execution entry. Its existing explicit `--output-dir` behavior is preserved rather than redesigned here.
+The command boundaries then diverge only after canonicalization:
+
+```text
+CLI canonicalize
+→ stop after canonicalization
+→ output canonical papers
+
+CLI materialize
+→ take canonical papers from the shared core
+→ invoke the formal materialization path
+
+CLI run / GUI Run
+→ take canonical papers from the shared core
+→ invoke the same formal materialization path
+```
+
+`run_monitor()` remains the formal common entry point for CLI `run` and GUI Run. This split must not change the existing observable behavior of `canonicalize` or `materialize`; `canonicalize` remains a read-only diagnostic command, and `materialize` retains its explicit `--output-dir` behavior. Lower-level diagnostic commands may continue to call existing lower-level modules when their diagnostic purpose requires it.
 
 ### 20.5 Validate configuration
 
@@ -1296,7 +1338,7 @@ Running:
 literature-monitor validate --config monitor.yaml
 ```
 
-has a strict boundary:
+and the v0.4.0 application boundary `application.monitor.validate_monitor(...) -> ValidationResult` share the same validation path and semantics. Validation has a strict boundary:
 
 ```text
 load config / whitelist
@@ -1308,7 +1350,7 @@ Before any OpenAlex Source-resolution network request, validation must complete 
 
 Parser-valid expressions may still fail local semantic validation after SQLite FTS5 `unicode61` tokenization. Invalid Prefix or Proximity operands, including a Proximity operand that produces only one lexical token, are local validation errors. A Python SQLite runtime without FTS5 is a local runtime-preflight failure. Runtime date resolution that exceeds the supported `datetime.date` bounds is also a local runtime-preflight failure.
 
-Configuration and deterministic local preflight failures exit with code `2` and must occur before any provider path is constructed or called. OpenAlex Source-resolution errors retain exit code `1`. Warning-only OpenAlex validation and fully valid validation both exit with code `0`.
+Configuration and deterministic local preflight failures exit with code `2` and must occur before any provider path is constructed or called. OpenAlex Source-resolution errors retain exit code `1`. Warning-only OpenAlex validation and fully valid validation both exit with code `0`. More generally, CLI compatibility remains: completed or valid results exit `0`; provider or materialization errors exit `1`; local configuration or deterministic preflight errors exit `2`.
 
 `validate` performs no OpenAlex Works discovery, Crossref connectivity check, Semantic Scholar connectivity check, `output_dir` writability check, workspace creation, or Paper / Author / Inbox materialization. Its only provider/network validation is OpenAlex Source resolution.
 
@@ -1639,6 +1681,33 @@ Given the v0.3.2 persistent-monitor model with the v0.3.3 correctness hardening:
 - no monitor UUID, workspace UUID, ownership marker, workspace registry, global research-work registry, cross-monitor Paper UUID, per-monitor decision object, monitor membership state, decision inheritance, last-run semantics, run history, scheduler/notification state, provider cursor/watermark/checkpoint persistence, or persistent execution database is introduced;
 - Paper Markdown remains the durable workflow state, with no Paper Markdown schema change in v0.3.3 and no regression to workspace-local UUID stability, statuses, or human-note preservation.
 
+### 23.15 v0.4.0 Local Web UI and application boundaries
+
+The v0.4.0 implementation is accepted only when all of the following hold:
+
+- a provider can fail while other evidence still canonicalizes and materializes successfully; the application result reports `COMPLETED_WITH_ERRORS`, preserves the successful writes, and the CLI retains exit code `1`;
+- a corrupt or unreliably parsed Paper is isolated from Inbox/Kept/Rejected/In Zotero views and appears in workspace issues without preventing valid Papers from loading;
+- decision writes preserve `Notes`, every human-managed body section, and unknown frontmatter fields while changing only `status`;
+- a decision whose expected current status no longer matches disk state returns a state conflict and does not overwrite the newer state;
+- compare-before-replace detects a file change between read and replace and refuses to overwrite it silently;
+- an unknown Paper UUID, duplicate/ambiguous UUID location, or unsafe/non-regular target produces a safe decision failure with no mutation;
+- an invalid workflow transition is rejected and no arbitrary status mutation surface exists;
+- Settings Save aborts before writing when either file revision has changed since Settings open;
+- if the journal file write succeeds and the monitor config write then fails, Settings reports a partial save, rereads real disk state, and does not report success;
+- an invalid or missing monitor config still allows the Web application to start, and `GET /` provides a recoverable HTML state with access to Settings rather than requiring a generic HTTP 500;
+- a missing or invalid journal data file, or a workspace that cannot form a normal view, still permits application startup and a recoverable `GET /` HTML state;
+- expected decision, Settings, and run-already-active failures produce understandable application HTML states rather than generic HTTP 500 responses;
+- `POST /settings/validate` validates the current unsaved `MonitorDraft` with shared deterministic rules and performs no config write, journal-data write, or provider request;
+- only one GUI run may be active in the process at a time, repeated starts do not create a second production run, and no run history is persisted;
+- RunCoordinator state reads use a small lock to obtain immutable snapshots, release the lock before HTML rendering or other slow work, and the HTTP server remains responsive while synchronous `run_monitor()` executes in its dedicated worker;
+- GUI Run exposes no temporary date override and uses only the persisted Monitor date policy;
+- CLI completed/valid, provider/materialization-error, and local-configuration/preflight outcomes retain exit codes `0`, `1`, and `2` respectively;
+- CLI `run`, CLI `canonicalize`, CLI `materialize`, and GUI Run demonstrably reuse the same canonical production core through canonicalization; `canonicalize` stops there, while `materialize`, CLI `run`, and GUI Run pass the resulting canonical papers into the formal materialization path;
+- Run, Settings Save, and all Paper decision mutations reject requests without the valid process-start CSRF token;
+- the Web server binds only to `127.0.0.1`, rejects unintended Host values, and does not enable broad CORS or LAN serving;
+- package templates, vendored HTMX, and other required static assets are present in both wheel and sdist;
+- a smoke test from an installed wheel/sdist can create the GUI application and render the required local UI without relying on repository-relative template/static paths or a Node toolchain.
+
 ---
 
 ## 24. Suggested Implementation Sequence
@@ -1753,13 +1822,452 @@ A1 Semantic Scholar year-only date-membership semantics
 
 Discovery remains publication-date-only. Semantic Scholar year-only records use `Y-01-01` only for provider filtering membership and do not acquire a fabricated bibliographic date. `validate --config` now exercises the deterministic local FTS5 and runtime date checks required before provider work. The supported durable-state boundary is one monitor to one decision workspace, with workspace-local Paper UUIDs, statuses, and human notes.
 
+### 24.8 v0.4.0 Python Local Web UI implementation
+
+v0.3.3 is the completed baseline for v0.4.0. The v0.4.0 specification alignment establishes the application, workspace, decision, settings, run-coordination, Web, security, and packaging contracts in §25 before production implementation proceeds.
+
+The implementation must remain an adapter over the existing durable Markdown model and canonical production pipeline. It must not introduce a second workflow source of truth, persistent execution database, new workflow status, Zotero API ingestion, or a parallel GUI-specific retrieval/canonicalization/materialization pipeline.
+
 ---
 
-## 25. Non-blocking Implementation Details
+## 25. v0.4.0 Python Local Web UI Application Contract
+
+v0.4.0 adds a local Web application as an adapter over the existing monitor, journal configuration, canonical production pipeline, Markdown workspace, and kept-export boundary. It does not redefine the literature-monitoring domain model.
+
+### 25.1 Runtime architecture and delivery boundary
+
+The Web application uses:
+
+```text
+FastAPI
++ Jinja2
++ HTMX
++ minimal browser-only JavaScript
+```
+
+Frontend delivery is Python-only. HTMX is vendored inside package static assets. The project does not require Node, npm, Vite, a SPA build pipeline, React, Vue, or another JavaScript application framework.
+
+The application runs as one local process with one server worker and binds only to `127.0.0.1`. v0.4.0 does not provide LAN/server deployment, remote multi-user operation, login/password authentication, or an account system.
+
+The durable-state contract from §12 remains authoritative. The Web application must not introduce:
+
+- a GUI database;
+- persisted Inbox membership;
+- persistent run history;
+- generic job records;
+- frontend workflow state;
+- a second Paper decision state.
+
+### 25.2 Stable application boundaries
+
+The stable application boundaries are:
+
+```text
+application.monitor
+application.settings
+application.workspace
+application.decisions
+```
+
+Both CLI and Web entry points call these application boundaries. Web routes, HTMX handlers, and Jinja templates must not directly implement provider orchestration, evidence consolidation, canonicalization, materialization, YAML mutation, frontmatter mutation, or other domain/business rules.
+
+The application layer may call the existing lower-level provider, parsing, canonicalization, materialization, and export modules. It must not duplicate those implementations behind Web-specific code paths.
+
+### 25.3 Monitor application contract
+
+The public monitor operations are:
+
+```python
+run_monitor(...) -> RunResult
+validate_monitor(...) -> ValidationResult
+```
+
+`run_monitor` is the common formal entry point for CLI `run` and GUI Run. The common canonical production core shared by CLI `run`, GUI Run, CLI `canonicalize`, and CLI `materialize` stops at canonicalization:
+
+```text
+retrieval
+→ provider evidence consolidation
+→ local matching
+→ canonicalization
+```
+
+The four entry points must not duplicate orchestration inside that core. After canonicalization, CLI `canonicalize` stops and emits canonical papers without materialization. CLI `materialize` consumes the core's canonical papers and invokes the formal materialization path while preserving its explicit `--output-dir`. CLI `run` and GUI Run consume the same canonical papers and invoke that same formal materialization path. These boundaries preserve the existing observable behavior of `canonicalize` and `materialize`.
+
+Lower-level diagnostic commands may continue to use existing lower-level modules where their diagnostic behavior requires it.
+
+GUI Run has no temporary date controls. It always uses the persisted Monitor date policy. CLI date overrides retain §20.3 semantics: once any CLI date argument is supplied, the CLI fields form the complete ephemeral override and must not be merged with configured date fields.
+
+The public progress contract has exactly these stages:
+
+```text
+CHECKING_MONITOR
+DISCOVERING_PAPERS
+COMBINING_METADATA
+MATCHING_LITERATURE
+UPDATING_WORKSPACE
+```
+
+The progress callback is synchronous and application-level. Its contract must not depend on FastAPI, HTMX, asyncio, a particular thread type, provider pagination, or provider request counts. Pagination and request counts may be logged or observed internally but are not public progress stages.
+
+`RunResult` must at least express:
+
+- resolved date range;
+- canonical paper count;
+- created papers;
+- matched-existing papers;
+- updated papers;
+- created authors;
+- existing authors;
+- warnings;
+- errors;
+- outcome.
+
+The outcome set includes at least:
+
+```text
+COMPLETED
+COMPLETED_WITH_WARNINGS
+COMPLETED_WITH_ERRORS
+INVALID_CONFIGURATION
+```
+
+A provider error does not imply that the entire run failed. When other evidence can still produce Papers and materialization completes, the run may return `COMPLETED_WITH_ERRORS`. Uncaught programming errors and system exceptions must propagate to the execution boundary and must not be disguised as ordinary business `RunResult` values.
+
+CLI exit compatibility is preserved:
+
+```text
+completed / valid
+→ exit 0
+
+provider or materialization error
+→ exit 1
+
+local configuration or deterministic preflight error
+→ exit 2
+```
+
+Accordingly, a CLI run that completes materialization while reporting provider errors still exits `1`, even though its application outcome can be `COMPLETED_WITH_ERRORS`.
+
+`validate_monitor` preserves the current validation semantics:
+
+```text
+configuration loading
+→ keyword lexical / FTS5 validation
+→ runtime date resolution
+→ configured OpenAlex Source resolution
+```
+
+It must not retrieve OpenAlex Works, call Crossref Works, call Semantic Scholar, create a workspace, or materialize Papers, Authors, or Inbox presentation artifacts.
+
+### 25.4 Workspace application contract
+
+The public workspace operation is:
+
+```python
+load_workspace(output_dir) -> WorkspaceSnapshot
+```
+
+It must reuse the existing `parse_paper_state()` parser. Valid Papers and workspace issues are separate outputs. A corrupt Paper or a Paper that cannot be parsed reliably does not enter workflow views, but its problem appears in workspace issues.
+
+Workspace membership is derived on every load from the current Paper Markdown `status`:
+
+```text
+candidate  → Inbox
+kept       → Kept
+rejected   → Rejected
+in_zotero  → In Zotero
+```
+
+Membership is neither persisted nor cached as workflow state. Default ordering remains:
+
+```text
+discovered_at DESC
+publication_date DESC
+title ASC
+```
+
+`WorkspaceSnapshot` is independent of `RunResult`. The workspace always reflects current disk contents, regardless of what the latest run reported.
+
+### 25.5 Decision application contract and safe filesystem writes
+
+The public decision actions are exactly:
+
+```python
+keep_paper(...)
+reject_paper(...)
+mark_paper_in_zotero(...)
+```
+
+There is no public arbitrary `set_status` action or generic status mutation route.
+
+v0.4.0 permits only:
+
+```text
+candidate → kept
+candidate → rejected
+kept      → in_zotero
+```
+
+A decision request identifies the Paper by its stable Paper UUID plus the expected current status. A browser-supplied or server-generated filesystem path is not an authoritative Paper identifier.
+
+Before mutation, the decision boundary must:
+
+1. rescan or otherwise relocate the Paper by UUID from the current workspace;
+2. reject missing UUIDs, duplicate/ambiguous UUID locations, non-regular/unsafe targets, and other unsafe location results;
+3. reread the complete current file bytes;
+4. call `parse_paper_state()` again on the current content;
+5. verify the Paper UUID;
+6. verify that the Paper is updateable;
+7. verify the expected current status;
+8. verify that the requested transition is allowed;
+9. prepare a change that modifies only `status`;
+10. preserve unknown frontmatter fields;
+11. preserve `Notes` and every human-managed body section;
+12. perform compare-before-replace so a concurrent change cannot be silently overwritten.
+
+`DecisionResult` must distinguish at least:
+
+```text
+updated
+not found
+invalid paper
+state conflict
+invalid transition
+I/O failure
+```
+
+`safe_write.py` contains only general filesystem semantics such as exact UTF-8 reads, atomic replace, and compare-before-replace. It does not understand Paper, Monitor, Journal, workflow states, or frontmatter. `materialize.py`, `application.decisions`, and `application.settings` may reuse it. v0.4.0 must not turn `materialize.py` into a generic persistence framework.
+
+### 25.6 Settings application contract
+
+The Settings application boundary edits the same persistent monitor and journal configuration used by the runtime. It does not create GUI-specific configuration or validation rules.
+
+`MonitorDraft` expresses at least:
+
+- name;
+- keyword expression;
+- journals;
+- date policy;
+- output workspace;
+- log level;
+- current monitor-config file revision;
+- current journal-data file revision.
+
+Runtime configuration loading and GUI draft validation reuse the same deterministic config/domain validation path. Settings-specific handlers must not reimplement keyword, date-policy, path, or journal validation. The provider-resolving stage of `validate_monitor` remains separate; Settings open, validate, and save do not contact providers.
+
+Concrete journal storage syntax is isolated at the storage/parser boundary. Routes, templates, `MonitorDraft`, monitor execution, and decisions operate on:
+
+```python
+tuple[JournalConfig, ...]
+```
+
+The current `list.md` format may remain the initial journal storage representation, but v0.4.0 does not freeze a future journal data-file format.
+
+When Settings opens, it computes a content revision from the exact bytes of both the monitor config file and the journal data file.
+
+Settings Save follows this sequence:
+
+```text
+validate the complete draft
+→ reread both current files
+→ compare both content revisions
+→ abort on revision conflict
+→ prepare both complete target contents
+→ write journal data file
+→ write monitor config file
+→ reread actual disk state
+→ report the resulting state
+```
+
+No write begins until both complete target contents have been prepared. If the journal write fails, the monitor file is not written. If the journal write succeeds and the monitor write fails, the result reports a partial save, rereads the real disk state, and must not display or report Save successful.
+
+This two-file operation is deliberately not an atomic cross-file transaction. v0.4.0 does not add SQLite transactions, a rollback framework, or another complex persistence subsystem to simulate one.
+
+### 25.7 Transient RunCoordinator
+
+The process-local run coordinator lives at:
+
+```text
+web/run_coordinator.py
+```
+
+It owns only transient process state:
+
+- at most one active run;
+- one dedicated in-process worker that calls synchronous `run_monitor()`;
+- current public progress stage;
+- relevant transient run timestamps;
+- the current session's last `RunResult`;
+- an unexpected-error record suitable for safe UI reporting and server logging.
+
+Coordinator state is:
+
+```text
+IDLE → RUNNING → FINISHED
+          ↑         │
+          └─────────┘ next start
+```
+
+A later start may move from `FINISHED` back to `RUNNING`. Run history is not persisted.
+
+A small coordinator lock protects at least:
+
+- coordinator status;
+- current progress stage;
+- relevant transient run timestamps;
+- current `RunResult`;
+- unexpected error state.
+
+HTTP polling and other read paths acquire the lock only long enough to copy an immutable coordinator snapshot, then release it immediately. HTML rendering, template work, workspace loading, or other comparatively slow work must occur after the lock is released.
+
+The synchronous `run_monitor()` call executes in the dedicated worker. The HTTP server must remain responsive while the monitor pipeline is running. Repeated start requests while the coordinator is already `RUNNING` must not create a second concurrent production run.
+
+Provider clients remain synchronous. These concurrency semantics do not require an asyncio provider rewrite, a generic queue, Celery, Redis, RabbitMQ, WebSocket, SSE, or a more elaborate threading framework.
+
+### 25.8 Web application behavior
+
+The application factory is:
+
+```python
+create_app(config_path: Path) -> FastAPI
+```
+
+or a semantically equivalent interface.
+
+Application creation does not require the current monitor configuration to be valid. A missing or invalid monitor file, or a missing/invalid journal data file, must not prevent the server from starting; the UI must remain able to enter Settings and repair the configuration.
+
+The full-page routes are:
+
+```text
+GET /           → Workspace, default Inbox
+GET /settings   → Monitor Editor
+```
+
+When Monitor configuration, Journal configuration, or the workspace cannot form a normal Workspace view, `GET /` returns a normal recoverable HTML empty/error state with an entry point to Settings. The UI may guide or redirect the user to Settings, but redirect is not the only valid behavior. Expected configuration or workspace failures must not become a generic HTTP 500, and application startup must remain successful.
+
+Paper mutation routes are exactly:
+
+```text
+POST /papers/{paper_id}/keep
+POST /papers/{paper_id}/reject
+POST /papers/{paper_id}/mark-in-zotero
+```
+
+There is no generic arbitrary-status route.
+
+Run routes are:
+
+```text
+POST /run
+GET  /fragments/run
+```
+
+Settings routes are:
+
+```text
+GET  /settings
+POST /settings/validate
+POST /settings/save
+```
+
+`POST /settings/validate` validates the browser's current unsaved `MonitorDraft`. It does not require the draft to be saved first, does not write the monitor config, does not write the journal data file, does not call any provider, and uses the same deterministic validation rules as runtime configuration.
+
+Expected application failures are represented as normal, understandable HTML error/state responses rather than being collapsed into generic HTTP 500 responses. This includes at least decision not found, invalid Paper, state conflict, invalid transition, decision I/O failure, Settings validation failure, Settings revision conflict, and run-already-active.
+
+Unexpected programming or system exceptions remain distinct from those expected failures. The adapter or coordinator outer boundary records the traceback in server logging, while ordinary HTML UI responses do not display the traceback.
+
+HTMX fragment responses cover at least:
+
+- the workspace composite snapshot;
+- Paper list;
+- Paper detail;
+- run status/result;
+- workspace issues;
+- Zotero export.
+
+After a decision completes, the server reloads the workspace from disk. The browser does not infer the next workflow state or maintain a domain-state store.
+
+Run completion does not make `RunResult` authoritative for workspace contents. The server rescans the workspace after completion. While a run is active, run-status polling occurs at approximately 0.5–1 second intervals. A finished run fragment stops polling and emits a completion event that triggers workspace refresh.
+
+Browser JavaScript is limited to browser-only interaction such as K/R keyboard shortcuts, clipboard handling, and focus management. It does not own workflow state, provider orchestration, persistence, or canonicalization.
+
+### 25.9 Web security, packaging, and dependency policy
+
+Every Web mutation, including Run, Settings Save, and Paper decisions, requires a process-start random CSRF token. The same protection may be required for other browser POST endpoints such as Settings Validate. Tokens are process-local and are not durable application state.
+
+The Web server must:
+
+- restrict accepted Host values to the intended localhost/loopback host set;
+- bind to `127.0.0.1` only;
+- avoid broad CORS configuration;
+- expose no LAN binding mode in v0.4.0;
+- provide no account/password system;
+- send unexpected tracebacks only to server logging;
+- keep ordinary HTML error responses free of tracebacks.
+
+Allowed v0.4.0 runtime dependencies are limited to those actually needed for this design, including:
+
+- FastAPI;
+- Uvicorn;
+- Jinja2;
+- the selected form-parsing dependency if form handling actually requires one.
+
+HTMX is vendored as a package static asset rather than installed with a Node toolchain. Templates and static assets must be included in both wheel and sdist so the GUI works from an installed package.
+
+The following remain outside the v0.4.0 architecture:
+
+- Node, npm, Vite, or another frontend build toolchain;
+- React or Vue;
+- Redis or Celery;
+- SQLAlchemy;
+- a WebSocket framework;
+- desktop wrappers;
+- generic Repository/Service/Manager/Interface hierarchies;
+- event bus or command bus infrastructure;
+- a DI container.
+
+### 25.10 Zotero boundary
+
+v0.4.0 does not implement Zotero API integration. The GUI reuses the existing read-only kept-paper export boundary. It may present or copy the export result, but it does not ingest items into Zotero or infer `in_zotero` from Zotero state.
+
+### 25.11 Testing responsibility boundary
+
+v0.4.0 regression coverage follows the same application boundaries as production code.
+
+Primary production-orchestration regression tests belong at the application layer, for example `test_application_monitor.py` or a semantically equivalent location. They cover the monitor behavior that must remain shared across CLI and Web, including validation, date resolution, provider partial failures, canonical production-core reuse, `RunResult` outcomes, materialization handoff, and progress reporting.
+
+CLI tests primarily cover:
+
+- argument parsing and CLI-only date-override handling;
+- adapter wiring into the application layer;
+- logging and user-visible output;
+- exit-code compatibility.
+
+CLI and application tests must not maintain duplicate copies of the same complete provider-orchestration fixture matrix.
+
+Application-level regression coverage also includes the important workspace, decision, Settings, and RunCoordinator contracts defined in §25: corrupt-Paper isolation, disk-derived membership, decision transitions and conflicts, human-content preservation, compare-before-replace outcomes, Settings validation/revision/partial-save behavior, one-active-run semantics, coordinator snapshots, and unexpected-error separation.
+
+Route tests verify the adapter boundary:
+
+```text
+HTTP input
+→ correct application action
+→ server-authoritative HTML state
+```
+
+They do not re-test Markdown merge algorithms, safe-write internals, canonicalization internals, or provider orchestration that is already covered at the corresponding application/domain layer.
+
+Browser-level tests remain few and targeted to behavior that requires a real browser, such as HTMX polling and swap termination, completion-triggered refresh, keyboard shortcuts, and dirty-form behavior. Domain and persistence semantics remain below the browser layer.
+
+Testability must not drive production-only hooks, exported symbols, setters/getters, widened visibility, or artificial interfaces that would not otherwise belong in the production design.
+
+---
+
+## 26. Non-blocking Implementation Details
 
 The following do not block implementation and may be decided locally as long as the specification's observable behavior is preserved:
 
-- programming language/package layout, provided the chosen stack can reuse relevant prior art cleanly;
+- internal Python package/file layout outside the stable application boundaries and the specified `web/run_coordinator.py` location;
 - exact short-UUID length, provided collisions are checked;
 - exact cache format;
 - exact Markdown section ordering;
@@ -1771,48 +2279,26 @@ These details should not change the core workflow or introduce additional scope.
 
 ---
 
-## 26. Definition of MVP Done
+## 27. Definition of Current Version Done
 
-The MVP is done when a user can take a monitor definition and reliably perform this cycle:
+The v0.3.3 baseline remains complete when a user can reliably run the journal-monitoring pipeline, review the durable Paper Markdown corpus through the Obsidian presentation, preserve decisions and notes across reruns, export kept identifiers, and manually confirm `in_zotero` after downstream Zotero import.
 
-```text
-literature-monitor run --config monitor.yaml
-→ review new candidate Markdown files through Inbox.base in Obsidian
-→ mark some rejected and some kept
-→ rerun without losing decisions or notes
-→ export kept identifiers
-→ import them with existing Zotero functionality
-→ manually mark imported papers in_zotero
-```
+v0.4.0 is complete when the same durable workflow is also operable through the local Python Web UI defined in §25, with the acceptance criteria in §23.15 demonstrated. In particular:
 
-No additional infrastructure is required for MVP completion.
+- GUI Run and CLI `run` share `run_monitor()`, use the same canonical production core plus formal materialization path, and preserve the existing CLI date/exit-code contracts;
+- Workspace views are reconstructed from current Paper Markdown and isolate corrupt records as issues;
+- GUI decisions perform conflict-safe, status-only mutations while preserving unknown frontmatter and human-authored content;
+- Settings uses shared validation, revision checks, and the specified non-transactional two-file save semantics;
+- only one transient local run is active at a time and no run history or second durable workflow state is introduced;
+- CSRF, Host restriction, localhost-only binding, traceback handling, and package asset inclusion are verified;
+- the installed wheel/sdist GUI smoke test succeeds without Node/npm/Vite or repository-relative assets.
 
-For v0.3.0 Track A, this also means:
-
-- `materialize` initializes a missing default Review Inbox even when no candidate is produced;
-- Inbox, Kept, Rejected, and In Zotero are projections of the existing Paper Markdown statuses, so status edits need no synchronization step and rediscovery does not reset prior decisions;
-- a nested workspace observes only its own `Papers/` files with `type == paper`;
-- Paper Markdown remains the only durable user-facing workflow state;
-- existing `Inbox.base` content and user customization are preserved byte-for-byte on rerun;
-- Inbox creation failures are reported as materialization issues, produce a non-zero command result, and do not roll back successful Paper or Author writes;
-- no Track B state, second source of truth, external service, community plugin, Python runtime dependency, or `export-kept` regression is introduced.
+Obsidian remains a supported presentation of the same Markdown workspace; it is no longer the only daily workflow presentation.
 
 ---
 
-## 27. Next Project Step
+## 28. Current Project Stage
 
-R0–R3, v0.2.1 lexical search, v0.3.0 Track A Review Inbox, v0.3.1 Prefix / Proximity search, and v0.3.2 Persistent Monitor Definition are completed release history. v0.3.2 is released and remains the latest released version.
+R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, and v0.3.3 Pre-GUI Correctness Hardening are completed release history. v0.3.3 is the current released and completed baseline.
 
-The v0.3.3 Pre-GUI Correctness Hardening feature implementation and reviewed feature commit are complete. The current stage is release preparation / closeout. The remaining release transaction is:
-
-```text
-release-preparation commit
-→ tag
-→ push main
-→ push tag
-→ GitHub Release
-```
-
-This status does not mark v0.3.3 as released. Until that transaction completes, v0.3.2 remains the latest released version.
-
-Future Track B remains outside the current v0.3.3 scope and requires a separate proposal before entering scope.
+The current stage is v0.4.0 Python Local Web UI implementation. This specification alignment defines the source-of-truth boundaries and acceptance contracts for subsequent implementation tasks; it does not itself implement the application layer, Web UI, filesystem mutation helpers, Settings, decisions, or run coordination.
