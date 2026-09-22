@@ -22,6 +22,25 @@ def read_text_exact(path: Path) -> str:
     return path.read_bytes().decode("utf-8")
 
 
+def create_text_exclusive(path: Path, contents: str) -> None:
+    """Create complete UTF-8 text without replacing a concurrently created path."""
+
+    created = False
+    try:
+        with path.open("x", encoding="utf-8", newline="") as handle:
+            created = True
+            handle.write(contents)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        if created:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        raise
+
+
 def atomic_replace_text(path: Path, contents: str) -> None:
     """Replace a path with complete UTF-8 text using a same-directory temp file."""
 

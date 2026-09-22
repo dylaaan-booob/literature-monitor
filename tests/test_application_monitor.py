@@ -499,7 +499,7 @@ def test_preflight_failure_occurs_before_provider_work_and_skips_workspace_stage
     def unexpected_provider(*args: object, **kwargs: object) -> object:
         raise AssertionError("provider work must not start")
 
-    monkeypatch.setattr(monitor, "validate_search_expression", fail_validation)
+    monkeypatch.setattr(monitor, "validate_runtime_keyword", fail_validation)
     monkeypatch.setattr(monitor, "OpenAlexClient", unexpected_provider)
 
     result = run_monitor(config_path, progress_callback=stages.append)
@@ -751,7 +751,7 @@ def test_validate_monitor_local_failures_are_invalid_before_source_resolution(
     if failure == "lexical":
         monkeypatch.setattr(
             monitor,
-            "validate_search_expression",
+            "validate_runtime_keyword",
             lambda expression: (_ for _ in ()).throw(
                 SearchExpressionError("invalid lexical expression")
             ),
@@ -759,7 +759,7 @@ def test_validate_monitor_local_failures_are_invalid_before_source_resolution(
     elif failure == "fts5":
         monkeypatch.setattr(
             monitor,
-            "validate_search_expression",
+            "validate_runtime_keyword",
             lambda expression: (_ for _ in ()).throw(
                 SearchBackendError("SQLite FTS5 is unavailable")
             ),

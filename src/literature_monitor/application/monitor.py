@@ -20,6 +20,8 @@ from literature_monitor.config import (
     LoadedConfig,
     LogLevel,
     load_config,
+    resolve_runtime_date,
+    validate_runtime_keyword,
 )
 from literature_monitor.crossref import (
     CrossrefClient,
@@ -32,7 +34,6 @@ from literature_monitor.date_range import (
     DateRangeError,
     DateRangeSpec,
     ResolvedDateRange,
-    resolve_date_range,
 )
 from literature_monitor.keywords import (
     KeywordExpression,
@@ -378,7 +379,7 @@ def _prepare_invocation(
         return None, None, _configuration_issue(error, config_path)
 
     try:
-        validate_search_expression(config.keyword_ast)
+        validate_runtime_keyword(config)
     except SearchExpressionError as error:
         return (
             None,
@@ -419,7 +420,11 @@ def _prepare_invocation(
 
     date_spec = date_override if date_override is not None else config.date_spec
     try:
-        resolved_date_range = resolve_date_range(date_spec, today=date.today())
+        resolved_date_range = resolve_runtime_date(
+            config,
+            today=date.today(),
+            date_spec=date_spec,
+        )
     except DateRangeError as error:
         return (
             None,

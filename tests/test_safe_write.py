@@ -9,6 +9,7 @@ import literature_monitor.safe_write as safe_write_module
 from literature_monitor.safe_write import (
     ContentChangedError,
     atomic_replace_text,
+    create_text_exclusive,
     read_text_exact,
     replace_text_if_unchanged,
 )
@@ -39,6 +40,24 @@ def test_atomic_replace_preserves_existing_mode(tmp_path: Path) -> None:
     atomic_replace_text(path, "new")
 
     assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
+def test_exclusive_create_writes_complete_content(tmp_path: Path) -> None:
+    path = tmp_path / "new.txt"
+
+    create_text_exclusive(path, "created\n完整内容\n")
+
+    assert path.read_bytes() == "created\n完整内容\n".encode("utf-8")
+
+
+def test_exclusive_create_refuses_existing_target(tmp_path: Path) -> None:
+    path = tmp_path / "existing.txt"
+    path.write_text("external", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        create_text_exclusive(path, "generated")
+
+    assert path.read_text(encoding="utf-8") == "external"
 
 
 def test_compare_before_replace_succeeds_when_contents_are_unchanged(
