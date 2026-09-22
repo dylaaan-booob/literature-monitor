@@ -322,10 +322,10 @@ def test_run_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
 
     monkeypatch.delenv("OPENALEX_API_KEY", raising=False)
     monkeypatch.delenv("CROSSREF_MAILTO", raising=False)
-    monkeypatch.setattr("literature_monitor.cli.OpenAlexClient", openalex_client)
-    monkeypatch.setattr("literature_monitor.cli.CrossrefClient", crossref_client)
+    monkeypatch.setattr("literature_monitor.application.monitor.OpenAlexClient", openalex_client)
+    monkeypatch.setattr("literature_monitor.application.monitor.CrossrefClient", crossref_client)
     monkeypatch.setattr(
-        "literature_monitor.cli.create_semantic_scholar_client",
+        "literature_monitor.application.monitor.create_semantic_scholar_client",
         semantic_scholar_client,
     )
 
@@ -631,10 +631,10 @@ def test_representative_multi_journal_cycle_handles_overlapping_rerun(
 
     monkeypatch.delenv("OPENALEX_API_KEY", raising=False)
     monkeypatch.delenv("CROSSREF_MAILTO", raising=False)
-    monkeypatch.setattr("literature_monitor.cli.OpenAlexClient", openalex_client)
-    monkeypatch.setattr("literature_monitor.cli.CrossrefClient", crossref_client)
+    monkeypatch.setattr("literature_monitor.application.monitor.OpenAlexClient", openalex_client)
+    monkeypatch.setattr("literature_monitor.application.monitor.CrossrefClient", crossref_client)
     monkeypatch.setattr(
-        "literature_monitor.cli.create_semantic_scholar_client",
+        "literature_monitor.application.monitor.create_semantic_scholar_client",
         lambda api_key: type(
             "EmptySemanticScholar",
             (),

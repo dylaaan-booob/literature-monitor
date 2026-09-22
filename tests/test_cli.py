@@ -5,10 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from literature_monitor.canonicalize import (
-    CanonicalizationIssue,
-    CanonicalizationResult,
-    consolidate_evidence,
+from literature_monitor.application.monitor import (
+    MonitorIssue,
+    MonitorIssueComponent,
+    MonitorIssueSeverity,
+    MonitorStatistics,
+    RunOutcome,
+    RunResult,
+    ValidationOutcome,
+    ValidationResult,
+    _CanonicalCoreResult,
 )
 from literature_monitor.cli import _build_parser, main
 from literature_monitor.config import JournalConfig, load_config
@@ -21,13 +27,9 @@ from literature_monitor.crossref import (
     EnrichmentIssueSeverity,
     EnrichmentResult,
 )
+from literature_monitor.date_range import DateRangeSpec, ResolvedDateRange
 from literature_monitor.kept_export import KeptExportIssue, KeptExportResult
 from literature_monitor.logging_setup import LOGGER_NAME, configure_logging
-from literature_monitor.materialize import (
-    MaterializationIssue,
-    MaterializationIssueSeverity,
-    MaterializationResult,
-)
 from literature_monitor.models import (
     Author,
     CanonicalMetadata,
@@ -35,7 +37,6 @@ from literature_monitor.models import (
     ExternalIds,
     MetadataSource,
     PaperVersion,
-    ProviderWorkEvidence,
     VersionKind,
     VersionRef,
 )
@@ -46,13 +47,7 @@ from literature_monitor.openalex import (
     OpenAlexWorkRecord,
     ResolvedSource,
 )
-from literature_monitor.retrieval import EvidenceRetrievalResult
 from literature_monitor.search import SearchBackendError, SearchableProjection
-from literature_monitor.semantic_scholar import (
-    SemanticScholarIssue,
-    SemanticScholarIssueSeverity,
-    SemanticScholarRetrievalResult,
-)
 
 
 def application_handlers() -> list[logging.Handler]:
@@ -148,255 +143,106 @@ def resolved_source(journal: JournalConfig) -> ResolvedSource:
     )
 
 
-def test_validate_cli_reports_resolutions_and_dynamic_counts(
+def test_validate_cli_calls_application_boundary_and_logs_result(
     tmp_path: Path,
     monkeypatch: object,
     capsys: object,
 ) -> None:
-    config_path, config = validate_config(tmp_path)
-    output_dir = config.output_dir  # type: ignore[attr-defined]
-    client = object()
-    api_keys: list[str | None] = []
-    calls: list[tuple[object, JournalConfig]] = []
-
-    def fake_client(*, api_key: str | None = None) -> object:
-        api_keys.append(api_key)
-        return client
-
-    def fake_resolve(
-        received_client: object,
-        journal: JournalConfig,
-    ) -> tuple[ResolvedSource, tuple[DiscoveryIssue, ...]]:
-        calls.append((received_client, journal))
-        return resolved_source(journal), ()
-
-    def unexpected_discovery(*args: object, **kwargs: object) -> object:
-        raise AssertionError("validate must not request Works discovery")
-
-    monkeypatch.setenv("OPENALEX_API_KEY", "test-key")  # type: ignore[attr-defined]
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.OpenAlexClient", fake_client
+    config_path = tmp_path / "monitor.yaml"
+    journal = JournalConfig(name="Biometrics", issn=("0006-341X",))
+    source = resolved_source(journal)
+    warning = MonitorIssue(
+        severity=MonitorIssueSeverity.WARNING,
+        component=MonitorIssueComponent.OPENALEX,
+        stage="source_resolution",
+        message="ISSN is unresolved; using the consistent Source",
+        journal=journal.name,
+        issn=journal.issn[0],
     )
+    calls: list[Path] = []
+
+    def fake_validate(path: Path) -> ValidationResult:
+        calls.append(path)
+        return ValidationResult(
+            resolved_date_range=ResolvedDateRange(
+                from_date=date(2026, 1, 1),
+                to_date=date(2026, 1, 31),
+            ),
+            configured_journal_count=1,
+            configured_issn_count=1,
+            resolved_sources=(source,),
+            warnings=(warning,),
+            errors=(),
+            outcome=ValidationOutcome.VALID_WITH_WARNINGS,
+        )
+
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.resolve_journal_source", fake_resolve
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals", unexpected_discovery
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", unexpected_discovery
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.create_semantic_scholar_client",
-        unexpected_discovery,
+        "literature_monitor.cli.validate_monitor",
+        fake_validate,
     )
 
-    assert not output_dir.exists()
-    assert main(("validate", "--config", str(config_path))) == 0
+    result = main(("validate", "--config", str(config_path)))
+
     captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert not output_dir.exists()
-    assert api_keys == ["test-key"]
-    assert [journal for _, journal in calls] == list(config.journals)  # type: ignore[attr-defined]
-    assert all(received_client is client for received_client, _ in calls)
+    assert result == 0
+    assert calls == [config_path]
+    assert captured.out == ""
     assert "resolved Biometrics to Biometrics" in captured.err
-    assert "resolved Annals of Statistics to Annals of Statistics" in captured.err
-    assert "2 configured journals, 3 configured ISSNs, 2 resolved sources" in captured.err
-    assert "0 warnings, 0 errors" in captured.err
+    assert "ISSN 0006-341X" in captured.err
+    assert "1 configured journals, 1 configured ISSNs, 1 resolved sources" in captured.err
+    assert "1 warnings, 0 errors" in captured.err
 
 
-def test_validate_cli_resolution_error_does_not_stop_later_journal(
+@pytest.mark.parametrize(
+    ("outcome", "expected_exit"),
+    (
+        (ValidationOutcome.VALID, 0),
+        (ValidationOutcome.VALID_WITH_WARNINGS, 0),
+        (ValidationOutcome.SOURCE_ERRORS, 1),
+        (ValidationOutcome.INVALID_CONFIGURATION, 2),
+    ),
+)
+def test_validate_cli_maps_application_outcome_to_exit_code(
+    outcome: ValidationOutcome,
+    expected_exit: int,
     tmp_path: Path,
     monkeypatch: object,
     capsys: object,
 ) -> None:
-    config_path, config = validate_config(tmp_path)
-    calls: list[str] = []
-
-    def fake_resolve(
-        client: object,
-        journal: JournalConfig,
-    ) -> tuple[ResolvedSource | None, tuple[DiscoveryIssue, ...]]:
-        calls.append(journal.name)
-        if journal.name == "Biometrics":
-            return None, (
-                DiscoveryIssue(
-                    severity=IssueSeverity.ERROR,
-                    stage="source_resolution",
-                    journal=journal.name,
-                    message="configured ISSNs resolve to conflicting Sources",
-                ),
-            )
-        return resolved_source(journal), ()
-
+    issue = MonitorIssue(
+        severity=MonitorIssueSeverity.ERROR,
+        component=(
+            MonitorIssueComponent.CONFIGURATION
+            if outcome is ValidationOutcome.INVALID_CONFIGURATION
+            else MonitorIssueComponent.OPENALEX
+        ),
+        stage="configuration" if outcome is ValidationOutcome.INVALID_CONFIGURATION else "source_resolution",
+        message="validation diagnostic",
+        journal=None if outcome is ValidationOutcome.INVALID_CONFIGURATION else "Biometrics",
+    )
+    result_value = ValidationResult(
+        resolved_date_range=None,
+        configured_journal_count=0,
+        configured_issn_count=0,
+        resolved_sources=(),
+        warnings=(),
+        errors=(issue,) if expected_exit else (),
+        outcome=outcome,
+    )
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.resolve_journal_source", fake_resolve
+        "literature_monitor.cli.validate_monitor",
+        lambda path: result_value,
     )
 
-    assert main(("validate", "--config", str(config_path))) == 1
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert calls == [journal.name for journal in config.journals]  # type: ignore[attr-defined]
-    assert "configured ISSNs resolve to conflicting Sources" in captured.err
-    assert "resolved Annals of Statistics to Annals of Statistics" in captured.err
-    assert "1 resolved sources, 0 warnings, 1 errors" in captured.err
-
-
-def test_validate_cli_warning_only_resolution_returns_zero(
-    tmp_path: Path,
-    monkeypatch: object,
-    capsys: object,
-) -> None:
-    config_path, _config = validate_config(tmp_path)
-
-    def fake_resolve(
-        client: object,
-        journal: JournalConfig,
-    ) -> tuple[ResolvedSource, tuple[DiscoveryIssue, ...]]:
-        issues: tuple[DiscoveryIssue, ...] = ()
-        if journal.name == "Biometrics":
-            issues = (
-                DiscoveryIssue(
-                    severity=IssueSeverity.WARNING,
-                    stage="source_resolution",
-                    journal=journal.name,
-                    issn=journal.issn[1],
-                    message="ISSN is unresolved; using the consistent Source",
-                ),
-            )
-        return resolved_source(journal), issues
-
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.resolve_journal_source", fake_resolve
-    )
-
-    assert main(("validate", "--config", str(config_path))) == 0
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert "WARNING" in captured.err
-    assert "ISSN 1541-0420" in captured.err
-    assert "2 resolved sources, 1 warnings, 0 errors" in captured.err
-
-
-def test_validate_cli_returns_two_and_logs_configuration_error(
-    tmp_path: Path,
-    monkeypatch: object,
-    capsys: object,
-) -> None:
-    config_path = tmp_path / "bad.yaml"
-    config_path.write_text("keyword_expression: alpha\n", encoding="utf-8")
-
-    def unexpected_call(*args: object, **kwargs: object) -> object:
-        raise AssertionError("provider path must not be reached")
-
-    for name in ("OpenAlexClient", "resolve_journal_source", "discover_journals"):
-        monkeypatch.setattr(  # type: ignore[attr-defined]
-            f"literature_monitor.cli.{name}", unexpected_call
-        )
-
-    assert main(("validate", "--config", str(config_path))) == 2
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert "ERROR" in captured.err
-    assert "venue_whitelist" in captured.err
-
-
-def test_validate_cli_rejects_lexically_invalid_config_before_openalex(
-    tmp_path: Path,
-    monkeypatch: object,
-    capsys: object,
-) -> None:
-    config_path = config_with_keyword_expression(tmp_path, '"causal"~2')
-
-    def unexpected_call(*args: object, **kwargs: object) -> object:
-        raise AssertionError("provider path must not be reached")
-
-    for name in (
-        "OpenAlexClient",
-        "resolve_journal_source",
-        "CrossrefClient",
-        "create_semantic_scholar_client",
-    ):
-        monkeypatch.setattr(  # type: ignore[attr-defined]
-            f"literature_monitor.cli.{name}", unexpected_call
-        )
-
-    result = main(("validate", "--config", str(config_path)))
+    result = main(("validate", "--config", str(tmp_path / "monitor.yaml")))
 
     captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 2
+    assert result == expected_exit
     assert captured.out == ""
-    assert str(config_path) in captured.err
-    assert "keyword_expression" in captured.err
-    assert "at least two lexical tokens" in captured.err
-    assert "Traceback" not in captured.err
-
-
-def test_validate_cli_reports_fts5_backend_failure_before_openalex(
-    tmp_path: Path,
-    monkeypatch: object,
-    capsys: object,
-) -> None:
-    config_path = validate_config(tmp_path)[0]
-
-    def fail_validation(*args: object) -> None:
-        raise SearchBackendError("SQLite FTS5 is unavailable")
-
-    def unexpected_call(*args: object, **kwargs: object) -> object:
-        raise AssertionError("provider path must not be reached")
-
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.validate_search_expression", fail_validation
-    )
-    for name in (
-        "OpenAlexClient",
-        "resolve_journal_source",
-        "CrossrefClient",
-        "create_semantic_scholar_client",
-    ):
-        monkeypatch.setattr(  # type: ignore[attr-defined]
-            f"literature_monitor.cli.{name}", unexpected_call
-        )
-
-    result = main(("validate", "--config", str(config_path)))
-
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 2
-    assert captured.out == ""
-    assert "Local search / FTS5 backend failure" in captured.err
-    assert "SQLite FTS5 is unavailable" in captured.err
-    assert "Traceback" not in captured.err
-
-
-def test_validate_cli_resolves_runtime_date_policy_before_openalex(
-    tmp_path: Path,
-    monkeypatch: object,
-    capsys: object,
-) -> None:
-    config_path = config_with_date_policy(
-        tmp_path,
-        "from_date: 9999-12-31\nwindow_days: 2\n",
-    )
-
-    def unexpected_call(*args: object, **kwargs: object) -> object:
-        raise AssertionError("provider path must not be reached")
-
-    for name in (
-        "OpenAlexClient",
-        "resolve_journal_source",
-        "CrossrefClient",
-        "create_semantic_scholar_client",
-    ):
-        monkeypatch.setattr(  # type: ignore[attr-defined]
-            f"literature_monitor.cli.{name}", unexpected_call
-        )
-
-    result = main(("validate", "--config", str(config_path)))
-
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 2
-    assert captured.out == ""
-    assert str(config_path) in captured.err
-    assert "field 'window_days'" in captured.err
-    assert "date range exceeds supported datetime.date bounds" in captured.err
-    assert "--window-days" not in captured.err
-    assert "Traceback" not in captured.err
+    if expected_exit:
+        assert "validation diagnostic" in captured.err
+    if outcome is ValidationOutcome.INVALID_CONFIGURATION:
+        assert "Validation completed" not in captured.err
 
 
 def diagnostic_result(*, with_error: bool = False) -> DiscoveryResult:
@@ -594,86 +440,6 @@ def crossref_discovery_result(
     issues: tuple[CrossrefDiscoveryIssue, ...] = (),
 ) -> CrossrefDiscoveryResult:
     return CrossrefDiscoveryResult(records=records, issues=issues)
-
-
-def assembled_evidence(
-    records: tuple[OpenAlexWorkRecord, ...],
-    crossref_records: tuple[CrossrefWorkRecord, ...] = (),
-    issues: tuple[EnrichmentIssue, ...] = (),
-) -> EvidenceRetrievalResult:
-    return EvidenceRetrievalResult(
-        evidence=(
-            *(record.to_evidence() for record in records),
-            *(record.to_evidence() for record in crossref_records),
-        ),
-        supplement_records=(),
-        issues=issues,
-    )
-
-
-def install_multisource_mocks(
-    monkeypatch: object,
-    *,
-    crossref_records: tuple[CrossrefWorkRecord, ...] = (),
-    crossref_issues: tuple[CrossrefDiscoveryIssue, ...] = (),
-    retrieval_issues: tuple[EnrichmentIssue, ...] = (),
-    semantic_result: SemanticScholarRetrievalResult | None = None,
-    events: list[str] | None = None,
-) -> None:
-    def discover(*args: object) -> CrossrefDiscoveryResult:
-        if events is not None:
-            events.append("crossref_discover")
-        return crossref_discovery_result(crossref_records, crossref_issues)
-
-    def assemble(
-        client: object,
-        records: tuple[OpenAlexWorkRecord, ...],
-        discovered: tuple[CrossrefWorkRecord, ...],
-    ) -> EvidenceRetrievalResult:
-        if events is not None:
-            events.append("supplement")
-        return assembled_evidence(records, discovered, retrieval_issues)
-
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_crossref_journals", discover
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.assemble_provider_evidence", assemble
-    )
-    install_semantic_scholar_mock(
-        monkeypatch,
-        result=semantic_result,
-        events=events,
-    )
-
-
-def install_semantic_scholar_mock(
-    monkeypatch: object,
-    *,
-    result: SemanticScholarRetrievalResult | None = None,
-    events: list[str] | None = None,
-) -> None:
-    semantic_result = result or SemanticScholarRetrievalResult(
-        evidence=(),
-        supplement_records=(),
-        discovered_records=(),
-        issues=(),
-    )
-
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.create_semantic_scholar_client",
-        lambda api_key: object(),
-    )
-
-    def augment(*args: object, **kwargs: object) -> SemanticScholarRetrievalResult:
-        if events is not None:
-            events.append("semantic_scholar")
-        return semantic_result
-
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.augment_with_semantic_scholar",
-        augment,
-    )
 
 
 @pytest.mark.parametrize(
@@ -971,398 +737,159 @@ def test_invalid_cli_date_overrides_fail_before_provider_work(
     assert message in captured.err
 
 
-@pytest.mark.parametrize("command", ("canonicalize", "materialize", "run"))
-def test_pipeline_commands_without_cli_dates_propagate_config_range(
-    command: str,
-    tmp_path: Path,
-    monkeypatch: object,
-    capsys: object,
-) -> None:
-    config_path = config_with_date_policy(
-        tmp_path,
-        "from_date: 2026-01-01\nto_date: 2026-01-31\n",
-    )
-    expected = (date(2026, 1, 1), date(2026, 1, 31))
-    received: list[tuple[str, date, date]] = []
-
-    def fake_openalex(
-        client: object,
-        journals: tuple[object, ...],
-        from_date: date,
-        to_date: date,
-    ) -> DiscoveryResult:
-        received.append(("openalex", from_date, to_date))
-        return DiscoveryResult(sources=(), records=(), issues=())
-
-    def fake_crossref(
-        client: object,
-        journals: tuple[object, ...],
-        from_date: date,
-        to_date: date,
-    ) -> CrossrefDiscoveryResult:
-        received.append(("crossref", from_date, to_date))
-        return crossref_discovery_result()
-
-    def fake_semantic_scholar(
-        client: object,
-        evidence: tuple[object, ...],
-        journals: tuple[object, ...],
-        from_date: date,
-        to_date: date,
-        expression: object,
-    ) -> SemanticScholarRetrievalResult:
-        received.append(("semantic_scholar", from_date, to_date))
-        return SemanticScholarRetrievalResult(
-            evidence=(),
-            supplement_records=(),
-            discovered_records=(),
-            issues=(),
-        )
-
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.OpenAlexClient", lambda **kwargs: object()
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals", fake_openalex
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_crossref_journals", fake_crossref
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.assemble_provider_evidence",
-        lambda client, openalex, crossref: EvidenceRetrievalResult(
-            evidence=(),
-            supplement_records=(),
-            issues=(),
+def cli_run_result(
+    outcome: RunOutcome,
+    *,
+    warnings: tuple[MonitorIssue, ...] = (),
+    errors: tuple[MonitorIssue, ...] = (),
+) -> RunResult:
+    return RunResult(
+        resolved_date_range=ResolvedDateRange(
+            from_date=date(2026, 1, 1),
+            to_date=date(2026, 1, 31),
+        ),
+        canonical_paper_count=1,
+        created_papers=1,
+        matched_existing_papers=0,
+        updated_papers=0,
+        created_authors=1,
+        existing_authors=0,
+        warnings=warnings,
+        errors=errors,
+        outcome=outcome,
+        statistics=MonitorStatistics(
+            openalex_records=1,
+            crossref_discovery_records=1,
+            crossref_supplement_records=1,
+            semantic_scholar_supplement_records=1,
+            semantic_scholar_discovery_records=1,
+            evidence_clusters=1,
+            retained_clusters=1,
         ),
     )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.create_semantic_scholar_client",
-        lambda api_key: object(),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.augment_with_semantic_scholar",
-        fake_semantic_scholar,
-    )
-    if command == "materialize":
-        monkeypatch.setattr(  # type: ignore[attr-defined]
-            "literature_monitor.cli.materialize_papers",
-            lambda papers, output_dir: MaterializationResult((), (), (), (), (), ()),
-        )
-
-    arguments = [command, "--config", str(config_path)]
-    if command == "materialize":
-        arguments.extend(("--output-dir", str(tmp_path / "Vault")))
-    result = main(tuple(arguments))
-
-    capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 0
-    assert received == [
-        ("openalex", *expected),
-        ("crossref", *expected),
-        ("semantic_scholar", *expected),
-    ]
-    if command == "run":
-        assert (tmp_path / "workspace" / "Inbox.base").exists()
 
 
 @pytest.mark.parametrize(
-    ("date_arguments", "expected"),
-    [
-        ((), (date(2026, 9, 8), date(2026, 9, 21))),
+    ("date_arguments", "expected_override"),
+    (
         (
             ("--window-days", "30"),
-            (date(2026, 8, 23), date(2026, 9, 21)),
+            DateRangeSpec(window_days=30),
         ),
-    ],
-)
-def test_run_uses_shared_config_and_cli_date_resolution(
-    date_arguments: tuple[str, ...],
-    expected: tuple[date, date],
-    tmp_path: Path,
-    monkeypatch: object,
-    capsys: object,
-) -> None:
-    config_path = config_with_date_policy(tmp_path, "window_days: 14\n")
-    received: list[tuple[str, date, date]] = []
-
-    def fake_openalex(
-        client: object,
-        journals: tuple[object, ...],
-        from_date: date,
-        to_date: date,
-    ) -> DiscoveryResult:
-        received.append(("openalex", from_date, to_date))
-        return DiscoveryResult(sources=(), records=(), issues=())
-
-    def fake_crossref(
-        client: object,
-        journals: tuple[object, ...],
-        from_date: date,
-        to_date: date,
-    ) -> CrossrefDiscoveryResult:
-        received.append(("crossref", from_date, to_date))
-        return crossref_discovery_result()
-
-    def fake_semantic_scholar(
-        client: object,
-        evidence: tuple[object, ...],
-        journals: tuple[object, ...],
-        from_date: date,
-        to_date: date,
-        expression: object,
-    ) -> SemanticScholarRetrievalResult:
-        received.append(("semantic_scholar", from_date, to_date))
-        return SemanticScholarRetrievalResult(
-            evidence=(),
-            supplement_records=(),
-            discovered_records=(),
-            issues=(),
-        )
-
-    monkeypatch.setattr("literature_monitor.cli.date", FixedDate)  # type: ignore[attr-defined]
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.OpenAlexClient", lambda **kwargs: object()
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals", fake_openalex
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_crossref_journals", fake_crossref
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.assemble_provider_evidence",
-        lambda client, openalex, crossref: EvidenceRetrievalResult(
-            evidence=(),
-            supplement_records=(),
-            issues=(),
-        ),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.create_semantic_scholar_client",
-        lambda api_key: object(),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.augment_with_semantic_scholar",
-        fake_semantic_scholar,
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.materialize_papers",
-        lambda papers, output_dir: MaterializationResult((), (), (), (), (), ()),
-    )
-
-    result = main(
-        ("run", "--config", str(config_path), *date_arguments)
-    )
-
-    capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 0
-    assert received == [
-        ("openalex", *expected),
-        ("crossref", *expected),
-        ("semantic_scholar", *expected),
-    ]
-
-
-def test_run_partial_cli_date_override_does_not_borrow_config_fields(
-    tmp_path: Path,
-    monkeypatch: object,
-    capsys: object,
-) -> None:
-    config_path = config_with_date_policy(tmp_path, "window_days: 14\n")
-
-    def unexpected_provider(*args: object, **kwargs: object) -> object:
-        raise AssertionError("provider path must not be reached")
-
-    for name in ("OpenAlexClient", "CrossrefClient", "discover_journals"):
-        monkeypatch.setattr(  # type: ignore[attr-defined]
-            f"literature_monitor.cli.{name}", unexpected_provider
-        )
-
-    result = main(
         (
-            "run",
-            "--config",
-            str(config_path),
-            "--to-date",
-            "2026-09-01",
-        )
-    )
-
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 2
-    assert "must be combined with another date field" in captured.err
-
-
-def test_run_uses_resolved_config_output_dir(
-    tmp_path: Path,
-    monkeypatch: object,
-    capsys: object,
-) -> None:
-    config_path = config_with_date_policy(
-        tmp_path,
-        "output_dir: ./run-workspace\n"
-        "from_date: 2026-01-01\n"
-        "to_date: 2026-01-31\n",
-    )
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    received_destinations: list[Path] = []
-
-    monkeypatch.chdir(elsewhere)  # type: ignore[attr-defined]
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.OpenAlexClient", lambda **kwargs: object()
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals",
-        lambda *args: DiscoveryResult(sources=(), records=(), issues=()),
-    )
-    install_multisource_mocks(monkeypatch)
-
-    def fake_materialize(
-        papers: tuple[CanonicalPaper, ...],
-        output_dir: Path,
-    ) -> MaterializationResult:
-        received_destinations.append(output_dir)
-        return MaterializationResult((), (), (), (), (), ())
-
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.materialize_papers", fake_materialize
-    )
-
-    result = main(("run", "--config", str(config_path)))
-
-    capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 0
-    assert received_destinations == [(tmp_path / "run-workspace").resolve()]
-
-
-def test_run_invalid_config_stops_before_provider_work(
-    tmp_path: Path,
-    monkeypatch: object,
-    capsys: object,
-) -> None:
-    config_path = tmp_path / "bad.yaml"
-    config_path.write_text("keyword_expression: causal\n", encoding="utf-8")
-
-    def unexpected_provider(*args: object, **kwargs: object) -> object:
-        raise AssertionError("provider path must not be reached")
-
-    for name in (
-        "OpenAlexClient",
-        "CrossrefClient",
-        "create_semantic_scholar_client",
-        "discover_journals",
-        "materialize_papers",
-    ):
-        monkeypatch.setattr(  # type: ignore[attr-defined]
-            f"literature_monitor.cli.{name}", unexpected_provider
-        )
-
-    result = main(("run", "--config", str(config_path)))
-
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 2
-    assert "venue_whitelist" in captured.err
-
-
-def test_run_provider_error_still_materializes_and_returns_one(
-    tmp_path: Path,
-    monkeypatch: object,
-    capsys: object,
-) -> None:
-    config_path = config_with_date_policy(
-        tmp_path,
-        "from_date: 2026-01-01\nto_date: 2026-01-31\n",
-    )
-    received: list[CanonicalPaper] = []
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals",
-        lambda *args: enrichment_diagnostic_result(with_error=True),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
-    )
-    install_multisource_mocks(monkeypatch)
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.canonicalize_records",
-        lambda records: CanonicalizationResult(
-            papers=(canonical_paper(),),
-            issues=(),
-        ),
-    )
-
-    def fake_materialize(
-        papers: tuple[CanonicalPaper, ...],
-        output_dir: Path,
-    ) -> MaterializationResult:
-        received.extend(papers)
-        return MaterializationResult((), (), (), (), (), ())
-
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.materialize_papers", fake_materialize
-    )
-
-    result = main(("run", "--config", str(config_path)))
-
-    capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 1
-    assert len(received) == 1
-
-
-def test_run_materialization_error_returns_one(
-    tmp_path: Path,
-    monkeypatch: object,
-    capsys: object,
-) -> None:
-    config_path = config_with_date_policy(
-        tmp_path,
-        "from_date: 2026-01-01\nto_date: 2026-01-31\n",
-    )
-    issue_path = tmp_path / "workspace" / "Papers" / "failed.md"
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.OpenAlexClient", lambda **kwargs: object()
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals",
-        lambda *args: DiscoveryResult(sources=(), records=(), issues=()),
-    )
-    install_multisource_mocks(monkeypatch)
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.materialize_papers",
-        lambda papers, output_dir: MaterializationResult(
-            created_papers=(),
-            existing_papers=(),
-            updated_papers=(),
-            created_authors=(),
-            existing_authors=(),
-            issues=(
-                MaterializationIssue(
-                    issue_path,
-                    "materialization diagnostic",
-                    MaterializationIssueSeverity.ERROR,
-                ),
+            ("--from-date", "2026-01-01", "--to-date", "2026-01-31"),
+            DateRangeSpec(
+                from_date=date(2026, 1, 1),
+                to_date=date(2026, 1, 31),
             ),
         ),
+        (
+            ("--from-date", "2026-09-01", "--window-days", "21"),
+            DateRangeSpec(from_date=date(2026, 9, 1), window_days=21),
+        ),
+        (
+            ("--to-date", "2026-09-21", "--window-days", "14"),
+            DateRangeSpec(to_date=date(2026, 9, 21), window_days=14),
+        ),
+    ),
+)
+def test_run_cli_shapes_date_override_for_application(
+    date_arguments: tuple[str, ...],
+    expected_override: DateRangeSpec,
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = tmp_path / "monitor.yaml"
+    calls: list[tuple[Path, DateRangeSpec | None]] = []
+
+    def fake_run(
+        path: Path,
+        *,
+        date_override: DateRangeSpec | None = None,
+    ) -> RunResult:
+        calls.append((path, date_override))
+        return cli_run_result(RunOutcome.COMPLETED)
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.run_monitor",
+        fake_run,
     )
 
-    result = main(("run", "--config", str(config_path)))
+    result = main(("run", "--config", str(config_path), *date_arguments))
 
     captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 1
-    assert "materialization diagnostic" in captured.err
+    assert result == 0
+    assert calls == [(config_path, expected_override)]
+    assert captured.out == ""
+
+
+def test_run_cli_passes_none_without_date_override(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    config_path = tmp_path / "monitor.yaml"
+    received: list[DateRangeSpec | None] = []
+
+    def fake_run(
+        path: Path,
+        *,
+        date_override: DateRangeSpec | None = None,
+    ) -> RunResult:
+        received.append(date_override)
+        return cli_run_result(RunOutcome.COMPLETED)
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.run_monitor",
+        fake_run,
+    )
+
+    assert main(("run", "--config", str(config_path))) == 0
+    capsys.readouterr()  # type: ignore[attr-defined]
+    assert received == [None]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_exit"),
+    (
+        (RunOutcome.COMPLETED, 0),
+        (RunOutcome.COMPLETED_WITH_WARNINGS, 0),
+        (RunOutcome.COMPLETED_WITH_ERRORS, 1),
+        (RunOutcome.INVALID_CONFIGURATION, 2),
+    ),
+)
+def test_run_cli_maps_structured_outcome_to_exit_code(
+    outcome: RunOutcome,
+    expected_exit: int,
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    issue = MonitorIssue(
+        severity=MonitorIssueSeverity.ERROR,
+        component=MonitorIssueComponent.CONFIGURATION,
+        stage="configuration",
+        message="run diagnostic",
+    )
+    value = cli_run_result(
+        outcome,
+        errors=(issue,) if expected_exit else (),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.run_monitor",
+        lambda path, *, date_override=None: value,
+    )
+
+    result = main(("run", "--config", str(tmp_path / "monitor.yaml")))
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == expected_exit
+    assert captured.out == ""
+    if outcome is RunOutcome.INVALID_CONFIGURATION:
+        assert "Materialization completed" not in captured.err
+    else:
+        assert "1 canonical papers, 1 paper files created" in captured.err
 
 
 @pytest.mark.parametrize(
@@ -1406,7 +933,7 @@ def test_historical_diagnostics_do_not_construct_semantic_scholar(
         ),
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.create_semantic_scholar_client",
+        "literature_monitor.application.monitor.create_semantic_scholar_client",
         unexpected_semantic_scholar,
     )
 
@@ -1879,7 +1406,7 @@ def test_openalex_filter_invalid_override_does_not_construct_client_or_discover(
 
 @pytest.mark.parametrize(
     "command",
-    ("openalex-filter", "crossref-enrich", "canonicalize", "materialize"),
+    ("openalex-filter", "crossref-enrich"),
 )
 def test_lexically_invalid_override_stops_before_provider_clients(
     command: str,
@@ -1895,10 +1422,8 @@ def test_lexically_invalid_override_stops_before_provider_clients(
     for name in (
         "OpenAlexClient",
         "CrossrefClient",
-        "create_semantic_scholar_client",
         "discover_journals",
         "discover_crossref_journals",
-        "augment_with_semantic_scholar",
     ):
         monkeypatch.setattr(  # type: ignore[attr-defined]
             f"literature_monitor.cli.{name}",
@@ -1929,7 +1454,7 @@ def test_lexically_invalid_override_stops_before_provider_clients(
     assert "Traceback" not in captured.err
 
 
-@pytest.mark.parametrize("command", ("openalex-filter", "run"))
+@pytest.mark.parametrize("command", ("openalex-filter",))
 def test_lexically_invalid_config_stops_before_provider_clients(
     command: str,
     tmp_path: Path,
@@ -1973,7 +1498,7 @@ def test_lexically_invalid_config_stops_before_provider_clients(
 
 @pytest.mark.parametrize(
     "command",
-    ("openalex-filter", "crossref-enrich", "canonicalize", "materialize"),
+    ("openalex-filter", "crossref-enrich"),
 )
 def test_lexically_invalid_config_cannot_be_hidden_by_valid_override(
     command: str,
@@ -1989,10 +1514,8 @@ def test_lexically_invalid_config_cannot_be_hidden_by_valid_override(
     for name in (
         "OpenAlexClient",
         "CrossrefClient",
-        "create_semantic_scholar_client",
         "discover_journals",
         "discover_crossref_journals",
-        "augment_with_semantic_scholar",
     ):
         monkeypatch.setattr(  # type: ignore[attr-defined]
             f"literature_monitor.cli.{name}",
@@ -2323,8 +1846,6 @@ def test_crossref_enrich_invalid_override_constructs_no_clients(
     for name in (
         "OpenAlexClient",
         "CrossrefClient",
-        "create_semantic_scholar_client",
-        "augment_with_semantic_scholar",
         "discover_journals",
         "enrich_records",
     ):
@@ -2713,628 +2234,72 @@ def test_crossref_discover_keeps_records_on_isolated_hard_error(
     assert "server unavailable" in captured.err
 
 
-def test_canonicalize_runs_full_pipeline_and_emits_canonical_ndjson(
-    monkeypatch: object, capsys: object
-) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-    received_by_assembly: list[OpenAlexWorkRecord] = []
-    received_by_canonicalization: list[ProviderWorkEvidence] = []
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals",
-        lambda *args: enrichment_diagnostic_result(),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
-    )
-
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_crossref_journals",
-        lambda *args: crossref_discovery_result(),
-    )
-
-    def fake_assemble(
-        client: object,
-        records: tuple[OpenAlexWorkRecord, ...],
-        discovered: tuple[CrossrefWorkRecord, ...],
-    ) -> EvidenceRetrievalResult:
-        received_by_assembly.extend(records)
-        return EvidenceRetrievalResult(
-            evidence=(
-                *EnrichedWorkRecord(
-                    openalex=records[0],
-                    crossref=crossref_record("10.5555/one"),
-                ).to_evidence(),
-                records[1].to_evidence(),
-                records[2].to_evidence(),
-            ),
-            supplement_records=(crossref_record("10.5555/one"),),
-            issues=(),
-        )
-
-    def fake_canonicalize(
-        records: tuple[ProviderWorkEvidence, ...],
-    ) -> CanonicalizationResult:
-        received_by_canonicalization.extend(records)
-        return CanonicalizationResult(papers=(canonical_paper(),), issues=())
-
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.assemble_provider_evidence", fake_assemble
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.canonicalize_records", fake_canonicalize
-    )
-    install_semantic_scholar_mock(monkeypatch)
-
-    result = main(
-        (
-            "canonicalize",
-            "--config",
-            str(repository_root / "config.example.yaml"),
-            "--journal",
-            "Biometrics",
-            "--from-date",
-            "2026-01-01",
-            "--to-date",
-            "2026-01-31",
-        )
-    )
-
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
-    rows = [json.loads(line) for line in captured.out.splitlines()]
-    assert result == 0
-    assert [record.external_ids.openalex for record in received_by_assembly] == [
-        "https://openalex.org/W1",
-        "https://openalex.org/W2",
-        "https://openalex.org/W3",
-    ]
-    assert [
-        record.provenance.provider for record in received_by_canonicalization
-    ] == ["crossref", "openalex", "openalex"]
-    assert received_by_canonicalization[0].supplements[0].record_id == (
-        received_by_assembly[0].provenance.record_id
-    )
-    assert len(rows) == 1
-    assert rows[0]["metadata"]["title"] == "Canonical paper"
-    assert rows[0]["preferred_version"] == {
-        "source": "doi",
-        "identifier": "10.5555/one",
-    }
-    assert "3 evidence clusters, 2 retained clusters" in captured.err
-    assert "1 Crossref DOI supplement records" in captured.err
-
-
-def test_canonicalize_override_is_applied_to_unified_projection(
-    monkeypatch: object, capsys: object
-) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-    received_by_assembly: list[OpenAlexWorkRecord] = []
-    received_by_canonicalization: list[ProviderWorkEvidence] = []
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals",
-        lambda *args: enrichment_diagnostic_result(),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
-    )
-
-    rescue = CrossrefWorkRecord(
-        doi="10.5555/one",
-        title="Crossref title",
-        journal="Biometrics",
-        abstract="Crossref rescue",
-        authors=(Author(name="Ada Author"),),
-        provenance=MetadataSource(
-            provider="crossref",
-            record_id="10.5555/one",
-            retrieved_at=datetime(2026, 9, 18, tzinfo=timezone.utc),
+def cli_core_result(
+    outcome: RunOutcome = RunOutcome.COMPLETED,
+    *,
+    warnings: tuple[MonitorIssue, ...] = (),
+    errors: tuple[MonitorIssue, ...] = (),
+) -> _CanonicalCoreResult:
+    return _CanonicalCoreResult(
+        config=None,
+        resolved_date_range=ResolvedDateRange(
+            from_date=date(2026, 1, 1),
+            to_date=date(2026, 1, 31),
+        ),
+        papers=(canonical_paper(),),
+        resolved_sources=(),
+        warnings=warnings,
+        errors=errors,
+        outcome=outcome,
+        statistics=MonitorStatistics(
+            openalex_records=1,
+            crossref_discovery_records=1,
+            crossref_supplement_records=1,
+            semantic_scholar_supplement_records=1,
+            semantic_scholar_discovery_records=1,
+            evidence_clusters=1,
+            retained_clusters=1,
         ),
     )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_crossref_journals",
-        lambda *args: crossref_discovery_result((rescue,)),
-    )
-
-    def fake_assemble(
-        client: object,
-        records: tuple[OpenAlexWorkRecord, ...],
-        discovered: tuple[CrossrefWorkRecord, ...],
-    ) -> EvidenceRetrievalResult:
-        received_by_assembly.extend(records)
-        return assembled_evidence(records, discovered)
-
-    def fake_canonicalize(
-        records: tuple[ProviderWorkEvidence, ...],
-    ) -> CanonicalizationResult:
-        received_by_canonicalization.extend(records)
-        return CanonicalizationResult(
-            papers=(canonical_paper("10.5555/one"),), issues=()
-        )
-
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.assemble_provider_evidence", fake_assemble
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.canonicalize_records", fake_canonicalize
-    )
-    install_semantic_scholar_mock(monkeypatch)
-
-    result = main(
-        (
-            "canonicalize",
-            "--config",
-            str(repository_root / "config.example.yaml"),
-            "--from-date",
-            "2026-01-01",
-            "--to-date",
-            "2026-01-31",
-            "--keyword-expression",
-            '"crossref rescue"',
-        )
-    )
-
-    capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 0
-    assert [record.external_ids.openalex for record in received_by_assembly] == [
-        "https://openalex.org/W1",
-        "https://openalex.org/W2",
-        "https://openalex.org/W3",
-    ]
-    assert [
-        record.provenance.provider for record in received_by_canonicalization
-    ] == ["crossref", "openalex"]
 
 
-def test_canonicalize_emits_openalex_rescue_and_crossref_only_candidate(
-    monkeypatch: object, capsys: object
+def test_canonicalize_cli_calls_shared_application_core_and_emits_ndjson(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
 ) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-    timestamp = datetime(2026, 9, 18, tzinfo=timezone.utc)
-    openalex_record = OpenAlexWorkRecord(
-        metadata=CanonicalMetadata(title="Unrelated title", journal="Biometrics"),
-        external_ids=ExternalIds(
-            openalex="https://openalex.org/W1",
-            doi="10.5555/rescue",
-        ),
-        authors=(Author(name="Ada Author"),),
-        source_id="https://openalex.org/S8265502",
-        provenance=MetadataSource(
-            provider="openalex",
-            record_id="https://openalex.org/W1",
-            retrieved_at=timestamp,
-        ),
-    )
-    openalex_result = DiscoveryResult(
-        sources=diagnostic_result().sources,
-        records=(openalex_record,),
-        issues=(),
-    )
-    rescue = crossref_candidate(
-        "10.5555/rescue",
-        title="Still unrelated",
-        abstract="Unified rescue phrase",
-    )
-    crossref_only = crossref_candidate(
-        "10.5555/crossref-only",
-        title="Unified rescue phrase in Crossref",
-        abstract="Provider-only abstract",
+    config_path = tmp_path / "monitor.yaml"
+    calls: list[tuple[Path, DateRangeSpec | None, str | None, str | None]] = []
+    core = cli_core_result()
+
+    def fake_core(
+        path: Path,
+        *,
+        date_override: DateRangeSpec | None = None,
+        journal_name: str | None = None,
+        keyword_expression: str | None = None,
+        progress_callback: object = None,
+    ) -> _CanonicalCoreResult:
+        calls.append((path, date_override, journal_name, keyword_expression))
+        return core
+
+    def unexpected_materialization(*args: object, **kwargs: object) -> object:
+        raise AssertionError("canonicalize must stop before materialization")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli._run_canonical_core",
+        fake_core,
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals", lambda *args: openalex_result
+        "literature_monitor.cli._materialize_canonical_result",
+        unexpected_materialization,
     )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_crossref_journals",
-        lambda *args: crossref_discovery_result((rescue, crossref_only)),
-    )
-    install_semantic_scholar_mock(monkeypatch)
-
-    result = main(
-        (
-            "canonicalize",
-            "--config",
-            str(repository_root / "config.example.yaml"),
-            "--journal",
-            "Biometrics",
-            "--from-date",
-            "2026-01-01",
-            "--to-date",
-            "2026-01-31",
-            "--keyword-expression",
-            '"unified rescue phrase"',
-        )
-    )
-
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
-    rows = [json.loads(line) for line in captured.out.splitlines()]
-    assert result == 0
-    assert {row["external_ids"]["doi"] for row in rows} == {
-        "10.5555/rescue",
-        "10.5555/crossref-only",
-    }
-    assert "2 evidence clusters, 2 retained clusters, 2 canonical papers" in captured.err
-
-
-def test_canonicalize_keeps_crossref_candidate_when_openalex_fails(
-    monkeypatch: object, capsys: object
-) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-    openalex_error = DiscoveryIssue(
-        severity=IssueSeverity.ERROR,
-        stage="work_retrieval",
-        journal="Biometrics",
-        message="OpenAlex unavailable",
-    )
-    openalex_result = DiscoveryResult(sources=(), records=(), issues=(openalex_error,))
-    crossref_only = crossref_candidate(
-        "10.5555/crossref-only",
-        title="Crossref-only rescue",
-        abstract="Provider-only evidence",
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals", lambda *args: openalex_result
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_crossref_journals",
-        lambda *args: crossref_discovery_result((crossref_only,)),
-    )
-    install_semantic_scholar_mock(monkeypatch)
-
-    result = main(
-        (
-            "canonicalize",
-            "--config",
-            str(repository_root / "config.example.yaml"),
-            "--journal",
-            "Biometrics",
-            "--from-date",
-            "2026-01-01",
-            "--to-date",
-            "2026-01-31",
-            "--keyword-expression",
-            '"crossref-only rescue"',
-        )
-    )
-
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 1
-    assert json.loads(captured.out)["external_ids"]["doi"] == (
-        "10.5555/crossref-only"
-    )
-    assert "OpenAlex unavailable" in captured.err
-
-
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        ("--from-date", "2026-01-01", "--to-date", "2026-01-31", "--keyword-expression", "alpha AND"),
-        ("--from-date", "2026-02-01", "--to-date", "2026-01-01"),
-    ],
-)
-def test_canonicalize_invalid_input_stops_before_provider_path(
-    arguments: tuple[str, ...], monkeypatch: object, capsys: object
-) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-
-    def unexpected_call(*args: object, **kwargs: object) -> object:
-        raise AssertionError("provider path must not be reached")
-
-    for name in (
-        "OpenAlexClient",
-        "CrossrefClient",
-        "create_semantic_scholar_client",
-        "augment_with_semantic_scholar",
-        "discover_journals",
-        "enrich_records",
-        "create_semantic_scholar_client",
-        "augment_with_semantic_scholar",
-        "canonicalize_records",
-    ):
-        monkeypatch.setattr(  # type: ignore[attr-defined]
-            f"literature_monitor.cli.{name}", unexpected_call
-        )
-
-    result = main(
-        (
-            "canonicalize",
-            "--config",
-            str(repository_root / "config.example.yaml"),
-            *arguments,
-        )
-    )
-
-    capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 2
-
-
-def test_canonicalize_invalid_config_stops_before_provider_path(
-    tmp_path: Path, monkeypatch: object, capsys: object
-) -> None:
-    config_path = tmp_path / "bad.yaml"
-    config_path.write_text("keyword_expression: alpha\n", encoding="utf-8")
-
-    def unexpected_call(*args: object, **kwargs: object) -> object:
-        raise AssertionError("provider path must not be reached")
-
-    for name in (
-        "OpenAlexClient",
-        "CrossrefClient",
-        "discover_journals",
-        "enrich_records",
-        "create_semantic_scholar_client",
-        "augment_with_semantic_scholar",
-        "canonicalize_records",
-    ):
-        monkeypatch.setattr(  # type: ignore[attr-defined]
-            f"literature_monitor.cli.{name}", unexpected_call
-        )
 
     result = main(
         (
             "canonicalize",
             "--config",
             str(config_path),
-            "--from-date",
-            "2026-01-01",
-            "--to-date",
-            "2026-01-31",
-        )
-    )
-
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 2
-    assert "venue_whitelist" in captured.err
-
-
-def test_canonicalize_warnings_keep_low_confidence_outputs_and_zero_exit(
-    monkeypatch: object, capsys: object
-) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals",
-        lambda *args: enrichment_diagnostic_result(),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
-    )
-    install_multisource_mocks(monkeypatch)
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.enrich_records",
-        lambda client, records: EnrichmentResult(
-            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
-            issues=(),
-        ),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.canonicalize_records",
-        lambda records: CanonicalizationResult(
-            papers=(canonical_paper("10.5555/a"), canonical_paper("10.5555/b")),
-            issues=(
-                CanonicalizationIssue(
-                    stage="blocked_match",
-                    message="insufficient author evidence",
-                    record_ids=("W1", "W2"),
-                ),
-            ),
-        ),
-    )
-
-    result = main(
-        (
-            "canonicalize",
-            "--config",
-            str(repository_root / "config.example.yaml"),
-            "--from-date",
-            "2026-01-01",
-            "--to-date",
-            "2026-01-31",
-        )
-    )
-
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 0
-    assert len(captured.out.splitlines()) == 2
-    assert "blocked_match" in captured.err
-    assert "2 canonical papers" in captured.err
-    assert "1 canonicalization issues" in captured.err
-
-
-def test_canonicalize_partial_upstream_failure_still_emits_successful_papers(
-    monkeypatch: object, capsys: object
-) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals",
-        lambda *args: enrichment_diagnostic_result(with_error=True),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
-    )
-    install_multisource_mocks(monkeypatch)
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.enrich_records",
-        lambda client, records: EnrichmentResult(
-            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
-            issues=(),
-        ),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.canonicalize_records",
-        lambda records: CanonicalizationResult(
-            papers=(canonical_paper(),), issues=()
-        ),
-    )
-
-    result = main(
-        (
-            "canonicalize",
-            "--config",
-            str(repository_root / "config.example.yaml"),
-            "--from-date",
-            "2026-01-01",
-            "--to-date",
-            "2026-01-31",
-        )
-    )
-
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 1
-    assert json.loads(captured.out)["metadata"]["title"] == "Canonical paper"
-    assert "bad record" in captured.err
-
-
-def test_canonicalize_crossref_error_still_emits_successful_papers(
-    monkeypatch: object, capsys: object
-) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals",
-        lambda *args: enrichment_diagnostic_result(),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
-    )
-
-    def fake_enrich(
-        client: object, records: tuple[OpenAlexWorkRecord, ...]
-    ) -> EnrichmentResult:
-        return EnrichmentResult(
-            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
-            issues=(
-                EnrichmentIssue(
-                    severity=EnrichmentIssueSeverity.ERROR,
-                    stage="request_failure",
-                    message="server unavailable",
-                    record_id=records[0].external_ids.openalex,
-                    doi=records[0].external_ids.doi,
-                ),
-            ),
-        )
-
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.enrich_records", fake_enrich
-    )
-    install_multisource_mocks(
-        monkeypatch,
-        retrieval_issues=(
-            EnrichmentIssue(
-                severity=EnrichmentIssueSeverity.ERROR,
-                stage="request_failure",
-                message="server unavailable",
-                record_id="https://openalex.org/W1",
-                doi="10.5555/one",
-            ),
-        ),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.canonicalize_records",
-        lambda records: CanonicalizationResult(
-            papers=(canonical_paper(),), issues=()
-        ),
-    )
-
-    result = main(
-        (
-            "canonicalize",
-            "--config",
-            str(repository_root / "config.example.yaml"),
-            "--from-date",
-            "2026-01-01",
-            "--to-date",
-            "2026-01-31",
-        )
-    )
-
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 1
-    assert json.loads(captured.out)["metadata"]["title"] == "Canonical paper"
-    assert "server unavailable" in captured.err
-
-
-def test_canonicalize_uses_semantic_scholar_after_r2_and_before_filtering(
-    monkeypatch: object,
-    capsys: object,
-) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-    timestamp = datetime(2026, 9, 19, tzinfo=timezone.utc)
-    openalex_record = OpenAlexWorkRecord(
-        metadata=CanonicalMetadata(title="Unrelated title", journal="Biometrics"),
-        external_ids=ExternalIds(
-            openalex="https://openalex.org/W-S2",
-            doi="10.5555/s2-rescue",
-        ),
-        authors=(Author(name="Ada Author", openalex_id="https://openalex.org/A1"),),
-        source_id="https://openalex.org/S8265502",
-        provenance=MetadataSource(
-            provider="openalex",
-            record_id="https://openalex.org/W-S2",
-            retrieved_at=timestamp,
-        ),
-    )
-    openalex_result = DiscoveryResult(
-        sources=diagnostic_result().sources,
-        records=(openalex_record,),
-        issues=(),
-    )
-    rescue = ProviderWorkEvidence(
-        provenance=MetadataSource(
-            provider="semantic_scholar",
-            record_id="S2-rescue",
-            retrieved_at=timestamp,
-        ),
-        title="Still unrelated",
-        journal="Biometrics",
-        abstract="Semantic rescue phrase",
-        authors=(Author(name="Ada Author"),),
-        external_ids=ExternalIds.model_validate(
-            {
-                "semantic_scholar": "S2-rescue",
-                "doi": "10.5555/s2-rescue",
-            }
-        ),
-    )
-    semantic_only = ProviderWorkEvidence(
-        provenance=MetadataSource(
-            provider="semantic_scholar",
-            record_id="S2-only",
-            retrieved_at=timestamp,
-        ),
-        title="Semantic rescue phrase in provider-only paper",
-        journal="Biometrics",
-        authors=(Author(name="Sole Author"),),
-        external_ids=ExternalIds.model_validate(
-            {"semantic_scholar": "S2-only", "doi": "10.5555/s2-only"}
-        ),
-    )
-    semantic_result = SemanticScholarRetrievalResult(
-        evidence=(rescue, semantic_only),
-        supplement_records=(),  # counts are tested independently of record models
-        discovered_records=(),
-        issues=(),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals", lambda *args: openalex_result
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
-    )
-    install_multisource_mocks(monkeypatch, semantic_result=semantic_result)
-    api_keys: list[str | None] = []
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.create_semantic_scholar_client",
-        lambda api_key: api_keys.append(api_key) or object(),
-    )
-    monkeypatch.setenv("SEMANTIC_SCHOLAR_API_KEY", "test-s2-key")  # type: ignore[attr-defined]
-
-    result = main(
-        (
-            "canonicalize",
-            "--config",
-            str(repository_root / "config.example.yaml"),
             "--journal",
             "Biometrics",
             "--from-date",
@@ -3342,74 +2307,62 @@ def test_canonicalize_uses_semantic_scholar_after_r2_and_before_filtering(
             "--to-date",
             "2026-01-31",
             "--keyword-expression",
-            '"semantic rescue phrase"',
+            "statistics",
         )
     )
 
     captured = capsys.readouterr()  # type: ignore[attr-defined]
-    rows = [json.loads(line) for line in captured.out.splitlines()]
     assert result == 0
-    assert api_keys == ["test-s2-key"]
-    assert {row["external_ids"]["doi"] for row in rows} == {
-        "10.5555/s2-rescue",
-        "10.5555/s2-only",
-    }
-    rescued = next(
-        row for row in rows if row["external_ids"]["doi"] == "10.5555/s2-rescue"
-    )
-    assert rescued["external_ids"]["openalex"] == "https://openalex.org/W-S2"
-    assert rescued["external_ids"]["semantic_scholar"] == "S2-rescue"
+    assert calls == [
+        (
+            config_path,
+            DateRangeSpec(
+                from_date=date(2026, 1, 1),
+                to_date=date(2026, 1, 31),
+            ),
+            "Biometrics",
+            "statistics",
+        )
+    ]
+    assert json.loads(captured.out)["metadata"]["title"] == "Canonical paper"
+    assert "1 canonical papers" in captured.err
 
 
 @pytest.mark.parametrize(
-    ("severity", "expected_exit"),
-    [
-        (SemanticScholarIssueSeverity.WARNING, 0),
-        (SemanticScholarIssueSeverity.ERROR, 1),
-    ],
+    ("outcome", "expected_exit"),
+    (
+        (RunOutcome.COMPLETED, 0),
+        (RunOutcome.COMPLETED_WITH_WARNINGS, 0),
+        (RunOutcome.COMPLETED_WITH_ERRORS, 1),
+        (RunOutcome.INVALID_CONFIGURATION, 2),
+    ),
 )
-def test_canonicalize_semantic_scholar_issue_controls_exit_without_suppressing_output(
-    severity: SemanticScholarIssueSeverity,
+def test_canonicalize_cli_maps_core_outcome_without_materializing(
+    outcome: RunOutcome,
     expected_exit: int,
+    tmp_path: Path,
     monkeypatch: object,
     capsys: object,
 ) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals",
-        lambda *args: enrichment_diagnostic_result(),
+    issue = MonitorIssue(
+        severity=MonitorIssueSeverity.ERROR,
+        component=MonitorIssueComponent.OPENALEX,
+        stage="work_retrieval",
+        message="provider diagnostic",
+        journal="Biometrics",
+    )
+    core = cli_core_result(
+        outcome,
+        errors=(issue,) if expected_exit else (),
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
-    )
-    install_multisource_mocks(
-        monkeypatch,
-        semantic_result=SemanticScholarRetrievalResult(
-            evidence=(),
-            supplement_records=(),
-            discovered_records=(),
-            issues=(
-                SemanticScholarIssue(
-                    severity=severity,
-                    stage=(
-                        "search_failure"
-                        if expected_exit
-                        else "unsupported_venue_filter"
-                    ),
-                    message="provider diagnostic",
-                    journal=(
-                        None
-                        if expected_exit
-                        else "IEEE Transactions on Systems, Man and Cybernetics: Systems"
-                    ),
-                ),
-            ),
-        ),
+        "literature_monitor.cli._run_canonical_core",
+        lambda *args, **kwargs: core,
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.canonicalize_records",
-        lambda records: CanonicalizationResult(
-            papers=(canonical_paper(),), issues=()
+        "literature_monitor.cli._materialize_canonical_result",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("canonicalize must not materialize")
         ),
     )
 
@@ -3417,7 +2370,7 @@ def test_canonicalize_semantic_scholar_issue_controls_exit_without_suppressing_o
         (
             "canonicalize",
             "--config",
-            str(repository_root / "config.example.yaml"),
+            str(tmp_path / "monitor.yaml"),
             "--from-date",
             "2026-01-01",
             "--to-date",
@@ -3427,517 +2380,120 @@ def test_canonicalize_semantic_scholar_issue_controls_exit_without_suppressing_o
 
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert result == expected_exit
-    assert json.loads(captured.out)["metadata"]["title"] == "Canonical paper"
-    assert "provider diagnostic" in captured.err
+    if outcome is RunOutcome.INVALID_CONFIGURATION:
+        assert captured.out == ""
+    else:
+        assert json.loads(captured.out)["metadata"]["title"] == "Canonical paper"
 
 
-@pytest.mark.parametrize("command", ("materialize", "run"))
-def test_materialize_and_run_share_full_pipeline_in_order_without_stdout(
-    command: str,
+def test_materialize_cli_uses_shared_core_then_formal_materialization_path(
     tmp_path: Path,
     monkeypatch: object,
     capsys: object,
 ) -> None:
-    config_path, config = validate_config(tmp_path)
-    materialize_output_dir = tmp_path / "Vault"
-    output_dir = (
-        (tmp_path / "workspace").resolve()
-        if command == "run"
-        else materialize_output_dir
-    )
-    config_before = config_path.read_bytes()
-    events: list[str] = []
-    filter_batches: list[tuple[SearchableProjection, ...]] = []
-    received_by_materialization: list[CanonicalPaper] = []
-    canonical = canonical_paper("10.5555/two")
+    config_path = tmp_path / "monitor.yaml"
+    output_dir = tmp_path / "Vault"
+    core = cli_core_result()
+    core_calls: list[tuple[Path, DateRangeSpec | None, str | None, str | None]] = []
+    materialize_calls: list[tuple[_CanonicalCoreResult, Path]] = []
 
-    def fake_discover(
-        client: object,
-        journals: tuple[JournalConfig, ...],
-        *args: object,
-    ) -> DiscoveryResult:
-        events.append("openalex_discover")
-        assert journals == config.journals
-        return enrichment_diagnostic_result()
-
-    def fake_consolidate(records: tuple[ProviderWorkEvidence, ...]) -> object:
-        events.append("consolidate")
-        return consolidate_evidence(records)
-
-    def fake_filter(
-        expression: object,
-        projections: tuple[SearchableProjection, ...],
-    ) -> tuple[bool, ...]:
-        events.append("filter")
-        filter_batches.append(projections)
-        if command == "run":
-            assert expression == config.keyword_ast
-        assert [projection.titles for projection in projections] == [
-            ("High-dimensional models",),
-            ("Excluded paper",),
-            ("High-dimensional analysis",),
-        ]
-        return (False, True, False)
-
-    def fake_canonicalize(
-        records: tuple[ProviderWorkEvidence, ...],
-    ) -> CanonicalizationResult:
-        events.append("canonicalize")
-        assert [record.external_ids.openalex for record in records] == [
-            "https://openalex.org/W2"
-        ]
-        return CanonicalizationResult(papers=(canonical,), issues=())
+    def fake_core(
+        path: Path,
+        *,
+        date_override: DateRangeSpec | None = None,
+        journal_name: str | None = None,
+        keyword_expression: str | None = None,
+        progress_callback: object = None,
+    ) -> _CanonicalCoreResult:
+        core_calls.append((path, date_override, journal_name, keyword_expression))
+        return core
 
     def fake_materialize(
-        papers: tuple[CanonicalPaper, ...], destination: Path
-    ) -> MaterializationResult:
-        events.append("materialize")
-        received_by_materialization.extend(papers)
-        assert destination == output_dir
-        return MaterializationResult(
-            created_papers=(destination / "Papers" / "paper.md",),
-            existing_papers=(),
-            updated_papers=(),
-            created_authors=(destination / "Authors" / "author.md",),
-            existing_authors=(),
-            issues=(),
-        )
+        received_core: _CanonicalCoreResult,
+        destination: Path,
+        *,
+        progress_callback: object = None,
+    ) -> RunResult:
+        materialize_calls.append((received_core, destination))
+        return cli_run_result(RunOutcome.COMPLETED)
 
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals", fake_discover
+        "literature_monitor.cli._run_canonical_core",
+        fake_core,
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+        "literature_monitor.cli._materialize_canonical_result",
+        fake_materialize,
     )
-    install_multisource_mocks(
-        monkeypatch,
-        events=events,
-        semantic_result=SemanticScholarRetrievalResult(
-            evidence=(),
-            supplement_records=(),
-            discovered_records=(),
-            issues=(
-                SemanticScholarIssue(
-                    severity=SemanticScholarIssueSeverity.WARNING,
-                    stage="unsupported_venue_filter",
-                    journal=(
-                        "IEEE Transactions on Systems, Man and Cybernetics: Systems"
-                    ),
-                    message="supplemental discovery was skipped",
-                ),
-            ),
-        ),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.consolidate_evidence", fake_consolidate
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.match_searchable_projections", fake_filter
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.canonicalize_records", fake_canonicalize
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.materialize_papers", fake_materialize
-    )
-
-    arguments = [
-        command,
-        "--config",
-        str(config_path),
-        "--from-date",
-        "2026-01-01",
-        "--to-date",
-        "2026-01-31",
-    ]
-    if command == "materialize":
-        arguments.extend(
-            (
-                "--keyword-expression",
-                '"excluded paper"',
-                "--output-dir",
-                str(materialize_output_dir),
-            )
-        )
-
-    result = main(tuple(arguments))
-
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 0
-    assert events == [
-        "openalex_discover",
-        "crossref_discover",
-        "supplement",
-        "semantic_scholar",
-        "consolidate",
-        "filter",
-        "canonicalize",
-        "materialize",
-    ]
-    assert received_by_materialization == [canonical]
-    assert len(filter_batches) == 1
-    assert config_path.read_bytes() == config_before
-    assert captured.out == ""
-    assert "Semantic Scholar [unsupported_venue_filter]" in captured.err
-    assert "1 canonical papers, 1 paper files created" in captured.err
-    assert "1 author files created, 0 author files existing" in captured.err
-
-
-def test_multisource_search_backend_failure_stops_before_canonicalization(
-    monkeypatch: object,
-    capsys: object,
-) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-    canonicalize_called = False
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals",
-        lambda *args: enrichment_diagnostic_result(),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient",
-        lambda **kwargs: object(),
-    )
-    install_multisource_mocks(monkeypatch)
-
-    def fail_search(*args: object) -> tuple[bool, ...]:
-        raise SearchBackendError("SQLite FTS5 is unavailable")
-
-    def unexpected_canonicalize(*args: object) -> CanonicalizationResult:
-        nonlocal canonicalize_called
-        canonicalize_called = True
-        raise AssertionError("canonicalization must not follow search failure")
-
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.match_searchable_projections",
-        fail_search,
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.canonicalize_records",
-        unexpected_canonicalize,
-    )
-
-    result = main(
-        (
-            "canonicalize",
-            "--config",
-            str(repository_root / "config.example.yaml"),
-            "--from-date",
-            "2026-01-01",
-            "--to-date",
-            "2026-01-31",
-        )
-    )
-
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 2
-    assert captured.out == ""
-    assert "Local search / FTS5 backend failure" in captured.err
-    assert "Traceback" not in captured.err
-    assert not canonicalize_called
-
-
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        (
-            "--from-date",
-            "2026-01-01",
-            "--to-date",
-            "2026-01-31",
-            "--keyword-expression",
-            "alpha AND",
-        ),
-        ("--from-date", "2026-02-01", "--to-date", "2026-01-01"),
-    ],
-)
-def test_materialize_invalid_input_stops_before_provider_and_materializer(
-    arguments: tuple[str, ...],
-    tmp_path: Path,
-    monkeypatch: object,
-    capsys: object,
-) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-
-    def unexpected_call(*args: object, **kwargs: object) -> object:
-        raise AssertionError("provider and materializer paths must not be reached")
-
-    for name in (
-        "OpenAlexClient",
-        "CrossrefClient",
-        "create_semantic_scholar_client",
-        "augment_with_semantic_scholar",
-        "discover_journals",
-        "enrich_records",
-        "canonicalize_records",
-        "materialize_papers",
-    ):
-        monkeypatch.setattr(  # type: ignore[attr-defined]
-            f"literature_monitor.cli.{name}", unexpected_call
-        )
-
-    result = main(
-        (
-            "materialize",
-            "--config",
-            str(repository_root / "config.example.yaml"),
-            *arguments,
-            "--output-dir",
-            str(tmp_path),
-        )
-    )
-
-    capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 2
-
-
-def test_materialize_invalid_config_stops_before_provider_and_materializer(
-    tmp_path: Path, monkeypatch: object, capsys: object
-) -> None:
-    config_path = tmp_path / "bad.yaml"
-    config_path.write_text("keyword_expression: alpha\n", encoding="utf-8")
-
-    def unexpected_call(*args: object, **kwargs: object) -> object:
-        raise AssertionError("provider and materializer paths must not be reached")
-
-    for name in (
-        "OpenAlexClient",
-        "create_semantic_scholar_client",
-        "augment_with_semantic_scholar",
-        "discover_journals",
-        "materialize_papers",
-    ):
-        monkeypatch.setattr(  # type: ignore[attr-defined]
-            f"literature_monitor.cli.{name}", unexpected_call
-        )
 
     result = main(
         (
             "materialize",
             "--config",
             str(config_path),
-            "--from-date",
-            "2026-01-01",
-            "--to-date",
-            "2026-01-31",
+            "--journal",
+            "Biometrics",
+            "--window-days",
+            "14",
+            "--keyword-expression",
+            "statistics",
+            "--output-dir",
+            str(output_dir),
+        )
+    )
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert core_calls == [
+        (
+            config_path,
+            DateRangeSpec(window_days=14),
+            "Biometrics",
+            "statistics",
+        )
+    ]
+    assert materialize_calls == [(core, output_dir)]
+    assert captured.out == ""
+    assert "Materialization completed" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_exit"),
+    (
+        (RunOutcome.COMPLETED, 0),
+        (RunOutcome.COMPLETED_WITH_WARNINGS, 0),
+        (RunOutcome.COMPLETED_WITH_ERRORS, 1),
+    ),
+)
+def test_materialize_cli_maps_materialization_outcome(
+    outcome: RunOutcome,
+    expected_exit: int,
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    core = cli_core_result()
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli._run_canonical_core",
+        lambda *args, **kwargs: core,
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli._materialize_canonical_result",
+        lambda *args, **kwargs: cli_run_result(outcome),
+    )
+
+    result = main(
+        (
+            "materialize",
+            "--config",
+            str(tmp_path / "monitor.yaml"),
             "--output-dir",
             str(tmp_path / "Vault"),
         )
     )
 
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 2
-    assert "venue_whitelist" in captured.err
-
-
-def test_materialize_canonicalization_warning_is_nonfatal(
-    tmp_path: Path, monkeypatch: object, capsys: object
-) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-    canonical = canonical_paper()
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals",
-        lambda *args: enrichment_diagnostic_result(),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
-    )
-    install_multisource_mocks(monkeypatch)
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.enrich_records",
-        lambda client, records: EnrichmentResult(
-            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
-            issues=(),
-        ),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.canonicalize_records",
-        lambda records: CanonicalizationResult(
-            papers=(canonical,),
-            issues=(
-                CanonicalizationIssue(
-                    stage="blocked_match",
-                    message="insufficient evidence",
-                    record_ids=("W1", "W2"),
-                ),
-            ),
-        ),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.materialize_papers",
-        lambda papers, output_dir: MaterializationResult(
-            created_papers=(output_dir / "Papers" / "paper.md",),
-            existing_papers=(),
-            updated_papers=(),
-            created_authors=(),
-            existing_authors=(),
-            issues=(),
-        ),
-    )
-
-    result = main(
-        (
-            "materialize",
-            "--config",
-            str(repository_root / "config.example.yaml"),
-            "--from-date",
-            "2026-01-01",
-            "--to-date",
-            "2026-01-31",
-            "--output-dir",
-            str(tmp_path),
-        )
-    )
-
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 0
-    assert captured.out == ""
-    assert "blocked_match" in captured.err
-    assert "1 canonicalization issues" in captured.err
-
-
-@pytest.mark.parametrize("upstream", ["openalex", "crossref"])
-def test_materialize_partial_upstream_error_still_materializes_papers(
-    upstream: str, tmp_path: Path, monkeypatch: object, capsys: object
-) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-    received: list[CanonicalPaper] = []
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals",
-        lambda *args: enrichment_diagnostic_result(with_error=upstream == "openalex"),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
-    )
-    enrichment_issues = (
-        EnrichmentIssue(
-            severity=EnrichmentIssueSeverity.ERROR,
-            stage="request_failure",
-            message="server unavailable",
-            record_id="https://openalex.org/W1",
-            doi="10.5555/one",
-        ),
-    ) if upstream == "crossref" else ()
-    install_multisource_mocks(
-        monkeypatch,
-        retrieval_issues=enrichment_issues,
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.enrich_records",
-        lambda client, records: EnrichmentResult(
-            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
-            issues=enrichment_issues,
-        ),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.canonicalize_records",
-        lambda records: CanonicalizationResult(
-            papers=(canonical_paper(),), issues=()
-        ),
-    )
-
-    def fake_materialize(
-        papers: tuple[CanonicalPaper, ...], output_dir: Path
-    ) -> MaterializationResult:
-        received.extend(papers)
-        return MaterializationResult((), (), (), (), (), ())
-
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.materialize_papers", fake_materialize
-    )
-
-    result = main(
-        (
-            "materialize",
-            "--config",
-            str(repository_root / "config.example.yaml"),
-            "--from-date",
-            "2026-01-01",
-            "--to-date",
-            "2026-01-31",
-            "--output-dir",
-            str(tmp_path),
-        )
-    )
-
     capsys.readouterr()  # type: ignore[attr-defined]
-    assert result == 1
-    assert len(received) == 1
-
-
-@pytest.mark.parametrize(
-    ("severity", "expected_exit"),
-    [
-        (MaterializationIssueSeverity.WARNING, 0),
-        (MaterializationIssueSeverity.ERROR, 1),
-    ],
-)
-def test_materialize_issue_severity_controls_exit_code(
-    severity: MaterializationIssueSeverity,
-    expected_exit: int,
-    tmp_path: Path,
-    monkeypatch: object,
-    capsys: object,
-) -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-    issue_path = tmp_path / "Papers" / "failed.md"
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.discover_journals",
-        lambda *args: enrichment_diagnostic_result(),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
-    )
-    install_multisource_mocks(monkeypatch)
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.enrich_records",
-        lambda client, records: EnrichmentResult(
-            records=tuple(EnrichedWorkRecord(openalex=record) for record in records),
-            issues=(),
-        ),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.canonicalize_records",
-        lambda records: CanonicalizationResult(
-            papers=(canonical_paper(),), issues=()
-        ),
-    )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.materialize_papers",
-        lambda papers, output_dir: MaterializationResult(
-            created_papers=(),
-            existing_papers=(),
-            updated_papers=(),
-            created_authors=(),
-            existing_authors=(),
-            issues=(
-                MaterializationIssue(
-                    issue_path,
-                    "materialization diagnostic",
-                    severity,
-                ),
-            ),
-        ),
-    )
-
-    result = main(
-        (
-            "materialize",
-            "--config",
-            str(repository_root / "config.example.yaml"),
-            "--from-date",
-            "2026-01-01",
-            "--to-date",
-            "2026-01-31",
-            "--output-dir",
-            str(tmp_path),
-        )
-    )
-
-    captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert result == expected_exit
-    assert "materialization diagnostic" in captured.err
-    assert "1 materialization issues" in captured.err
-    assert severity.value.upper() in captured.err
 
 
 def test_export_kept_cli_writes_entries_without_entering_provider_pipeline(
@@ -3950,12 +2506,12 @@ def test_export_kept_cli_writes_entries_without_entering_provider_pipeline(
         "load_config",
         "OpenAlexClient",
         "CrossrefClient",
-        "create_semantic_scholar_client",
-        "augment_with_semantic_scholar",
         "discover_journals",
         "enrich_records",
-        "canonicalize_records",
-        "materialize_papers",
+        "run_monitor",
+        "validate_monitor",
+        "_run_canonical_core",
+        "_materialize_canonical_result",
     ):
         monkeypatch.setattr(  # type: ignore[attr-defined]
             f"literature_monitor.cli.{name}", unexpected_call
