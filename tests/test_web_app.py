@@ -712,7 +712,7 @@ def test_expected_decision_failures_remain_normal_html_states(
     assert "Traceback" not in response.text
 
 
-def test_no_generic_status_or_t7_run_settings_post_routes(tmp_path: Path) -> None:
+def test_no_generic_status_and_run_settings_routes_are_explicit(tmp_path: Path) -> None:
     app = create_app(tmp_path / "missing.yaml")
     route_methods = {
         (route.path, method)
@@ -722,10 +722,10 @@ def test_no_generic_status_or_t7_run_settings_post_routes(tmp_path: Path) -> Non
     }
 
     assert not any(path.endswith("/status") for path, _ in route_methods)
-    assert ("/run", "POST") not in route_methods
-    assert ("/fragments/run", "GET") not in route_methods
-    assert ("/settings/validate", "POST") not in route_methods
-    assert ("/settings/save", "POST") not in route_methods
+    assert ("/run", "POST") in route_methods
+    assert ("/fragments/run", "GET") in route_methods
+    assert ("/settings/validate", "POST") in route_methods
+    assert ("/settings/save", "POST") in route_methods
 
 
 def test_zotero_export_fragment_reuses_existing_export_boundary(
@@ -761,14 +761,16 @@ def test_zotero_export_fragment_reuses_existing_export_boundary(
     assert "invalid Paper" in response.text
 
 
-def test_settings_get_is_recoverable_placeholder(tmp_path: Path) -> None:
+def test_settings_get_is_recoverable_editor(tmp_path: Path) -> None:
     app = create_app(tmp_path / "missing.yaml")
 
     with TestClient(app, base_url="http://localhost") as client:
         response = client.get("/settings")
 
     assert response.status_code == 200
-    assert "Editing and Save/Validate actions arrive in the next Web task." in response.text
+    assert 'id="settings-form"' in response.text
+    assert 'name="monitor_revision_exists"' in response.text
+    assert 'name="journal_revision_exists"' in response.text
     assert "Configuration needs attention" in response.text
 
 

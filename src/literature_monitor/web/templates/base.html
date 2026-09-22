@@ -6,6 +6,7 @@
   <title>{% block title %}Literature Monitor{% endblock %}</title>
   <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}">
   <script src="{{ request.url_for('static', path='vendor/htmx.min.js') }}" defer></script>
+  <script src="{{ request.url_for('static', path='app.js') }}" defer></script>
 </head>
 <body>
   <header class="site-header">
@@ -17,7 +18,14 @@
       <a href="/?view=in-zotero">In Zotero</a>
       <a href="/settings">Settings</a>
     </nav>
-    <button type="button" disabled title="Run controls are added in the next Web task">Run</button>
+    <div id="run-panel"
+         class="run-panel"
+         hx-get="/fragments/run"
+         hx-trigger="load"
+         hx-target="this"
+         hx-swap="outerHTML">
+      <button type="button" disabled>Loading run status…</button>
+    </div>
   </header>
   <main class="page-shell">
     {% block content %}{% endblock %}

@@ -1,0 +1,85 @@
+<section id="run-panel"
+         class="run-panel"
+         {% if run_snapshot.status.value == "RUNNING" %}
+         hx-get="/fragments/run"
+         hx-trigger="every 750ms"
+         hx-target="this"
+         hx-swap="outerHTML"
+         {% endif %}>
+  {% if run_start_result and run_start_result.outcome.value == "ALREADY_RUNNING" %}
+    <span class="run-message">A monitor run is already active.</span>
+  {% elif run_start_result and run_start_result.outcome.value == "START_FAILED" %}
+    <span class="run-message error">The monitor worker could not be started.</span>
+  {% endif %}
+
+  {% if run_snapshot.status.value == "IDLE" %}
+    <form method="post"
+          action="/run"
+          hx-post="/run"
+          hx-target="#run-panel"
+          hx-swap="outerHTML">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">Run</button>
+    </form>
+  {% elif run_snapshot.status.value == "RUNNING" %}
+    <div class="run-status" aria-live="polite">
+      <strong>Run in progress</strong>
+      {% if run_snapshot.progress_stage %}
+        <span>{{ run_snapshot.progress_stage.value }}</span>
+      {% else %}
+        <span>Starting…</span>
+      {% endif %}
+      {% if run_snapshot.started_at %}
+        <span>Started {{ run_snapshot.started_at.isoformat() }}</span>
+      {% endif %}
+    </div>
+  {% else %}
+    <div class="run-status" aria-live="polite">
+      {% if run_snapshot.result %}
+        {% set result = run_snapshot.result %}
+        <strong>Run finished · {{ result.outcome.value }}</strong>
+        {% if result.resolved_date_range %}
+          <span>{{ result.resolved_date_range.from_date.isoformat() }} → {{ result.resolved_date_range.to_date.isoformat() }}</span>
+        {% endif %}
+        <span>Papers: {{ result.canonical_paper_count }} canonical · {{ result.created_papers }} created · {{ result.matched_existing_papers }} matched · {{ result.updated_papers }} updated</span>
+        <span>Authors: {{ result.created_authors }} created · {{ result.existing_authors }} existing</span>
+        {% if result.warnings %}
+          <span>{{ result.warnings|length }} warning{{ "" if result.warnings|length == 1 else "s" }}</span>
+        {% endif %}
+        {% if result.errors %}
+          <span>{{ result.errors|length }} error{{ "" if result.errors|length == 1 else "s" }}</span>
+        {% endif %}
+        {% if result.warnings or result.errors %}
+          <details>
+            <summary>Run issues</summary>
+            <ul>
+              {% for issue in result.warnings %}
+                <li>Warning · {{ issue.component.value }} · {{ issue.message }}</li>
+              {% endfor %}
+              {% for issue in result.errors %}
+                <li>Error · {{ issue.component.value }} · {{ issue.message }}</li>
+              {% endfor %}
+            </ul>
+          </details>
+        {% endif %}
+      {% elif run_snapshot.unexpected_error %}
+        <strong>Run stopped</strong>
+        <span>{{ run_snapshot.unexpected_error.message }}</span>
+        <span class="muted">{{ run_snapshot.unexpected_error.category }}</span>
+      {% else %}
+        <strong>Run finished</strong>
+      {% endif %}
+      {% if run_snapshot.finished_at %}
+        <span>Finished {{ run_snapshot.finished_at.isoformat() }}</span>
+      {% endif %}
+    </div>
+    <form method="post"
+          action="/run"
+          hx-post="/run"
+          hx-target="#run-panel"
+          hx-swap="outerHTML">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">Run again</button>
+    </form>
+  {% endif %}
+</section>

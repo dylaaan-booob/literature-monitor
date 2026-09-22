@@ -1,0 +1,183 @@
+<section id="settings-editor" class="panel settings-editor">
+  <div class="section-heading">
+    <div>
+      <h1>Settings</h1>
+      <p class="muted">Edits apply to the monitor definition and Journals configuration.</p>
+    </div>
+    <span class="dirty-indicator" aria-live="polite">Unsaved changes</span>
+  </div>
+
+  {% if settings_message %}
+    <div class="notice {{ settings_message_tone }}">{{ settings_message }}</div>
+  {% endif %}
+
+  {% if settings_save and settings_save.outcome.value == "PARTIAL_SAVE" %}
+    <div class="notice warning">
+      <strong>Partial save.</strong>
+      Journal data written: {{ "yes" if settings_save.journal_written else "no" }}.
+      Monitor config written: {{ "yes" if settings_save.monitor_written else "no" }}.
+      The editor below reflects the reread disk state.
+    </div>
+  {% endif %}
+
+  {% if settings_issues %}
+    <section class="settings-issues" aria-label="Settings issues">
+      <h2>Issues</h2>
+      <ul>
+        {% for issue in settings_issues %}
+          <li>
+            <strong>{{ issue.source.value }}</strong>
+            {% if issue.field %} · {{ issue.field }}{% endif %}
+            · {{ issue.message }}
+            {% if issue.path %}<span class="muted"> · {{ issue.path }}</span>{% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    </section>
+  {% endif %}
+
+  {% if settings_validation
+        and settings_validation.outcome.value == "VALID"
+        and settings_validation.resolved_date_range
+        and (not settings_save or settings_save.outcome.value == "SAVED") %}
+    <div class="notice success">
+      Runtime date range:
+      {{ settings_validation.resolved_date_range.from_date.isoformat() }}
+      →
+      {{ settings_validation.resolved_date_range.to_date.isoformat() }}
+    </div>
+  {% endif %}
+
+  {% if settings_save and settings_save.outcome.value != "SAVED" and settings_disk_state %}
+    <details class="disk-state">
+      <summary>Current disk state</summary>
+      <dl class="details">
+        <dt>Name</dt><dd>{{ settings_disk_state.draft.name }}</dd>
+        <dt>Output workspace</dt><dd>{{ settings_disk_state.draft.output_dir }}</dd>
+        <dt>Journal entries</dt><dd>{{ settings_disk_state.draft.journals|length }}</dd>
+        <dt>Monitor revision</dt><dd>{{ settings_disk_state.draft.monitor_revision.digest or "missing/unreadable" }}</dd>
+        <dt>Journal revision</dt><dd>{{ settings_disk_state.draft.journal_revision.digest or "missing/unreadable" }}</dd>
+      </dl>
+    </details>
+  {% endif %}
+
+  {% if settings_attempted and settings_save and settings_save.outcome.value in ("WRITE_FAILED", "PARTIAL_SAVE", "REVISION_CONFLICT") %}
+    <details class="attempted-state">
+      <summary>Attempted draft</summary>
+      <dl class="details">
+        <dt>Name</dt><dd>{{ settings_attempted.name }}</dd>
+        <dt>Keyword expression</dt><dd>{{ settings_attempted.keyword_expression }}</dd>
+        <dt>Output workspace</dt><dd>{{ settings_attempted.output_dir }}</dd>
+        <dt>Journal rows</dt><dd>{{ settings_attempted.journals|length }}</dd>
+      </dl>
+    </details>
+  {% endif %}
+
+  <form id="settings-form"
+        data-settings-form
+        method="post"
+        action="/settings/save"
+        hx-post="/settings/save"
+        hx-target="#settings-editor"
+        hx-swap="outerHTML">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="monitor_revision_exists" value="{{ settings_form.monitor_revision_exists }}">
+    <input type="hidden" name="monitor_revision_digest" value="{{ settings_form.monitor_revision_digest }}">
+    <input type="hidden" name="journal_revision_exists" value="{{ settings_form.journal_revision_exists }}">
+    <input type="hidden" name="journal_revision_digest" value="{{ settings_form.journal_revision_digest }}">
+
+    <div class="form-grid">
+      <label>
+        Name
+        <input name="name" value="{{ settings_form.name }}" autocomplete="off">
+      </label>
+
+      <label>
+        Keyword expression
+        <input name="keyword_expression" value="{{ settings_form.keyword_expression }}" autocomplete="off">
+      </label>
+
+      <label>
+        Output workspace
+        <input name="output_dir" value="{{ settings_form.output_dir }}" autocomplete="off">
+      </label>
+
+      <label>
+        Log level
+        <select name="log_level">
+          {% for level in ("DEBUG", "INFO", "WARNING", "ERROR") %}
+            <option value="{{ level }}" {{ "selected" if settings_form.log_level == level else "" }}>{{ level }}</option>
+          {% endfor %}
+          {% if settings_form.log_level not in ("DEBUG", "INFO", "WARNING", "ERROR") %}
+            <option value="{{ settings_form.log_level }}" selected>{{ settings_form.log_level }}</option>
+          {% endif %}
+        </select>
+      </label>
+    </div>
+
+    <fieldset>
+      <legend>Date policy</legend>
+      <p class="muted">Use a rolling window, fixed from/to dates, or one bound plus a window. Runtime validation is authoritative.</p>
+      <div class="form-grid date-grid">
+        <label>
+          From
+          <input type="date" name="from_date" value="{{ settings_form.from_date }}">
+        </label>
+        <label>
+          To
+          <input type="date" name="to_date" value="{{ settings_form.to_date }}">
+        </label>
+        <label>
+          Window days
+          <input type="number" name="window_days" value="{{ settings_form.window_days }}">
+        </label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <div class="section-heading">
+        <legend>Journals</legend>
+        <button type="button" class="secondary" data-add-journal>Add journal</button>
+      </div>
+      <p class="muted">Enter ISSN/EISSN values separated by commas. Conferences are not edited here.</p>
+      <div data-journal-rows>
+        {% for row in settings_form.journals %}
+          <div class="journal-row">
+            <label>
+              Journal name
+              <input name="journal_name" value="{{ row.name }}" autocomplete="off">
+            </label>
+            <label>
+              ISSN/EISSN
+              <input name="journal_issns" value="{{ row.issns }}" autocomplete="off">
+            </label>
+            <button type="button" class="secondary" data-remove-journal>Remove</button>
+          </div>
+        {% endfor %}
+      </div>
+      <template data-journal-template>
+        <div class="journal-row">
+          <label>
+            Journal name
+            <input name="journal_name" value="" autocomplete="off">
+          </label>
+          <label>
+            ISSN/EISSN
+            <input name="journal_issns" value="" autocomplete="off">
+          </label>
+          <button type="button" class="secondary" data-remove-journal>Remove</button>
+        </div>
+      </template>
+    </fieldset>
+
+    <div class="form-actions">
+      <button type="button"
+              class="secondary"
+              hx-post="/settings/validate"
+              hx-include="#settings-form"
+              hx-target="#settings-editor"
+              hx-swap="outerHTML">Validate</button>
+      <button type="submit">Save</button>
+    </div>
+  </form>
+</section>

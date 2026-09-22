@@ -20,7 +20,17 @@ from literature_monitor.application.decisions import (
     mark_paper_in_zotero,
     reject_paper,
 )
-from literature_monitor.application.settings import load_settings
+from literature_monitor.application.settings import (
+    SettingsIssue,
+    SettingsLoadResult,
+    SettingsSaveOutcome,
+    SettingsSaveResult,
+    SettingsValidationOutcome,
+    SettingsValidationResult,
+    load_settings,
+    save_settings,
+    validate_settings,
+)
 from literature_monitor.application.workspace import (
     WorkspacePaper,
     WorkspaceSnapshot,
@@ -29,6 +39,19 @@ from literature_monitor.application.workspace import (
 from literature_monitor.config import ConfigurationError, load_config
 from literature_monitor.kept_export import export_kept_papers
 from literature_monitor.models import WorkflowStatus
+from literature_monitor.web.run_coordinator import (
+    CoordinatorSnapshot,
+    CoordinatorStatus,
+    RunCoordinator,
+    StartOutcome,
+    StartResult,
+)
+from literature_monitor.web.settings_form import (
+    SettingsFormValues,
+    settings_draft_from_form,
+    settings_form_from_draft,
+    settings_form_from_submission,
+)
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _PACKAGE_DIR / "templates"
@@ -42,6 +65,11 @@ _VIEW_ATTRIBUTES = {
 }
 
 templates = Jinja2Templates(directory=_TEMPLATES_DIR)
+
+
+def _csrf_valid(submitted_csrf: str | None, csrf_token: str) -> bool:
+    submitted = (submitted_csrf or "").encode("utf-8")
+    return secrets.compare_digest(submitted, csrf_token.encode("ascii"))
 
 
 def _workspace_state(
@@ -131,6 +159,48 @@ def _export_context(
     }
 
 
+def _run_context(
+    request: Request,
+    csrf_token: str,
+    snapshot: CoordinatorSnapshot,
+    *,
+    start_result: StartResult | None = None,
+) -> dict[str, object]:
+    return {
+        "request": request,
+        "csrf_token": csrf_token,
+        "run_snapshot": snapshot,
+        "run_start_result": start_result,
+    }
+
+
+def _settings_context(
+    *,
+    request: Request,
+    csrf_token: str,
+    form_values: SettingsFormValues,
+    issues: tuple[SettingsIssue, ...] = (),
+    validation_result: SettingsValidationResult | None = None,
+    save_result: SettingsSaveResult | None = None,
+    disk_state: SettingsLoadResult | None = None,
+    attempted_values: SettingsFormValues | None = None,
+    message: str | None = None,
+    message_tone: str = "warning",
+) -> dict[str, object]:
+    return {
+        "request": request,
+        "csrf_token": csrf_token,
+        "settings_form": form_values,
+        "settings_issues": issues,
+        "settings_validation": validation_result,
+        "settings_save": save_result,
+        "settings_disk_state": disk_state,
+        "settings_attempted": attempted_values,
+        "settings_message": message,
+        "settings_message_tone": message_tone,
+    }
+
+
 def create_app(config_path: Path) -> FastAPI:
     """Create the local Web adapter without requiring valid configuration."""
 
@@ -144,6 +214,7 @@ def create_app(config_path: Path) -> FastAPI:
     )
     app.state.config_path = resolved_config_path
     app.state.csrf_token = csrf_token
+    app.state.run_coordinator = RunCoordinator(resolved_config_path)
 
     app.add_middleware(
         TrustedHostMiddleware,
@@ -172,10 +243,198 @@ def create_app(config_path: Path) -> FastAPI:
         return templates.TemplateResponse(
             request,
             "settings.html",
-            {
-                "request": request,
-                "settings_state": settings_state,
-            },
+            _settings_context(
+                request=request,
+                csrf_token=csrf_token,
+                form_values=settings_form_from_draft(settings_state.draft),
+                issues=settings_state.issues,
+                disk_state=settings_state,
+                message=(
+                    "Configuration needs attention. You can repair it here."
+                    if settings_state.issues
+                    else None
+                ),
+            ),
+        )
+
+    @app.get("/fragments/run", response_class=HTMLResponse)
+    def run_fragment(request: Request) -> HTMLResponse:
+        snapshot = app.state.run_coordinator.snapshot()
+        headers = (
+            {"HX-Trigger": "runCompleted"}
+            if snapshot.status is CoordinatorStatus.FINISHED
+            else None
+        )
+        return templates.TemplateResponse(
+            request,
+            "fragments/run.html",
+            _run_context(request, csrf_token, snapshot),
+            headers=headers,
+        )
+
+    @app.post("/run", response_class=HTMLResponse)
+    def start_run(
+        request: Request,
+        csrf_token_value: Annotated[str | None, Form(alias="csrf_token")] = None,
+    ) -> HTMLResponse:
+        if not _csrf_valid(csrf_token_value, csrf_token):
+            return HTMLResponse(
+                '<p class="notice error">Invalid or missing CSRF token.</p>',
+                status_code=403,
+            )
+        start_result = app.state.run_coordinator.start()
+        snapshot = app.state.run_coordinator.snapshot()
+        response = templates.TemplateResponse(
+            request,
+            "fragments/run.html",
+            _run_context(
+                request,
+                csrf_token,
+                snapshot,
+                start_result=start_result,
+            ),
+        )
+        if (
+            start_result.outcome is StartOutcome.STARTED
+            and snapshot.status is CoordinatorStatus.FINISHED
+        ):
+            response.headers["HX-Trigger"] = "runCompleted"
+        return response
+
+    @app.post("/settings/validate", response_class=HTMLResponse)
+    async def validate_settings_route(request: Request) -> HTMLResponse:
+        form = await request.form()
+        submitted_csrf = form.get("csrf_token")
+        if not _csrf_valid(
+            str(submitted_csrf) if submitted_csrf is not None else None,
+            csrf_token,
+        ):
+            return HTMLResponse(
+                '<p class="notice error">Invalid or missing CSRF token.</p>',
+                status_code=403,
+            )
+
+        values = settings_form_from_submission(form)
+        draft, form_issues = settings_draft_from_form(values)
+        if draft is None:
+            return templates.TemplateResponse(
+                request,
+                "fragments/settings_editor.html",
+                _settings_context(
+                    request=request,
+                    csrf_token=csrf_token,
+                    form_values=values,
+                    issues=form_issues,
+                    message="Settings could not be validated.",
+                ),
+            )
+
+        validation = validate_settings(resolved_config_path, draft)
+        message = (
+            "Settings draft is valid."
+            if validation.outcome is SettingsValidationOutcome.VALID
+            else "Settings draft needs correction."
+        )
+        return templates.TemplateResponse(
+            request,
+            "fragments/settings_editor.html",
+            _settings_context(
+                request=request,
+                csrf_token=csrf_token,
+                form_values=values,
+                issues=validation.issues,
+                validation_result=validation,
+                message=message,
+                message_tone=(
+                    "success"
+                    if validation.outcome is SettingsValidationOutcome.VALID
+                    else "warning"
+                ),
+            ),
+        )
+
+    @app.post("/settings/save", response_class=HTMLResponse)
+    async def save_settings_route(request: Request) -> HTMLResponse:
+        form = await request.form()
+        submitted_csrf = form.get("csrf_token")
+        if not _csrf_valid(
+            str(submitted_csrf) if submitted_csrf is not None else None,
+            csrf_token,
+        ):
+            return HTMLResponse(
+                '<p class="notice error">Invalid or missing CSRF token.</p>',
+                status_code=403,
+            )
+
+        values = settings_form_from_submission(form)
+        draft, form_issues = settings_draft_from_form(values)
+        if draft is None:
+            return templates.TemplateResponse(
+                request,
+                "fragments/settings_editor.html",
+                _settings_context(
+                    request=request,
+                    csrf_token=csrf_token,
+                    form_values=values,
+                    issues=form_issues,
+                    message="Settings were not saved.",
+                ),
+            )
+
+        result = save_settings(resolved_config_path, draft)
+        if result.outcome is SettingsSaveOutcome.SAVED:
+            response = templates.TemplateResponse(
+                request,
+                "fragments/settings_editor.html",
+                _settings_context(
+                    request=request,
+                    csrf_token=csrf_token,
+                    form_values=settings_form_from_draft(result.state.draft),
+                    issues=result.issues,
+                    validation_result=result.validation,
+                    save_result=result,
+                    disk_state=result.state,
+                    message="Settings saved.",
+                    message_tone="success",
+                ),
+            )
+            response.headers["HX-Trigger"] = "settingsSaved"
+            return response
+
+        if result.outcome is SettingsSaveOutcome.PARTIAL_SAVE:
+            form_values = settings_form_from_draft(result.state.draft)
+            message = (
+                "Settings were partially saved: journal data was written, "
+                "but monitor configuration was not written."
+            )
+        elif result.outcome is SettingsSaveOutcome.REVISION_CONFLICT:
+            form_values = values
+            message = (
+                "Settings were not saved because files changed since this "
+                "editor was opened. Reload and reconcile before retrying."
+            )
+        elif result.outcome is SettingsSaveOutcome.WRITE_FAILED:
+            form_values = values
+            message = "Settings could not be written."
+        else:
+            form_values = values
+            message = "Settings draft is invalid and was not saved."
+
+        return templates.TemplateResponse(
+            request,
+            "fragments/settings_editor.html",
+            _settings_context(
+                request=request,
+                csrf_token=csrf_token,
+                form_values=form_values,
+                issues=result.issues,
+                validation_result=result.validation,
+                save_result=result,
+                disk_state=result.state,
+                attempted_values=values,
+                message=message,
+                message_tone="warning",
+            ),
         )
 
     @app.get("/fragments/workspace", response_class=HTMLResponse)
@@ -266,8 +525,7 @@ def create_app(config_path: Path) -> FastAPI:
         view: str,
         action: Callable[[Path, UUID, WorkflowStatus], DecisionResult],
     ) -> HTMLResponse:
-        submitted_csrf_bytes = (submitted_csrf or "").encode("utf-8")
-        if not secrets.compare_digest(submitted_csrf_bytes, csrf_token.encode("ascii")):
+        if not _csrf_valid(submitted_csrf, csrf_token):
             return HTMLResponse(
                 "<p class=\"notice error\">Invalid or missing CSRF token.</p>",
                 status_code=403,

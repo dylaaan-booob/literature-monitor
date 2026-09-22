@@ -1,4 +1,8 @@
-<section id="workspace-root">
+<section id="workspace-root"
+         hx-get="/fragments/workspace?view={{ active_view }}"
+         hx-trigger="runCompleted from:body"
+         hx-target="this"
+         hx-swap="outerHTML">
   {% if decision_result %}
     <div class="notice {{ 'success' if decision_result.outcome.value == 'UPDATED' else 'warning' }}">
       {{ decision_result.message }}
