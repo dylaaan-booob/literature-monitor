@@ -2,7 +2,7 @@
 
 **Status:** Active; v0.3.3 is the current released and completed baseline
 
-**Stage:** v0.4.0 Python Local Web UI implementation
+**Stage:** v0.4.0 release preparation / closeout
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
@@ -1822,11 +1822,25 @@ A1 Semantic Scholar year-only date-membership semantics
 
 Discovery remains publication-date-only. Semantic Scholar year-only records use `Y-01-01` only for provider filtering membership and do not acquire a fabricated bibliographic date. `validate --config` now exercises the deterministic local FTS5 and runtime date checks required before provider work. The supported durable-state boundary is one monitor to one decision workspace, with workspace-local Paper UUIDs, statuses, and human notes.
 
-### 24.8 v0.4.0 Python Local Web UI implementation
+### 24.8 v0.4.0 Python Local Web UI implementation — completed
 
-v0.3.3 is the completed baseline for v0.4.0. The v0.4.0 specification alignment establishes the application, workspace, decision, settings, run-coordination, Web, security, and packaging contracts in §25 before production implementation proceeds.
+v0.3.3 remains the latest released baseline until the v0.4.0 release transaction completes. The v0.4.0 feature implementation and final independent audit are complete: the application, workspace, decision, settings, run-coordination, Web, security, GUI CLI, packaging, and installed-distribution contracts in §25 have been implemented and verified.
 
-The implementation must remain an adapter over the existing durable Markdown model and canonical production pipeline. It must not introduce a second workflow source of truth, persistent execution database, new workflow status, Zotero API ingestion, or a parallel GUI-specific retrieval/canonicalization/materialization pipeline.
+The completed implementation remains an adapter over the existing durable Markdown model and canonical production pipeline. It does not introduce a second workflow source of truth, persistent execution database, new workflow status, Zotero API ingestion, or a parallel GUI-specific retrieval/canonicalization/materialization pipeline.
+
+The release closeout sequence is:
+
+```text
+v0.4.0 feature implementation complete
+→ final audit complete
+→ release-preparation commit
+→ tag
+→ push main
+→ push tag
+→ GitHub Release
+```
+
+The first two steps are complete; the repository is now in release preparation before the release-preparation commit and release transaction.
 
 ---
 
@@ -2283,7 +2297,7 @@ These details should not change the core workflow or introduce additional scope.
 
 The v0.3.3 baseline remains complete when a user can reliably run the journal-monitoring pipeline, review the durable Paper Markdown corpus through the Obsidian presentation, preserve decisions and notes across reruns, export kept identifiers, and manually confirm `in_zotero` after downstream Zotero import.
 
-v0.4.0 is complete when the same durable workflow is also operable through the local Python Web UI defined in §25, with the acceptance criteria in §23.15 demonstrated. In particular:
+v0.4.0 feature implementation is complete: the same durable workflow is operable through the local Python Web UI defined in §25, and the acceptance criteria in §23.15 have been demonstrated. This implementation-complete state does not mean v0.4.0 has been released. In particular:
 
 - GUI Run and CLI `run` share `run_monitor()`, use the same canonical production core plus formal materialization path, and preserve the existing CLI date/exit-code contracts;
 - Workspace views are reconstructed from current Paper Markdown and isolate corrupt records as issues;
@@ -2299,6 +2313,6 @@ Obsidian remains a supported presentation of the same Markdown workspace; it is 
 
 ## 28. Current Project Stage
 
-R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, and v0.3.3 Pre-GUI Correctness Hardening are completed release history. v0.3.3 is the current released and completed baseline.
+R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, and v0.3.3 Pre-GUI Correctness Hardening are completed release history. v0.3.3 remains the latest released and completed baseline until the v0.4.0 release transaction completes.
 
-The current stage is v0.4.0 Python Local Web UI implementation. This specification alignment defines the source-of-truth boundaries and acceptance contracts for subsequent implementation tasks; it does not itself implement the application layer, Web UI, filesystem mutation helpers, Settings, decisions, or run coordination.
+The current stage is v0.4.0 release preparation / closeout. Feature implementation and the final independent audit are complete. The remaining release sequence is the release-preparation commit, tag, push of `main`, push of the tag, and GitHub Release. v0.4.0 is not yet released.

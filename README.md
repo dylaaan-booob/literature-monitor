@@ -6,8 +6,9 @@ Semantic Scholar, consolidates provider evidence before local keyword filtering,
 canonicalizes retained papers and versions, safely updates durable Paper
 and Author Markdown, and exports kept papers.
 
-v0.3.2 is the latest released baseline. Current development is the bounded
-v0.3.3 Pre-GUI Correctness Hardening stage.
+v0.3.3 is the latest released baseline. The v0.4.0 feature implementation
+and final independent audit are complete; the repository is currently in
+v0.4.0 release preparation.
 
 ## Setup
 
@@ -17,6 +18,29 @@ Install [uv](https://docs.astral.sh/uv/) and synchronize the locked environment:
 brew install uv
 uv sync
 ```
+
+## Local Web UI
+
+During development, launch the supported local Web UI with:
+
+```bash
+uv run literature-monitor gui --config monitor.yaml
+```
+
+From an installed distribution, use:
+
+```bash
+literature-monitor gui --config monitor.yaml
+```
+
+The GUI is local-only and binds to `127.0.0.1:8000`; v0.4.0 provides no LAN
+serving mode. Missing or invalid monitor/journal configuration does not block
+startup, so it can be repaired through Settings. GUI Run always uses the
+persisted Monitor date policy and exposes no temporary date override.
+
+Paper Markdown remains the durable workflow state. The GUI does not add a
+workflow database, persistent run history, or another source of Paper decision
+state.
 
 ## Run a persistent monitor
 
@@ -141,12 +165,12 @@ Optional provider credentials/contact information remain environment settings,
 not monitor fields: `OPENALEX_API_KEY`, `CROSSREF_MAILTO`, and
 `SEMANTIC_SCHOLAR_API_KEY`.
 
-The v0.3.3 correctness hardening does not add monitor/workspace UUIDs, workspace
-ownership markers, a global research-work or decision registry, last-successful-
-run state, provider cursors/watermarks/checkpoints, incremental delta /
-“What's New” state, scheduler or daemon state, notifications, or an execution
-database. It also does not add a GUI/dashboard or write directly to the Zotero
-API.
+The workflow does not add monitor/workspace UUIDs, workspace ownership
+markers, a global research-work or decision registry, last-successful-run state,
+provider cursors/watermarks/checkpoints, incremental delta / “What's New” state,
+scheduler or daemon durable state, notifications, or a workflow/execution
+database. The local GUI does not change those boundaries and does not write
+directly to the Zotero API.
 
 ## Validate configuration
 
