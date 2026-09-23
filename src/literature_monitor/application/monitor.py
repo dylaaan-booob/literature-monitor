@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import date
 from enum import Enum
@@ -46,6 +46,7 @@ from literature_monitor.materialize import (
     materialize_papers,
 )
 from literature_monitor.models import CanonicalPaper
+from literature_monitor.progress import ProgressCallback, ProgressEvent, ProgressStage
 from literature_monitor.openalex import (
     DiscoveryIssue,
     IssueSeverity,
@@ -68,17 +69,6 @@ from literature_monitor.semantic_scholar import (
     augment_with_semantic_scholar,
     create_semantic_scholar_client,
 )
-
-
-class ProgressStage(str, Enum):
-    CHECKING_MONITOR = "CHECKING_MONITOR"
-    DISCOVERING_PAPERS = "DISCOVERING_PAPERS"
-    COMBINING_METADATA = "COMBINING_METADATA"
-    MATCHING_LITERATURE = "MATCHING_LITERATURE"
-    UPDATING_WORKSPACE = "UPDATING_WORKSPACE"
-
-
-ProgressCallback = Callable[[ProgressStage], None]
 
 
 class MonitorIssueSeverity(str, Enum):
@@ -203,7 +193,7 @@ def _emit_progress(
     stage: ProgressStage,
 ) -> None:
     if callback is not None:
-        callback(stage)
+        callback(ProgressEvent(stage=stage))
 
 
 def _split_issues(

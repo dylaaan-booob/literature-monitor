@@ -50,6 +50,7 @@ from literature_monitor.openalex import (
     IssueSeverity,
     ResolvedSource,
 )
+from literature_monitor.progress import ProgressEvent
 from literature_monitor.retrieval import EvidenceRetrievalResult
 from literature_monitor.search import SearchBackendError, SearchExpressionError, SearchableProjection
 from literature_monitor.semantic_scholar import (
@@ -361,7 +362,7 @@ def test_run_monitor_uses_core_materialization_and_progress_contract(
     config_path = write_monitor(tmp_path, output_dir="run-workspace")
     events: list[str] = []
     install_core_mocks(monkeypatch, events=events)
-    stages: list[ProgressStage] = []
+    progress_events: list[ProgressEvent] = []
 
     def materialize(
         papers: tuple[CanonicalPaper, ...],
@@ -373,16 +374,17 @@ def test_run_monitor_uses_core_materialization_and_progress_contract(
 
     monkeypatch.setattr(monitor, "materialize_papers", materialize)
 
-    result = run_monitor(config_path, progress_callback=stages.append)
+    result = run_monitor(config_path, progress_callback=progress_events.append)
 
     assert result.outcome is RunOutcome.COMPLETED
-    assert stages == [
+    assert [event.stage for event in progress_events] == [
         ProgressStage.CHECKING_MONITOR,
         ProgressStage.DISCOVERING_PAPERS,
         ProgressStage.COMBINING_METADATA,
         ProgressStage.MATCHING_LITERATURE,
         ProgressStage.UPDATING_WORKSPACE,
     ]
+    assert all(event.activity is None for event in progress_events)
     assert events[-1] == "materialize"
     assert result.canonical_paper_count == 1
     assert result.created_papers == 1
@@ -491,7 +493,7 @@ def test_preflight_failure_occurs_before_provider_work_and_skips_workspace_stage
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_path = write_monitor(tmp_path)
-    stages: list[ProgressStage] = []
+    progress_events: list[ProgressEvent] = []
 
     def fail_validation(*args: object) -> None:
         raise SearchBackendError("SQLite FTS5 is unavailable")
@@ -502,11 +504,13 @@ def test_preflight_failure_occurs_before_provider_work_and_skips_workspace_stage
     monkeypatch.setattr(monitor, "validate_runtime_keyword", fail_validation)
     monkeypatch.setattr(monitor, "OpenAlexClient", unexpected_provider)
 
-    result = run_monitor(config_path, progress_callback=stages.append)
+    result = run_monitor(config_path, progress_callback=progress_events.append)
 
     assert result.outcome is RunOutcome.INVALID_CONFIGURATION
-    assert stages == [ProgressStage.CHECKING_MONITOR]
-    assert ProgressStage.UPDATING_WORKSPACE not in stages
+    assert [event.stage for event in progress_events] == [
+        ProgressStage.CHECKING_MONITOR
+    ]
+    assert all(event.activity is None for event in progress_events)
 
 
 def test_provider_error_still_materializes_successful_papers(
