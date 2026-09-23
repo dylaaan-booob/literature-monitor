@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — Specification v1.3
 
-**Status:** Active; v0.4.0 remains the current released and completed baseline until the v0.4.1 release transaction completes
+**Status:** Active; v0.4.1 is the current released and completed baseline
 
-**Stage:** v0.4.1 release preparation / closeout
+**Stage:** v0.4.1 released / closeout complete
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
@@ -1867,7 +1867,7 @@ v0.4.1 feature implementation complete
 → GitHub Release
 ```
 
-The feature implementation and final audit steps are complete. The repository is currently in release preparation before the release-preparation commit; v0.4.1 has not yet been released.
+The full closeout sequence is complete. v0.4.1 is released and is the current released and completed baseline.
 
 ---
 
@@ -2338,15 +2338,15 @@ v0.4.0 is released and remains complete: the same durable workflow is operable t
 
 Obsidian remains a supported presentation of the same Markdown workspace; it is no longer the only daily workflow presentation.
 
-v0.4.1 feature implementation and the final independent audit are complete. The runtime progress/activity contract and acceptance criteria in §29 have been implemented and verified without changing the durable workflow model or canonical production path. This implementation-complete state does not mean v0.4.1 has been released; release preparation and the release transaction remain.
+v0.4.1 is released and complete. Its feature implementation, final independent audit, release preparation, and release transaction are complete, and the runtime progress/activity contract and acceptance criteria in §29 were implemented and verified without changing the durable workflow model or canonical production path.
 
 ---
 
 ## 28. Current Project Stage
 
-R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, and v0.4.0 Python Local Web UI are completed release history. v0.4.0 is the current released and completed baseline.
+R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, and v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback are completed release history. v0.4.1 is the current released and completed baseline.
 
-The current stage is v0.4.1 release preparation / closeout. The feature implementation and final independent audit are complete. The remaining release sequence is the release-preparation commit, tag, push of `main`, push of the tag, and GitHub Release. v0.4.1 is not yet released.
+The v0.4.1 release and closeout are complete. No subsequent product-development stage is established by this closeout.
 
 ---
 

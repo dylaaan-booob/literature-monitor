@@ -6,9 +6,10 @@ Semantic Scholar, consolidates provider evidence before local keyword filtering,
 canonicalizes retained papers and versions, safely updates durable Paper
 and Author Markdown, and exports kept papers.
 
-v0.4.0 is the latest released baseline. The v0.4.1 Runtime Progress, Activity,
-ETA, and Inactivity Feedback implementation and final independent audit are
-complete; the repository is currently in v0.4.1 release preparation.
+v0.4.1 is the latest released baseline. It adds shared transient runtime
+progress, Activity, current-Activity ETA, inactivity feedback, and corresponding
+CLI/Web presentation while preserving the existing production and durable-state
+boundaries.
 
 ## Setup
 
