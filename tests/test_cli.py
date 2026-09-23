@@ -1,5 +1,6 @@
 import json
 import logging
+from io import StringIO
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from literature_monitor.application.monitor import (
     _CanonicalCoreResult,
 )
 from literature_monitor.cli import _build_parser, main
+from literature_monitor.cli_progress import _CliProgressRenderer
 from literature_monitor.config import JournalConfig, load_config
 from literature_monitor.crossref import (
     CrossrefDiscoveryIssue,
@@ -40,6 +42,13 @@ from literature_monitor.models import (
     VersionKind,
     VersionRef,
 )
+from literature_monitor.progress import (
+    ActivityKind,
+    ActivityUpdate,
+    ProgressCallback,
+    ProgressEvent,
+    ProgressStage,
+)
 from literature_monitor.openalex import (
     DiscoveryIssue,
     DiscoveryResult,
@@ -56,6 +65,11 @@ def application_handlers() -> list[logging.Handler]:
         for handler in logging.getLogger(LOGGER_NAME).handlers
         if getattr(handler, "_literature_monitor_handler", False)
     ]
+
+
+class TtyStringIO(StringIO):
+    def isatty(self) -> bool:
+        return True
 
 
 def test_cli_help_uses_functional_diagnostic_names() -> None:
@@ -160,9 +174,15 @@ def test_validate_cli_calls_application_boundary_and_logs_result(
         issn=journal.issn[0],
     )
     calls: list[Path] = []
+    callbacks: list[ProgressCallback | None] = []
 
-    def fake_validate(path: Path) -> ValidationResult:
+    def fake_validate(
+        path: Path,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> ValidationResult:
         calls.append(path)
+        callbacks.append(progress_callback)
         return ValidationResult(
             resolved_date_range=ResolvedDateRange(
                 from_date=date(2026, 1, 1),
@@ -186,6 +206,8 @@ def test_validate_cli_calls_application_boundary_and_logs_result(
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert result == 0
     assert calls == [config_path]
+    assert len(callbacks) == 1
+    assert callbacks[0] is not None
     assert captured.out == ""
     assert "resolved Biometrics to Biometrics" in captured.err
     assert "ISSN 0006-341X" in captured.err
@@ -231,7 +253,7 @@ def test_validate_cli_maps_application_outcome_to_exit_code(
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.validate_monitor",
-        lambda path: result_value,
+        lambda path, *, progress_callback=None: result_value,
     )
 
     result = main(("validate", "--config", str(tmp_path / "monitor.yaml")))
@@ -243,6 +265,82 @@ def test_validate_cli_maps_application_outcome_to_exit_code(
         assert "validation diagnostic" in captured.err
     if outcome is ValidationOutcome.INVALID_CONFIGURATION:
         assert "Validation completed" not in captured.err
+
+
+def test_validate_cli_non_tty_progress_is_plain_stderr(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    def fake_validate(
+        path: Path,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> ValidationResult:
+        assert progress_callback is not None
+        progress_callback(
+            ProgressEvent(
+                activity=ActivityUpdate(
+                    kind=ActivityKind.WORKING,
+                    source="application",
+                    operation="validation_preflight",
+                    label="Checking monitor configuration",
+                )
+            )
+        )
+        progress_callback(
+            ProgressEvent(
+                activity=ActivityUpdate(
+                    kind=ActivityKind.WORKING,
+                    source="application",
+                    operation="validation_journals",
+                    label="Resolving journal sources",
+                    current=1,
+                    total=2,
+                    unit="journal",
+                )
+            )
+        )
+        progress_callback(
+            ProgressEvent(
+                activity=ActivityUpdate(
+                    kind=ActivityKind.RETRYING,
+                    source="openalex",
+                    operation="validation_source_resolution:0",
+                    label="Retrying OpenAlex request",
+                    detail="backoff 2s",
+                )
+            )
+        )
+        return ValidationResult(
+            resolved_date_range=ResolvedDateRange(
+                from_date=date(2026, 1, 1),
+                to_date=date(2026, 1, 31),
+            ),
+            configured_journal_count=2,
+            configured_issn_count=3,
+            resolved_sources=(),
+            warnings=(),
+            errors=(),
+            outcome=ValidationOutcome.VALID,
+        )
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.validate_monitor",
+        fake_validate,
+    )
+
+    result = main(("validate", "--config", str(tmp_path / "monitor.yaml")))
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert captured.out == ""
+    assert "[progress] Application · Checking monitor configuration" in captured.err
+    assert "Resolving journal sources · 1/2 journals" in captured.err
+    assert "OpenAlex · RETRYING · Retrying OpenAlex request · backoff 2s" in captured.err
+    assert "Stage " not in captured.err
+    assert "\x1b" not in captured.err
+    assert "\r" not in captured.err
 
 
 def diagnostic_result(*, with_error: bool = False) -> DiscoveryResult:
@@ -807,8 +905,10 @@ def test_run_cli_shapes_date_override_for_application(
         path: Path,
         *,
         date_override: DateRangeSpec | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> RunResult:
         calls.append((path, date_override))
+        assert progress_callback is not None
         return cli_run_result(RunOutcome.COMPLETED)
 
     monkeypatch.setattr(  # type: ignore[attr-defined]
@@ -836,8 +936,10 @@ def test_run_cli_passes_none_without_date_override(
         path: Path,
         *,
         date_override: DateRangeSpec | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> RunResult:
         received.append(date_override)
+        assert progress_callback is not None
         return cli_run_result(RunOutcome.COMPLETED)
 
     monkeypatch.setattr(  # type: ignore[attr-defined]
@@ -878,7 +980,7 @@ def test_run_cli_maps_structured_outcome_to_exit_code(
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.run_monitor",
-        lambda path, *, date_override=None: value,
+        lambda path, *, date_override=None, progress_callback=None: value,
     )
 
     result = main(("run", "--config", str(tmp_path / "monitor.yaml")))
@@ -890,6 +992,352 @@ def test_run_cli_maps_structured_outcome_to_exit_code(
         assert "Materialization completed" not in captured.err
     else:
         assert "1 canonical papers, 1 paper files created" in captured.err
+
+
+def test_run_cli_non_tty_progress_is_plain_stderr(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    def fake_run(
+        path: Path,
+        *,
+        date_override: DateRangeSpec | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> RunResult:
+        assert progress_callback is not None
+        progress_callback(
+            ProgressEvent(stage=ProgressStage.DISCOVERING_PAPERS)
+        )
+        progress_callback(
+            ProgressEvent(
+                activity=ActivityUpdate(
+                    kind=ActivityKind.WORKING,
+                    source="crossref",
+                    operation="doi_supplement",
+                    label="Looking up Crossref DOI metadata",
+                    detail="DOI 10.5555/example",
+                    current=18,
+                    total=47,
+                    unit="doi",
+                )
+            )
+        )
+        progress_callback(
+            ProgressEvent(
+                activity=ActivityUpdate(
+                    kind=ActivityKind.RETRYING,
+                    source="crossref",
+                    operation="doi_supplement",
+                    label="Retrying Crossref request",
+                    detail="backoff 2s",
+                    current=18,
+                    total=47,
+                    unit="doi",
+                )
+            )
+        )
+        return cli_run_result(RunOutcome.COMPLETED)
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.run_monitor",
+        fake_run,
+    )
+
+    result = main(("run", "--config", str(tmp_path / "monitor.yaml")))
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert captured.out == ""
+    assert "[progress] Stage 2 of 5 · Discovering papers" in captured.err
+    assert "Crossref · Looking up Crossref DOI metadata" in captured.err
+    assert "18/47 DOI" in captured.err
+    assert "Crossref · RETRYING · Retrying Crossref request · backoff 2s" in captured.err
+    assert "\x1b" not in captured.err
+    assert "\r" not in captured.err
+
+
+def test_run_cli_tty_progress_cleans_before_summary(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    stream = TtyStringIO()
+    monkeypatch.setattr("literature_monitor.cli.sys.stderr", stream)  # type: ignore[attr-defined]
+
+    def fake_run(
+        path: Path,
+        *,
+        date_override: DateRangeSpec | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> RunResult:
+        assert progress_callback is not None
+        progress_callback(
+            ProgressEvent(stage=ProgressStage.DISCOVERING_PAPERS)
+        )
+        progress_callback(
+            ProgressEvent(
+                activity=ActivityUpdate(
+                    kind=ActivityKind.WORKING,
+                    source="openalex",
+                    operation="works_discovery:0",
+                    label="Discovering OpenAlex works",
+                    current=3,
+                    total=None,
+                    unit="work",
+                )
+            )
+        )
+        progress_callback(
+            ProgressEvent(
+                activity=ActivityUpdate(
+                    kind=ActivityKind.WORKING,
+                    source="crossref",
+                    operation="doi_supplement",
+                    label="Looking up Crossref DOI metadata",
+                    current=7,
+                    total=14,
+                    unit="doi",
+                )
+            )
+        )
+        return cli_run_result(RunOutcome.COMPLETED)
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.run_monitor",
+        fake_run,
+    )
+
+    result = main(("run", "--config", str(tmp_path / "monitor.yaml")))
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    output = stream.getvalue()
+    assert result == 0
+    assert captured.out == ""
+    assert "\r\x1b[2KStage 2 of 5 · Discovering papers" in output
+    assert "OpenAlex · Discovering OpenAlex works · 3 works processed" in output
+    assert "3/" not in output
+    assert "Crossref · Looking up Crossref DOI metadata · 7/14 DOI" in output
+    assert "elapsed " in output
+    cleanup = output.rfind("\r\x1b[2K\n")
+    summary = output.find("Materialization completed")
+    assert cleanup != -1
+    assert summary > cleanup
+
+
+def test_validate_cli_tty_progress_has_no_run_stage_model(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    stream = TtyStringIO()
+    monkeypatch.setattr("literature_monitor.cli.sys.stderr", stream)  # type: ignore[attr-defined]
+
+    def fake_validate(
+        path: Path,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> ValidationResult:
+        assert progress_callback is not None
+        progress_callback(
+            ProgressEvent(
+                activity=ActivityUpdate(
+                    kind=ActivityKind.WORKING,
+                    source="application",
+                    operation="validation_journals",
+                    label="Resolving journal sources",
+                    current=1,
+                    total=2,
+                    unit="journal",
+                )
+            )
+        )
+        progress_callback(
+            ProgressEvent(
+                activity=ActivityUpdate(
+                    kind=ActivityKind.RETRYING,
+                    source="openalex",
+                    operation="validation_source_resolution:0",
+                    label="Retrying OpenAlex request",
+                    detail="backoff 1s",
+                )
+            )
+        )
+        return ValidationResult(
+            resolved_date_range=ResolvedDateRange(
+                from_date=date(2026, 1, 1),
+                to_date=date(2026, 1, 31),
+            ),
+            configured_journal_count=2,
+            configured_issn_count=3,
+            resolved_sources=(),
+            warnings=(),
+            errors=(),
+            outcome=ValidationOutcome.VALID,
+        )
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.validate_monitor",
+        fake_validate,
+    )
+
+    result = main(("validate", "--config", str(tmp_path / "monitor.yaml")))
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    output = stream.getvalue()
+    assert result == 0
+    assert captured.out == ""
+    assert "Stage " not in output
+    assert "Resolving journal sources · 1/2 journals" in output
+    assert "OpenAlex · RETRYING · Retrying OpenAlex request" in output
+    cleanup = output.rfind("\r\x1b[2K\n")
+    summary = output.find("Validation completed")
+    assert cleanup != -1
+    assert summary > cleanup
+
+
+def test_tty_renderer_uses_shared_eta_and_drops_stale_eta() -> None:
+    base = datetime(2026, 9, 23, 0, 0, tzinfo=timezone.utc)
+    moments = iter(
+        (
+            base,
+            base,
+            base,
+            base.replace(second=1),
+            base.replace(second=2),
+            base.replace(second=3),
+            base.replace(second=4),
+            base.replace(second=5),
+        )
+    )
+    stream = TtyStringIO()
+    renderer = _CliProgressRenderer(
+        stream,
+        show_run_stages=True,
+        clock=lambda: next(moments),
+    )
+    renderer(ProgressEvent(stage=ProgressStage.COMBINING_METADATA))
+    renderer(
+        ProgressEvent(
+            activity=ActivityUpdate(
+                kind=ActivityKind.WORKING,
+                source="crossref",
+                operation="doi_supplement",
+                label="Looking up Crossref DOI metadata",
+                current=0,
+                total=4,
+                unit="doi",
+            )
+        )
+    )
+    renderer(
+        ProgressEvent(
+            activity=ActivityUpdate(
+                kind=ActivityKind.WORKING,
+                source="crossref",
+                operation="doi_supplement",
+                label="Looking up Crossref DOI metadata",
+                current=1,
+                total=4,
+                unit="doi",
+            )
+        )
+    )
+    renderer(
+        ProgressEvent(
+            activity=ActivityUpdate(
+                kind=ActivityKind.WORKING,
+                source="crossref",
+                operation="doi_supplement",
+                label="Looking up Crossref DOI metadata",
+                current=2,
+                total=4,
+                unit="doi",
+            )
+        )
+    )
+    latest = stream.getvalue().split("\r\x1b[2K")[-1]
+    assert "ETA 2s" in latest
+
+    renderer(
+        ProgressEvent(
+            activity=ActivityUpdate(
+                kind=ActivityKind.WORKING,
+                source="workspace",
+                operation="materialize_write",
+                label="Writing workspace",
+                current=0,
+                total=3,
+                unit="file",
+            )
+        )
+    )
+    latest = stream.getvalue().split("\r\x1b[2K")[-1]
+    assert "ETA " not in latest
+
+    renderer(
+        ProgressEvent(
+            activity=ActivityUpdate(
+                kind=ActivityKind.RETRYING,
+                source="workspace",
+                operation="materialize_write",
+                label="Retrying workspace operation",
+                current=0,
+                total=3,
+                unit="file",
+            )
+        )
+    )
+    latest = stream.getvalue().split("\r\x1b[2K")[-1]
+    assert "RETRYING" in latest
+    assert "ETA " not in latest
+
+    renderer(
+        ProgressEvent(
+            activity=ActivityUpdate(
+                kind=ActivityKind.WAITING,
+                source="workspace",
+                operation="materialize_write",
+                label="Waiting for workspace",
+                current=0,
+                total=3,
+                unit="file",
+            )
+        )
+    )
+    latest = stream.getvalue().split("\r\x1b[2K")[-1]
+    assert "WAITING" in latest
+    assert "ETA " not in latest
+
+
+def test_run_cli_tty_cleanup_on_unexpected_exception(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    stream = TtyStringIO()
+    monkeypatch.setattr("literature_monitor.cli.sys.stderr", stream)  # type: ignore[attr-defined]
+
+    def fake_run(
+        path: Path,
+        *,
+        date_override: DateRangeSpec | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> RunResult:
+        assert progress_callback is not None
+        progress_callback(
+            ProgressEvent(stage=ProgressStage.CHECKING_MONITOR)
+        )
+        raise RuntimeError("unexpected run failure")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.run_monitor",
+        fake_run,
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected run failure"):
+        main(("run", "--config", str(tmp_path / "monitor.yaml")))
+
+    assert stream.getvalue().endswith("\r\x1b[2K\n")
 
 
 @pytest.mark.parametrize(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
@@ -22,6 +23,7 @@ from literature_monitor.application.monitor import (
     run_monitor,
     validate_monitor,
 )
+from literature_monitor.cli_progress import _CliProgressRenderer
 from literature_monitor.config import ConfigurationError, load_config
 from literature_monitor.crossref import (
     CrossrefClient,
@@ -472,7 +474,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1 if result.has_errors else 0
     if args.command == "validate":
-        validation = validate_monitor(args.config)
+        progress = _CliProgressRenderer(
+            sys.stderr,
+            show_run_stages=False,
+        )
+        try:
+            validation = validate_monitor(
+                args.config,
+                progress_callback=progress,
+            )
+        finally:
+            progress.close()
         if validation.log_level is not None:
             logger = configure_logging(validation.log_level.value)
         for source in validation.resolved_sources:
@@ -492,10 +504,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1 if validation.outcome is ValidationOutcome.SOURCE_ERRORS else 0
 
     if args.command == "run":
-        result = run_monitor(
-            args.config,
-            date_override=_date_override_from_args(args),
+        progress = _CliProgressRenderer(
+            sys.stderr,
+            show_run_stages=True,
         )
+        try:
+            result = run_monitor(
+                args.config,
+                date_override=_date_override_from_args(args),
+                progress_callback=progress,
+            )
+        finally:
+            progress.close()
         if result.log_level is not None:
             logger = configure_logging(result.log_level.value)
         for source in result.resolved_sources:
