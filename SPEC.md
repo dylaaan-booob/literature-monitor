@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — Specification v1.3
 
-**Status:** Active; v0.4.0 is the current released and completed baseline
+**Status:** Active; v0.4.0 remains the current released and completed baseline until the v0.4.1 release transaction completes
 
-**Stage:** v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback specification alignment
+**Stage:** v0.4.1 release preparation / closeout
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
@@ -1844,14 +1844,30 @@ The full closeout sequence is completed release history.
 
 ### 24.9 v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback
 
-The v0.4.1 work extends the existing transient runtime reporting contract without changing the canonical production pipeline, durable workspace model, single-active-run semantics, or provider retrieval policy. The bounded sequence begins with this specification alignment and then proceeds through the separately reviewed A1–A5 implementation tasks:
+The v0.4.1 work extends the existing transient runtime reporting contract without changing the canonical production pipeline, durable workspace model, single-active-run semantics, or provider retrieval policy. Specification alignment, the separately reviewed A1–A5 implementation tasks, and the final independent audit are complete.
+
+The completed bounded result includes:
+
+- a shared process-local five-stage `ProgressStage` plus transient `Activity` contract;
+- reliable current-Activity counters and ETA, real `last_activity_at` / `worker_alive`, and one inactivity advisory;
+- OpenAlex and Crossref request/retry/response/page instrumentation without progress-only provider requests;
+- coarse local processing plus natural materialization and validation progress;
+- CLI TTY/non-TTY runtime presentation and GUI HTMX progress/accessibility presentation;
+- no durable runtime state and no duplicated CLI/Web production orchestration.
+
+The release closeout sequence is:
 
 ```text
-P0 Specification alignment
-→ A1–A5 bounded implementation and review
+v0.4.1 feature implementation complete
+→ final audit complete
+→ release-preparation commit
+→ tag
+→ push main
+→ push tag
+→ GitHub Release
 ```
 
-P0 defines the normative contract in §29. It is not an implementation step and does not authorize production-code changes.
+The feature implementation and final audit steps are complete. The repository is currently in release preparation before the release-preparation commit; v0.4.1 has not yet been released.
 
 ---
 
@@ -2322,7 +2338,7 @@ v0.4.0 is released and remains complete: the same durable workflow is operable t
 
 Obsidian remains a supported presentation of the same Markdown workspace; it is no longer the only daily workflow presentation.
 
-v0.4.1 is complete only when the runtime progress/activity contract and acceptance criteria in §29 are implemented and verified. This specification-alignment step defines that contract but does not itself satisfy the v0.4.1 implementation acceptance criteria.
+v0.4.1 feature implementation and the final independent audit are complete. The runtime progress/activity contract and acceptance criteria in §29 have been implemented and verified without changing the durable workflow model or canonical production path. This implementation-complete state does not mean v0.4.1 has been released; release preparation and the release transaction remain.
 
 ---
 
@@ -2330,7 +2346,7 @@ v0.4.1 is complete only when the runtime progress/activity contract and acceptan
 
 R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, and v0.4.0 Python Local Web UI are completed release history. v0.4.0 is the current released and completed baseline.
 
-The current stage is v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback specification alignment. No A1–A5 production implementation is part of this stage.
+The current stage is v0.4.1 release preparation / closeout. The feature implementation and final independent audit are complete. The remaining release sequence is the release-preparation commit, tag, push of `main`, push of the tag, and GitHub Release. v0.4.1 is not yet released.
 
 ---
 

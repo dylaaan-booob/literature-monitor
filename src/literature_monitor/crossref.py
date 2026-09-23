@@ -427,7 +427,7 @@ class CrossrefClient:
             url,
             headers={
                 "Accept": "application/json",
-                "User-Agent": "literature-monitor/0.4.0",
+                "User-Agent": "literature-monitor/0.4.1",
             },
         )
 

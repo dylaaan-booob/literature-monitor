@@ -6,9 +6,9 @@ Semantic Scholar, consolidates provider evidence before local keyword filtering,
 canonicalizes retained papers and versions, safely updates durable Paper
 and Author Markdown, and exports kept papers.
 
-v0.3.3 is the latest released baseline. The v0.4.0 feature implementation
-and final independent audit are complete; the repository is currently in
-v0.4.0 release preparation.
+v0.4.0 is the latest released baseline. The v0.4.1 Runtime Progress, Activity,
+ETA, and Inactivity Feedback implementation and final independent audit are
+complete; the repository is currently in v0.4.1 release preparation.
 
 ## Setup
 
@@ -38,9 +38,16 @@ serving mode. Missing or invalid monitor/journal configuration does not block
 startup, so it can be repaired through Settings. GUI Run always uses the
 persisted Monitor date policy and exposes no temporary date override.
 
+During an active run, the GUI Run panel shows the humanized `Stage N of 5`,
+current Activity, reliable `current / total` counters when available, elapsed
+time, current-Activity ETA when enough reliable samples exist, and last-activity
+age. `No recent activity` is an advisory rather than a failure, and retrying,
+waiting, or stopped-worker states remain distinct. Runtime state stays
+process-local in the existing coordinator and is presented through HTMX polling.
+
 Paper Markdown remains the durable workflow state. The GUI does not add a
-workflow database, persistent run history, or another source of Paper decision
-state.
+workflow/execution database, persistent run history, heartbeat, SSE, WebSocket,
+queue, or another source of Paper decision state.
 
 ## Run a persistent monitor
 
@@ -55,6 +62,11 @@ policy, and log level from the monitor YAML. It then runs the complete productio
 path: OpenAlex and Crossref retrieval, provider evidence supplementation,
 Semantic Scholar supplementation/discovery, evidence consolidation, local FTS5
 filtering, canonicalization, and Paper / Author / Inbox materialization.
+
+On a TTY, `run` renders the workflow stage, current Activity, reliable counters,
+elapsed time, and current-Activity ETA when available. On a non-TTY, progress is
+plain event lines on `stderr`; existing machine/data output on `stdout` and the
+existing exit-code contract are unchanged.
 
 Discovery windows are publication-date-only. The monitor does not use Crossref
 update-date, created-date, index-date, provider update timestamps, or persisted
@@ -193,6 +205,10 @@ every configured journal Source. OpenAlex supports anonymous Source lookups; set
 or runtime-preflight failures exit with status `2`; OpenAlex Source-resolution
 errors exit with status `1`; warning-only and fully valid validation exit with
 status `0`.
+
+TTY `validate` shows validation-specific progress, including reliable journal
+Source-resolution counts, without presenting the five-stage Run model. Non-TTY
+validation progress uses the same plain `stderr` event-line convention.
 
 `validate` does not request OpenAlex Works, contact Crossref or Semantic
 Scholar, check whether `output_dir` is writable, create a workspace, or
