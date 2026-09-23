@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from literature_monitor.crossref import (
@@ -20,6 +20,12 @@ from literature_monitor.crossref import (
 from literature_monitor.identifiers import normalize_doi
 from literature_monitor.models import ProviderRecordRef, ProviderWorkEvidence
 from literature_monitor.openalex import OpenAlexWorkRecord
+from literature_monitor.progress import (
+    ActivityKind,
+    ActivityUpdate,
+    ProgressCallback,
+    ProgressEvent,
+)
 
 
 @dataclass(frozen=True)
@@ -43,12 +49,21 @@ def _anchor(record: OpenAlexWorkRecord) -> ProviderRecordRef:
     )
 
 
+def _report_activity(
+    callback: ProgressCallback | None,
+    activity: ActivityUpdate,
+) -> None:
+    if callback is not None:
+        callback(ProgressEvent(activity=activity))
+
+
 def assemble_provider_evidence(
     client: CrossrefClient,
     openalex_records: Sequence[OpenAlexWorkRecord],
     discovered_crossref_records: Sequence[CrossrefWorkRecord],
     *,
     retrieved_at: datetime | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> EvidenceRetrievalResult:
     """Attach discovered Crossref evidence and supplement uncovered OA DOIs once."""
 
@@ -86,13 +101,33 @@ def assemble_provider_evidence(
         evidence.append(record.to_evidence(supplements=anchors))
 
     supplements: list[CrossrefWorkRecord] = []
-    for doi in sorted(set(openalex_by_doi) - discovered_dois):
+    pending_dois = tuple(sorted(set(openalex_by_doi) - discovered_dois))
+    total_dois = len(pending_dois)
+    for doi_index, doi in enumerate(pending_dois):
         matching = sorted(
             openalex_by_doi[doi],
             key=lambda item: item.provenance.record_id,
         )
+        activity = ActivityUpdate(
+            kind=ActivityKind.WORKING,
+            source="crossref",
+            operation="doi_supplement",
+            label="Looking up Crossref DOI metadata",
+            detail=f"DOI {doi}",
+            current=doi_index,
+            total=total_dois,
+            unit="doi",
+        )
+        _report_activity(progress_callback, activity)
         try:
-            payload = client.get_work_by_doi(doi)
+            if progress_callback is None:
+                payload = client.get_work_by_doi(doi)
+            else:
+                payload = client.get_work_by_doi(
+                    doi,
+                    progress_callback=progress_callback,
+                    activity=activity,
+                )
             crossref_record, warnings = normalize_crossref_work(
                 payload,
                 doi,
@@ -109,7 +144,6 @@ def assemble_provider_evidence(
                 )
                 for record in matching
             )
-            continue
         except CrossrefRequestError as error:
             issues.extend(
                 EnrichmentIssue(
@@ -121,7 +155,6 @@ def assemble_provider_evidence(
                 )
                 for record in matching
             )
-            continue
         except CrossrefRecordError as error:
             issues.extend(
                 EnrichmentIssue(
@@ -133,20 +166,28 @@ def assemble_provider_evidence(
                 )
                 for record in matching
             )
-            continue
-
-        supplements.append(crossref_record)
-        anchors = tuple(_anchor(record) for record in matching)
-        evidence.append(crossref_record.to_evidence(supplements=anchors))
-        issues.extend(
-            EnrichmentIssue(
-                severity=EnrichmentIssueSeverity.WARNING,
-                stage="field_normalization",
-                record_id=matching[0].provenance.record_id,
-                doi=doi,
-                message=warning,
+        else:
+            supplements.append(crossref_record)
+            anchors = tuple(_anchor(record) for record in matching)
+            evidence.append(crossref_record.to_evidence(supplements=anchors))
+            issues.extend(
+                EnrichmentIssue(
+                    severity=EnrichmentIssueSeverity.WARNING,
+                    stage="field_normalization",
+                    record_id=matching[0].provenance.record_id,
+                    doi=doi,
+                    message=warning,
+                )
+                for warning in warnings
             )
-            for warning in warnings
+        # 成功、not-found、请求失败与记录错误都完成了一个 DOI work unit。
+        _report_activity(
+            progress_callback,
+            replace(
+                activity,
+                label="Completed Crossref DOI lookup",
+                current=doi_index + 1,
+            ),
         )
 
     return EvidenceRetrievalResult(

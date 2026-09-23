@@ -50,7 +50,12 @@ from literature_monitor.openalex import (
     IssueSeverity,
     ResolvedSource,
 )
-from literature_monitor.progress import ProgressEvent
+from literature_monitor.progress import (
+    ActivityKind,
+    ActivityUpdate,
+    ProgressCallback,
+    ProgressEvent,
+)
 from literature_monitor.retrieval import EvidenceRetrievalResult
 from literature_monitor.search import SearchBackendError, SearchExpressionError, SearchableProjection
 from literature_monitor.semantic_scholar import (
@@ -136,6 +141,8 @@ def install_core_mocks(
     semantic_issues: tuple[SemanticScholarIssue, ...] = (),
     consolidation_issues: tuple[CanonicalizationIssue, ...] = (),
     canonicalization_issues: tuple[CanonicalizationIssue, ...] = (),
+    progress_callbacks: list[ProgressCallback | None] | None = None,
+    emit_provider_activity: bool = False,
 ) -> CanonicalPaper:
     oa_record = object()
     cr_record = object()
@@ -151,7 +158,22 @@ def install_core_mocks(
         journals: tuple[JournalConfig, ...],
         from_date: date,
         to_date: date,
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> DiscoveryResult:
+        if progress_callbacks is not None:
+            progress_callbacks.append(progress_callback)
+        if emit_provider_activity and progress_callback is not None:
+            progress_callback(
+                ProgressEvent(
+                    activity=ActivityUpdate(
+                        kind=ActivityKind.WORKING,
+                        source="openalex",
+                        operation="test_openalex",
+                        label="OpenAlex activity",
+                    )
+                )
+            )
         if events is not None:
             events.append("openalex")
         if ranges is not None:
@@ -169,7 +191,22 @@ def install_core_mocks(
         journals: tuple[JournalConfig, ...],
         from_date: date,
         to_date: date,
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> CrossrefDiscoveryResult:
+        if progress_callbacks is not None:
+            progress_callbacks.append(progress_callback)
+        if emit_provider_activity and progress_callback is not None:
+            progress_callback(
+                ProgressEvent(
+                    activity=ActivityUpdate(
+                        kind=ActivityKind.WORKING,
+                        source="crossref",
+                        operation="test_crossref_discovery",
+                        label="Crossref discovery activity",
+                    )
+                )
+            )
         if events is not None:
             events.append("crossref")
         if ranges is not None:
@@ -183,7 +220,22 @@ def install_core_mocks(
         client: object,
         openalex_records: tuple[object, ...],
         crossref_records: tuple[object, ...],
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> EvidenceRetrievalResult:
+        if progress_callbacks is not None:
+            progress_callbacks.append(progress_callback)
+        if emit_provider_activity and progress_callback is not None:
+            progress_callback(
+                ProgressEvent(
+                    activity=ActivityUpdate(
+                        kind=ActivityKind.WORKING,
+                        source="crossref",
+                        operation="test_crossref_supplement",
+                        label="Crossref supplement activity",
+                    )
+                )
+            )
         if events is not None:
             events.append("supplement")
         assert openalex_records == (oa_record,)
@@ -392,6 +444,50 @@ def test_run_monitor_uses_core_materialization_and_progress_contract(
     assert result.updated_papers == 1
     assert result.created_authors == 1
     assert result.existing_authors == 1
+
+
+def test_run_monitor_passes_one_progress_callback_through_provider_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = write_monitor(tmp_path)
+    progress_events: list[ProgressEvent] = []
+    provider_callbacks: list[ProgressCallback | None] = []
+    install_core_mocks(
+        monkeypatch,
+        progress_callbacks=provider_callbacks,
+        emit_provider_activity=True,
+    )
+    monkeypatch.setattr(
+        monitor,
+        "materialize_papers",
+        lambda papers, output_dir: materialization_result(output_dir),
+    )
+
+    def report(event: ProgressEvent) -> None:
+        progress_events.append(event)
+
+    result = run_monitor(config_path, progress_callback=report)
+
+    assert result.outcome is RunOutcome.COMPLETED
+    assert provider_callbacks == [report, report, report]
+    assert [
+        (
+            event.stage,
+            event.activity.source if event.activity is not None else None,
+            event.activity.operation if event.activity is not None else None,
+        )
+        for event in progress_events
+    ] == [
+        (ProgressStage.CHECKING_MONITOR, None, None),
+        (ProgressStage.DISCOVERING_PAPERS, None, None),
+        (None, "openalex", "test_openalex"),
+        (None, "crossref", "test_crossref_discovery"),
+        (ProgressStage.COMBINING_METADATA, None, None),
+        (None, "crossref", "test_crossref_supplement"),
+        (ProgressStage.MATCHING_LITERATURE, None, None),
+        (ProgressStage.UPDATING_WORKSPACE, None, None),
+    ]
 
 
 @pytest.mark.parametrize(

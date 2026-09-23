@@ -8,7 +8,7 @@ import socket
 import time
 import unicodedata
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any
@@ -30,6 +30,12 @@ from literature_monitor.models import (
     MetadataSource,
     NonEmptyStr,
     ProviderWorkEvidence,
+)
+from literature_monitor.progress import (
+    ActivityKind,
+    ActivityUpdate,
+    ProgressCallback,
+    ProgressEvent,
 )
 
 OPENALEX_BASE_URL = "https://api.openalex.org"
@@ -153,6 +159,22 @@ class OpenAlexRecordError(OpenAlexError):
     """One provider record lacks data required for normalization."""
 
 
+def _report_activity(
+    callback: ProgressCallback | None,
+    activity: ActivityUpdate | None,
+) -> None:
+    if callback is not None and activity is not None:
+        callback(ProgressEvent(activity=activity))
+
+
+def _progress_total(value: Any) -> int | None:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        else None
+    )
+
+
 class OpenAlexClient:
     def __init__(
         self,
@@ -169,11 +191,28 @@ class OpenAlexClient:
         self._opener = opener
         self._sleep = sleep
 
-    def get_source_by_issn(self, issn: str) -> dict[str, Any]:
+    def get_source_by_issn(
+        self,
+        issn: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
+        activity: ActivityUpdate | None = None,
+    ) -> dict[str, Any]:
+        if activity is None and progress_callback is not None:
+            activity = ActivityUpdate(
+                kind=ActivityKind.WORKING,
+                source="openalex",
+                operation="source_resolution",
+                label="Resolving OpenAlex source",
+                detail=f"ISSN {issn}",
+                unit="issn",
+            )
         return self._request_json(
             f"/sources/issn:{issn}",
             {"select": SOURCE_FIELDS},
             not_found_message=f"ISSN {issn} is not present in OpenAlex",
+            progress_callback=progress_callback,
+            activity=activity,
         )
 
     def iter_work_pages(
@@ -181,14 +220,51 @@ class OpenAlexClient:
         source_id: str,
         from_date: date,
         to_date: date,
+        *,
+        progress_callback: ProgressCallback | None = None,
+        activity: ActivityUpdate | None = None,
     ) -> Iterator[dict[str, Any]]:
         cursor: str | None = "*"
         seen_cursors: set[str] = set()
         short_source_id = _short_openalex_id(source_id, "S")
+        if activity is None and progress_callback is not None:
+            activity = ActivityUpdate(
+                kind=ActivityKind.WORKING,
+                source="openalex",
+                operation=f"works_discovery:{short_source_id}",
+                label="Discovering OpenAlex works",
+                detail=f"Source {short_source_id}",
+                current=0,
+                unit="work",
+            )
+        current = (
+            activity.current
+            if activity is not None and activity.current is not None
+            else 0
+        )
+        total = activity.total if activity is not None else None
+        activity_detail = activity.detail if activity is not None else None
+        page_number = 0
+        _report_activity(progress_callback, activity)
         while cursor is not None:
             if cursor in seen_cursors:
                 raise OpenAlexRequestError("OpenAlex returned a repeated cursor")
             seen_cursors.add(cursor)
+            page_number += 1
+            request_activity = (
+                replace(
+                    activity,
+                    current=current,
+                    total=total,
+                    detail=(
+                        f"{activity_detail} · page {page_number}"
+                        if activity_detail
+                        else f"page {page_number}"
+                    ),
+                )
+                if activity is not None
+                else None
+            )
             payload = self._request_json(
                 "/works",
                 {
@@ -201,6 +277,8 @@ class OpenAlexClient:
                     "per_page": "100",
                     "cursor": cursor,
                 },
+                progress_callback=progress_callback,
+                activity=request_activity,
             )
             results = payload.get("results")
             meta = payload.get("meta")
@@ -209,8 +287,39 @@ class OpenAlexClient:
             next_cursor = meta.get("next_cursor")
             if next_cursor is not None and not isinstance(next_cursor, str):
                 raise OpenAlexRequestError("OpenAlex Works response has an invalid next_cursor")
+            page_current = current + len(results)
+            response_total = _progress_total(meta.get("count"))
+            if response_total is not None and response_total >= page_current:
+                total = response_total
+            elif total is not None and total < page_current:
+                total = None
+            current = page_current
+            if activity is not None:
+                activity = replace(
+                    activity,
+                    kind=ActivityKind.WORKING,
+                    label="Retrieved OpenAlex page",
+                    detail=(
+                        f"{activity_detail} · page {page_number}"
+                        if activity_detail
+                        else f"page {page_number}"
+                    ),
+                    current=current,
+                    total=total,
+                )
+                _report_activity(progress_callback, activity)
             yield payload
             cursor = next_cursor
+        if activity is not None:
+            _report_activity(
+                progress_callback,
+                replace(
+                    activity,
+                    label="Completed OpenAlex journal discovery",
+                    current=current,
+                    total=total,
+                ),
+            )
 
     def _request_json(
         self,
@@ -218,6 +327,8 @@ class OpenAlexClient:
         params: dict[str, str],
         *,
         not_found_message: str | None = None,
+        progress_callback: ProgressCallback | None = None,
+        activity: ActivityUpdate | None = None,
     ) -> dict[str, Any]:
         url = f"{self.base_url}{path}?{urlencode(params)}"
         headers = {
@@ -229,24 +340,86 @@ class OpenAlexClient:
         request = Request(url, headers=headers)
 
         for attempt in range(3):
+            attempt_number = attempt + 1
+            if activity is not None:
+                _report_activity(
+                    progress_callback,
+                    replace(
+                        activity,
+                        kind=ActivityKind.WORKING,
+                        label="Requesting OpenAlex",
+                        detail=(
+                            f"{activity.detail} · attempt {attempt_number}/3"
+                            if activity.detail
+                            else f"attempt {attempt_number}/3"
+                        ),
+                    ),
+                )
             try:
                 with self._opener(request, timeout=self.timeout) as response:
                     payload = json.loads(response.read())
                 if not isinstance(payload, dict):
                     raise OpenAlexRequestError("OpenAlex returned a non-object JSON response")
+                if activity is not None:
+                    _report_activity(
+                        progress_callback,
+                        replace(
+                            activity,
+                            kind=ActivityKind.WORKING,
+                            label="Received OpenAlex response",
+                            detail=(
+                                f"{activity.detail} · attempt {attempt_number}/3"
+                                if activity.detail
+                                else f"attempt {attempt_number}/3"
+                            ),
+                        ),
+                    )
                 return payload
             except HTTPError as error:
                 if error.code == 404 and not_found_message is not None:
                     raise OpenAlexNotFoundError(not_found_message) from error
                 if (error.code == 429 or error.code >= 500) and attempt < 2:
-                    self._sleep(2**attempt)
+                    delay = 2**attempt
+                    if activity is not None:
+                        # retry 事件必须先于 sleep，避免 backoff 被误判成无活动。
+                        _report_activity(
+                            progress_callback,
+                            replace(
+                                activity,
+                                kind=ActivityKind.RETRYING,
+                                label="Retrying OpenAlex request",
+                                detail=(
+                                    f"{activity.detail} · HTTP {error.code} · "
+                                    f"backoff {delay}s"
+                                    if activity.detail
+                                    else f"HTTP {error.code} · backoff {delay}s"
+                                ),
+                            ),
+                        )
+                    self._sleep(delay)
                     continue
                 raise OpenAlexRequestError(
                     f"OpenAlex request failed with HTTP {error.code}"
                 ) from error
             except (TimeoutError, socket.timeout, URLError) as error:
                 if attempt < 2:
-                    self._sleep(2**attempt)
+                    delay = 2**attempt
+                    if activity is not None:
+                        _report_activity(
+                            progress_callback,
+                            replace(
+                                activity,
+                                kind=ActivityKind.RETRYING,
+                                label="Retrying OpenAlex request",
+                                detail=(
+                                    f"{activity.detail} · transport failure · "
+                                    f"backoff {delay}s"
+                                    if activity.detail
+                                    else f"transport failure · backoff {delay}s"
+                                ),
+                            ),
+                        )
+                    self._sleep(delay)
                     continue
                 raise OpenAlexRequestError(f"OpenAlex request failed: {error}") from error
             except (json.JSONDecodeError, UnicodeDecodeError) as error:
@@ -346,26 +519,71 @@ def _journal_name_matches(journal_name: str, source: _SourceHit) -> bool:
 def resolve_journal_source(
     client: OpenAlexClient,
     journal: JournalConfig,
+    *,
+    progress_callback: ProgressCallback | None = None,
+    operation: str | None = None,
 ) -> tuple[ResolvedSource | None, tuple[DiscoveryIssue, ...]]:
     hits: list[_SourceHit] = []
     unresolved: list[str] = []
     request_failures: list[tuple[str, str]] = []
     source_validation_failures: list[tuple[str, str]] = []
     issues: list[DiscoveryIssue] = []
+    operation = operation or f"source_resolution:{_normalized_journal_name(journal.name)}"
+    total_issns = len(journal.issn)
 
-    for issn in journal.issn:
+    for issn_index, issn in enumerate(journal.issn):
+        activity = ActivityUpdate(
+            kind=ActivityKind.WORKING,
+            source="openalex",
+            operation=operation,
+            label="Resolving OpenAlex journal source",
+            detail=f"{journal.name} · ISSN {issn}",
+            current=issn_index,
+            total=total_issns,
+            unit="issn",
+        )
+        _report_activity(progress_callback, activity)
         try:
-            payload = client.get_source_by_issn(issn)
+            if progress_callback is None:
+                payload = client.get_source_by_issn(issn)
+            else:
+                payload = client.get_source_by_issn(
+                    issn,
+                    progress_callback=progress_callback,
+                    activity=activity,
+                )
         except OpenAlexNotFoundError:
             unresolved.append(issn)
-            continue
         except OpenAlexRequestError as error:
             request_failures.append((issn, str(error)))
-            continue
-        try:
-            hits.append(_parse_source(payload, issn))
-        except OpenAlexRecordError as error:
-            source_validation_failures.append((issn, str(error)))
+        else:
+            try:
+                hits.append(_parse_source(payload, issn))
+            except OpenAlexRecordError as error:
+                source_validation_failures.append((issn, str(error)))
+        _report_activity(
+            progress_callback,
+            replace(
+                activity,
+                label="Checked OpenAlex ISSN",
+                current=issn_index + 1,
+            ),
+        )
+
+    if journal.issn:
+        _report_activity(
+            progress_callback,
+            ActivityUpdate(
+                kind=ActivityKind.WORKING,
+                source="openalex",
+                operation=operation,
+                label="Completed OpenAlex source resolution",
+                detail=journal.name,
+                current=total_issns,
+                total=total_issns,
+                unit="issn",
+            ),
+        )
 
     if not hits:
         details: list[str] = []
@@ -683,6 +901,7 @@ def discover_journals(
     to_date: date,
     *,
     retrieved_at: datetime | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> DiscoveryResult:
     if from_date > to_date:
         raise ValueError("from_date must not be after to_date")
@@ -696,13 +915,38 @@ def discover_journals(
     issues: list[DiscoveryIssue] = []
 
     for journal_index, journal in enumerate(journals):
-        source, resolution_issues = resolve_journal_source(client, journal)
+        source, resolution_issues = resolve_journal_source(
+            client,
+            journal,
+            progress_callback=progress_callback,
+            operation=f"source_resolution:{journal_index}",
+        )
         issues.extend(resolution_issues)
         if source is None:
             continue
         sources.append(source)
+        activity = ActivityUpdate(
+            kind=ActivityKind.WORKING,
+            source="openalex",
+            operation=f"works_discovery:{journal_index}",
+            label="Discovering OpenAlex works",
+            detail=journal.name,
+            current=0,
+            total=None,
+            unit="work",
+        )
         try:
-            for page in client.iter_work_pages(source.openalex_id, from_date, to_date):
+            if progress_callback is None:
+                pages = client.iter_work_pages(source.openalex_id, from_date, to_date)
+            else:
+                pages = client.iter_work_pages(
+                    source.openalex_id,
+                    from_date,
+                    to_date,
+                    progress_callback=progress_callback,
+                    activity=activity,
+                )
+            for page in pages:
                 for payload in page["results"]:
                     record_id = payload.get("id") if isinstance(payload, dict) else None
                     try:

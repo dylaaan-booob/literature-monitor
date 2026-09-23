@@ -25,6 +25,7 @@ from literature_monitor.openalex import (
     discover_journals,
     resolve_journal_source,
 )
+from literature_monitor.progress import ActivityKind, ActivityUpdate, ProgressEvent
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "openalex"
@@ -290,6 +291,64 @@ def test_connection_retries_use_injected_backoff_without_real_sleep() -> None:
     assert len(opener.requests) == 3
 
 
+@pytest.mark.parametrize(
+    "transient_failure",
+    (http_error(429), http_error(500), TimeoutError("timed out")),
+)
+def test_request_progress_reports_retry_before_backoff_and_success(
+    transient_failure: Exception,
+) -> None:
+    trace: list[tuple[str, object]] = []
+    opener = SequenceOpener(transient_failure, fixture("source_biometrics.json"))
+
+    def report(event: ProgressEvent) -> None:
+        assert event.activity is not None
+        trace.append(("activity", event.activity))
+
+    def sleep(delay: float) -> None:
+        trace.append(("sleep", delay))
+
+    client = OpenAlexClient(opener=opener, sleep=sleep)
+    activity = ActivityUpdate(
+        kind=ActivityKind.WORKING,
+        source="openalex",
+        operation="source_resolution:0",
+        label="Resolving OpenAlex journal source",
+        detail="Biometrics · ISSN 0006-341X",
+        current=0,
+        total=1,
+        unit="issn",
+    )
+
+    payload = client.get_source_by_issn(
+        "0006-341X",
+        progress_callback=report,
+        activity=activity,
+    )
+
+    assert payload["id"] == "https://openalex.org/S8265502"
+    assert len(opener.requests) == 2
+    assert [kind for kind, _ in trace] == [
+        "activity",
+        "activity",
+        "sleep",
+        "activity",
+        "activity",
+    ]
+    request, retry, (_sleep_kind, delay), request_again, response = trace
+    assert request[1].label == "Requesting OpenAlex"
+    assert retry[1].kind is ActivityKind.RETRYING
+    assert delay == 1
+    assert request_again[1].label == "Requesting OpenAlex"
+    assert response[1].label == "Received OpenAlex response"
+    identities = {
+        (item.source, item.operation, item.unit, item.current, item.total)
+        for kind, item in trace
+        if kind == "activity"
+    }
+    assert identities == {("openalex", "source_resolution:0", "issn", 0, 1)}
+
+
 def test_non_retryable_client_error_is_not_retried() -> None:
     client, opener = make_client(http_error(400))
 
@@ -352,6 +411,72 @@ def test_discovery_pages_normalizes_records_and_builds_venue_first_query() -> No
         "search" not in parse_qs(urlparse(request.full_url).query)
         for request in work_requests
     )
+
+
+def test_source_resolution_and_discovery_report_natural_progress_without_extra_requests() -> None:
+    client, opener = make_client(
+        fixture("source_biometrics.json"),
+        fixture("works_page_1.json"),
+        fixture("works_page_2.json"),
+    )
+    events: list[ProgressEvent] = []
+
+    result = discover_journals(
+        client,
+        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        date(2026, 1, 1),
+        date(2026, 9, 18),
+        progress_callback=events.append,
+    )
+
+    assert not result.has_errors
+    assert len(opener.requests) == 3
+    activities = [event.activity for event in events if event.activity is not None]
+    source_checks = [
+        item for item in activities if item.label == "Checked OpenAlex ISSN"
+    ]
+    assert [(item.current, item.total) for item in source_checks] == [(1, 1)]
+
+    works = [item for item in activities if item.operation == "works_discovery:0"]
+    assert works[0].label == "Discovering OpenAlex works"
+    assert (works[0].current, works[0].total) == (0, None)
+    first_request = next(item for item in works if item.label == "Requesting OpenAlex")
+    assert (first_request.current, first_request.total) == (0, None)
+    pages = [item for item in works if item.label == "Retrieved OpenAlex page"]
+    assert [(item.current, item.total) for item in pages] == [(1, 2), (2, 2)]
+    assert works[-1].label == "Completed OpenAlex journal discovery"
+    assert (works[-1].current, works[-1].total) == (2, 2)
+
+
+@pytest.mark.parametrize("count", (None, "2", -1, 0, True))
+def test_discovery_unusable_meta_count_stays_indeterminate(count: object) -> None:
+    page = deepcopy(fixture("works_page_1.json"))
+    page["meta"]["next_cursor"] = None
+    if count is None:
+        page["meta"].pop("count", None)
+    else:
+        page["meta"]["count"] = count
+    client, opener = make_client(fixture("source_biometrics.json"), page)
+    events: list[ProgressEvent] = []
+
+    result = discover_journals(
+        client,
+        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        progress_callback=events.append,
+    )
+
+    assert not result.has_errors
+    assert len(opener.requests) == 2
+    works = [
+        event.activity
+        for event in events
+        if event.activity is not None
+        and event.activity.operation == "works_discovery:0"
+    ]
+    assert works
+    assert all(item.total is None for item in works)
 
 
 def test_normalization_preserves_inline_location_version_hints() -> None:

@@ -32,6 +32,7 @@ from literature_monitor.models import (
     ProviderRecordRef,
 )
 from literature_monitor.openalex import OpenAlexWorkRecord
+from literature_monitor.progress import ActivityKind, ActivityUpdate, ProgressEvent
 from literature_monitor.retrieval import assemble_provider_evidence
 
 
@@ -99,11 +100,19 @@ def payload_for(doi: str) -> dict[str, Any]:
     return payload
 
 
-def list_payload(items: list[object], cursor: object = "next") -> dict[str, Any]:
+def list_payload(
+    items: list[object],
+    cursor: object = "next",
+    *,
+    total_results: object = None,
+) -> dict[str, Any]:
+    message: dict[str, object] = {"items": items, "next-cursor": cursor}
+    if total_results is not None:
+        message["total-results"] = total_results
     return {
         "status": "ok",
         "message-type": "work-list",
-        "message": {"items": items, "next-cursor": cursor},
+        "message": message,
     }
 
 
@@ -227,6 +236,67 @@ def test_client_retries_transient_failures(outcome: Exception) -> None:
     assert client.get_work_by_doi("10.5555/retry")["status"] == "ok"
     assert delays == [1, 2]
     assert len(opener.requests) == 3
+
+
+@pytest.mark.parametrize(
+    "transient_failure",
+    (http_error(429), http_error(500), TimeoutError("timed out")),
+)
+def test_client_progress_reports_retry_before_backoff_and_success(
+    transient_failure: Exception,
+) -> None:
+    trace: list[tuple[str, object]] = []
+    opener = SequenceOpener(
+        transient_failure,
+        payload_for("10.5555/retry-progress"),
+    )
+
+    def report(event: ProgressEvent) -> None:
+        assert event.activity is not None
+        trace.append(("activity", event.activity))
+
+    def sleep(delay: float) -> None:
+        trace.append(("sleep", delay))
+
+    client = CrossrefClient(opener=opener, sleep=sleep)
+    activity = ActivityUpdate(
+        kind=ActivityKind.WORKING,
+        source="crossref",
+        operation="doi_supplement",
+        label="Looking up Crossref DOI metadata",
+        detail="DOI 10.5555/retry-progress",
+        current=2,
+        total=5,
+        unit="doi",
+    )
+
+    response = client.get_work_by_doi(
+        "10.5555/retry-progress",
+        progress_callback=report,
+        activity=activity,
+    )
+
+    assert response["status"] == "ok"
+    assert len(opener.requests) == 2
+    assert [kind for kind, _ in trace] == [
+        "activity",
+        "activity",
+        "sleep",
+        "activity",
+        "activity",
+    ]
+    request, retry, (_sleep_kind, delay), request_again, response_event = trace
+    assert request[1].label == "Requesting Crossref"
+    assert retry[1].kind is ActivityKind.RETRYING
+    assert delay == 1
+    assert request_again[1].label == "Requesting Crossref"
+    assert response_event[1].label == "Received Crossref response"
+    identities = {
+        (item.source, item.operation, item.unit, item.current, item.total)
+        for kind, item in trace
+        if kind == "activity"
+    }
+    assert identities == {("crossref", "doi_supplement", "doi", 2, 5)}
 
 
 def test_client_distinguishes_not_found_from_request_failure() -> None:
@@ -444,6 +514,78 @@ def test_discovery_uses_alternate_issn_after_not_found() -> None:
     assert not result.has_errors
 
 
+def test_discovery_progress_uses_total_results_without_extra_request() -> None:
+    first = discovered_message("10.5555/first", issns=["0006-341X"])
+    second = discovered_message("10.5555/second", issns=["0006-341X"])
+    opener = SequenceOpener(list_payload([first, second], total_results=2))
+    client = CrossrefClient(opener=opener, sleep=lambda _: None)
+    events: list[ProgressEvent] = []
+
+    result = discover_crossref_journals(
+        client,
+        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        progress_callback=events.append,
+    )
+
+    assert [record.doi for record in result.records] == [
+        "10.5555/first",
+        "10.5555/second",
+    ]
+    assert len(opener.requests) == 1
+    activities = [event.activity for event in events if event.activity is not None]
+    issn_activity = [
+        item
+        for item in activities
+        if item.operation == "journal_discovery:0:0"
+    ]
+    assert (issn_activity[0].current, issn_activity[0].total) == (0, None)
+    page = next(
+        item for item in issn_activity if item.label == "Retrieved Crossref page"
+    )
+    assert (page.current, page.total) == (2, 2)
+    assert issn_activity[-1].label == "Completed Crossref ISSN discovery"
+    assert (issn_activity[-1].current, issn_activity[-1].total) == (2, 2)
+    journal = next(
+        item
+        for item in activities
+        if item.label == "Completed Crossref journal discovery"
+    )
+    assert (journal.current, journal.total, journal.unit) == (1, 1, "issn")
+
+
+@pytest.mark.parametrize("total_results", (None, "2", -1, 0, True))
+def test_discovery_unusable_total_results_stays_indeterminate(
+    total_results: object,
+) -> None:
+    item = discovered_message("10.5555/indeterminate", issns=["0006-341X"])
+    opener = SequenceOpener(
+        list_payload([item], total_results=total_results)
+    )
+    client = CrossrefClient(opener=opener, sleep=lambda _: None)
+    events: list[ProgressEvent] = []
+
+    result = discover_crossref_journals(
+        client,
+        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        progress_callback=events.append,
+    )
+
+    assert not result.has_errors
+    assert len(opener.requests) == 1
+    issn_activity = [
+        event.activity
+        for event in events
+        if event.activity is not None
+        and event.activity.operation == "journal_discovery:0:0"
+    ]
+    assert issn_activity
+    assert all(item.total is None for item in issn_activity)
+
+
 def test_discovery_skips_malformed_item_without_discarding_valid_peer() -> None:
     valid = discovered_message("10.5555/valid-peer", issns=["0006-341X"])
     client = JournalDiscoveryClient(
@@ -550,6 +692,77 @@ def test_doi_gap_supplementation_fetches_shared_doi_once() -> None:
         item for item in result.evidence if item.provenance.provider == "crossref"
     )
     assert len(crossref_evidence.supplements) == 2
+
+
+def test_doi_supplement_progress_has_exact_total_and_completes_every_work_unit() -> None:
+    opener = SequenceOpener(
+        payload_for("10.5555/a"),
+        http_error(404),
+        http_error(500),
+        payload_for("10.5555/c"),
+        http_error(400),
+        payload_for("10.5555/not-e"),
+    )
+    client = CrossrefClient(opener=opener, sleep=lambda _: None)
+    events: list[ProgressEvent] = []
+
+    result = assemble_provider_evidence(
+        client,
+        (
+            openalex_record("W1", "10.5555/a"),
+            openalex_record("W2", "10.5555/a"),
+            openalex_record("W3", "10.5555/b"),
+            openalex_record("W4", "10.5555/c"),
+            openalex_record("W5", "10.5555/d"),
+            openalex_record("W6", "10.5555/e"),
+        ),
+        (),
+        progress_callback=events.append,
+    )
+
+    assert len(opener.requests) == 6
+    assert [record.doi for record in result.supplement_records] == [
+        "10.5555/a",
+        "10.5555/c",
+    ]
+    completed = [
+        event.activity
+        for event in events
+        if event.activity is not None
+        and event.activity.label == "Completed Crossref DOI lookup"
+    ]
+    assert [(item.current, item.total, item.unit) for item in completed] == [
+        (1, 5, "doi"),
+        (2, 5, "doi"),
+        (3, 5, "doi"),
+        (4, 5, "doi"),
+        (5, 5, "doi"),
+    ]
+    request_activity = [
+        event.activity
+        for event in events
+        if event.activity is not None
+        and event.activity.label
+        in {
+            "Requesting Crossref",
+            "Retrying Crossref request",
+            "Received Crossref response",
+        }
+    ]
+    assert request_activity
+    assert {
+        (item.source, item.operation, item.unit, item.total)
+        for item in request_activity
+    } == {("crossref", "doi_supplement", "doi", 5)}
+    retry = next(
+        item for item in request_activity if item.kind is ActivityKind.RETRYING
+    )
+    assert retry.current == 2
+    assert {issue.stage for issue in result.issues} >= {
+        "not_found",
+        "record_normalization",
+        "request_failure",
+    }
 
 
 def test_partial_dates_preserve_provider_order_without_fabricating_components() -> None:

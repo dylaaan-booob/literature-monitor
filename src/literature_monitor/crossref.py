@@ -8,7 +8,7 @@ import socket
 import time
 import unicodedata
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from enum import Enum
 from html.parser import HTMLParser
@@ -34,6 +34,12 @@ from literature_monitor.models import (
     ProviderWorkEvidence,
 )
 from literature_monitor.openalex import OpenAlexWorkRecord
+from literature_monitor.progress import (
+    ActivityKind,
+    ActivityUpdate,
+    ProgressCallback,
+    ProgressEvent,
+)
 
 CROSSREF_BASE_URL = "https://api.crossref.org"
 CROSSREF_PAGE_SIZE = 100
@@ -211,6 +217,22 @@ class CrossrefRecordError(CrossrefError):
     """A Crossref record cannot be normalized safely."""
 
 
+def _report_activity(
+    callback: ProgressCallback | None,
+    activity: ActivityUpdate | None,
+) -> None:
+    if callback is not None and activity is not None:
+        callback(ProgressEvent(activity=activity))
+
+
+def _progress_total(value: Any) -> int | None:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        else None
+    )
+
+
 class CrossrefClient:
     def __init__(
         self,
@@ -227,7 +249,13 @@ class CrossrefClient:
         self._opener = opener
         self._sleep = sleep
 
-    def get_work_by_doi(self, doi: str) -> dict[str, Any]:
+    def get_work_by_doi(
+        self,
+        doi: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
+        activity: ActivityUpdate | None = None,
+    ) -> dict[str, Any]:
         try:
             normalized_doi = normalize_doi(doi)
         except ValueError as error:
@@ -235,12 +263,23 @@ class CrossrefClient:
         if normalized_doi is None:
             raise CrossrefRecordError("missing requested DOI")
 
+        if activity is None and progress_callback is not None:
+            activity = ActivityUpdate(
+                kind=ActivityKind.WORKING,
+                source="crossref",
+                operation="doi_lookup",
+                label="Looking up Crossref DOI",
+                detail=f"DOI {normalized_doi}",
+                unit="doi",
+            )
         return self._request_json(
             f"/v1/works/{quote(normalized_doi, safe='')}",
             {},
             not_found_message=(
                 f"DOI {normalized_doi} is not present in Crossref"
             ),
+            progress_callback=progress_callback,
+            activity=activity,
         )
 
     def iter_journal_work_pages(
@@ -250,17 +289,53 @@ class CrossrefClient:
         to_date: date,
         *,
         rows: int = CROSSREF_PAGE_SIZE,
+        progress_callback: ProgressCallback | None = None,
+        activity: ActivityUpdate | None = None,
     ) -> Iterator[dict[str, Any]]:
         if from_date > to_date:
             raise ValueError("from_date must not be after to_date")
         if rows < 1:
             raise ValueError("rows must be positive")
+        if activity is None and progress_callback is not None:
+            activity = ActivityUpdate(
+                kind=ActivityKind.WORKING,
+                source="crossref",
+                operation=f"journal_discovery:{issn}",
+                label="Discovering Crossref works",
+                detail=f"ISSN {issn}",
+                current=0,
+                unit="work",
+            )
         cursor = "*"
         seen_cursors: set[str] = set()
+        current = (
+            activity.current
+            if activity is not None and activity.current is not None
+            else 0
+        )
+        total = activity.total if activity is not None else None
+        activity_detail = activity.detail if activity is not None else None
+        page_number = 0
+        _report_activity(progress_callback, activity)
         while True:
             if cursor in seen_cursors:
                 raise CrossrefRequestError("Crossref returned a repeated cursor")
             seen_cursors.add(cursor)
+            page_number += 1
+            request_activity = (
+                replace(
+                    activity,
+                    current=current,
+                    total=total,
+                    detail=(
+                        f"{activity_detail} · page {page_number}"
+                        if activity_detail
+                        else f"page {page_number}"
+                    ),
+                )
+                if activity is not None
+                else None
+            )
             payload = self._request_json(
                 f"/v1/journals/{quote(issn, safe='')}/works",
                 {
@@ -272,6 +347,8 @@ class CrossrefClient:
                     "cursor": cursor,
                 },
                 not_found_message=f"ISSN {issn} is not present in Crossref",
+                progress_callback=progress_callback,
+                activity=request_activity,
             )
             if (
                 payload.get("status") != "ok"
@@ -290,8 +367,39 @@ class CrossrefClient:
                 raise CrossrefRequestError(
                     "Crossref journal response lacks a valid items list"
                 )
+            page_current = current + len(items)
+            response_total = _progress_total(message.get("total-results"))
+            if response_total is not None and response_total >= page_current:
+                total = response_total
+            elif total is not None and total < page_current:
+                total = None
+            current = page_current
+            if activity is not None:
+                activity = replace(
+                    activity,
+                    kind=ActivityKind.WORKING,
+                    label="Retrieved Crossref page",
+                    detail=(
+                        f"{activity_detail} · page {page_number}"
+                        if activity_detail
+                        else f"page {page_number}"
+                    ),
+                    current=current,
+                    total=total,
+                )
+                _report_activity(progress_callback, activity)
             yield payload
             if len(items) < rows:
+                if activity is not None:
+                    _report_activity(
+                        progress_callback,
+                        replace(
+                            activity,
+                            label="Completed Crossref ISSN discovery",
+                            current=current,
+                            total=total,
+                        ),
+                    )
                 return
             next_cursor = message.get("next-cursor")
             if not isinstance(next_cursor, str) or not next_cursor:
@@ -306,6 +414,8 @@ class CrossrefClient:
         params: dict[str, str],
         *,
         not_found_message: str | None = None,
+        progress_callback: ProgressCallback | None = None,
+        activity: ActivityUpdate | None = None,
     ) -> dict[str, Any]:
         query = dict(params)
         if self.mailto is not None:
@@ -322,6 +432,21 @@ class CrossrefClient:
         )
 
         for attempt in range(3):
+            attempt_number = attempt + 1
+            if activity is not None:
+                _report_activity(
+                    progress_callback,
+                    replace(
+                        activity,
+                        kind=ActivityKind.WORKING,
+                        label="Requesting Crossref",
+                        detail=(
+                            f"{activity.detail} · attempt {attempt_number}/3"
+                            if activity.detail
+                            else f"attempt {attempt_number}/3"
+                        ),
+                    ),
+                )
             try:
                 with self._opener(request, timeout=self.timeout) as response:
                     payload = json.loads(response.read())
@@ -329,19 +454,66 @@ class CrossrefClient:
                     raise CrossrefRequestError(
                         "Crossref returned a non-object JSON response"
                     )
+                if activity is not None:
+                    _report_activity(
+                        progress_callback,
+                        replace(
+                            activity,
+                            kind=ActivityKind.WORKING,
+                            label="Received Crossref response",
+                            detail=(
+                                f"{activity.detail} · attempt {attempt_number}/3"
+                                if activity.detail
+                                else f"attempt {attempt_number}/3"
+                            ),
+                        ),
+                    )
                 return payload
             except HTTPError as error:
                 if error.code == 404 and not_found_message is not None:
                     raise CrossrefNotFoundError(not_found_message) from error
                 if (error.code == 429 or error.code >= 500) and attempt < 2:
-                    self._sleep(2**attempt)
+                    delay = 2**attempt
+                    if activity is not None:
+                        # retry 事件先于 backoff，且沿用所属 ISSN/DOI activity identity。
+                        _report_activity(
+                            progress_callback,
+                            replace(
+                                activity,
+                                kind=ActivityKind.RETRYING,
+                                label="Retrying Crossref request",
+                                detail=(
+                                    f"{activity.detail} · HTTP {error.code} · "
+                                    f"backoff {delay}s"
+                                    if activity.detail
+                                    else f"HTTP {error.code} · backoff {delay}s"
+                                ),
+                            ),
+                        )
+                    self._sleep(delay)
                     continue
                 raise CrossrefRequestError(
                     f"Crossref request failed with HTTP {error.code}"
                 ) from error
             except (TimeoutError, socket.timeout, URLError, OSError) as error:
                 if attempt < 2:
-                    self._sleep(2**attempt)
+                    delay = 2**attempt
+                    if activity is not None:
+                        _report_activity(
+                            progress_callback,
+                            replace(
+                                activity,
+                                kind=ActivityKind.RETRYING,
+                                label="Retrying Crossref request",
+                                detail=(
+                                    f"{activity.detail} · transport failure · "
+                                    f"backoff {delay}s"
+                                    if activity.detail
+                                    else f"transport failure · backoff {delay}s"
+                                ),
+                            ),
+                        )
+                    self._sleep(delay)
                     continue
                 raise CrossrefRequestError(
                     f"Crossref request failed: {error}"
@@ -772,6 +944,7 @@ def discover_crossref_journals(
     to_date: date,
     *,
     retrieved_at: datetime | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> CrossrefDiscoveryResult:
     if from_date > to_date:
         raise ValueError("from_date must not be after to_date")
@@ -784,8 +957,27 @@ def discover_crossref_journals(
     issues: list[CrossrefDiscoveryIssue] = []
     for journal_index, journal in enumerate(journals):
         for issn_index, issn in enumerate(journal.issn):
+            activity = ActivityUpdate(
+                kind=ActivityKind.WORKING,
+                source="crossref",
+                operation=f"journal_discovery:{journal_index}:{issn_index}",
+                label="Discovering Crossref works",
+                detail=f"{journal.name} · ISSN {issn}",
+                current=0,
+                total=None,
+                unit="work",
+            )
             try:
-                pages = client.iter_journal_work_pages(issn, from_date, to_date)
+                if progress_callback is None:
+                    pages = client.iter_journal_work_pages(issn, from_date, to_date)
+                else:
+                    pages = client.iter_journal_work_pages(
+                        issn,
+                        from_date,
+                        to_date,
+                        progress_callback=progress_callback,
+                        activity=activity,
+                    )
                 for page in pages:
                     message = page["message"]
                     for item in message["items"]:
@@ -861,6 +1053,20 @@ def discover_crossref_journals(
                         message=str(error),
                     )
                 )
+        if journal.issn:
+            _report_activity(
+                progress_callback,
+                ActivityUpdate(
+                    kind=ActivityKind.WORKING,
+                    source="crossref",
+                    operation=f"journal_completion:{journal_index}",
+                    label="Completed Crossref journal discovery",
+                    detail=journal.name,
+                    current=len(journal.issn),
+                    total=len(journal.issn),
+                    unit="issn",
+                ),
+            )
 
     records.sort(
         key=lambda item: (

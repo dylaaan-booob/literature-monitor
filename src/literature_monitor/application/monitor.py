@@ -501,12 +501,14 @@ def _run_canonical_core(
         prepared.journals,
         prepared.resolved_date_range.from_date,
         prepared.resolved_date_range.to_date,
+        progress_callback=progress_callback,
     )
     crossref = discover_crossref_journals(
         crossref_client,
         prepared.journals,
         prepared.resolved_date_range.from_date,
         prepared.resolved_date_range.to_date,
+        progress_callback=progress_callback,
     )
 
     _emit_progress(progress_callback, ProgressStage.COMBINING_METADATA)
@@ -514,6 +516,7 @@ def _run_canonical_core(
         crossref_client,
         openalex.records,
         crossref.records,
+        progress_callback=progress_callback,
     )
     semantic_scholar_client = create_semantic_scholar_client(
         os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
