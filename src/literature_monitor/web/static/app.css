@@ -50,8 +50,78 @@ button:disabled {
 
 .run-status {
   display: grid;
-  gap: .1rem;
+  gap: .3rem;
   font-size: .85rem;
+  min-width: min(28rem, 80vw);
+}
+
+.run-status-stopped {
+  color: #8f2f2f;
+}
+
+.stage-position,
+.stage-label,
+.activity-source,
+.activity-counter {
+  font-weight: 650;
+}
+
+.stage-indicator {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(1.5rem, 1fr));
+  gap: .2rem;
+}
+
+.stage-segment {
+  height: .35rem;
+  border-radius: 999px;
+  background: #d9dde3;
+}
+
+.stage-segment.complete {
+  background: #7f9fbe;
+}
+
+.stage-segment.current {
+  background: #1f5f9f;
+}
+
+.activity-card {
+  display: grid;
+  gap: .2rem;
+  padding: .45rem .55rem;
+  border: 1px solid #d9dde3;
+  border-radius: .4rem;
+  background: #f9fafb;
+}
+
+.activity-heading,
+.run-timing {
+  display: flex;
+  gap: .55rem;
+  flex-wrap: wrap;
+  color: #5d6775;
+}
+
+.activity-state {
+  font-weight: 700;
+  color: #8a6500;
+}
+
+.activity-progress {
+  width: 100%;
+  height: .55rem;
+}
+
+.run-advisory {
+  border-radius: .35rem;
+  padding: .35rem .5rem;
+}
+
+.run-advisory.warning {
+  background: #fff8dc;
+  border: 1px solid #dbc976;
+  color: #6f5500;
 }
 
 .run-message {
@@ -61,6 +131,18 @@ button:disabled {
 
 .run-message.error {
   color: #9a3030;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .brand {

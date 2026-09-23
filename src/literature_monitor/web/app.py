@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID
@@ -46,6 +47,7 @@ from literature_monitor.web.run_coordinator import (
     StartOutcome,
     StartResult,
 )
+from literature_monitor.web.run_presentation import build_run_presentation
 from literature_monitor.web.settings_form import (
     SettingsFormValues,
     settings_draft_from_form,
@@ -65,6 +67,10 @@ _VIEW_ATTRIBUTES = {
 }
 
 templates = Jinja2Templates(directory=_TEMPLATES_DIR)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _csrf_valid(submitted_csrf: str | None, csrf_token: str) -> bool:
@@ -170,6 +176,7 @@ def _run_context(
         "request": request,
         "csrf_token": csrf_token,
         "run_snapshot": snapshot,
+        "run_progress": build_run_presentation(snapshot, now=_utc_now()),
         "run_start_result": start_result,
     }
 

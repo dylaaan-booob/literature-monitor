@@ -1,5 +1,6 @@
 (() => {
   let settingsDirty = false;
+  let lastRunAnnouncementKey = null;
 
   function setSettingsDirty(value) {
     settingsDirty = value;
@@ -8,6 +9,24 @@
 
   function isSettingsField(target) {
     return target instanceof Element && target.closest("form[data-settings-form]");
+  }
+
+  function syncRunAnnouncement() {
+    const panel = document.getElementById("run-panel");
+    const announcer = document.getElementById("run-live-announcer");
+    if (!(panel instanceof HTMLElement) || !(announcer instanceof HTMLElement)) {
+      return;
+    }
+
+    const key = panel.dataset.runAnnouncementKey;
+    const message = panel.dataset.runAnnouncement;
+    if (!key || !message || key === lastRunAnnouncementKey) {
+      return;
+    }
+
+    // 只缓存 presentation identity；runtime state 始终来自 server snapshot。
+    lastRunAnnouncementKey = key;
+    announcer.textContent = message;
   }
 
   document.addEventListener("input", (event) => {
@@ -51,6 +70,10 @@
     setSettingsDirty(false);
   });
 
+  document.body.addEventListener("htmx:afterSwap", () => {
+    syncRunAnnouncement();
+  });
+
   window.addEventListener("beforeunload", (event) => {
     if (!settingsDirty) {
       return;
@@ -60,4 +83,5 @@
   });
 
   setSettingsDirty(false);
+  syncRunAnnouncement();
 })();

@@ -27,6 +27,10 @@
       <button type="button" disabled>Loading run status…</button>
     </div>
   </header>
+  <div id="run-live-announcer"
+       class="visually-hidden"
+       aria-live="polite"
+       aria-atomic="true"></div>
   <main class="page-shell">
     {% block content %}{% endblock %}
   </main>

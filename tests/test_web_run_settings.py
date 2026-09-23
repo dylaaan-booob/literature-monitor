@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import re
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -33,7 +34,13 @@ from literature_monitor.application.settings import (
 )
 from literature_monitor.config import JournalConfig, LogLevel, parse_monitor_definition
 from literature_monitor.date_range import DateRangeSpec, ResolvedDateRange
+from literature_monitor.progress import (
+    PROGRESS_STAGES,
+    ActivityKind,
+    ActivitySnapshot,
+)
 from literature_monitor.web.app import create_app
+from literature_monitor.web.run_presentation import build_run_presentation
 from literature_monitor.web.run_coordinator import (
     CoordinatorSnapshot,
     CoordinatorStatus,
@@ -227,15 +234,68 @@ def idle_snapshot() -> CoordinatorSnapshot:
 
 
 def running_snapshot(
-    stage: ProgressStage = ProgressStage.DISCOVERING_PAPERS,
+    stage: ProgressStage | None = ProgressStage.DISCOVERING_PAPERS,
+    *,
+    activity: ActivitySnapshot | None = None,
+    started_at: datetime | None = None,
+    last_activity_at: datetime | None = None,
+    inactivity_warning: bool = False,
+    worker_alive: bool = True,
 ) -> CoordinatorSnapshot:
+    actual_started_at = started_at or datetime(
+        2026,
+        9,
+        22,
+        12,
+        0,
+        tzinfo=timezone.utc,
+    )
     return CoordinatorSnapshot(
         status=CoordinatorStatus.RUNNING,
         progress_stage=stage,
-        started_at=datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc),
+        started_at=actual_started_at,
         finished_at=None,
         result=None,
         unexpected_error=None,
+        stage_index=(
+            PROGRESS_STAGES.index(stage) + 1 if stage is not None else None
+        ),
+        stage_total=len(PROGRESS_STAGES),
+        current_activity=activity,
+        stage_started_at=actual_started_at if stage is not None else None,
+        last_activity_at=last_activity_at,
+        worker_alive=worker_alive,
+        inactivity_warning=inactivity_warning,
+    )
+
+
+
+def activity_snapshot(
+    *,
+    kind: ActivityKind = ActivityKind.WORKING,
+    operation: str = "doi_supplement",
+    label: str = "Looking up Crossref DOI metadata",
+    source: str | None = "crossref",
+    detail: str | None = "DOI 10.5555/example",
+    current: int | None = 18,
+    total: int | None = 47,
+    unit: str | None = "doi",
+    eta_seconds: float | None = 24.0,
+) -> ActivitySnapshot:
+    started_at = datetime(2026, 9, 22, 12, 1, tzinfo=timezone.utc)
+    return ActivitySnapshot(
+        kind=kind,
+        operation=operation,
+        label=label,
+        source=source,
+        detail=detail,
+        current=current,
+        total=total,
+        unit=unit,
+        started_at=started_at,
+        updated_at=datetime(2026, 9, 22, 12, 1, 22, tzinfo=timezone.utc),
+        rate=1.0 if kind is ActivityKind.WORKING else None,
+        eta_seconds=eta_seconds,
     )
 
 
@@ -417,7 +477,9 @@ def test_idle_run_fragment_has_run_button_without_polling(tmp_path: Path) -> Non
     assert "HX-Trigger" not in response.headers
 
 
-def test_running_run_fragment_renders_exact_stage_and_htmx_polling(tmp_path: Path) -> None:
+def test_running_run_fragment_renders_human_stage_and_htmx_polling(
+    tmp_path: Path,
+) -> None:
     app = create_app(tmp_path / "monitor.yaml")
     app.state.run_coordinator = StubCoordinator(
         snapshot=running_snapshot(ProgressStage.COMBINING_METADATA)
@@ -427,9 +489,330 @@ def test_running_run_fragment_renders_exact_stage_and_htmx_polling(tmp_path: Pat
         response = client.get("/fragments/run")
 
     assert response.status_code == 200
-    assert ProgressStage.COMBINING_METADATA.value in response.text
+    assert "Stage 3 of 5" in response.text
+    assert "Combining metadata" in response.text
+    assert ProgressStage.COMBINING_METADATA.value not in response.text
+    assert response.text.count('class="stage-segment') == 5
+    assert 'aria-label="Workflow stage 3 of 5: Combining metadata"' in response.text
     assert 'hx-get="/fragments/run"' in response.text
     assert 'hx-trigger="every 750ms"' in response.text
+
+
+def test_running_run_fragment_starts_without_blank_progress_panel(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path / "monitor.yaml")
+    app.state.run_coordinator = StubCoordinator(
+        snapshot=running_snapshot(None)
+    )
+
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get("/fragments/run")
+
+    assert response.status_code == 200
+    assert "Run in progress" in response.text
+    assert "Starting…" in response.text
+    assert 'hx-trigger="every 750ms"' in response.text
+
+
+def test_running_fragment_renders_determinate_activity_eta_and_timing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 9, 22, 12, 1, 24, tzinfo=timezone.utc)
+    monkeypatch.setattr(web_app, "_utc_now", lambda: now)
+    activity = activity_snapshot()
+    app = create_app(tmp_path / "monitor.yaml")
+    app.state.run_coordinator = StubCoordinator(
+        snapshot=running_snapshot(
+            ProgressStage.COMBINING_METADATA,
+            activity=activity,
+            last_activity_at=activity.updated_at,
+        )
+    )
+
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get("/fragments/run")
+
+    assert response.status_code == 200
+    assert "Crossref" in response.text
+    assert "Looking up Crossref DOI metadata" in response.text
+    assert "DOI 10.5555/example" in response.text
+    assert "18 / 47 DOI" in response.text
+    assert 'value="18"' in response.text
+    assert 'max="47"' in response.text
+    assert 'aria-label="Activity progress: 18 / 47 DOI"' in response.text
+    assert "Elapsed 1m 24s" in response.text
+    assert "ETA 24s" in response.text
+    assert "Last activity 2s ago" in response.text
+    assert "doi_supplement" not in response.text
+
+
+def test_running_fragment_handles_indeterminate_and_zero_work_safely(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path / "monitor.yaml")
+    activity = activity_snapshot(
+        current=3,
+        total=None,
+        unit="work",
+        eta_seconds=None,
+    )
+    app.state.run_coordinator = StubCoordinator(
+        snapshot=running_snapshot(
+            activity=activity,
+            last_activity_at=activity.updated_at,
+        )
+    )
+
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get("/fragments/run")
+
+    assert "3 works processed" in response.text
+    assert 'class="activity-progress"' not in response.text
+    assert "3 /" not in response.text
+    assert "ETA " not in response.text
+
+    zero_activity = activity_snapshot(
+        current=0,
+        total=0,
+        unit="file",
+        eta_seconds=None,
+    )
+    app.state.run_coordinator = StubCoordinator(
+        snapshot=running_snapshot(activity=zero_activity)
+    )
+    with TestClient(app, base_url="http://localhost") as client:
+        zero_response = client.get("/fragments/run")
+
+    assert "0 / 0 files" in zero_response.text
+    assert 'class="activity-progress"' not in zero_response.text
+
+
+def test_running_fragment_shows_estimating_for_working_activity(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path / "monitor.yaml")
+    activity = activity_snapshot(current=1, total=4, eta_seconds=None)
+    app.state.run_coordinator = StubCoordinator(
+        snapshot=running_snapshot(activity=activity)
+    )
+
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get("/fragments/run")
+
+    assert "1 / 4 DOI" in response.text
+    assert "Estimating…" in response.text
+    assert "ETA " not in response.text
+
+
+@pytest.mark.parametrize(
+    ("kind", "state_text"),
+    (
+        (ActivityKind.RETRYING, "Retrying"),
+        (ActivityKind.WAITING, "Waiting"),
+    ),
+)
+def test_running_fragment_shows_non_working_state_without_stale_eta(
+    kind: ActivityKind,
+    state_text: str,
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path / "monitor.yaml")
+    activity = activity_snapshot(kind=kind, eta_seconds=99.0)
+    app.state.run_coordinator = StubCoordinator(
+        snapshot=running_snapshot(activity=activity)
+    )
+
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get("/fragments/run")
+
+    assert state_text in response.text
+    assert "ETA 1m" not in response.text
+    assert "Estimating…" not in response.text
+
+
+def test_inactivity_is_advisory_and_keeps_stage_and_activity_visible(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path / "monitor.yaml")
+    activity = activity_snapshot(eta_seconds=24.0)
+    app.state.run_coordinator = StubCoordinator(
+        snapshot=running_snapshot(
+            ProgressStage.DISCOVERING_PAPERS,
+            activity=activity,
+            inactivity_warning=True,
+        )
+    )
+
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get("/fragments/run")
+
+    assert "Run in progress" in response.text
+    assert "Discovering papers" in response.text
+    assert activity.label in response.text
+    assert "No recent activity" in response.text
+    assert 'class="run-advisory warning"' in response.text
+    assert 'class="run-advisory error"' not in response.text
+    assert "ETA 24s" not in response.text
+
+
+def test_running_snapshot_with_dead_worker_is_stopped_not_in_progress(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path / "monitor.yaml")
+    app.state.run_coordinator = StubCoordinator(
+        snapshot=running_snapshot(worker_alive=False)
+    )
+
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get("/fragments/run")
+
+    assert "Run stopped" in response.text
+    assert "The monitor worker is no longer active." in response.text
+    assert "Run in progress" not in response.text
+    assert "No recent activity" not in response.text
+
+
+def test_run_presentation_semantic_key_ignores_timer_and_counter_only_changes() -> None:
+    first_activity = activity_snapshot(current=18, total=47)
+    first = running_snapshot(
+        ProgressStage.COMBINING_METADATA,
+        activity=first_activity,
+        last_activity_at=first_activity.updated_at,
+    )
+    later_activity = replace(
+        first_activity,
+        current=19,
+        eta_seconds=20.0,
+    )
+    later = replace(first, current_activity=later_activity)
+    now = datetime(2026, 9, 22, 12, 1, 24, tzinfo=timezone.utc)
+
+    first_view = build_run_presentation(first, now=now)
+    later_view = build_run_presentation(later, now=now)
+    timer_view = build_run_presentation(
+        first,
+        now=now.replace(second=25),
+    )
+
+    assert first_view["announcement_key"] == later_view["announcement_key"]
+    assert first_view["announcement_key"] == timer_view["announcement_key"]
+    assert first_view["elapsed_text"] != timer_view["elapsed_text"]
+    assert first_view["last_activity_text"] != timer_view["last_activity_text"]
+
+    inactive_view = build_run_presentation(
+        replace(later, inactivity_warning=True),
+        now=now,
+    )
+    retry_view = build_run_presentation(
+        replace(
+            later,
+            current_activity=replace(
+                later_activity,
+                kind=ActivityKind.RETRYING,
+                eta_seconds=None,
+            ),
+        ),
+        now=now,
+    )
+    next_stage_view = build_run_presentation(
+        replace(
+            later,
+            progress_stage=ProgressStage.MATCHING_LITERATURE,
+            stage_index=4,
+        ),
+        now=now,
+    )
+    changed_activity_view = build_run_presentation(
+        replace(
+            later,
+            current_activity=activity_snapshot(
+                operation="materialize_write",
+                label="Writing workspace",
+                source="workspace",
+                current=0,
+                total=3,
+                unit="file",
+                eta_seconds=None,
+            ),
+        ),
+        now=now,
+    )
+    finished_view = build_run_presentation(
+        finished_snapshot(result=make_run_result()),
+        now=now,
+    )
+
+    assert inactive_view["announcement_key"] != later_view["announcement_key"]
+    assert retry_view["announcement_key"] != later_view["announcement_key"]
+    assert next_stage_view["announcement_key"] != later_view["announcement_key"]
+    assert changed_activity_view["announcement_key"] != later_view["announcement_key"]
+    assert finished_view["announcement_key"] != later_view["announcement_key"]
+    assert "No recent activity." in inactive_view["announcement_message"]
+    assert "Retrying." in retry_view["announcement_message"]
+    assert "Run finished:" in finished_view["announcement_message"]
+
+
+def test_run_fragment_polling_is_read_only_and_timer_changes_keep_announcement_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    activity = activity_snapshot()
+    snapshot = running_snapshot(
+        activity=activity,
+        last_activity_at=activity.updated_at,
+    )
+    coordinator = StubCoordinator(snapshot=snapshot)
+    times = iter(
+        (
+            datetime(2026, 9, 22, 12, 1, 24, tzinfo=timezone.utc),
+            datetime(2026, 9, 22, 12, 1, 25, tzinfo=timezone.utc),
+        )
+    )
+    monkeypatch.setattr(web_app, "_utc_now", lambda: next(times))
+    app = create_app(tmp_path / "monitor.yaml")
+    app.state.run_coordinator = coordinator
+
+    with TestClient(app, base_url="http://localhost") as client:
+        first = client.get("/fragments/run")
+        second = client.get("/fragments/run")
+
+    key_pattern = r'data-run-announcement-key="([^"]+)"'
+    first_key = re.search(key_pattern, first.text)
+    second_key = re.search(key_pattern, second.text)
+    assert first_key is not None
+    assert second_key is not None
+    assert first_key.group(1) == second_key.group(1)
+    assert "Elapsed 1m 24s" in first.text
+    assert "Elapsed 1m 25s" in second.text
+    assert coordinator.snapshot_calls == 2
+    assert coordinator.current_snapshot.last_activity_at == activity.updated_at
+    assert coordinator.current_snapshot.worker_alive
+
+
+def test_run_progress_accessibility_uses_persistent_semantic_announcer(
+    tmp_path: Path,
+) -> None:
+    app = create_app(tmp_path / "monitor.yaml")
+    app.state.run_coordinator = StubCoordinator(snapshot=running_snapshot())
+
+    with TestClient(app, base_url="http://localhost") as client:
+        page = client.get("/")
+        fragment = client.get("/fragments/run")
+
+    assert 'id="run-live-announcer"' in page.text
+    assert 'aria-live="polite"' in page.text
+    assert 'aria-atomic="true"' in page.text
+    assert 'class="run-status" aria-live=' not in fragment.text
+    assert "data-run-announcement-key=" in fragment.text
+    assert "data-run-announcement=" in fragment.text
+    js_path = Path(web_app.__file__).resolve().parent / "static" / "app.js"
+    javascript = js_path.read_text(encoding="utf-8")
+    assert "lastRunAnnouncementKey" in javascript
+    assert "key === lastRunAnnouncementKey" in javascript
+    assert "panel.dataset.runAnnouncementKey" in javascript
+    assert "announcer.textContent = message" in javascript
 
 
 def test_finished_run_fragment_stops_polling_and_emits_completion_event(

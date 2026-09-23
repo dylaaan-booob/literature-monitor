@@ -1,5 +1,7 @@
 <section id="run-panel"
          class="run-panel"
+         data-run-announcement-key="{{ run_progress.announcement_key }}"
+         data-run-announcement="{{ run_progress.announcement_message }}"
          {% if run_snapshot.status.value == "RUNNING" %}
          hx-get="/fragments/run"
          hx-trigger="every 750ms"
@@ -22,19 +24,78 @@
       <button type="submit">Run</button>
     </form>
   {% elif run_snapshot.status.value == "RUNNING" %}
-    <div class="run-status" aria-live="polite">
-      <strong>Run in progress</strong>
-      {% if run_snapshot.progress_stage %}
-        <span>{{ run_snapshot.progress_stage.value }}</span>
-      {% else %}
-        <span>Starting…</span>
-      {% endif %}
-      {% if run_snapshot.started_at %}
-        <span>Started {{ run_snapshot.started_at.isoformat() }}</span>
-      {% endif %}
-    </div>
+    {% if not run_snapshot.worker_alive %}
+      <div class="run-status run-status-stopped">
+        <strong>Run stopped</strong>
+        <span>The monitor worker is no longer active.</span>
+      </div>
+    {% else %}
+      <div class="run-status">
+        <strong>Run in progress</strong>
+
+        {% if run_snapshot.progress_stage %}
+          <span class="stage-position">Stage {{ run_snapshot.stage_index }} of {{ run_snapshot.stage_total }}</span>
+          <div class="stage-indicator"
+               role="img"
+               aria-label="Workflow stage {{ run_snapshot.stage_index }} of {{ run_snapshot.stage_total }}: {{ run_progress.stage_label }}">
+            {% for step in range(1, run_snapshot.stage_total + 1) %}
+              <span class="stage-segment{% if step < run_snapshot.stage_index %} complete{% elif step == run_snapshot.stage_index %} current{% endif %}"
+                    aria-hidden="true"></span>
+            {% endfor %}
+          </div>
+          <span class="stage-label">{{ run_progress.stage_label }}</span>
+        {% elif not run_progress.activity %}
+          <span>Starting…</span>
+        {% endif %}
+
+        {% if run_progress.activity %}
+          {% set activity = run_progress.activity %}
+          <div class="activity-card">
+            <div class="activity-heading">
+              {% if run_progress.activity_source %}
+                <span class="activity-source">{{ run_progress.activity_source }}</span>
+              {% endif %}
+              {% if run_progress.activity_state %}
+                <span class="activity-state">{{ run_progress.activity_state }}</span>
+              {% endif %}
+            </div>
+            <strong>{{ activity.label }}</strong>
+            {% if activity.detail %}
+              <span class="muted">{{ activity.detail }}</span>
+            {% endif %}
+            {% if run_progress.activity_counter %}
+              <span class="activity-counter">{{ run_progress.activity_counter }}</span>
+            {% endif %}
+            {% if run_progress.activity_determinate %}
+              <progress class="activity-progress"
+                        value="{{ activity.current }}"
+                        max="{{ activity.total }}"
+                        aria-label="Activity progress: {{ run_progress.activity_counter }}"></progress>
+            {% endif %}
+          </div>
+        {% endif %}
+
+        <div class="run-timing">
+          {% if run_progress.elapsed_text %}
+            <span>Elapsed {{ run_progress.elapsed_text }}</span>
+          {% endif %}
+          {% if run_progress.eta_text %}
+            <span>ETA {{ run_progress.eta_text }}</span>
+          {% elif run_progress.estimating %}
+            <span>Estimating…</span>
+          {% endif %}
+          {% if run_progress.last_activity_text %}
+            <span>Last activity {{ run_progress.last_activity_text }} ago</span>
+          {% endif %}
+        </div>
+
+        {% if run_snapshot.inactivity_warning %}
+          <div class="run-advisory warning">No recent activity</div>
+        {% endif %}
+      </div>
+    {% endif %}
   {% else %}
-    <div class="run-status" aria-live="polite">
+    <div class="run-status">
       {% if run_snapshot.result %}
         {% set result = run_snapshot.result %}
         <strong>Run finished · {{ result.outcome.value }}</strong>
