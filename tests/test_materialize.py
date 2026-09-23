@@ -1433,9 +1433,18 @@ def test_external_ids_and_sources_union_preserve_durable_conflicts(
     initial = paper("24345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa").model_copy(
         update={
             "external_ids": ExternalIds.model_validate(
-                {"doi": "10.5555/shared", "pmid": "old-pmid"}
+                {
+                    "doi": "10.5555/shared",
+                    "pmid": "old-pmid",
+                    "semantic_scholar": "S2-1",
+                }
             ),
             "sources": (
+                MetadataSource(
+                    provider="semantic_scholar",
+                    record_id="S2-1",
+                    retrieved_at=datetime(2025, 12, 1, tzinfo=timezone.utc),
+                ),
                 MetadataSource(
                     provider="openalex",
                     record_id="W-union",
@@ -1450,9 +1459,7 @@ def test_external_ids_and_sources_union_preserve_durable_conflicts(
     incoming = initial.model_copy(
         update={
             "id": UUID("25345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
-            "external_ids": ExternalIds.model_validate(
-                {"pmid": "new-pmid", "semantic_scholar": "S2-1"}
-            ),
+            "external_ids": ExternalIds.model_validate({"pmid": "new-pmid"}),
             "sources": (
                 MetadataSource(
                     provider="OpenAlex",
@@ -1471,7 +1478,15 @@ def test_external_ids_and_sources_union_preserve_durable_conflicts(
     assert external_ids["doi"] == "10.5555/shared"  # type: ignore[index]
     assert external_ids["pmid"] == "old-pmid"  # type: ignore[index]
     assert external_ids["semantic_scholar"] == "S2-1"  # type: ignore[index]
-    assert sources[0]["retrieved_at"] == "2026-09-18T00:00:00Z"  # type: ignore[index]
+    assert any(
+        source["provider"] == "semantic_scholar" and source["record_id"] == "S2-1"
+        for source in sources  # type: ignore[union-attr]
+    )
+    assert any(
+        source["provider"].casefold() == "openalex"
+        and source["retrieved_at"] == "2026-09-18T00:00:00Z"
+        for source in sources  # type: ignore[union-attr]
+    )
     assert any("external ID pmid conflicts" in issue.message for issue in result.issues)
     assert not result.has_errors
 

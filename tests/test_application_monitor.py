@@ -9,6 +9,7 @@ import pytest
 from literature_monitor.application import monitor
 from literature_monitor.application.monitor import (
     MonitorIssueComponent,
+    MonitorStatistics,
     ProgressStage,
     RunOutcome,
     ValidationOutcome,
@@ -60,11 +61,6 @@ from literature_monitor.progress import (
 )
 from literature_monitor.retrieval import EvidenceRetrievalResult
 from literature_monitor.search import SearchBackendError, SearchExpressionError, SearchableProjection
-from literature_monitor.semantic_scholar import (
-    SemanticScholarIssue,
-    SemanticScholarIssueSeverity,
-    SemanticScholarRetrievalResult,
-)
 
 
 class FixedDate(date):
@@ -140,7 +136,6 @@ def install_core_mocks(
     openalex_issues: tuple[DiscoveryIssue, ...] = (),
     crossref_issues: tuple[CrossrefDiscoveryIssue, ...] = (),
     retrieval_issues: tuple[EnrichmentIssue, ...] = (),
-    semantic_issues: tuple[SemanticScholarIssue, ...] = (),
     consolidation_issues: tuple[CanonicalizationIssue, ...] = (),
     canonicalization_issues: tuple[CanonicalizationIssue, ...] = (),
     progress_callbacks: list[ProgressCallback | None] | None = None,
@@ -148,8 +143,8 @@ def install_core_mocks(
 ) -> CanonicalPaper:
     oa_record = object()
     cr_record = object()
-    base_evidence = object()
-    semantic_evidence = object()
+    openalex_evidence = object()
+    crossref_evidence = object()
     paper = canonical_paper()
 
     monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kwargs: object())
@@ -243,39 +238,19 @@ def install_core_mocks(
         assert openalex_records == (oa_record,)
         assert crossref_records == (cr_record,)
         return EvidenceRetrievalResult(
-            evidence=(base_evidence,),  # type: ignore[arg-type]
+            evidence=(openalex_evidence, crossref_evidence),  # type: ignore[arg-type]
             supplement_records=(cr_record,),  # type: ignore[arg-type]
             issues=retrieval_issues,
-        )
-
-    def semantic(
-        client: object,
-        evidence: tuple[object, ...],
-        journals: tuple[JournalConfig, ...],
-        from_date: date,
-        to_date: date,
-        expression: object,
-    ) -> SemanticScholarRetrievalResult:
-        if events is not None:
-            events.append("semantic")
-        if ranges is not None:
-            ranges.append(("semantic", from_date, to_date))
-        assert evidence == (base_evidence,)
-        return SemanticScholarRetrievalResult(
-            evidence=(semantic_evidence,),  # type: ignore[arg-type]
-            supplement_records=(object(),),  # type: ignore[arg-type]
-            discovered_records=(object(),),  # type: ignore[arg-type]
-            issues=semantic_issues,
         )
 
     def consolidate(evidence: tuple[object, ...]) -> EvidenceConsolidationResult:
         if events is not None:
             events.append("consolidate")
-        assert evidence == (base_evidence, semantic_evidence)
+        assert evidence == (openalex_evidence, crossref_evidence)
         return EvidenceConsolidationResult(
             clusters=(
-                EvidenceCluster(evidence=(base_evidence,)),  # type: ignore[arg-type]
-                EvidenceCluster(evidence=(semantic_evidence,)),  # type: ignore[arg-type]
+                EvidenceCluster(evidence=(openalex_evidence,)),  # type: ignore[arg-type]
+                EvidenceCluster(evidence=(crossref_evidence,)),  # type: ignore[arg-type]
             ),
             issues=consolidation_issues,
         )
@@ -294,7 +269,7 @@ def install_core_mocks(
     def canonicalize(evidence: tuple[object, ...]) -> CanonicalizationResult:
         if events is not None:
             events.append("canonicalize")
-        assert evidence == (base_evidence,)
+        assert evidence == (openalex_evidence,)
         return CanonicalizationResult(
             papers=(paper,),
             issues=canonicalization_issues,
@@ -303,8 +278,6 @@ def install_core_mocks(
     monkeypatch.setattr(monitor, "discover_journals", discover_openalex)
     monkeypatch.setattr(monitor, "discover_crossref_journals", discover_crossref)
     monkeypatch.setattr(monitor, "assemble_provider_evidence", assemble)
-    monkeypatch.setattr(monitor, "create_semantic_scholar_client", lambda api_key: object())
-    monkeypatch.setattr(monitor, "augment_with_semantic_scholar", semantic)
     monkeypatch.setattr(monitor, "consolidate_evidence", consolidate)
     monkeypatch.setattr(monitor, "build_searchable_projection", build_projection)
     monkeypatch.setattr(monitor, "match_searchable_projections", match)
@@ -325,6 +298,12 @@ def materialization_result(
         existing_authors=(output_dir / "Authors" / "existing.md",),
         issues=issues,
     )
+
+
+def test_runtime_contract_has_no_semantic_scholar_specific_issue_or_statistics_surface() -> None:
+    assert "SEMANTIC_SCHOLAR" not in MonitorIssueComponent.__members__
+    assert "semantic_scholar_supplement_records" not in MonitorStatistics.__dataclass_fields__
+    assert "semantic_scholar_discovery_records" not in MonitorStatistics.__dataclass_fields__
 
 
 def test_canonical_core_preserves_real_orchestration_order_and_stops_before_materialization(
@@ -348,7 +327,6 @@ def test_canonical_core_preserves_real_orchestration_order_and_stops_before_mate
         "openalex",
         "crossref",
         "supplement",
-        "semantic",
         "consolidate",
         "match",
         "canonicalize",
@@ -476,8 +454,6 @@ def test_run_monitor_uses_core_materialization_and_progress_contract(
         if event.activity is not None:
             activity_locations.append((stage, event.activity.operation))
     assert activity_locations == [
-        (ProgressStage.COMBINING_METADATA, "semantic_scholar_supplement"),
-        (ProgressStage.COMBINING_METADATA, "semantic_scholar_supplement"),
         (ProgressStage.COMBINING_METADATA, "consolidate_evidence"),
         (ProgressStage.COMBINING_METADATA, "consolidate_evidence"),
         (ProgressStage.MATCHING_LITERATURE, "matching_literature"),
@@ -495,20 +471,24 @@ def test_run_monitor_uses_core_materialization_and_progress_contract(
     assert result.existing_authors == 1
 
 
-def test_missing_semantic_scholar_key_does_not_block_local_progress(
+def test_canonical_core_does_not_read_or_construct_semantic_scholar(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_path = write_monitor(tmp_path)
     install_core_mocks(monkeypatch)
-    monkeypatch.delenv("SEMANTIC_SCHOLAR_API_KEY", raising=False)
-    api_keys: list[str | None] = []
+    requested_environment: list[str] = []
 
-    def create_client(api_key: str | None) -> object:
-        api_keys.append(api_key)
-        return object()
+    class TrackingEnvironment(dict[str, str]):
+        def get(self, key: str, default: str | None = None) -> str | None:
+            requested_environment.append(key)
+            return super().get(key, default)
 
-    monkeypatch.setattr(monitor, "create_semantic_scholar_client", create_client)
+    monkeypatch.setattr(
+        monitor.os,
+        "environ",
+        TrackingEnvironment(dict(monitor.os.environ)),
+    )
     progress_events: list[ProgressEvent] = []
 
     result = _run_canonical_core(
@@ -517,22 +497,13 @@ def test_missing_semantic_scholar_key_does_not_block_local_progress(
     )
 
     assert result.outcome is RunOutcome.COMPLETED
-    assert api_keys == [None]
-    operations = [
-        event.activity.operation
+    assert requested_environment == ["CROSSREF_MAILTO", "OPENALEX_API_KEY"]
+    assert not hasattr(monitor, "create_semantic_scholar_client")
+    assert not hasattr(monitor, "augment_with_semantic_scholar")
+    assert all(
+        event.activity is None or event.activity.source != "semantic_scholar"
         for event in progress_events
-        if event.activity is not None
-    ]
-    assert operations == [
-        "semantic_scholar_supplement",
-        "semantic_scholar_supplement",
-        "consolidate_evidence",
-        "consolidate_evidence",
-        "matching_literature",
-        "matching_literature",
-        "canonicalize_literature",
-        "canonicalize_literature",
-    ]
+    )
 
 
 def test_run_monitor_passes_one_progress_callback_through_provider_boundaries(
@@ -626,7 +597,6 @@ def test_application_date_override_forms_are_complete_and_ephemeral(
     assert [(provider, start, end) for provider, start, end in ranges] == [
         ("openalex", *expected),
         ("crossref", *expected),
-        ("semantic", *expected),
     ]
 
 
@@ -895,8 +865,6 @@ def test_validate_monitor_success_and_only_resolves_sources(
         "discover_journals",
         "CrossrefClient",
         "discover_crossref_journals",
-        "create_semantic_scholar_client",
-        "augment_with_semantic_scholar",
         "materialize_papers",
     ):
         monkeypatch.setattr(monitor, name, unexpected)
@@ -999,8 +967,6 @@ def test_validate_monitor_reuses_openalex_request_retry_progress(
         "discover_journals",
         "CrossrefClient",
         "discover_crossref_journals",
-        "create_semantic_scholar_client",
-        "augment_with_semantic_scholar",
         "materialize_papers",
     ):
         monkeypatch.setattr(monitor, name, unexpected)

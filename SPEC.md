@@ -101,9 +101,8 @@ MVP includes:
 - journal whitelist configuration;
 - ISSN/EISSN-based venue resolution;
 - multi-source evidence retrieval within the journal/date boundary;
-- OpenAlex journal/date discovery;
-- Crossref journal/date discovery and DOI enrichment;
-- Semantic Scholar metadata supplementation and supplemental discovery;
+- OpenAlex primary journal/date discovery;
+- Crossref secondary journal/date discovery, DOI enrichment, and bibliographic evidence;
 - provider-neutral identity/evidence consolidation;
 - local keyword filtering after available evidence is consolidated;
 - a transient, reconstructible SQLite FTS5 runtime index for local lexical filtering;
@@ -221,9 +220,9 @@ No global `research_article_only` assumption should be hard-coded because the wh
 
 ## 6. Data Source Policy
 
-All retrieval remains journal-whitelist-first and date-bounded. OpenAlex, Crossref, and Semantic Scholar may each contribute evidence to the candidate universe. No provider has implicit canonical authority merely because its record was retrieved first.
+All retrieval remains journal-whitelist-first and date-bounded. OpenAlex is the sole primary discovery provider. Crossref is the secondary provider and may independently contribute journal/date discovery records plus DOI and bibliographic evidence. Evidence consolidation remains provider-neutral; retrieval order does not grant canonical authority.
 
-Discovery date membership remains publication-date-only. Literature Monitor does not use Crossref update-date, created-date, index-date, provider update timestamps, or persisted synchronization metadata to expand a date window. v0.3.3 therefore does not provide late-index recovery, provider watermarks, checkpoints, or incremental-sync semantics. Semantic Scholar year-only records use the provider-specific filtering interpretation defined in §6.3 without fabricating a bibliographic publication date.
+Discovery date membership remains publication-date-only. Literature Monitor does not use Crossref update-date, created-date, index-date, provider update timestamps, or persisted synchronization metadata to expand a date window. The current production pipeline does not provide late-index recovery, provider watermarks, checkpoints, or incremental-sync semantics.
 
 ### 6.1 OpenAlex
 
@@ -267,23 +266,11 @@ A valid Crossref journal/date result may contribute a candidate even when no cor
 
 Crossref `type = journal-article` must not be interpreted as proof that a record is a research article.
 
-### 6.3 Semantic Scholar
+### 6.3 Retired providers and durable compatibility
 
-Responsibilities:
+Semantic Scholar is not a supported production retrieval provider. The production pipeline must not construct a Semantic Scholar client, read `SEMANTIC_SCHOLAR_API_KEY`, perform Semantic Scholar discovery or supplementation, or expose Semantic Scholar-specific runtime statistics, issues, or progress activity.
 
-- supplement metadata by DOI or batch lookup;
-- perform venue/date-constrained supplemental discovery;
-- contribute title, authorship, abstract, external identifiers, topics/fields of study, and provenance when available.
-
-A broad positive query may be used only to expand provider coverage. Every returned record must still pass the configured date boundary and venue validation, and final inclusion is always decided by the unified local keyword expression.
-
-When the local expression is projected into a Semantic Scholar supplemental-discovery query, Prefix operands retain their single trailing `*`. Proximity operands are not sent using provider-specific proximity syntax; each Proximity operand is reduced to a broad `AND` query containing all of its positive lexical terms. As with the existing broad-positive-query behavior, `NOT` subtrees are removed from the provider query rather than used to exclude provider results. This projection affects discovery recall only and never changes final local Boolean evaluation. OpenAlex and Crossref remain venue/date retrieval paths and do not acquire keyword-query responsibilities from this projection.
-
-Venue validation must prefer ISSN/EISSN. Only when the provider record has no usable ISSN/EISSN may a strict normalized journal-name match be used as a fallback; ambiguous or mismatched venues must not enter the candidate universe.
-
-Supplemental-discovery date validation follows Semantic Scholar's `publicationDateOrYear` contract. When a normalized record has an exact `publication_date`, that exact date alone determines inclusive membership in the configured date window, even when `publication_year` is also present. When the exact date is absent and only `publication_year = Y` is available, local provider-result validation interprets the filtering date as `Y-01-01`; the record is accepted only when that date falls inside the inclusive query window. When both date and year are absent, the record cannot prove date-window membership and is excluded.
-
-`Y-01-01` is only a filtering interpretation for Semantic Scholar supplemental discovery. It is not a bibliographic publication date and must not be written to `SemanticScholarWorkRecord.publication_date`, `ProviderWorkEvidence.publication_date`, canonical metadata, or Paper Markdown. A valid year-only record does not produce a warning merely because this filtering rule was used.
+Provider retirement does not narrow the durable data model. Existing Paper Markdown may continue to contain `semantic_scholar` or other provider-specific external identifiers, and historical provenance may continue to name retired providers. `ExternalIds` remains open to additional provider-specific identifiers, while canonicalization and Markdown merge preserve valid historical identifiers and provenance rather than deleting them during reruns.
 
 ### 6.4 Publisher fallback
 
@@ -508,7 +495,7 @@ external_ids:
   semantic_scholar:
 ```
 
-All except the internal UUID are optional.
+All except the internal UUID are optional. The `semantic_scholar` example is retained for historical durable-data compatibility; current production retrieval does not populate it.
 
 The schema should allow future additional identifiers without migration of the identity model.
 
@@ -545,7 +532,7 @@ sources:
     retrieved_at:
 ```
 
-The purpose is to preserve enough provenance to understand where metadata came from.
+The purpose is to preserve enough provenance to understand where metadata came from. The `semantic_scholar` example represents historical provenance that remains readable and must not be deleted during reruns; it does not define a current retrieval provider.
 
 MVP does not need to archive full raw API responses in every Markdown file.
 
@@ -578,7 +565,7 @@ The system records only versions it actually discovers. It must not invent an un
 
 The system should determine whether two source records represent the same research work using evidence in descending reliability.
 
-Provider evidence may exist independently before consolidation. A Crossref-only work or a Semantic-Scholar-only supplemental work is valid input when it satisfies the journal/date boundary; canonicalization must not require an OpenAlex record.
+Provider evidence may exist independently before consolidation. Crossref-only current production evidence is valid input when it satisfies the journal/date boundary, and canonicalization must not require an OpenAlex record. Provider-neutral canonicalization and data structures may also accept and preserve valid historical evidence, provenance, and identifiers from retired providers, consistent with §6.3.
 
 ### 10.1 Match priority
 
@@ -772,7 +759,7 @@ The program may maintain bibliographic/system metadata such as:
 - publication dates;
 - DOI;
 - OpenAlex ID;
-- Semantic Scholar ID;
+- provider-specific external identifiers, including historical Semantic Scholar IDs;
 - arXiv ID;
 - author identities;
 - author keywords;
@@ -1352,16 +1339,15 @@ Parser-valid expressions may still fail local semantic validation after SQLite F
 
 Configuration and deterministic local preflight failures exit with code `2` and must occur before any provider path is constructed or called. OpenAlex Source-resolution errors retain exit code `1`. Warning-only OpenAlex validation and fully valid validation both exit with code `0`. More generally, CLI compatibility remains: completed or valid results exit `0`; provider or materialization errors exit `1`; local configuration or deterministic preflight errors exit `2`.
 
-`validate` performs no OpenAlex Works discovery, Crossref connectivity check, Semantic Scholar connectivity check, `output_dir` writability check, workspace creation, or Paper / Author / Inbox materialization. Its only provider/network validation is OpenAlex Source resolution.
+`validate` performs no OpenAlex Works discovery, Crossref connectivity check, retired-provider connectivity check, `output_dir` writability check, workspace creation, or Paper / Author / Inbox materialization. Its only provider/network validation is OpenAlex Source resolution.
 
 ### 20.6 Existing behavior preserved
 
 The v0.3.3 hardening preserves the existing observable behavior of:
 
 - OpenAlex retrieval;
-- Crossref retrieval;
-- Semantic Scholar DOI/batch supplementation;
-- provider evidence consolidation;
+- Crossref retrieval and DOI supplementation;
+- provider-neutral evidence consolidation and durable historical-provider compatibility;
 - local FTS5 lexical filtering;
 - v0.3.1 Prefix semantics;
 - v0.3.1 Proximity semantics;
@@ -1495,14 +1481,11 @@ Given the supplied journal whitelist with conferences excluded:
 For a selected date window:
 
 - discovery membership uses publication date only; Crossref update-date, created-date, index-date, provider update timestamps, and persisted sync state do not extend the window;
-- OpenAlex and Crossref can each contribute journal/date candidates independently;
-- Semantic Scholar can supplement metadata and contribute supplemental candidates that pass venue/date validation;
-- Semantic Scholar records with an exact publication date use that date even when a year is also present;
-- a Semantic Scholar record with no exact date and only year `Y` uses `Y-01-01` solely for supplemental-discovery filtering membership; the interpretation is not stored as bibliographic metadata and does not itself produce a warning;
-- a Semantic Scholar record with neither publication date nor year is excluded because date-window membership cannot be proven;
-- a candidate is not required to exist in OpenAlex first;
+- OpenAlex is the sole primary discovery provider;
+- Crossref independently contributes secondary journal/date candidates and may supply DOI/bibliographic evidence;
+- a candidate is not required to exist in OpenAlex first when Crossref provides valid journal/date evidence;
 - global keyword search is not used to define the candidate universe;
-- Semantic Scholar broad positive queries do not decide final inclusion.
+- Semantic Scholar is not called by the production retrieval pipeline.
 
 ### 23.3 Evidence consolidation and keyword filtering
 
@@ -1530,9 +1513,7 @@ Given test expressions using Terms, Phrases, Prefix, Proximity, `AND`, `OR`, `NO
 - each Prefix or Proximity match is satisfied within one searchable unit, and Proximity cannot cross title/abstract boundaries, author keyword values, or provider records;
 - a single-token Proximity operand is invalid and is not treated as fuzzy search;
 - generated FTS5 queries are compiled from parsed operands and never accept user input as arbitrary `MATCH` or `NEAR(...)` syntax;
-- Semantic Scholar supplemental discovery preserves the trailing `*` of valid Prefix operands, lowers each Proximity operand to a broad `AND` query over all of its positive lexical terms, and removes `NOT` subtrees from the broad positive provider query;
-- Semantic Scholar query projection affects discovery recall only: provider evidence is still consolidated before local filtering, and provider-neutral final inclusion is determined only by the complete local Boolean expression;
-- OpenAlex and Crossref retain their existing venue/date retrieval responsibilities and do not use the Semantic Scholar query projection;
+- OpenAlex and Crossref retrieval remain journal/date-bounded; neither provider uses a keyword-query projection to decide candidate inclusion;
 - if the current Python SQLite runtime lacks FTS5, commands that require local filtering use the existing explicit error path rather than silently changing matching semantics;
 - the local search index is transient, reconstructible runtime state and is not a durable or mandatory source of truth.
 
@@ -1589,7 +1570,7 @@ journal final
 
 ### 23.8 Provider-neutral canonicalization
 
-Given valid evidence from multiple providers or from Crossref/Semantic Scholar without OpenAlex:
+Given valid evidence from multiple providers, from Crossref without OpenAlex, or from persisted historical provider evidence:
 
 - the work can produce a canonical paper without an OpenAlex record;
 - records sharing the same normalized DOI produce exactly one canonical work;
@@ -1663,7 +1644,7 @@ Given the v0.3.2 persistent-monitor model with the v0.3.3 correctness hardening:
 - resolved runtime dates are not written back to the monitor YAML;
 - `validate --config` performs FTS5 lexical semantic validation and effective runtime date-range resolution before constructing or calling the OpenAlex Source-resolution path;
 - local configuration, FTS5 semantic/backend, and runtime date-resolution failures from `validate` exit `2`; OpenAlex Source-resolution errors exit `1`; warning-only and fully valid validation exit `0`;
-- `validate` does not perform OpenAlex Works discovery, Crossref or Semantic Scholar connectivity checks, output-directory writability checks, workspace creation, or Paper / Author / Inbox materialization;
+- `validate` does not perform OpenAlex Works discovery, Crossref or retired-provider connectivity checks, output-directory writability checks, workspace creation, or Paper / Author / Inbox materialization;
 - `literature-monitor run --config monitor.yaml` is the normal persistent-monitor execution entry and obtains journals, keyword expression, output directory, date policy, and log level from that monitor;
 - all date-bearing commands expose `--from-date`, `--to-date`, and `--window-days` with the same date-resolution semantics;
 - when no CLI date argument is supplied, the monitor date policy is used;
@@ -1672,7 +1653,7 @@ Given the v0.3.2 persistent-monitor model with the v0.3.3 correctness hardening:
 - CLI `--from-date X` alone, `--to-date Y` alone, all three CLI date fields, zero/negative window sizes, and reversed ranges are rejected;
 - the legacy `openalex-discover --config ... --from-date ... --to-date ...` form preserves its observable from/to behavior;
 - CLI date overrides remain ephemeral and create no config mutation, last-used range, checkpoint, or other durable run state;
-- `run` reuses the existing retrieval, Semantic Scholar supplementation, evidence consolidation, local filtering, canonicalization, and materialization production path rather than implementing a second pipeline;
+- `run` reuses the OpenAlex/Crossref retrieval, evidence consolidation, local filtering, canonicalization, and materialization production path rather than implementing a second pipeline;
 - `materialize` remains an explicit legacy / diagnostic-style entry and its existing explicit `--output-dir` behavior is preserved;
 - one monitor to one decision workspace is the supported product relationship; Paper UUIDs, statuses, notes, and other durable Paper state are workspace-local;
 - different workspaces are not promised the same UUID for the same research work and do not inherit Reject/Keep decisions from one another;
@@ -2344,13 +2325,15 @@ v0.4.1 is released and complete. Its feature implementation, final independent a
 
 ## 28. Current Project Stage
 
-R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, and v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback are completed release history. v0.4.1 is the current released and completed baseline.
+R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, and v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback are completed release history. v0.4.1 remains the current released and completed baseline.
 
-The v0.4.1 release and closeout are complete. No subsequent product-development stage is established by this closeout.
+v0.4.2 development begins with the provider contract defined in §6: OpenAlex is the sole primary discovery provider, Crossref is the secondary discovery/bibliographic provider, and Semantic Scholar is retired from production retrieval. This provider-contract change does not start the later v0.4.2 reliability work on batching, rate limits, retry policy, coverage state, resume semantics, or scheduling.
 
 ---
 
 ## 29. v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback Contract
+
+This section records the released v0.4.1 contract. Where it mentions Semantic Scholar runtime behavior, the current v0.4.2 provider contract in §6 supersedes those historical statements.
 
 v0.4.1 gives GUI and CLI runtime feedback a shared transient contract. It extends the v0.4.0 application and `RunCoordinator` boundaries without changing the canonical production pipeline, Paper Markdown ownership, one-active-run rule, provider retrieval policy, or CLI result semantics.
 

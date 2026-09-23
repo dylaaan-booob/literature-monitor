@@ -69,12 +69,6 @@ from literature_monitor.search import (
     match_searchable_projections,
     validate_search_expression,
 )
-from literature_monitor.semantic_scholar import (
-    SemanticScholarIssue,
-    SemanticScholarIssueSeverity,
-    augment_with_semantic_scholar,
-    create_semantic_scholar_client,
-)
 
 
 class MonitorIssueSeverity(str, Enum):
@@ -89,7 +83,6 @@ class MonitorIssueComponent(str, Enum):
     OPENALEX = "openalex"
     CROSSREF_DISCOVERY = "crossref_discovery"
     CROSSREF_SUPPLEMENT = "crossref_supplement"
-    SEMANTIC_SCHOLAR = "semantic_scholar"
     CONSOLIDATION = "consolidation"
     CANONICALIZATION = "canonicalization"
     MATERIALIZATION = "materialization"
@@ -105,7 +98,6 @@ class MonitorIssue:
     issn: str | None = None
     record_id: str | None = None
     doi: str | None = None
-    paper_id: str | None = None
     record_ids: tuple[str, ...] = ()
     path: Path | None = None
     field: str | None = None
@@ -131,8 +123,6 @@ class MonitorStatistics:
     openalex_records: int = 0
     crossref_discovery_records: int = 0
     crossref_supplement_records: int = 0
-    semantic_scholar_supplement_records: int = 0
-    semantic_scholar_discovery_records: int = 0
     evidence_clusters: int = 0
     retained_clusters: int = 0
     consolidation_issues: int = 0
@@ -322,22 +312,6 @@ def _enrichment_issue(issue: EnrichmentIssue) -> MonitorIssue:
         stage=issue.stage,
         message=issue.message,
         record_id=issue.record_id,
-        doi=issue.doi,
-    )
-
-
-def _semantic_scholar_issue(issue: SemanticScholarIssue) -> MonitorIssue:
-    return MonitorIssue(
-        severity=(
-            MonitorIssueSeverity.ERROR
-            if issue.severity is SemanticScholarIssueSeverity.ERROR
-            else MonitorIssueSeverity.WARNING
-        ),
-        component=MonitorIssueComponent.SEMANTIC_SCHOLAR,
-        stage=issue.stage,
-        message=issue.message,
-        journal=issue.journal,
-        paper_id=issue.paper_id,
         doi=issue.doi,
     )
 
@@ -532,41 +506,6 @@ def _run_canonical_core(
         crossref.records,
         progress_callback=progress_callback,
     )
-    semantic_scholar_client = create_semantic_scholar_client(
-        os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
-    )
-    _emit_activity(
-        progress_callback,
-        ActivityUpdate(
-            kind=ActivityKind.WORKING,
-            source="semantic_scholar",
-            operation="semantic_scholar_supplement",
-            label="Starting Semantic Scholar supplementation",
-            detail=f"{len(retrieval.evidence)} provider evidence records",
-        ),
-    )
-    semantic_scholar = augment_with_semantic_scholar(
-        semantic_scholar_client,
-        retrieval.evidence,
-        prepared.journals,
-        prepared.resolved_date_range.from_date,
-        prepared.resolved_date_range.to_date,
-        prepared.keyword_ast,
-    )
-    _emit_activity(
-        progress_callback,
-        ActivityUpdate(
-            kind=ActivityKind.WORKING,
-            source="semantic_scholar",
-            operation="semantic_scholar_supplement",
-            label="Completed Semantic Scholar supplementation",
-            detail=(
-                f"{len(semantic_scholar.supplement_records)} supplements · "
-                f"{len(semantic_scholar.discovered_records)} discovered"
-            ),
-        ),
-    )
-    combined_evidence = (*retrieval.evidence, *semantic_scholar.evidence)
     _emit_activity(
         progress_callback,
         ActivityUpdate(
@@ -574,10 +513,10 @@ def _run_canonical_core(
             source="application",
             operation="consolidate_evidence",
             label="Consolidating provider evidence",
-            detail=f"{len(combined_evidence)} evidence records",
+            detail=f"{len(retrieval.evidence)} evidence records",
         ),
     )
-    consolidation = consolidate_evidence(combined_evidence)
+    consolidation = consolidate_evidence(retrieval.evidence)
     _emit_activity(
         progress_callback,
         ActivityUpdate(
@@ -593,7 +532,6 @@ def _run_canonical_core(
         *(_openalex_issue(issue) for issue in openalex.issues),
         *(_crossref_discovery_issue(issue) for issue in crossref.issues),
         *(_enrichment_issue(issue) for issue in retrieval.issues),
-        *(_semantic_scholar_issue(issue) for issue in semantic_scholar.issues),
         *(
             _canonicalization_issue(
                 issue,
@@ -639,15 +577,12 @@ def _run_canonical_core(
                 openalex_records=len(openalex.records),
                 crossref_discovery_records=len(crossref.records),
                 crossref_supplement_records=len(retrieval.supplement_records),
-                semantic_scholar_supplement_records=len(semantic_scholar.supplement_records),
-                semantic_scholar_discovery_records=len(semantic_scholar.discovered_records),
                 evidence_clusters=len(consolidation.clusters),
                 consolidation_issues=len(consolidation.issues),
                 provider_issues=(
                     len(openalex.issues)
                     + len(crossref.issues)
                     + len(retrieval.issues)
-                    + len(semantic_scholar.issues)
                 ),
             ),
         )
@@ -670,15 +605,12 @@ def _run_canonical_core(
                 openalex_records=len(openalex.records),
                 crossref_discovery_records=len(crossref.records),
                 crossref_supplement_records=len(retrieval.supplement_records),
-                semantic_scholar_supplement_records=len(semantic_scholar.supplement_records),
-                semantic_scholar_discovery_records=len(semantic_scholar.discovered_records),
                 evidence_clusters=len(consolidation.clusters),
                 consolidation_issues=len(consolidation.issues),
                 provider_issues=(
                     len(openalex.issues)
                     + len(crossref.issues)
                     + len(retrieval.issues)
-                    + len(semantic_scholar.issues)
                 ),
             ),
         )
@@ -736,8 +668,6 @@ def _run_canonical_core(
         openalex_records=len(openalex.records),
         crossref_discovery_records=len(crossref.records),
         crossref_supplement_records=len(retrieval.supplement_records),
-        semantic_scholar_supplement_records=len(semantic_scholar.supplement_records),
-        semantic_scholar_discovery_records=len(semantic_scholar.discovered_records),
         evidence_clusters=len(consolidation.clusters),
         retained_clusters=len(retained_clusters),
         consolidation_issues=len(consolidation.issues),
@@ -746,7 +676,6 @@ def _run_canonical_core(
             len(openalex.issues)
             + len(crossref.issues)
             + len(retrieval.issues)
-            + len(semantic_scholar.issues)
         ),
     )
     return _CanonicalCoreResult(

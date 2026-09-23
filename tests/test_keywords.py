@@ -9,7 +9,6 @@ from literature_monitor.keywords import (
     Prefix,
     Proximity,
     Term,
-    broad_positive_query,
     parse_keyword_expression,
 )
 
@@ -132,7 +131,6 @@ def test_prefix_marker_inside_proximity_content_is_not_prefix_syntax() -> None:
     expression = parse_keyword_expression('"statist* inference"~5')
 
     assert expression == Proximity("statist* inference", 5)
-    assert broad_positive_query(expression) == "(statist) + (inference)"
 
 
 def test_proximity_token_count_validation_is_deferred_to_fts5_backend() -> None:
@@ -183,57 +181,3 @@ def test_p_greater_greater_n_is_one_word_inside_an_expression() -> None:
 def test_invalid_expressions_include_column(expression: str) -> None:
     with pytest.raises(KeywordSyntaxError, match="column"):
         parse_keyword_expression(expression)
-
-
-@pytest.mark.parametrize(
-    ("expression", "expected"),
-    [
-        ("causal", "causal"),
-        ('"causal inference"', '"causal inference"'),
-        ("causal AND genomics", "(causal) + (genomics)"),
-        ("causal OR bayesian", "(causal) | (bayesian)"),
-        (
-            "(causal OR bayesian) AND genomics",
-            "((causal) | (bayesian)) + (genomics)",
-        ),
-        ("causal AND NOT review", "causal"),
-        ("(causal OR bayesian) AND NOT editorial", "(causal) | (bayesian)"),
-        ("statist*", "statist*"),
-        ('"causal inference"~5', "(causal) + (inference)"),
-        (
-            'statist* AND "causal inference"~5',
-            "(statist*) + ((causal) + (inference))",
-        ),
-        (
-            'statist* OR "causal inference"~5',
-            "(statist*) | ((causal) + (inference))",
-        ),
-        ('"causal inference"~5 AND NOT review', "(causal) + (inference)"),
-        ("NOT review", None),
-        ("NOT statist*", None),
-    ],
-)
-def test_broad_positive_query_derivation(
-    expression: str,
-    expected: str | None,
-) -> None:
-    assert broad_positive_query(parse_keyword_expression(expression)) == expected
-
-
-def test_broad_positive_query_sanitizes_provider_operators() -> None:
-    expression = And(
-        Term("causal|review"),
-        Phrase('genomics + -editorial (survey) "quoted"'),
-    )
-
-    assert broad_positive_query(expression) == (
-        '(causal review) + ("genomics editorial survey quoted")'
-    )
-
-
-def test_broad_positive_query_sanitizes_proximity_metacharacters() -> None:
-    expression = Proximity('causal|inference + review* "quoted"', 5)
-
-    assert broad_positive_query(expression) == (
-        "(causal) + (inference) + (review) + (quoted)"
-    )

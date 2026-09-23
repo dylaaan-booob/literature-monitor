@@ -153,12 +153,12 @@ dependencies = [
     { name = "pydantic" },
     { name = "python-multipart" },
     { name = "pyyaml" },
-    { name = "semanticscholar" },
     { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "httpx" },
     { name = "pytest" },
 ]
 
@@ -169,12 +169,14 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2,<3" },
     { name = "python-multipart", specifier = ">=0.0.20,<1" },
     { name = "pyyaml", specifier = ">=6,<7" },
-    { name = "semanticscholar", specifier = ">=0.12,<0.13" },
     { name = "uvicorn", specifier = ">=0.30,<1" },
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8" }]
+dev = [
+    { name = "httpx", specifier = ">=0.27,<0.29" },
+    { name = "pytest", specifier = ">=8" },
+]
 
 [[package]]
 name = "markupsafe"
@@ -311,19 +313,6 @@ wheels = [
 ]
 
 [[package]]
-name = "semanticscholar"
-version = "0.12.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "httpx" },
-    { name = "tenacity" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/ff/1a/60fbb6096ed06d9d485e67b9778e60550ef12273ca124e9c82c06cf3b8d4/semanticscholar-0.12.0.tar.gz", hash = "sha256:174bb0129853480d2e659d8726ce0306a1f6f3817d1bc7a4bdd53b45a4984eb9", size = 30884, upload-time = "2026-03-29T20:07:23.842Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/b7/84/9b273b7ae0946e1b311ec651605c9c229d0553863dcc6c5a315150c5f7ef/semanticscholar-0.12.0-py3-none-any.whl", hash = "sha256:bffa484dd08e5c8041eaec357a46ec44838c79a0cfd4ddea20d09f84d350a830", size = 28289, upload-time = "2026-03-29T20:07:23.019Z" },
-]
-
-[[package]]
 name = "starlette"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
@@ -334,15 +323,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b5/b4/205b0d5241d934e8add0c38aa924c4f9fb7330834ff11e5444db964ec3f9/starlette-1.6.0.tar.gz", hash = "sha256:d4e3ac5e546444960c710297a3c9fc3f7ebae1b7e963f3d36173b49da535be9b", size = 2716969, upload-time = "2026-08-08T18:27:57.512Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c8/cb/6a6a47d5b464bd08695d254f3da6e7986cc70c9fa5d778eda57538edfe56/starlette-1.6.0-py3-none-any.whl", hash = "sha256:a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c", size = 75969, upload-time = "2026-08-08T18:27:56.196Z" },
-]
-
-[[package]]
-name = "tenacity"
-version = "9.1.4"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/47/c6/ee486fd809e357697ee8a44d3d69222b344920433d3b6666ccd9b374630c/tenacity-9.1.4.tar.gz", hash = "sha256:adb31d4c263f2bd041081ab33b498309a57c77f9acf2db65aadf0898179cf93a", size = 49413, upload-time = "2026-02-07T10:45:33.841Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d7/c1/eb8f9debc45d3b7918a32ab756658a0904732f75e555402972246b0b8e71/tenacity-9.1.4-py3-none-any.whl", hash = "sha256:6095a360c919085f28c6527de529e76a06ad89b23659fa881ae0649b867a9d55", size = 28926, upload-time = "2026-02-07T10:45:32.24Z" },
 ]
 
 [[package]]

@@ -859,8 +859,6 @@ def cli_run_result(
             openalex_records=1,
             crossref_discovery_records=1,
             crossref_supplement_records=1,
-            semantic_scholar_supplement_records=1,
-            semantic_scholar_discovery_records=1,
             evidence_clusters=1,
             retained_clusters=1,
         ),
@@ -1349,16 +1347,19 @@ def test_run_cli_tty_cleanup_on_unexpected_exception(
         "crossref-enrich",
     ),
 )
-def test_historical_diagnostics_do_not_construct_semantic_scholar(
+def test_historical_diagnostics_do_not_enter_production_core(
     command: str,
     monkeypatch: object,
     capsys: object,
 ) -> None:
     repository_root = Path(__file__).resolve().parents[1]
 
-    def unexpected_semantic_scholar(*args: object, **kwargs: object) -> object:
-        raise AssertionError("historical diagnostics must not construct S2")
-
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli._run_canonical_core",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("historical diagnostics must remain lower-level")
+        ),
+    )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.OpenAlexClient", lambda **kwargs: object()
     )
@@ -1380,11 +1381,6 @@ def test_historical_diagnostics_do_not_construct_semantic_scholar(
             issues=(),
         ),
     )
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.application.monitor.create_semantic_scholar_client",
-        unexpected_semantic_scholar,
-    )
-
     result = main(
         (
             command,
@@ -2703,8 +2699,6 @@ def cli_core_result(
             openalex_records=1,
             crossref_discovery_records=1,
             crossref_supplement_records=1,
-            semantic_scholar_supplement_records=1,
-            semantic_scholar_discovery_records=1,
             evidence_clusters=1,
             retained_clusters=1,
         ),

@@ -84,7 +84,6 @@ _OPERATORS = {
 }
 
 _WHITESPACE_PATTERN = re.compile(r"\s+")
-_PROVIDER_LITERAL_SEPARATOR = re.compile(r"[^\w\s]", re.UNICODE)
 _DECIMAL_INTEGER = re.compile(r"[0-9]+")
 
 
@@ -297,60 +296,3 @@ class _Parser:
 
 def parse_keyword_expression(text: str) -> KeywordExpression:
     return _Parser(text).parse()
-
-
-def _provider_components(value: str) -> tuple[str, ...]:
-    normalized = unicodedata.normalize("NFKC", value)
-    sanitized = _PROVIDER_LITERAL_SEPARATOR.sub(" ", normalized)
-    return tuple(_WHITESPACE_PATTERN.sub(" ", sanitized).strip().split())
-
-
-def _provider_literal(value: str, *, phrase: bool) -> str | None:
-    components = _provider_components(value)
-    if not components:
-        return None
-    sanitized = " ".join(components)
-    return f'"{sanitized}"' if phrase else sanitized
-
-
-def broad_positive_query(expression: KeywordExpression) -> str | None:
-    """Derive a safe positive-only Semantic Scholar bulk-search query."""
-
-    def convert(node: KeywordExpression) -> str | None:
-        if isinstance(node, Term):
-            return _provider_literal(node.value, phrase=False)
-        if isinstance(node, Phrase):
-            return _provider_literal(node.value, phrase=True)
-        if isinstance(node, Prefix):
-            normalized = unicodedata.normalize("NFKC", node.value)
-            validated = normalized.casefold()
-            if (
-                len(validated) < 3
-                or not all(
-                    character.isalpha() or character.isdigit()
-                    for character in validated
-                )
-            ):
-                return None
-            return f"{normalized}*"
-        if isinstance(node, Proximity):
-            components = _provider_components(node.value)
-            if not components:
-                return None
-            if len(components) == 1:
-                return components[0]
-            return " + ".join(f"({component})" for component in components)
-        if isinstance(node, Not):
-            return None
-        if isinstance(node, (And, Or)):
-            left = convert(node.left)
-            right = convert(node.right)
-            if left is None:
-                return right
-            if right is None:
-                return left
-            operator = "+" if isinstance(node, And) else "|"
-            return f"({left}) {operator} ({right})"
-        raise TypeError(f"unsupported keyword expression node: {type(node).__name__}")
-
-    return convert(expression)

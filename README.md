@@ -1,10 +1,10 @@
 # Literature Monitor
 
 This repository contains the journal-monitoring workflow specified in
-`SPEC.md`. The workflow retrieves journal evidence from OpenAlex, Crossref, and
-Semantic Scholar, consolidates provider evidence before local keyword filtering,
-canonicalizes retained papers and versions, safely updates durable Paper
-and Author Markdown, and exports kept papers.
+`SPEC.md`. The workflow uses OpenAlex for primary discovery and Crossref for
+secondary discovery and bibliographic evidence, consolidates provider evidence
+before local keyword filtering, canonicalizes retained papers and versions,
+safely updates durable Paper and Author Markdown, and exports kept papers.
 
 v0.4.1 is the latest released baseline. It adds shared transient runtime
 progress, Activity, current-Activity ETA, inactivity feedback, and corresponding
@@ -60,9 +60,9 @@ uv run literature-monitor run --config config.example.yaml
 
 `run` reads the journal whitelist, keyword expression, output directory, date
 policy, and log level from the monitor YAML. It then runs the complete production
-path: OpenAlex and Crossref retrieval, provider evidence supplementation,
-Semantic Scholar supplementation/discovery, evidence consolidation, local FTS5
-filtering, canonicalization, and Paper / Author / Inbox materialization.
+path: OpenAlex primary discovery, Crossref secondary discovery and DOI
+supplementation, evidence consolidation, local FTS5 filtering, canonicalization,
+and Paper / Author / Inbox materialization.
 
 On a TTY, `run` renders the workflow stage, current Activity, reliable counters,
 elapsed time, and current-Activity ETA when available. On a non-TTY, progress is
@@ -71,16 +71,7 @@ existing exit-code contract are unchanged.
 
 Discovery windows are publication-date-only. The monitor does not use Crossref
 update-date, created-date, index-date, provider update timestamps, or persisted
-cursor/watermark/checkpoint state to recover late-indexed records. For Semantic
-Scholar supplemental discovery, an exact publication date takes precedence. If
-the exact date is missing and only year `Y` is available, `Y-01-01` is used
-only to validate provider filtering membership against the query window. That
-filtering interpretation is not stored as the paper's publication date, is not
-propagated into provider evidence or canonical metadata, and is not written to
-Paper Markdown. If both publication date and year are missing, the record is
-excluded because date-window membership cannot be established. A normal
-year-only record does not produce a warning solely because this filtering rule
-was used.
+cursor/watermark/checkpoint state to recover late-indexed records.
 
 The selected output directory contains:
 
@@ -175,8 +166,7 @@ never written back to the monitor file.
 ### Runtime environment and non-features
 
 Optional provider credentials/contact information remain environment settings,
-not monitor fields: `OPENALEX_API_KEY`, `CROSSREF_MAILTO`, and
-`SEMANTIC_SCHOLAR_API_KEY`.
+not monitor fields: `OPENALEX_API_KEY` and `CROSSREF_MAILTO`.
 
 The workflow does not add monitor/workspace UUIDs, workspace ownership
 markers, a global research-work or decision registry, last-successful-run state,
@@ -229,11 +219,10 @@ regressions using local HTTP fixtures. The representative persistent-monitor
 lifecycle enters through `run --config`, while explicit `materialize` coverage
 remains for the legacy / diagnostic surface and an overlapping multi-journal
 rerun. The CLI can also be used for manual smoke validation against the real
-OpenAlex, Crossref, and Semantic Scholar providers, but those results
-depend on external service availability and are not part of the deterministic
-default suite. Optional credentials and contact details are supplied only
-through `OPENALEX_API_KEY`, `CROSSREF_MAILTO`, and
-`SEMANTIC_SCHOLAR_API_KEY` environment variables.
+OpenAlex and Crossref providers, but those results depend on external service
+availability and are not part of the deterministic default suite. Optional
+credentials and contact details are supplied only through `OPENALEX_API_KEY`
+and `CROSSREF_MAILTO` environment variables.
 
 ## Diagnostic and lower-level commands
 
@@ -428,18 +417,10 @@ creation, Markdown materialization, Zotero integration, or persistence.
 ## Diagnose canonicalization and versions
 
 The canonicalization diagnostic retrieves journal/date evidence from OpenAlex
-and Crossref, performs Crossref DOI supplementation, then uses Semantic Scholar
-for DOI batch supplementation and venue/date-bounded supplemental discovery.
-Provider search expands coverage only: all evidence is consolidated before the
-local FTS5 filter evaluates the searchable projection using the rules above.
-For Semantic Scholar supplemental discovery, Prefix operands retain their
-trailing `*`, while Proximity operands are reduced to broad positive `AND`
-terms rather than provider-specific proximity syntax. This provider query only
-expands recall; final inclusion is always decided by the complete local
-expression.
-Semantic Scholar fields of study remain provider taxonomy and are not treated
-as author keywords or searchable text. Retained clusters become canonical
-papers. Matching is conservative and evidence-based:
+and Crossref and performs Crossref DOI supplementation. All available evidence
+is consolidated before the local FTS5 filter evaluates the searchable
+projection using the rules above. Retained clusters become canonical papers.
+Matching is conservative and evidence-based:
 exact identifiers and explicit version relations take priority, while the
 title-and-author fallback requires compatible ordered author identities.
 
@@ -464,14 +445,11 @@ export.
 ## Legacy / diagnostic materialization
 
 `materialize` remains an explicit legacy / diagnostic-style entry point. It
-runs the same three-provider consolidation-before-filter production pipeline as
-`run`, but it still requires an explicit CLI `--output-dir` and continues to
+runs the same OpenAlex/Crossref consolidation-before-filter production pipeline
+as `run`, but it still requires an explicit CLI `--output-dir` and continues to
 support the existing diagnostic `--journal` and `--keyword-expression`
 overrides. The normal `run` command instead takes its output directory,
-journal whitelist, and keyword expression from the monitor definition.
-
-Semantic Scholar access is anonymous by default; set
-`SEMANTIC_SCHOLAR_API_KEY` in the environment when using an API key:
+journal whitelist, and keyword expression from the monitor definition:
 
 ```bash
 uv run literature-monitor materialize \

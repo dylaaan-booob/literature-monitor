@@ -264,16 +264,6 @@ def _log_monitor_issue(
             detail = f"{issue.record_id}: {detail}"
         log("Crossref [%s]: %s", issue.stage, detail)
         return
-    if issue.component is MonitorIssueComponent.SEMANTIC_SCHOLAR:
-        detail = issue.message
-        if issue.doi is not None:
-            detail = f"DOI {issue.doi}: {detail}"
-        if issue.paper_id is not None:
-            detail = f"{issue.paper_id}: {detail}"
-        if issue.journal is not None:
-            detail = f"{issue.journal}: {detail}"
-        log("Semantic Scholar [%s]: %s", issue.stage, detail)
-        return
     if issue.component in {
         MonitorIssueComponent.CONSOLIDATION,
         MonitorIssueComponent.CANONICALIZATION,
@@ -343,15 +333,11 @@ def _log_canonicalization_summary(
     logger.info(
         "Canonicalization diagnostic completed: %d OpenAlex records, "
         "%d Crossref discovery records, %d Crossref DOI supplement records, "
-        "%d Semantic Scholar batch supplement records, %d Semantic Scholar "
-        "discovery records, %d evidence clusters, %d retained clusters, "
-        "%d canonical papers, %d consolidation issues, %d canonicalization "
-        "issues, %d provider issues",
+        "%d evidence clusters, %d retained clusters, %d canonical papers, "
+        "%d consolidation issues, %d canonicalization issues, %d provider issues",
         stats.openalex_records,
         stats.crossref_discovery_records,
         stats.crossref_supplement_records,
-        stats.semantic_scholar_supplement_records,
-        stats.semantic_scholar_discovery_records,
         stats.evidence_clusters,
         stats.retained_clusters,
         len(result.papers),
@@ -368,18 +354,14 @@ def _log_materialization_summary(
     stats = result.statistics
     logger.info(
         "Materialization completed: %d OpenAlex records, %d Crossref "
-        "discovery records, %d Crossref DOI supplement records, %d Semantic "
-        "Scholar batch supplement records, %d Semantic Scholar discovery "
-        "records, %d evidence clusters, %d retained clusters, %d canonical papers, "
-        "%d paper files created, %d paper files matched, %d paper files updated, "
-        "%d author files created, %d author files existing, %d materialization "
-        "issues, %d consolidation issues, %d canonicalization issues, %d "
-        "provider issues",
+        "discovery records, %d Crossref DOI supplement records, %d evidence "
+        "clusters, %d retained clusters, %d canonical papers, %d paper files "
+        "created, %d paper files matched, %d paper files updated, %d author "
+        "files created, %d author files existing, %d materialization issues, "
+        "%d consolidation issues, %d canonicalization issues, %d provider issues",
         stats.openalex_records,
         stats.crossref_discovery_records,
         stats.crossref_supplement_records,
-        stats.semantic_scholar_supplement_records,
-        stats.semantic_scholar_discovery_records,
         stats.evidence_clusters,
         stats.retained_clusters,
         result.canonical_paper_count,

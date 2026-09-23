@@ -23,7 +23,6 @@ _SOURCE_LABELS = {
     "application": "Application",
     "crossref": "Crossref",
     "openalex": "OpenAlex",
-    "semantic_scholar": "Semantic Scholar",
     "workspace": "Workspace",
 }
 
