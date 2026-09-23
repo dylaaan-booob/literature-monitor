@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from uuid import UUID
@@ -39,6 +39,12 @@ from literature_monitor.models import (
     PaperVersion,
 )
 from literature_monitor.naming import paper_filename
+from literature_monitor.progress import (
+    ActivityKind,
+    ActivityUpdate,
+    ProgressCallback,
+    ProgressEvent,
+)
 from literature_monitor.safe_write import (
     CompareReadError,
     ContentChangedError,
@@ -88,6 +94,14 @@ class _PaperWrite:
     path: Path
     contents: str
     original: str | None
+
+
+def _report_activity(
+    callback: ProgressCallback | None,
+    activity: ActivityUpdate,
+) -> None:
+    if callback is not None:
+        callback(ProgressEvent(activity=activity))
 
 
 def _yaml_frontmatter(values: dict[str, object]) -> str:
@@ -773,9 +787,18 @@ def _render_updated_paper(
 def materialize_papers(
     papers: Sequence[CanonicalPaper],
     output_dir: Path,
+    *,
+    progress_callback: ProgressCallback | None = None,
 ) -> MaterializationResult:
     """Create or incrementally update Paper and Author notes."""
 
+    read_activity = ActivityUpdate(
+        kind=ActivityKind.WORKING,
+        source="workspace",
+        operation="materialize_read",
+        label="Reading workspace",
+    )
+    _report_activity(progress_callback, read_activity)
     authors_dir = output_dir / "Authors"
     papers_dir = output_dir / "Papers"
     issues: list[MaterializationIssue] = []
@@ -803,6 +826,14 @@ def materialize_papers(
         papers_dir,
         issues,
     )
+    _report_activity(
+        progress_callback,
+        replace(
+            read_activity,
+            label="Completed workspace read",
+            detail=f"{len(states)} papers · {len(author_states)} authors",
+        ),
+    )
     collision_ids = {
         state.paper_id for state in states if state.paper_id is not None
     }
@@ -816,180 +847,238 @@ def materialize_papers(
     handled_new_paths: set[Path] = set()
     pending_paper_writes: list[_PaperWrite] = []
 
-    for paper, match in zip(papers, matches, strict=True):
-        state = match.state
-        if state is not None and state.path not in existing_papers:
-            existing_papers.append(state.path)
-        if match.blocked:
-            continue
-        if state is not None:
-            if not state.updateable:
-                issues.append(
-                    MaterializationIssue(
-                        state.path,
-                        "matched durable Paper is not safe to update",
-                    )
-                )
-                continue
-            merged = merge_paper_state(state, paper)
-            for message in merged.warnings:
-                _warning(issues, state.path, message)
-            if merged.incoming_is_preferred:
-                resolved = _resolve_author_links(
-                    paper,
-                    state.paper_id or paper.id,
-                    authors_dir,
-                    state,
-                    author_states,
-                    openalex_index,
-                    orcid_index,
-                    created_authors,
-                    existing_authors,
-                    issues,
-                )
-                if resolved is None:
-                    continue
-                author_links, _stems = resolved
-                durable_author_links = tuple(
-                    f"[[Authors/{link.stem}|{link.alias}]]"
-                    for link in state.author_links
-                )
-                if durable_author_links != author_links:
-                    _warning(
-                        issues,
-                        state.path,
-                        "authors changed with the effective preferred version",
-                    )
-            else:
-                author_links = tuple(
-                    f"[[Authors/{link.stem}|{link.alias}]]"
-                    for link in state.author_links
-                )
-                authors_compatible = len(state.author_links) == len(paper.authors) and all(
-                    _link_compatible(
-                        link,
-                        author,
-                        author_states,
-                        for_title_fallback=False,
-                    )
-                    for link, author in zip(
-                        state.author_links, paper.authors, strict=True
-                    )
-                )
-                if not authors_compatible:
-                    _warning(
-                        issues,
-                        state.path,
-                        "ignored authors from a non-effective incoming version",
-                    )
-            try:
-                contents = _render_updated_paper(state, merged, author_links)
-            except Exception as error:
-                issues.append(MaterializationIssue(state.path, str(error)))
-                continue
-            if contents == state.original:
-                continue
-            pending_paper_writes.append(
-                _PaperWrite(state.path, contents, state.original)
-            )
-            continue
+    preparation_activity = ActivityUpdate(
+        kind=ActivityKind.WORKING,
+        source="workspace",
+        operation="materialize_prepare",
+        label="Preparing workspace updates",
+        current=0,
+        total=len(papers),
+        unit="paper",
+    )
+    _report_activity(progress_callback, preparation_activity)
 
-        if papers_directory_issue is not None or authors_directory_issue is not None:
-            continue
-        target = papers_dir / paper_filename(
-            paper.metadata.title,
-            paper.id,
-            collision_ids,
-        )
-        if target in handled_new_paths:
-            issues.append(
-                MaterializationIssue(
-                    target,
-                    "multiple incoming Papers resolve to the same new target",
+    for paper_index, (paper, match) in enumerate(
+        zip(papers, matches, strict=True)
+    ):
+        completed = True
+        try:
+            state = match.state
+            if state is not None and state.path not in existing_papers:
+                existing_papers.append(state.path)
+            if match.blocked:
+                continue
+            if state is not None:
+                if not state.updateable:
+                    issues.append(
+                        MaterializationIssue(
+                            state.path,
+                            "matched durable Paper is not safe to update",
+                        )
+                    )
+                    continue
+                merged = merge_paper_state(state, paper)
+                for message in merged.warnings:
+                    _warning(issues, state.path, message)
+                if merged.incoming_is_preferred:
+                    resolved = _resolve_author_links(
+                        paper,
+                        state.paper_id or paper.id,
+                        authors_dir,
+                        state,
+                        author_states,
+                        openalex_index,
+                        orcid_index,
+                        created_authors,
+                        existing_authors,
+                        issues,
+                    )
+                    if resolved is None:
+                        continue
+                    author_links, _stems = resolved
+                    durable_author_links = tuple(
+                        f"[[Authors/{link.stem}|{link.alias}]]"
+                        for link in state.author_links
+                    )
+                    if durable_author_links != author_links:
+                        _warning(
+                            issues,
+                            state.path,
+                            "authors changed with the effective preferred version",
+                        )
+                else:
+                    author_links = tuple(
+                        f"[[Authors/{link.stem}|{link.alias}]]"
+                        for link in state.author_links
+                    )
+                    authors_compatible = len(state.author_links) == len(paper.authors) and all(
+                        _link_compatible(
+                            link,
+                            author,
+                            author_states,
+                            for_title_fallback=False,
+                        )
+                        for link, author in zip(
+                            state.author_links, paper.authors, strict=True
+                        )
+                    )
+                    if not authors_compatible:
+                        _warning(
+                            issues,
+                            state.path,
+                            "ignored authors from a non-effective incoming version",
+                        )
+                try:
+                    contents = _render_updated_paper(state, merged, author_links)
+                except Exception as error:
+                    issues.append(MaterializationIssue(state.path, str(error)))
+                    continue
+                if contents == state.original:
+                    continue
+                pending_paper_writes.append(
+                    _PaperWrite(state.path, contents, state.original)
                 )
+                continue
+
+            if papers_directory_issue is not None or authors_directory_issue is not None:
+                continue
+            target = papers_dir / paper_filename(
+                paper.metadata.title,
+                paper.id,
+                collision_ids,
             )
-            continue
-        handled_new_paths.add(target)
-        resolved = _resolve_author_links(
-            paper,
-            paper.id,
-            authors_dir,
-            None,
-            author_states,
-            openalex_index,
-            orcid_index,
-            created_authors,
-            existing_authors,
-            issues,
-        )
-        if resolved is None:
-            continue
-        _links, stems = resolved
-        if target.exists():
-            if target.is_file():
+            if target in handled_new_paths:
                 issues.append(
                     MaterializationIssue(
                         target,
-                        "occupied Paper path has no safe identity match",
+                        "multiple incoming Papers resolve to the same new target",
                     )
                 )
-            else:
-                if not any(issue.path == target for issue in issues):
+                continue
+            handled_new_paths.add(target)
+            resolved = _resolve_author_links(
+                paper,
+                paper.id,
+                authors_dir,
+                None,
+                author_states,
+                openalex_index,
+                orcid_index,
+                created_authors,
+                existing_authors,
+                issues,
+            )
+            if resolved is None:
+                continue
+            _links, stems = resolved
+            if target.exists():
+                if target.is_file():
                     issues.append(
                         MaterializationIssue(
                             target,
-                            "Paper target exists but is not a regular file",
+                            "occupied Paper path has no safe identity match",
                         )
                     )
-            continue
-        try:
-            contents = render_paper_markdown(paper, stems)
-        except Exception as error:
-            issues.append(MaterializationIssue(target, str(error)))
-            continue
-        pending_paper_writes.append(_PaperWrite(target, contents, None))
-
-    for pending in pending_paper_writes:
-        if pending.original is not None:
+                else:
+                    if not any(issue.path == target for issue in issues):
+                        issues.append(
+                            MaterializationIssue(
+                                target,
+                                "Paper target exists but is not a regular file",
+                            )
+                        )
+                continue
             try:
-                replace_text_if_unchanged(
-                    pending.path,
-                    pending.contents,
-                    expected_contents=pending.original,
+                contents = render_paper_markdown(paper, stems)
+            except Exception as error:
+                issues.append(MaterializationIssue(target, str(error)))
+                continue
+            pending_paper_writes.append(_PaperWrite(target, contents, None))
+
+        except BaseException:
+            completed = False
+            raise
+        finally:
+            if completed:
+                # 已隔离的 blocked/no-op/error 分支也完成了这个 incoming Paper work unit。
+                _report_activity(
+                    progress_callback,
+                    replace(
+                        preparation_activity,
+                        detail=paper.metadata.title,
+                        current=paper_index + 1,
+                    ),
                 )
-            except CompareReadError as error:
+
+    write_activity = ActivityUpdate(
+        kind=ActivityKind.WORKING,
+        source="workspace",
+        operation="materialize_write",
+        label="Writing workspace",
+        current=0,
+        total=len(pending_paper_writes),
+        unit="file",
+    )
+    _report_activity(progress_callback, write_activity)
+
+    for write_index, pending in enumerate(pending_paper_writes):
+        completed = True
+        try:
+            if pending.original is not None:
+                try:
+                    replace_text_if_unchanged(
+                        pending.path,
+                        pending.contents,
+                        expected_contents=pending.original,
+                    )
+                except CompareReadError as error:
+                    issues.append(
+                        MaterializationIssue(
+                            pending.path,
+                            f"cannot verify Paper before update: {error}",
+                        )
+                    )
+                except ContentChangedError:
+                    issues.append(
+                        MaterializationIssue(
+                            pending.path,
+                            "Paper changed on disk after it was scanned; update safely aborted",
+                        )
+                    )
+                except OSError as error:
+                    issues.append(MaterializationIssue(pending.path, str(error)))
+                else:
+                    updated_papers.append(pending.path)
+                continue
+            outcome, error = _create_file(pending.path, pending.contents)
+            if outcome == "created":
+                created_papers.append(pending.path)
+            elif outcome == "existing":
                 issues.append(
                     MaterializationIssue(
                         pending.path,
-                        f"cannot verify Paper before update: {error}",
+                        "Paper path became occupied without a safe identity match",
                     )
                 )
-            except ContentChangedError:
-                issues.append(
-                    MaterializationIssue(
-                        pending.path,
-                        "Paper changed on disk after it was scanned; update safely aborted",
-                    )
-                )
-            except OSError as error:
-                issues.append(MaterializationIssue(pending.path, str(error)))
             else:
-                updated_papers.append(pending.path)
-            continue
-        outcome, error = _create_file(pending.path, pending.contents)
-        if outcome == "created":
-            created_papers.append(pending.path)
-        elif outcome == "existing":
-            issues.append(
-                MaterializationIssue(
-                    pending.path,
-                    "Paper path became occupied without a safe identity match",
+                issues.append(
+                    MaterializationIssue(pending.path, error or "write failed")
                 )
-            )
-        else:
-            issues.append(
-                MaterializationIssue(pending.path, error or "write failed")
-            )
+
+        except BaseException:
+            completed = False
+            raise
+        finally:
+            if completed:
+                # write conflict 或 I/O failure 仍表示这一 pending write attempt 已处理完成。
+                _report_activity(
+                    progress_callback,
+                    replace(
+                        write_activity,
+                        detail=pending.path.name,
+                        current=write_index + 1,
+                    ),
+                )
 
     if authors_directory_issue is None and papers_directory_issue is None:
         inbox_path = output_dir / "Inbox.base"

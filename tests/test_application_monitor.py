@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 from pathlib import Path
 
@@ -48,6 +49,7 @@ from literature_monitor.openalex import (
     DiscoveryIssue,
     DiscoveryResult,
     IssueSeverity,
+    OpenAlexClient,
     ResolvedSource,
 )
 from literature_monitor.progress import (
@@ -386,19 +388,36 @@ def test_materialize_consumes_the_same_canonical_result(
     core = _run_canonical_core(config_path)
     output_dir = tmp_path / "explicit"
     received: list[tuple[tuple[CanonicalPaper, ...], Path]] = []
+    received_callbacks: list[ProgressCallback | None] = []
 
     def materialize(
         papers: tuple[CanonicalPaper, ...],
         destination: Path,
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> MaterializationResult:
         received.append((papers, destination))
+        received_callbacks.append(progress_callback)
         return materialization_result(destination)
 
     monkeypatch.setattr(monitor, "materialize_papers", materialize)
 
-    result = _materialize_canonical_result(core, output_dir)
+    progress_events: list[ProgressEvent] = []
+
+    def report(event: ProgressEvent) -> None:
+        progress_events.append(event)
+
+    result = _materialize_canonical_result(
+        core,
+        output_dir,
+        progress_callback=report,
+    )
 
     assert received == [((paper,), output_dir)]
+    assert received_callbacks == [report]
+    assert [event.stage for event in progress_events if event.stage is not None] == [
+        ProgressStage.UPDATING_WORKSPACE
+    ]
     assert result.canonical_paper_count == 1
     assert result.created_papers == 1
     assert result.matched_existing_papers == 1
@@ -419,9 +438,22 @@ def test_run_monitor_uses_core_materialization_and_progress_contract(
     def materialize(
         papers: tuple[CanonicalPaper, ...],
         destination: Path,
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> MaterializationResult:
         events.append("materialize")
         assert destination == (tmp_path / "run-workspace").resolve()
+        assert progress_callback is not None
+        progress_callback(
+            ProgressEvent(
+                activity=ActivityUpdate(
+                    kind=ActivityKind.WORKING,
+                    source="workspace",
+                    operation="test_materialize",
+                    label="Materialization activity",
+                )
+            )
+        )
         return materialization_result(destination)
 
     monkeypatch.setattr(monitor, "materialize_papers", materialize)
@@ -429,14 +461,31 @@ def test_run_monitor_uses_core_materialization_and_progress_contract(
     result = run_monitor(config_path, progress_callback=progress_events.append)
 
     assert result.outcome is RunOutcome.COMPLETED
-    assert [event.stage for event in progress_events] == [
+    assert [event.stage for event in progress_events if event.stage is not None] == [
         ProgressStage.CHECKING_MONITOR,
         ProgressStage.DISCOVERING_PAPERS,
         ProgressStage.COMBINING_METADATA,
         ProgressStage.MATCHING_LITERATURE,
         ProgressStage.UPDATING_WORKSPACE,
     ]
-    assert all(event.activity is None for event in progress_events)
+    stage: ProgressStage | None = None
+    activity_locations: list[tuple[ProgressStage | None, str]] = []
+    for event in progress_events:
+        if event.stage is not None:
+            stage = event.stage
+        if event.activity is not None:
+            activity_locations.append((stage, event.activity.operation))
+    assert activity_locations == [
+        (ProgressStage.COMBINING_METADATA, "semantic_scholar_supplement"),
+        (ProgressStage.COMBINING_METADATA, "semantic_scholar_supplement"),
+        (ProgressStage.COMBINING_METADATA, "consolidate_evidence"),
+        (ProgressStage.COMBINING_METADATA, "consolidate_evidence"),
+        (ProgressStage.MATCHING_LITERATURE, "matching_literature"),
+        (ProgressStage.MATCHING_LITERATURE, "matching_literature"),
+        (ProgressStage.MATCHING_LITERATURE, "canonicalize_literature"),
+        (ProgressStage.MATCHING_LITERATURE, "canonicalize_literature"),
+        (ProgressStage.UPDATING_WORKSPACE, "test_materialize"),
+    ]
     assert events[-1] == "materialize"
     assert result.canonical_paper_count == 1
     assert result.created_papers == 1
@@ -444,6 +493,46 @@ def test_run_monitor_uses_core_materialization_and_progress_contract(
     assert result.updated_papers == 1
     assert result.created_authors == 1
     assert result.existing_authors == 1
+
+
+def test_missing_semantic_scholar_key_does_not_block_local_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = write_monitor(tmp_path)
+    install_core_mocks(monkeypatch)
+    monkeypatch.delenv("SEMANTIC_SCHOLAR_API_KEY", raising=False)
+    api_keys: list[str | None] = []
+
+    def create_client(api_key: str | None) -> object:
+        api_keys.append(api_key)
+        return object()
+
+    monkeypatch.setattr(monitor, "create_semantic_scholar_client", create_client)
+    progress_events: list[ProgressEvent] = []
+
+    result = _run_canonical_core(
+        config_path,
+        progress_callback=progress_events.append,
+    )
+
+    assert result.outcome is RunOutcome.COMPLETED
+    assert api_keys == [None]
+    operations = [
+        event.activity.operation
+        for event in progress_events
+        if event.activity is not None
+    ]
+    assert operations == [
+        "semantic_scholar_supplement",
+        "semantic_scholar_supplement",
+        "consolidate_evidence",
+        "consolidate_evidence",
+        "matching_literature",
+        "matching_literature",
+        "canonicalize_literature",
+        "canonicalize_literature",
+    ]
 
 
 def test_run_monitor_passes_one_progress_callback_through_provider_boundaries(
@@ -461,7 +550,7 @@ def test_run_monitor_passes_one_progress_callback_through_provider_boundaries(
     monkeypatch.setattr(
         monitor,
         "materialize_papers",
-        lambda papers, output_dir: materialization_result(output_dir),
+        lambda papers, output_dir, **kwargs: materialization_result(output_dir),
     )
 
     def report(event: ProgressEvent) -> None:
@@ -471,22 +560,25 @@ def test_run_monitor_passes_one_progress_callback_through_provider_boundaries(
 
     assert result.outcome is RunOutcome.COMPLETED
     assert provider_callbacks == [report, report, report]
+    assert [event.stage for event in progress_events if event.stage is not None] == [
+        ProgressStage.CHECKING_MONITOR,
+        ProgressStage.DISCOVERING_PAPERS,
+        ProgressStage.COMBINING_METADATA,
+        ProgressStage.MATCHING_LITERATURE,
+        ProgressStage.UPDATING_WORKSPACE,
+    ]
     assert [
         (
-            event.stage,
-            event.activity.source if event.activity is not None else None,
-            event.activity.operation if event.activity is not None else None,
+            event.activity.source,
+            event.activity.operation,
         )
         for event in progress_events
+        if event.activity is not None
+        and event.activity.operation.startswith("test_")
     ] == [
-        (ProgressStage.CHECKING_MONITOR, None, None),
-        (ProgressStage.DISCOVERING_PAPERS, None, None),
-        (None, "openalex", "test_openalex"),
-        (None, "crossref", "test_crossref_discovery"),
-        (ProgressStage.COMBINING_METADATA, None, None),
-        (None, "crossref", "test_crossref_supplement"),
-        (ProgressStage.MATCHING_LITERATURE, None, None),
-        (ProgressStage.UPDATING_WORKSPACE, None, None),
+        ("openalex", "test_openalex"),
+        ("crossref", "test_crossref_discovery"),
+        ("crossref", "test_crossref_supplement"),
     ]
 
 
@@ -521,7 +613,7 @@ def test_application_date_override_forms_are_complete_and_ephemeral(
     monkeypatch.setattr(
         monitor,
         "materialize_papers",
-        lambda papers, output_dir: materialization_result(output_dir),
+        lambda papers, output_dir, **kwargs: materialization_result(output_dir),
     )
 
     result = run_monitor(config_path, date_override=date_override)
@@ -551,7 +643,7 @@ def test_persisted_date_policy_is_used_without_override(
     monkeypatch.setattr(
         monitor,
         "materialize_papers",
-        lambda papers, output_dir: materialization_result(output_dir),
+        lambda papers, output_dir, **kwargs: materialization_result(output_dir),
     )
 
     result = run_monitor(config_path)
@@ -630,6 +722,8 @@ def test_provider_error_still_materializes_successful_papers(
     def materialize(
         papers: tuple[CanonicalPaper, ...],
         destination: Path,
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> MaterializationResult:
         materialized.extend(papers)
         return materialization_result(destination)
@@ -662,7 +756,7 @@ def test_provider_warning_is_nonfatal(
     monkeypatch.setattr(
         monitor,
         "materialize_papers",
-        lambda papers, output_dir: materialization_result(output_dir),
+        lambda papers, output_dir, **kwargs: materialization_result(output_dir),
     )
 
     result = run_monitor(config_path)
@@ -691,6 +785,8 @@ def test_materialization_issue_controls_structured_run_outcome(
     def materialize(
         papers: tuple[CanonicalPaper, ...],
         destination: Path,
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> MaterializationResult:
         return materialization_result(
             destination,
@@ -730,7 +826,7 @@ def test_canonicalization_warning_is_nonfatal(
     monkeypatch.setattr(
         monitor,
         "materialize_papers",
-        lambda papers, output_dir: materialization_result(output_dir),
+        lambda papers, output_dir, **kwargs: materialization_result(output_dir),
     )
 
     result = run_monitor(config_path)
@@ -763,11 +859,31 @@ def test_validate_monitor_success_and_only_resolves_sources(
     config_path = write_monitor(tmp_path)
     config = load_config(config_path)
     calls: list[str] = []
+    progress_events: list[ProgressEvent] = []
+    source_callbacks: list[ProgressCallback | None] = []
 
     monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kwargs: object())
 
-    def resolve(client: object, journal: JournalConfig) -> tuple[ResolvedSource, tuple[DiscoveryIssue, ...]]:
+    def resolve(
+        client: object,
+        journal: JournalConfig,
+        *,
+        progress_callback: ProgressCallback | None = None,
+        operation: str | None = None,
+    ) -> tuple[ResolvedSource, tuple[DiscoveryIssue, ...]]:
         calls.append(journal.name)
+        source_callbacks.append(progress_callback)
+        if progress_callback is not None:
+            progress_callback(
+                ProgressEvent(
+                    activity=ActivityUpdate(
+                        kind=ActivityKind.WORKING,
+                        source="openalex",
+                        operation=operation or "source_resolution",
+                        label="Requesting OpenAlex",
+                    )
+                )
+            )
         return resolved_source(journal), ()
 
     monkeypatch.setattr(monitor, "resolve_journal_source", resolve)
@@ -785,13 +901,137 @@ def test_validate_monitor_success_and_only_resolves_sources(
     ):
         monkeypatch.setattr(monitor, name, unexpected)
 
-    result = validate_monitor(config_path)
+    def report(event: ProgressEvent) -> None:
+        progress_events.append(event)
+
+    result = validate_monitor(config_path, progress_callback=report)
 
     assert result.outcome is ValidationOutcome.VALID
     assert calls == [journal.name for journal in config.journals]
+    assert source_callbacks == [report, report]
+    assert all(event.stage is None for event in progress_events)
+    journal_progress = [
+        event.activity
+        for event in progress_events
+        if event.activity is not None
+        and event.activity.operation == "validation_journals"
+    ]
+    assert [
+        (activity.current, activity.total, activity.unit)
+        for activity in journal_progress
+    ] == [
+        (0, 2, "journal"),
+        (1, 2, "journal"),
+        (2, 2, "journal"),
+    ]
+    assert [
+        event.activity.operation
+        for event in progress_events
+        if event.activity is not None and event.activity.source == "openalex"
+    ] == [
+        "validation_source_resolution:0",
+        "validation_source_resolution:1",
+    ]
     assert result.configured_journal_count == 2
     assert result.configured_issn_count == 3
     assert len(result.resolved_sources) == 2
+
+
+def test_validate_monitor_reuses_openalex_request_retry_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = write_monitor(tmp_path)
+    calls: list[str] = []
+    request_count = 0
+
+    class Response:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = json.dumps(payload).encode()
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self._payload
+
+    def opener(request: object, *, timeout: float) -> Response:
+        nonlocal request_count
+        request_count += 1
+        url = getattr(request, "full_url")
+        calls.append(url)
+        if request_count == 1:
+            raise TimeoutError("simulated transient timeout")
+        if "0090-5364" in url:
+            return Response(
+                {
+                    "id": "https://openalex.org/S1234567",
+                    "display_name": "Annals of Statistics",
+                    "issn_l": "0090-5364",
+                    "issn": ["0090-5364"],
+                    "type": "journal",
+                    "alternate_titles": [],
+                    "abbreviated_title": None,
+                }
+            )
+        return Response(
+            {
+                "id": "https://openalex.org/S8265502",
+                "display_name": "Biometrics",
+                "issn_l": "0006-341X",
+                "issn": ["0006-341X", "1541-0420"],
+                "type": "journal",
+                "alternate_titles": [],
+                "abbreviated_title": None,
+            }
+        )
+
+    client = OpenAlexClient(opener=opener, sleep=lambda _delay: None)
+    monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kwargs: client)
+
+    def unexpected(*args: object, **kwargs: object) -> object:
+        raise AssertionError("validation must not expand beyond Source resolution")
+
+    for name in (
+        "discover_journals",
+        "CrossrefClient",
+        "discover_crossref_journals",
+        "create_semantic_scholar_client",
+        "augment_with_semantic_scholar",
+        "materialize_papers",
+    ):
+        monkeypatch.setattr(monitor, name, unexpected)
+
+    progress_events: list[ProgressEvent] = []
+    result = validate_monitor(
+        config_path,
+        progress_callback=progress_events.append,
+    )
+
+    assert result.outcome is ValidationOutcome.VALID
+    assert request_count == 4
+    assert not any("/works" in url for url in calls)
+    openalex_activity = [
+        event.activity
+        for event in progress_events
+        if event.activity is not None and event.activity.source == "openalex"
+    ]
+    assert any(
+        activity.kind is ActivityKind.RETRYING
+        and activity.operation == "validation_source_resolution:0"
+        for activity in openalex_activity
+    )
+    assert any(
+        activity.label == "Requesting OpenAlex"
+        for activity in openalex_activity
+    )
+    assert any(
+        activity.label == "Received OpenAlex response"
+        for activity in openalex_activity
+    )
 
 
 @pytest.mark.parametrize(
@@ -870,8 +1110,21 @@ def test_validate_monitor_local_failures_are_invalid_before_source_resolution(
 
     monkeypatch.setattr(monitor, "OpenAlexClient", unexpected)
     monkeypatch.setattr(monitor, "resolve_journal_source", unexpected)
+    progress_events: list[ProgressEvent] = []
 
-    result = validate_monitor(config_path)
+    result = validate_monitor(
+        config_path,
+        progress_callback=progress_events.append,
+    )
 
     assert result.outcome is ValidationOutcome.INVALID_CONFIGURATION
     assert result.errors
+    assert [
+        event.activity.operation
+        for event in progress_events
+        if event.activity is not None
+    ] == ["validation_preflight"]
+    assert all(
+        event.activity is None or event.activity.source != "openalex"
+        for event in progress_events
+    )

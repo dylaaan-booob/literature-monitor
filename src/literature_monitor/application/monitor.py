@@ -46,7 +46,13 @@ from literature_monitor.materialize import (
     materialize_papers,
 )
 from literature_monitor.models import CanonicalPaper
-from literature_monitor.progress import ProgressCallback, ProgressEvent, ProgressStage
+from literature_monitor.progress import (
+    ActivityKind,
+    ActivityUpdate,
+    ProgressCallback,
+    ProgressEvent,
+    ProgressStage,
+)
 from literature_monitor.openalex import (
     DiscoveryIssue,
     IssueSeverity,
@@ -194,6 +200,14 @@ def _emit_progress(
 ) -> None:
     if callback is not None:
         callback(ProgressEvent(stage=stage))
+
+
+def _emit_activity(
+    callback: ProgressCallback | None,
+    activity: ActivityUpdate,
+) -> None:
+    if callback is not None:
+        callback(ProgressEvent(activity=activity))
 
 
 def _split_issues(
@@ -521,6 +535,16 @@ def _run_canonical_core(
     semantic_scholar_client = create_semantic_scholar_client(
         os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
     )
+    _emit_activity(
+        progress_callback,
+        ActivityUpdate(
+            kind=ActivityKind.WORKING,
+            source="semantic_scholar",
+            operation="semantic_scholar_supplement",
+            label="Starting Semantic Scholar supplementation",
+            detail=f"{len(retrieval.evidence)} provider evidence records",
+        ),
+    )
     semantic_scholar = augment_with_semantic_scholar(
         semantic_scholar_client,
         retrieval.evidence,
@@ -529,8 +553,40 @@ def _run_canonical_core(
         prepared.resolved_date_range.to_date,
         prepared.keyword_ast,
     )
-    consolidation = consolidate_evidence(
-        (*retrieval.evidence, *semantic_scholar.evidence)
+    _emit_activity(
+        progress_callback,
+        ActivityUpdate(
+            kind=ActivityKind.WORKING,
+            source="semantic_scholar",
+            operation="semantic_scholar_supplement",
+            label="Completed Semantic Scholar supplementation",
+            detail=(
+                f"{len(semantic_scholar.supplement_records)} supplements · "
+                f"{len(semantic_scholar.discovered_records)} discovered"
+            ),
+        ),
+    )
+    combined_evidence = (*retrieval.evidence, *semantic_scholar.evidence)
+    _emit_activity(
+        progress_callback,
+        ActivityUpdate(
+            kind=ActivityKind.WORKING,
+            source="application",
+            operation="consolidate_evidence",
+            label="Consolidating provider evidence",
+            detail=f"{len(combined_evidence)} evidence records",
+        ),
+    )
+    consolidation = consolidate_evidence(combined_evidence)
+    _emit_activity(
+        progress_callback,
+        ActivityUpdate(
+            kind=ActivityKind.WORKING,
+            source="application",
+            operation="consolidate_evidence",
+            label="Completed provider evidence consolidation",
+            detail=f"{len(consolidation.clusters)} candidate works",
+        ),
     )
 
     issues: list[MonitorIssue] = [
@@ -551,6 +607,16 @@ def _run_canonical_core(
     projections = tuple(
         build_searchable_projection(cluster.evidence)
         for cluster in consolidation.clusters
+    )
+    _emit_activity(
+        progress_callback,
+        ActivityUpdate(
+            kind=ActivityKind.WORKING,
+            source="application",
+            operation="matching_literature",
+            label="Matching literature",
+            detail=f"{len(projections)} candidate works",
+        ),
     )
     try:
         matches = match_searchable_projections(prepared.keyword_ast, projections)
@@ -617,6 +683,16 @@ def _run_canonical_core(
             ),
         )
 
+    _emit_activity(
+        progress_callback,
+        ActivityUpdate(
+            kind=ActivityKind.WORKING,
+            source="application",
+            operation="matching_literature",
+            label="Completed literature matching",
+            detail=f"{sum(matches)} matched clusters",
+        ),
+    )
     retained_clusters = tuple(
         cluster
         for cluster, matched in zip(consolidation.clusters, matches, strict=True)
@@ -627,7 +703,27 @@ def _run_canonical_core(
         for cluster in retained_clusters
         for evidence in cluster.evidence
     )
+    _emit_activity(
+        progress_callback,
+        ActivityUpdate(
+            kind=ActivityKind.WORKING,
+            source="application",
+            operation="canonicalize_literature",
+            label="Canonicalizing literature",
+            detail=f"{len(retained_clusters)} matched clusters",
+        ),
+    )
     canonicalization = canonicalize_records(retained_evidence)
+    _emit_activity(
+        progress_callback,
+        ActivityUpdate(
+            kind=ActivityKind.WORKING,
+            source="application",
+            operation="canonicalize_literature",
+            label="Completed literature canonicalization",
+            detail=f"{len(canonicalization.papers)} canonical papers",
+        ),
+    )
     issues.extend(
         _canonicalization_issue(
             issue,
@@ -690,7 +786,11 @@ def _materialize_canonical_result(
 
     assert output_dir is not None
     _emit_progress(progress_callback, ProgressStage.UPDATING_WORKSPACE)
-    materialization = materialize_papers(core.papers, output_dir)
+    materialization = materialize_papers(
+        core.papers,
+        output_dir,
+        progress_callback=progress_callback,
+    )
     materialization_issues = tuple(
         _materialization_issue(issue) for issue in materialization.issues
     )
@@ -736,7 +836,20 @@ def run_monitor(
     )
 
 
-def validate_monitor(config_path: Path) -> ValidationResult:
+def validate_monitor(
+    config_path: Path,
+    *,
+    progress_callback: ProgressCallback | None = None,
+) -> ValidationResult:
+    _emit_activity(
+        progress_callback,
+        ActivityUpdate(
+            kind=ActivityKind.WORKING,
+            source="application",
+            operation="validation_preflight",
+            label="Checking monitor configuration",
+        ),
+    )
     prepared, config, preflight_issue = _prepare_invocation(
         config_path,
         date_override=None,
@@ -760,14 +873,50 @@ def validate_monitor(config_path: Path) -> ValidationResult:
         )
     assert prepared is not None
 
+    _emit_activity(
+        progress_callback,
+        ActivityUpdate(
+            kind=ActivityKind.WORKING,
+            source="application",
+            operation="validation_preflight",
+            label="Completed monitor configuration check",
+        ),
+    )
     client = OpenAlexClient(api_key=os.environ.get("OPENALEX_API_KEY"))
     sources: list[ResolvedSource] = []
     issues: list[MonitorIssue] = []
-    for journal in prepared.journals:
-        source, source_issues = resolve_journal_source(client, journal)
+    journal_total = len(prepared.journals)
+    journal_activity = ActivityUpdate(
+        kind=ActivityKind.WORKING,
+        source="application",
+        operation="validation_journals",
+        label="Resolving journal sources",
+        current=0,
+        total=journal_total,
+        unit="journal",
+    )
+    _emit_activity(progress_callback, journal_activity)
+    for journal_index, journal in enumerate(prepared.journals):
+        if progress_callback is None:
+            source, source_issues = resolve_journal_source(client, journal)
+        else:
+            source, source_issues = resolve_journal_source(
+                client,
+                journal,
+                progress_callback=progress_callback,
+                operation=f"validation_source_resolution:{journal_index}",
+            )
         if source is not None:
             sources.append(source)
         issues.extend(_openalex_issue(issue) for issue in source_issues)
+        _emit_activity(
+            progress_callback,
+            replace(
+                journal_activity,
+                detail=journal.name,
+                current=journal_index + 1,
+            ),
+        )
 
     warnings, errors = _split_issues(issues)
     outcome = (

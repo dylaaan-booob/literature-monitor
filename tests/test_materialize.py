@@ -31,6 +31,7 @@ from literature_monitor.models import (
     WorkflowStatus,
 )
 from literature_monitor.naming import paper_filename
+from literature_monitor.progress import ProgressEvent
 
 
 NOW = datetime(2026, 9, 18, 8, 30, tzinfo=timezone.utc)
@@ -226,8 +227,32 @@ def test_materializes_complete_paper_and_minimal_author_notes(tmp_path: Path) ->
 def test_empty_materialization_initializes_workspace_and_inbox(
     tmp_path: Path,
 ) -> None:
-    result = materialize_papers((), tmp_path)
+    progress_events: list[ProgressEvent] = []
+    result = materialize_papers(
+        (),
+        tmp_path,
+        progress_callback=progress_events.append,
+    )
 
+    activities = [
+        event.activity for event in progress_events if event.activity is not None
+    ]
+    assert [activity.operation for activity in activities] == [
+        "materialize_read",
+        "materialize_read",
+        "materialize_prepare",
+        "materialize_write",
+    ]
+    assert (
+        activities[2].current,
+        activities[2].total,
+        activities[2].unit,
+    ) == (0, 0, "paper")
+    assert (
+        activities[3].current,
+        activities[3].total,
+        activities[3].unit,
+    ) == (0, 0, "file")
     assert (tmp_path / "Papers").is_dir()
     assert (tmp_path / "Authors").is_dir()
     assert (tmp_path / "Inbox.base").read_text(encoding="utf-8") == (
@@ -464,7 +489,12 @@ def test_rerun_preserves_human_paper_content_and_opaque_author_bytes(
     paper_path.write_bytes(modified_paper)
     author_path.write_bytes(modified_author)
 
-    second = materialize_papers((source,), tmp_path)
+    progress_events: list[ProgressEvent] = []
+    second = materialize_papers(
+        (source,),
+        tmp_path,
+        progress_callback=progress_events.append,
+    )
 
     assert second.created_papers == ()
     assert second.created_authors == ()
@@ -472,6 +502,23 @@ def test_rerun_preserves_human_paper_content_and_opaque_author_bytes(
     assert second.existing_authors == (author_path,)
     assert paper_path.read_bytes() == modified_paper
     assert author_path.read_bytes() == modified_author
+    prepare = [
+        event.activity
+        for event in progress_events
+        if event.activity is not None
+        and event.activity.operation == "materialize_prepare"
+    ]
+    assert [(activity.current, activity.total) for activity in prepare] == [
+        (0, 1),
+        (1, 1),
+    ]
+    writes = [
+        event.activity
+        for event in progress_events
+        if event.activity is not None
+        and event.activity.operation == "materialize_write"
+    ]
+    assert [(activity.current, activity.total) for activity in writes] == [(0, 0)]
 
 
 def test_parsed_author_note_is_enriched_without_losing_unknown_content(
@@ -514,7 +561,12 @@ def test_failed_author_blocks_dependent_paper_but_not_unrelated_paper(
     failed_target = tmp_path / "Authors" / "openalex-a1.md"
     failed_target.mkdir(parents=True)
 
-    result = materialize_papers((blocked, unrelated), tmp_path)
+    progress_events: list[ProgressEvent] = []
+    result = materialize_papers(
+        (blocked, unrelated),
+        tmp_path,
+        progress_callback=progress_events.append,
+    )
 
     blocked_path = tmp_path / "Papers" / paper_filename(
         blocked.metadata.title, blocked.id, (blocked.id, unrelated.id)
@@ -524,6 +576,27 @@ def test_failed_author_blocks_dependent_paper_but_not_unrelated_paper(
     assert result.created_papers[0].name.startswith("unrelated--")
     assert {path.name for path in result.created_authors} == {"openalex-a2.md"}
     assert [issue.path for issue in result.issues] == [failed_target]
+    prepare = [
+        event.activity
+        for event in progress_events
+        if event.activity is not None
+        and event.activity.operation == "materialize_prepare"
+    ]
+    assert [(activity.current, activity.total) for activity in prepare] == [
+        (0, 2),
+        (1, 2),
+        (2, 2),
+    ]
+    writes = [
+        event.activity
+        for event in progress_events
+        if event.activity is not None
+        and event.activity.operation == "materialize_write"
+    ]
+    assert [(activity.current, activity.total) for activity in writes] == [
+        (0, 1),
+        (1, 1),
+    ]
 
 
 def test_paper_write_failure_keeps_authors_and_other_papers(tmp_path: Path) -> None:
@@ -713,7 +786,12 @@ def test_preferred_version_upgrade_updates_bibliographic_snapshot(
     )
     first = materialize_papers((preprint,), tmp_path)
 
-    result = materialize_papers((final,), tmp_path)
+    progress_events: list[ProgressEvent] = []
+    result = materialize_papers(
+        (final,),
+        tmp_path,
+        progress_callback=progress_events.append,
+    )
 
     values = frontmatter(first.created_papers[0].read_text())
     assert result.created_papers == ()
@@ -743,6 +821,16 @@ def test_preferred_version_upgrade_updates_bibliographic_snapshot(
         for issue in result.issues
     )
     assert not result.has_errors
+    writes = [
+        event.activity
+        for event in progress_events
+        if event.activity is not None
+        and event.activity.operation == "materialize_write"
+    ]
+    assert [(activity.current, activity.total) for activity in writes] == [
+        (0, 1),
+        (1, 1),
+    ]
 
     stable_bytes = first.created_papers[0].read_bytes()
     stable_rerun = materialize_papers((final,), tmp_path)
@@ -1158,11 +1246,26 @@ def test_atomic_replace_failure_preserves_original_paper(
         raise OSError("replace failed")
 
     monkeypatch.setattr("literature_monitor.safe_write.os.replace", fail_replace)
-    result = materialize_papers((changed,), tmp_path)
+    progress_events: list[ProgressEvent] = []
+    result = materialize_papers(
+        (changed,),
+        tmp_path,
+        progress_callback=progress_events.append,
+    )
 
     assert result.updated_papers == ()
     assert result.has_errors
     assert path.read_bytes() == before
+    writes = [
+        event.activity
+        for event in progress_events
+        if event.activity is not None
+        and event.activity.operation == "materialize_write"
+    ]
+    assert [(activity.current, activity.total) for activity in writes] == [
+        (0, 1),
+        (1, 1),
+    ]
 
 
 def test_concurrent_paper_edit_aborts_update_without_blocking_other_papers(
@@ -1211,7 +1314,12 @@ def test_concurrent_paper_edit_aborts_update_without_blocking_other_papers(
 
     monkeypatch.setattr(materialize_module, "_render_updated_paper", render_then_edit)
 
-    result = materialize_papers((changed, independent), tmp_path)
+    progress_events: list[ProgressEvent] = []
+    result = materialize_papers(
+        (changed, independent),
+        tmp_path,
+        progress_callback=progress_events.append,
+    )
 
     contents = path.read_text(encoding="utf-8")
     conflict_errors = [
@@ -1229,6 +1337,17 @@ def test_concurrent_paper_edit_aborts_update_without_blocking_other_papers(
     assert len(result.created_papers) == 1
     assert result.created_papers[0].name.startswith("independent-paper--")
     assert result.created_papers[0].is_file()
+    writes = [
+        event.activity
+        for event in progress_events
+        if event.activity is not None
+        and event.activity.operation == "materialize_write"
+    ]
+    assert [(activity.current, activity.total) for activity in writes] == [
+        (0, 2),
+        (1, 2),
+        (2, 2),
+    ]
 
 
 def test_issue_severity_controls_has_errors(tmp_path: Path) -> None:
