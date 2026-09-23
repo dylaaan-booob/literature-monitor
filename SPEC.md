@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — Specification v1.3
 
-**Status:** Active; v0.3.3 is the current released and completed baseline
+**Status:** Active; v0.4.0 is the current released and completed baseline
 
-**Stage:** v0.4.0 release preparation / closeout
+**Stage:** v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback specification alignment
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
@@ -1824,7 +1824,7 @@ Discovery remains publication-date-only. Semantic Scholar year-only records use 
 
 ### 24.8 v0.4.0 Python Local Web UI implementation — completed
 
-v0.3.3 remains the latest released baseline until the v0.4.0 release transaction completes. The v0.4.0 feature implementation and final independent audit are complete: the application, workspace, decision, settings, run-coordination, Web, security, GUI CLI, packaging, and installed-distribution contracts in §25 have been implemented and verified.
+v0.4.0 is released and is the current completed baseline. Its application, workspace, decision, settings, run-coordination, Web, security, GUI CLI, packaging, and installed-distribution contracts in §25 were implemented, independently audited, release-prepared, tagged, pushed, and released.
 
 The completed implementation remains an adapter over the existing durable Markdown model and canonical production pipeline. It does not introduce a second workflow source of truth, persistent execution database, new workflow status, Zotero API ingestion, or a parallel GUI-specific retrieval/canonicalization/materialization pipeline.
 
@@ -1840,7 +1840,18 @@ v0.4.0 feature implementation complete
 → GitHub Release
 ```
 
-The first two steps are complete; the repository is now in release preparation before the release-preparation commit and release transaction.
+The full closeout sequence is completed release history.
+
+### 24.9 v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback
+
+The v0.4.1 work extends the existing transient runtime reporting contract without changing the canonical production pipeline, durable workspace model, single-active-run semantics, or provider retrieval policy. The bounded sequence begins with this specification alignment and then proceeds through the separately reviewed A1–A5 implementation tasks:
+
+```text
+P0 Specification alignment
+→ A1–A5 bounded implementation and review
+```
+
+P0 defines the normative contract in §29. It is not an implementation step and does not authorize production-code changes.
 
 ---
 
@@ -1911,7 +1922,7 @@ Lower-level diagnostic commands may continue to use existing lower-level modules
 
 GUI Run has no temporary date controls. It always uses the persisted Monitor date policy. CLI date overrides retain §20.3 semantics: once any CLI date argument is supplied, the CLI fields form the complete ephemeral override and must not be merged with configured date fields.
 
-The public progress contract has exactly these stages:
+The public workflow-progress contract has exactly these stages:
 
 ```text
 CHECKING_MONITOR
@@ -1921,7 +1932,9 @@ MATCHING_LITERATURE
 UPDATING_WORKSPACE
 ```
 
-The progress callback is synchronous and application-level. Its contract must not depend on FastAPI, HTMX, asyncio, a particular thread type, provider pagination, or provider request counts. Pagination and request counts may be logged or observed internally but are not public progress stages.
+These five `ProgressStage` values remain the stable workflow-location contract. v0.4.1 extends runtime feedback with the independent transient `Activity` layer defined in §29. Provider pagination, journal counts, ISSN counts, DOI lookup counts, retry state, and other operation-level details may populate Activity, counters, or timing data, but they must not become additional `ProgressStage` values.
+
+The progress callback or semantically equivalent application-level reporting boundary remains synchronous and independent of FastAPI, HTMX, asyncio, or a particular thread type. It may report stage transitions and current Activity. Its public semantics must not make provider pagination or provider request counts part of the stage model.
 
 `RunResult` must at least express:
 
@@ -2297,7 +2310,7 @@ These details should not change the core workflow or introduce additional scope.
 
 The v0.3.3 baseline remains complete when a user can reliably run the journal-monitoring pipeline, review the durable Paper Markdown corpus through the Obsidian presentation, preserve decisions and notes across reruns, export kept identifiers, and manually confirm `in_zotero` after downstream Zotero import.
 
-v0.4.0 feature implementation is complete: the same durable workflow is operable through the local Python Web UI defined in §25, and the acceptance criteria in §23.15 have been demonstrated. This implementation-complete state does not mean v0.4.0 has been released. In particular:
+v0.4.0 is released and remains complete: the same durable workflow is operable through the local Python Web UI defined in §25, and the acceptance criteria in §23.15 have been demonstrated. In particular:
 
 - GUI Run and CLI `run` share `run_monitor()`, use the same canonical production core plus formal materialization path, and preserve the existing CLI date/exit-code contracts;
 - Workspace views are reconstructed from current Paper Markdown and isolate corrupt records as issues;
@@ -2309,10 +2322,320 @@ v0.4.0 feature implementation is complete: the same durable workflow is operable
 
 Obsidian remains a supported presentation of the same Markdown workspace; it is no longer the only daily workflow presentation.
 
+v0.4.1 is complete only when the runtime progress/activity contract and acceptance criteria in §29 are implemented and verified. This specification-alignment step defines that contract but does not itself satisfy the v0.4.1 implementation acceptance criteria.
+
 ---
 
 ## 28. Current Project Stage
 
-R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, and v0.3.3 Pre-GUI Correctness Hardening are completed release history. v0.3.3 remains the latest released and completed baseline until the v0.4.0 release transaction completes.
+R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, and v0.4.0 Python Local Web UI are completed release history. v0.4.0 is the current released and completed baseline.
 
-The current stage is v0.4.0 release preparation / closeout. Feature implementation and the final independent audit are complete. The remaining release sequence is the release-preparation commit, tag, push of `main`, push of the tag, and GitHub Release. v0.4.0 is not yet released.
+The current stage is v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback specification alignment. No A1–A5 production implementation is part of this stage.
+
+---
+
+## 29. v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback Contract
+
+v0.4.1 gives GUI and CLI runtime feedback a shared transient contract. It extends the v0.4.0 application and `RunCoordinator` boundaries without changing the canonical production pipeline, Paper Markdown ownership, one-active-run rule, provider retrieval policy, or CLI result semantics.
+
+### 29.1 Workflow stage and Activity model
+
+`run_monitor()` remains the only formal public production entry point shared by CLI `run` and GUI Run. Its workflow location is still expressed by exactly these five `ProgressStage` values:
+
+```text
+CHECKING_MONITOR
+DISCOVERING_PAPERS
+COMBINING_METADATA
+MATCHING_LITERATURE
+UPDATING_WORKSPACE
+```
+
+The GUI presents this as `Stage N of 5`. The stage indicator represents discrete workflow position; it must not claim that the five stages consume equal time or that `N / 5` is a real elapsed-time completion percentage.
+
+Operation-level runtime feedback is a separate transient `Activity`. The minimum Activity semantics are:
+
+- `kind`: `WORKING`, `WAITING`, or `RETRYING`;
+- `source`: optional provider or subsystem identity;
+- `operation`: stable internal operation identity;
+- `label`: human-readable current action;
+- `detail`: optional supporting text;
+- `current`: optional integer completed/processed count;
+- `total`: optional integer denominator;
+- `unit`: optional unit identity;
+- `started_at`;
+- `updated_at`;
+- `rate`: optional smoothed current rate;
+- `eta_seconds`: optional current-Activity ETA.
+
+Activity represents only the current transient operation. It does not store an event history and must not be written to Monitor YAML, Paper Markdown, workspace files, a run database, or any other durable state.
+
+The coordinator status model remains:
+
+```text
+IDLE → RUNNING → FINISHED
+          ↑         │
+          └─────────┘ next start
+```
+
+`WAITING` and `RETRYING` are Activity kinds inside `RUNNING`; they are not new `CoordinatorStatus` values. v0.4.1 must not add `WAITING`, `RETRYING`, `STALLED`, or another top-level coordinator state.
+
+Determinate Activity progress is allowed only when the denominator is reliable. Examples include:
+
+```text
+3 / 8 journals
+5 / 11 ISSNs
+18 / 47 DOI lookups
+7 / 14 files
+```
+
+When no reliable denominator exists, the UI and CLI may show indeterminate activity, a completed count, or ordinary activity text. They must not synthesize a percentage from an unknown or unstable denominator.
+
+### 29.2 ETA and elapsed-time contract
+
+Elapsed runtime may always be shown. ETA applies only to the current Activity; v0.4.1 does not define a whole-run ETA.
+
+An Activity ETA is available only when all of the following are true:
+
+- `total` is known and reliable;
+- `current` has advanced through real completed work;
+- at least two valid work units have completed;
+- enough nonzero elapsed-time sampling exists to calculate a meaningful rate.
+
+Before those conditions are met, the presentation uses `Estimating…` or an equivalent unavailable/initializing state. A lightweight smoothed rate is sufficient; an EWMA with smoothing around `0.3` is an acceptable model. v0.4.1 must not add a complex forecasting subsystem.
+
+The estimator resets whenever Activity identity changes. Identity distinguishes at least:
+
+- `stage`;
+- `source`;
+- `operation`;
+- `unit`.
+
+An invalid ETA is `None` or otherwise explicitly unavailable; an ETA from a previous Activity must never be carried forward. When an inactivity warning becomes active, the current ETA immediately becomes unavailable. When real activity resumes, ETA sampling restarts for the active identity rather than reusing stale samples.
+
+### 29.3 CoordinatorSnapshot, timestamps, and liveness
+
+The process-local coordinator snapshot must express at least:
+
+- `status`;
+- `progress_stage`;
+- `stage_index`;
+- `stage_total`;
+- `current_activity`;
+- `started_at`;
+- `stage_started_at`;
+- `last_activity_at`;
+- `worker_alive`;
+- `result`;
+- `unexpected_error`.
+
+All runtime progress, Activity, rate, ETA, liveness, and timing data remain process-local. `stage_total` is `5` for normal `run_monitor()` execution, and a stage change updates `stage_started_at`.
+
+`last_activity_at` records real worker activity, not observation of coordinator state. Real activity includes:
+
+- stage change;
+- provider request-attempt start;
+- provider response completion;
+- page completion;
+- journal or ISSN completion;
+- DOI lookup completion;
+- retry/backoff start;
+- a major local operation start or completion;
+- materialization paper/write completion.
+
+The following must not update `last_activity_at`:
+
+- `GET /fragments/run`;
+- HTMX polling;
+- coordinator snapshot/read operations;
+- Jinja rendering;
+- CLI spinner or progress-widget refresh;
+- elapsed-time refresh;
+- a UI redraw that does not correspond to worker activity.
+
+No heartbeat thread is added. `worker_alive` reflects the real liveness of the current local worker thread. If coordinator status remains `RUNNING` after that worker is no longer alive, the GUI must not continue to present a normal Run in progress state. It must render an explicit stopped/error state while preserving the distinction between an unexpected execution failure and an ordinary inactivity advisory.
+
+### 29.4 Inactivity advisory
+
+Inactivity is advisory and is not a run failure.
+
+When OpenAlex/Crossref request attempts, retry/backoff starts, and response completions are observable, `60` seconds without real activity activates a single `No recent activity` advisory. While that advisory is active:
+
+- `CoordinatorStatus` remains `RUNNING`;
+- the worker is not terminated;
+- no `RunResult` is created or modified because of inactivity;
+- the whole run is not automatically retried;
+- the main progress indicator does not become an error indicator;
+- current ETA is unavailable.
+
+When real activity resumes, the advisory clears automatically and ETA sampling restarts.
+
+If an implementation can observe only the start and end of an entire provider-client call, but cannot observe request/retry boundaries within that call, a `60`-second threshold is not safe. That implementation must use at least approximately `120` seconds and document why the coarser observation boundary requires the higher threshold.
+
+v0.4.1 defines only one inactivity threshold. It does not add second-level or third-level stale thresholds, automatic cancellation, or a `STALLED` coordinator state.
+
+### 29.5 Provider instrumentation
+
+Provider instrumentation must use information already available during normal retrieval. It must not add provider API requests solely to improve progress reporting.
+
+For OpenAlex:
+
+- existing response pagination/meta information is reused;
+- after the first page, a reliable record total may provide determinate progress for the current journal;
+- request-attempt start, retry/backoff start, response completion, and natural page/journal completion are real Activity boundaries;
+- no count-only or other progress-specific API request is added.
+
+For Crossref discovery:
+
+- normal response result/pagination metadata is reused when it provides a reliable denominator;
+- request-attempt start, retry/backoff start, response completion, and natural page/journal completion are real Activity boundaries;
+- no extra count request is added.
+
+For Crossref supplementation, `assemble_provider_evidence()` already knows the exact DOI set before per-DOI lookup. That exact total should drive `current / total` DOI lookup progress and is one of the primary determinate Activities suitable for ETA.
+
+The progress architecture does not depend on Semantic Scholar. Absence of a Semantic Scholar API key must not weaken OpenAlex, Crossref, matching, or materialization progress. When Semantic Scholar runs, basic Activity reporting is sufficient; an existing natural batch count may be used, but SDK-internal retry observability and precise Semantic Scholar ETA are not blocking v0.4.1 requirements.
+
+### 29.6 Local processing instrumentation
+
+`MATCHING_LITERATURE` keeps the existing FTS5 batch-processing design. Progress instrumentation must not convert matching into one FTS5 query per Paper.
+
+Canonicalization does not gain a per-record callback. Coarse Activity at natural operation boundaries is sufficient, for example:
+
+```text
+Matching literature · N candidate works
+Canonicalizing literature · N matched clusters
+```
+
+Materialization likewise uses existing natural boundaries rather than restructuring its core behavior. Meaningful Activities may include:
+
+```text
+Reading workspace
+Preparing workspace updates · x/y papers
+Writing workspace · x/y files
+```
+
+Progress instrumentation must not require a redesign of materialization semantics.
+
+### 29.7 GUI presentation and accessibility
+
+The GUI continues to use the existing HTMX polling model. v0.4.1 adds no SSE, WebSocket, external worker, queue, or background service. Poll frequency is a presentation concern and must not participate in liveness or inactivity calculations.
+
+While a run is active, the GUI presents at least:
+
+- a human-readable stage label;
+- a primary progress bar/indicator labeled `Stage N of 5`;
+- current Activity;
+- a reliable counter when available;
+- elapsed time;
+- optional current-Activity ETA;
+- last-activity information;
+- the inactivity advisory when active.
+
+A secondary determinate Activity indicator is allowed when a reliable denominator exists. Without such a denominator, the Activity is indeterminate or textual.
+
+`No recent activity` uses warning/advisory semantics rather than failure/error semantics.
+
+Elapsed time, ETA countdowns, last-activity age, polling, and redraws must not continuously trigger screen-reader live announcements. `aria-live` is reserved for semantically meaningful changes such as:
+
+- stage change;
+- Activity change;
+- retry;
+- inactivity advisory activation/recovery;
+- completion;
+- failure.
+
+### 29.8 CLI runtime feedback
+
+CLI `run` and `validate` both provide runtime feedback without changing their production behavior.
+
+For a TTY, the display continuously updates current progress and Activity:
+
+- `run` may present the five-stage workflow model;
+- `validate` presents validation-specific progress and is not forced into the five-stage run model; journal `x/y` Source resolution is an example of a valid determinate validation Activity.
+
+For a non-TTY:
+
+- output consists of plain progress lines only on real Activity or state changes;
+- no ANSI spinner/control characters are emitted;
+- elapsed-time refresh alone does not produce repeated log lines.
+
+All CLI progress output goes to `stderr`. Existing machine/data output on `stdout` remains compatible, and the existing exit-code semantics in §20.5 and §25.3 remain unchanged.
+
+### 29.9 Explicitly out of scope for v0.4.1
+
+The following remain outside v0.4.1:
+
+- persistent run history;
+- persistent runtime metrics;
+- whole-run historical ETA;
+- SSE;
+- WebSocket;
+- Celery;
+- Redis;
+- an external worker process;
+- a generic job queue;
+- a heartbeat thread;
+- inactivity-triggered cancellation;
+- a `STALLED` `CoordinatorStatus`;
+- multiple inactivity thresholds;
+- provider timeout-policy redesign;
+- provider API requests added only for progress;
+- per-Paper FTS5 execution;
+- per-record canonicalization instrumentation;
+- Semantic Scholar retry observability as a blocking requirement;
+- Semantic Scholar retrieval-policy redesign;
+- a public machine-readable `--progress=json` protocol;
+- unrelated GUI redesign.
+
+### 29.10 v0.4.1 acceptance and regression coverage
+
+The v0.4.1 implementation is accepted only when all of the following hold:
+
+- `run_monitor()` remains the sole formal public production entry used by CLI `run` and GUI Run;
+- the five existing `ProgressStage` values retain their v0.4.0 semantics and provider/request counters do not become new stages;
+- the GUI primary progress bar/indicator shows `Stage N of 5` without claiming that stage position is a real time percentage;
+- determinate Activity is used only with a reliable denominator, while unknown denominators remain indeterminate or textual;
+- elapsed, current-Activity ETA, and last-activity presentation follow §§29.2–29.4;
+- ETA does not initialize until real progress has supplied the required work/time samples;
+- Activity identity changes reset ETA sampling;
+- an inactivity advisory makes ETA unavailable, and real activity recovery clears the advisory and restarts sampling;
+- when request/retry boundaries are observable, `60` seconds without real activity activates the single inactivity advisory; if only whole-provider-call boundaries are observable, the threshold is at least approximately `120` seconds and the implementation documents the reason;
+- `last_activity_at` changes only because of real worker activity;
+- snapshot reads, HTMX polling, rendering, spinner refresh, elapsed refresh, and redraws do not manufacture activity;
+- `stage_started_at` changes on stage transition;
+- `worker_alive` reflects the real local worker thread state;
+- a dead worker cannot leave a `RUNNING` coordinator rendered indefinitely as a normal active run;
+- observable OpenAlex/Crossref request attempts, retry/backoff starts, and response completions can emit real Activity;
+- provider instrumentation adds no API request solely for progress;
+- Crossref supplementation uses the exact DOI total already known before per-DOI lookup;
+- FTS5 matching remains batched and canonicalization does not become per-record solely for progress;
+- materialization exposes progress only at natural, meaningful boundaries;
+- missing Semantic Scholar credentials do not degrade the primary OpenAlex/Crossref/local progress path;
+- TTY `run` exposes live workflow and Activity feedback;
+- TTY `validate` exposes validation-specific progress;
+- non-TTY operation emits plain event lines only on real state/Activity changes and no ANSI control stream;
+- all CLI progress is written to `stderr`;
+- existing CLI `stdout` and exit-code compatibility is preserved;
+- GUI live-region behavior avoids repeated announcements from timer-only refreshes;
+- runtime progress/activity/timing data is not persisted to Monitor YAML, Paper Markdown, workspace files, or another durable store;
+- existing single-active-run semantics remain unchanged;
+- unexpected exceptions remain distinct from an ordinary inactivity advisory;
+- the existing test suite continues to pass.
+
+Regression coverage must include at least:
+
+- Activity snapshot update;
+- `last_activity_at` updating only on real activity;
+- `stage_started_at`;
+- `worker_alive`;
+- ETA initialization;
+- ETA identity reset;
+- ETA unavailable after inactivity;
+- inactivity advisory activation;
+- Activity recovery;
+- provider retry Activity;
+- GUI determinate and indeterminate Activity presentation;
+- GUI inactivity presentation;
+- CLI TTY progress;
+- CLI non-TTY progress;
+- `validate` progress;
+- polling that does not fabricate activity.
