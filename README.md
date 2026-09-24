@@ -73,6 +73,16 @@ Discovery windows are publication-date-only. The monitor does not use Crossref
 update-date, created-date, index-date, provider update timestamps, or persisted
 cursor/watermark/checkpoint state to recover late-indexed records.
 
+Provider clients remain synchronous and serial. OpenAlex Works discovery keeps
+cursor pagination at `per_page=100`; Crossref journal discovery keeps cursor
+pagination and defaults to `rows=1000`. A Crossref client uses valid
+`X-Rate-Limit-Limit` and `X-Rate-Limit-Interval` response metadata to pace later
+requests without rate-limit probes or count-only requests. HTTP 429, HTTP 5xx,
+and supported timeout/transport failures receive at most three attempts; when no
+provider pacing is known, retry waits remain 1 second and then 2 seconds.
+Endpoint-specific 404 handling is unchanged, and other HTTP 4xx responses are
+not retried. Retry and pacing state remain process-local and transient.
+
 The selected output directory contains:
 
 ```text

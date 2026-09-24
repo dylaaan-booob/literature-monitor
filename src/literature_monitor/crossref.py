@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import socket
 import time
@@ -42,8 +43,9 @@ from literature_monitor.progress import (
 )
 
 CROSSREF_BASE_URL = "https://api.crossref.org"
-CROSSREF_PAGE_SIZE = 100
+CROSSREF_PAGE_SIZE = 1000
 _ISSN_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{3}[0-9X]$")
+_RATE_LIMIT_INTERVAL_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)?)s\s*$", re.IGNORECASE)
 _ORCID_PATTERN = re.compile(
     r"^(?:https?://orcid\.org/)?\d{4}-\d{4}-\d{4}-\d{3}[\dX]/?$",
     re.IGNORECASE,
@@ -248,6 +250,60 @@ class CrossrefClient:
         self.timeout = timeout
         self._opener = opener
         self._sleep = sleep
+        self._rate_limit_delay: float | None = None
+
+    def _update_rate_limit(self, headers: Any) -> None:
+        if headers is None or not hasattr(headers, "get"):
+            return
+        raw_limit = headers.get("X-Rate-Limit-Limit")
+        raw_interval = headers.get("X-Rate-Limit-Interval")
+        if not isinstance(raw_limit, str) or not isinstance(raw_interval, str):
+            return
+        try:
+            limit = int(raw_limit.strip())
+        except ValueError:
+            return
+        match = _RATE_LIMIT_INTERVAL_PATTERN.fullmatch(raw_interval)
+        if limit <= 0 or match is None:
+            return
+        interval = float(match.group(1))
+        if not math.isfinite(interval) or interval <= 0:
+            return
+        delay = interval / limit
+        if not math.isfinite(delay) or delay <= 0:
+            return
+        self._rate_limit_delay = delay
+
+    def _wait_for_rate_limit(
+        self,
+        *,
+        progress_callback: ProgressCallback | None,
+        activity: ActivityUpdate | None,
+    ) -> None:
+        delay = self._rate_limit_delay
+        if delay is None:
+            return
+        if activity is not None:
+            _report_activity(
+                progress_callback,
+                replace(
+                    activity,
+                    kind=ActivityKind.WAITING,
+                    label="Waiting for Crossref rate limit",
+                    detail=(
+                        f"{activity.detail} · provider pacing {delay:g}s"
+                        if activity.detail
+                        else f"provider pacing {delay:g}s"
+                    ),
+                ),
+            )
+        self._sleep(delay)
+
+    def _retry_delay(self, attempt: int) -> float:
+        fallback = 2**attempt
+        if self._rate_limit_delay is None:
+            return fallback
+        return max(fallback, self._rate_limit_delay)
 
     def get_work_by_doi(
         self,
@@ -431,6 +487,10 @@ class CrossrefClient:
             },
         )
 
+        self._wait_for_rate_limit(
+            progress_callback=progress_callback,
+            activity=activity,
+        )
         for attempt in range(3):
             attempt_number = attempt + 1
             if activity is not None:
@@ -450,10 +510,12 @@ class CrossrefClient:
             try:
                 with self._opener(request, timeout=self.timeout) as response:
                     payload = json.loads(response.read())
+                    response_headers = getattr(response, "headers", None)
                 if not isinstance(payload, dict):
                     raise CrossrefRequestError(
                         "Crossref returned a non-object JSON response"
                     )
+                self._update_rate_limit(response_headers)
                 if activity is not None:
                     _report_activity(
                         progress_callback,
@@ -473,7 +535,7 @@ class CrossrefClient:
                 if error.code == 404 and not_found_message is not None:
                     raise CrossrefNotFoundError(not_found_message) from error
                 if (error.code == 429 or error.code >= 500) and attempt < 2:
-                    delay = 2**attempt
+                    delay = self._retry_delay(attempt)
                     if activity is not None:
                         # retry 事件先于 backoff，且沿用所属 ISSN/DOI activity identity。
                         _report_activity(
@@ -497,7 +559,7 @@ class CrossrefClient:
                 ) from error
             except (TimeoutError, socket.timeout, URLError, OSError) as error:
                 if attempt < 2:
-                    delay = 2**attempt
+                    delay = self._retry_delay(attempt)
                     if activity is not None:
                         _report_activity(
                             progress_callback,

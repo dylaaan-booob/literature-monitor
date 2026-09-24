@@ -272,7 +272,21 @@ Semantic Scholar is not a supported production retrieval provider. The productio
 
 Provider retirement does not narrow the durable data model. Existing Paper Markdown may continue to contain `semantic_scholar` or other provider-specific external identifiers, and historical provenance may continue to name retired providers. `ExternalIds` remains open to additional provider-specific identifiers, while canonicalization and Markdown merge preserve valid historical identifiers and provenance rather than deleting them during reruns.
 
-### 6.4 Publisher fallback
+### 6.4 Provider request reliability
+
+Production provider clients remain synchronous. Provider request reliability is transient runtime behavior: it must not introduce an asyncio provider rewrite, worker pool, concurrent request framework, durable retry history, persisted provider cursor/checkpoint state, coverage state, resume state, scheduler state, or another persistent execution state.
+
+OpenAlex Works discovery continues to use cursor pagination with `per_page=100`. Crossref journal discovery continues to use cursor pagination and defaults to `rows=1000`, using the latest valid `next-cursor` from each full page while retaining repeated-cursor and malformed-response protection. Crossref DOI supplementation remains one DOI per request.
+
+Provider requests use at most three attempts by default. Retryable transient failures are limited to HTTP 429, HTTP 5xx, and supported transport or timeout failures. Endpoint-specific HTTP 404 handling retains its existing not-found semantics. Other HTTP 4xx responses fail the request immediately and are not automatically retried. When no provider pacing information is available, retry delays retain the existing exponential fallback of 1 second and then 2 seconds.
+
+Crossref request pacing uses rate metadata already present on normal API responses. When both `X-Rate-Limit-Limit` and `X-Rate-Limit-Interval` are valid, subsequent requests made by the same Crossref client must respect the returned rate. Missing or malformed pacing headers do not invalidate an otherwise successful response and do not trigger a separate probe, count-only request, or other pacing-only provider request. The implementation must not freeze current public, polite, or plus pool limits into long-lived product constants.
+
+Provider pacing remains serial and transient. If a pacing delay actually occurs and a progress callback is present, the wait is reported with the existing transient Activity model so liveness and inactivity reporting reflect the worker state. Retry Activity is reported before its corresponding sleep and preserves the request's source, operation, unit, current, and total identity. Provider pagination, pacing, and retry state do not add or change any of the five `ProgressStage` values.
+
+A failed provider request remains isolated according to the existing retrieval rules. Evidence already obtained successfully from another provider, journal, page, or request remains usable and must not be discarded because a later request fails.
+
+### 6.5 Publisher fallback
 
 Publisher fallback is deliberately excluded from MVP.
 

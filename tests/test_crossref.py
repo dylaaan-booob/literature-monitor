@@ -44,8 +44,14 @@ def fixture(name: str) -> dict[str, Any]:
 
 
 class FakeResponse:
-    def __init__(self, payload: object) -> None:
+    def __init__(
+        self,
+        payload: object,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.payload = payload
+        self.headers = headers or {}
 
     def __enter__(self) -> "FakeResponse":
         return self
@@ -69,6 +75,8 @@ class SequenceOpener:
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
+        if isinstance(outcome, FakeResponse):
+            return outcome
         return FakeResponse(outcome)
 
 
@@ -164,6 +172,206 @@ def test_journal_client_uses_publication_filters_and_encoded_cursor_pages() -> N
     }
     assert parse_qs(second.query)["cursor"] == ["next / cursor"]
     assert "next+%2F+cursor" in second.query
+
+
+def test_journal_client_defaults_to_rows_1000() -> None:
+    opener = SequenceOpener(list_payload([{}]))
+    client = CrossrefClient(opener=opener, sleep=lambda _: None)
+
+    pages = list(
+        client.iter_journal_work_pages(
+            "0006-341X",
+            date(2026, 1, 1),
+            date(2026, 1, 31),
+        )
+    )
+
+    assert len(pages) == 1
+    query = parse_qs(urlparse(opener.requests[0][0].full_url).query)
+    assert query["rows"] == ["1000"]
+
+
+def test_journal_client_traverses_multiple_default_size_cursor_pages() -> None:
+    opener = SequenceOpener(
+        list_payload([{}] * 1000, "second-page"),
+        list_payload([{}], "unused"),
+    )
+    client = CrossrefClient(opener=opener, sleep=lambda _: None)
+
+    pages = list(
+        client.iter_journal_work_pages(
+            "0006-341X",
+            date(2026, 1, 1),
+            date(2026, 1, 31),
+        )
+    )
+
+    assert len(pages) == 2
+    first_query = parse_qs(urlparse(opener.requests[0][0].full_url).query)
+    second_query = parse_qs(urlparse(opener.requests[1][0].full_url).query)
+    assert first_query["rows"] == ["1000"]
+    assert first_query["cursor"] == ["*"]
+    assert second_query["rows"] == ["1000"]
+    assert second_query["cursor"] == ["second-page"]
+
+
+def test_client_uses_response_rate_headers_to_pace_later_requests() -> None:
+    delays: list[float] = []
+    opener = SequenceOpener(
+        FakeResponse(
+            payload_for("10.5555/first"),
+            headers={
+                "X-Rate-Limit-Limit": "4",
+                "X-Rate-Limit-Interval": "2s",
+            },
+        ),
+        FakeResponse(
+            payload_for("10.5555/second"),
+            headers={
+                "X-Rate-Limit-Limit": "2",
+                "X-Rate-Limit-Interval": "3s",
+            },
+        ),
+        payload_for("10.5555/third"),
+    )
+    client = CrossrefClient(opener=opener, sleep=delays.append)
+
+    client.get_work_by_doi("10.5555/first")
+    client.get_work_by_doi("10.5555/second")
+    client.get_work_by_doi("10.5555/third")
+
+    assert delays == [0.5, 1.5]
+    assert len(opener.requests) == 3
+
+
+def test_client_missing_rate_headers_do_not_add_pacing_or_break_requests() -> None:
+    delays: list[float] = []
+    opener = SequenceOpener(
+        payload_for("10.5555/first"),
+        payload_for("10.5555/second"),
+    )
+    client = CrossrefClient(opener=opener, sleep=delays.append)
+
+    assert client.get_work_by_doi("10.5555/first")["status"] == "ok"
+    assert client.get_work_by_doi("10.5555/second")["status"] == "ok"
+
+    assert delays == []
+
+
+@pytest.mark.parametrize(
+    ("limit", "interval"),
+    [
+        ("", "1s"),
+        ("0", "1s"),
+        ("not-a-number", "1s"),
+        ("50", ""),
+        ("50", "0s"),
+        ("50", "1m"),
+        ("50", "not-an-interval"),
+    ],
+)
+def test_client_malformed_rate_headers_do_not_break_requests_or_enable_pacing(
+    limit: str,
+    interval: str,
+) -> None:
+    delays: list[float] = []
+    opener = SequenceOpener(
+        FakeResponse(
+            payload_for("10.5555/first"),
+            headers={
+                "X-Rate-Limit-Limit": limit,
+                "X-Rate-Limit-Interval": interval,
+            },
+        ),
+        payload_for("10.5555/second"),
+    )
+    client = CrossrefClient(opener=opener, sleep=delays.append)
+
+    assert client.get_work_by_doi("10.5555/first")["status"] == "ok"
+    assert client.get_work_by_doi("10.5555/second")["status"] == "ok"
+
+    assert delays == []
+
+
+def test_client_rate_pacing_reports_waiting_activity_with_request_identity() -> None:
+    trace: list[tuple[str, object]] = []
+    opener = SequenceOpener(
+        FakeResponse(
+            payload_for("10.5555/first"),
+            headers={
+                "X-Rate-Limit-Limit": "5",
+                "X-Rate-Limit-Interval": "1s",
+            },
+        ),
+        payload_for("10.5555/second"),
+    )
+
+    def report(event: ProgressEvent) -> None:
+        assert event.activity is not None
+        trace.append(("activity", event.activity))
+
+    def sleep(delay: float) -> None:
+        trace.append(("sleep", delay))
+
+    client = CrossrefClient(opener=opener, sleep=sleep)
+    client.get_work_by_doi("10.5555/first")
+    activity = ActivityUpdate(
+        kind=ActivityKind.WORKING,
+        source="crossref",
+        operation="doi_supplement",
+        label="Looking up Crossref DOI metadata",
+        detail="DOI 10.5555/second",
+        current=2,
+        total=5,
+        unit="doi",
+    )
+
+    client.get_work_by_doi(
+        "10.5555/second",
+        progress_callback=report,
+        activity=activity,
+    )
+
+    assert [kind for kind, _ in trace] == [
+        "activity",
+        "sleep",
+        "activity",
+        "activity",
+    ]
+    waiting, (_sleep_kind, delay), request, response = trace
+    assert waiting[1].kind is ActivityKind.WAITING
+    assert waiting[1].label == "Waiting for Crossref rate limit"
+    assert delay == 0.2
+    assert request[1].label == "Requesting Crossref"
+    assert response[1].label == "Received Crossref response"
+    identities = {
+        (item.source, item.operation, item.unit, item.current, item.total)
+        for kind, item in trace
+        if kind == "activity"
+    }
+    assert identities == {("crossref", "doi_supplement", "doi", 2, 5)}
+
+
+def test_client_retry_wait_respects_slower_known_provider_pacing() -> None:
+    delays: list[float] = []
+    opener = SequenceOpener(
+        FakeResponse(
+            payload_for("10.5555/first"),
+            headers={
+                "X-Rate-Limit-Limit": "1",
+                "X-Rate-Limit-Interval": "5s",
+            },
+        ),
+        http_error(429),
+        payload_for("10.5555/second"),
+    )
+    client = CrossrefClient(opener=opener, sleep=delays.append)
+
+    client.get_work_by_doi("10.5555/first")
+    assert client.get_work_by_doi("10.5555/second")["status"] == "ok"
+
+    assert delays == [5, 5]
+    assert len(opener.requests) == 3
 
 
 @pytest.mark.parametrize(
@@ -490,6 +698,32 @@ def test_discovery_isolates_issn_failures_and_validates_venue_identity() -> None
         "work_retrieval",
         "venue_validation",
     }
+
+
+def test_discovery_keeps_records_from_pages_before_later_request_failure() -> None:
+    valid = discovered_message("10.5555/first-page", issns=["0006-341X"])
+
+    class PartialFailureClient:
+        def iter_journal_work_pages(
+            self,
+            issn: str,
+            from_date: date,
+            to_date: date,
+        ) -> Any:
+            yield list_payload([valid])
+            raise CrossrefRequestError("later page failed")
+
+    result = discover_crossref_journals(
+        PartialFailureClient(),  # type: ignore[arg-type]
+        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
+    )
+
+    assert [record.doi for record in result.records] == ["10.5555/first-page"]
+    assert result.has_errors
+    assert [issue.stage for issue in result.issues] == ["work_retrieval"]
 
 
 def test_discovery_uses_alternate_issn_after_not_found() -> None:
