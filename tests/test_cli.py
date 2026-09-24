@@ -20,6 +20,7 @@ from literature_monitor.application.monitor import (
 from literature_monitor.cli import _build_parser, main
 from literature_monitor.cli_progress import _CliProgressRenderer
 from literature_monitor.config import JournalConfig, load_config
+from literature_monitor.coverage import CoverageComponent, CoverageStatus, CoverageUnit
 from literature_monitor.crossref import (
     CrossrefDiscoveryIssue,
     CrossrefDiscoveryResult,
@@ -840,6 +841,7 @@ def cli_run_result(
     *,
     warnings: tuple[MonitorIssue, ...] = (),
     errors: tuple[MonitorIssue, ...] = (),
+    coverage: tuple[CoverageUnit, ...] = (),
 ) -> RunResult:
     return RunResult(
         resolved_date_range=ResolvedDateRange(
@@ -862,6 +864,7 @@ def cli_run_result(
             evidence_clusters=1,
             retained_clusters=1,
         ),
+        coverage=coverage,
     )
 
 
@@ -990,6 +993,57 @@ def test_run_cli_maps_structured_outcome_to_exit_code(
         assert "Materialization completed" not in captured.err
     else:
         assert "1 canonical papers, 1 paper files created" in captured.err
+
+
+def test_run_cli_logs_compact_structured_coverage_summary(
+    tmp_path: Path,
+    monkeypatch: object,
+    capsys: object,
+) -> None:
+    coverage = (
+        CoverageUnit(
+            provider="openalex",
+            component=CoverageComponent.OPENALEX_DISCOVERY,
+            status=CoverageStatus.COMPLETE,
+            journal="Biometrics",
+        ),
+        CoverageUnit(
+            provider="openalex",
+            component=CoverageComponent.OPENALEX_DISCOVERY,
+            status=CoverageStatus.FAILED,
+            journal="Annals of Statistics",
+        ),
+        CoverageUnit(
+            provider="crossref",
+            component=CoverageComponent.CROSSREF_DISCOVERY,
+            status=CoverageStatus.UNAVAILABLE,
+            journal="Biometrics",
+            issn="0006-341X",
+        ),
+        CoverageUnit(
+            provider="crossref",
+            component=CoverageComponent.CROSSREF_SUPPLEMENT,
+            status=CoverageStatus.FAILED,
+            doi="10.5555/missing",
+        ),
+    )
+    value = cli_run_result(RunOutcome.COMPLETED, coverage=coverage)
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "literature_monitor.cli.run_monitor",
+        lambda path, *, date_override=None, progress_callback=None: value,
+    )
+
+    result = main(("run", "--config", str(tmp_path / "monitor.yaml")))
+
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert result == 0
+    assert "OpenAlex coverage: 1/2 complete · 1 failed" in captured.err
+    assert (
+        "Crossref discovery coverage: 0/1 complete · 1 unavailable"
+        in captured.err
+    )
+    assert "Crossref supplement coverage: 0/1 complete · 1 failed" in captured.err
+    assert "Biometrics coverage" not in captured.err
 
 
 def test_run_cli_non_tty_progress_is_plain_stderr(
@@ -2683,6 +2737,7 @@ def cli_core_result(
     *,
     warnings: tuple[MonitorIssue, ...] = (),
     errors: tuple[MonitorIssue, ...] = (),
+    coverage: tuple[CoverageUnit, ...] = (),
 ) -> _CanonicalCoreResult:
     return _CanonicalCoreResult(
         config=None,
@@ -2702,6 +2757,7 @@ def cli_core_result(
             evidence_clusters=1,
             retained_clusters=1,
         ),
+        coverage=coverage,
     )
 
 
@@ -2712,7 +2768,16 @@ def test_canonicalize_cli_calls_shared_application_core_and_emits_ndjson(
 ) -> None:
     config_path = tmp_path / "monitor.yaml"
     calls: list[tuple[Path, DateRangeSpec | None, str | None, str | None]] = []
-    core = cli_core_result()
+    core = cli_core_result(
+        coverage=(
+            CoverageUnit(
+                provider="openalex",
+                component=CoverageComponent.OPENALEX_DISCOVERY,
+                status=CoverageStatus.COMPLETE,
+                journal="Biometrics",
+            ),
+        )
+    )
 
     def fake_core(
         path: Path,
@@ -2768,6 +2833,7 @@ def test_canonicalize_cli_calls_shared_application_core_and_emits_ndjson(
     ]
     assert json.loads(captured.out)["metadata"]["title"] == "Canonical paper"
     assert "1 canonical papers" in captured.err
+    assert "OpenAlex coverage: 1/1 complete" in captured.err
 
 
 @pytest.mark.parametrize(
@@ -2835,7 +2901,15 @@ def test_materialize_cli_uses_shared_core_then_formal_materialization_path(
 ) -> None:
     config_path = tmp_path / "monitor.yaml"
     output_dir = tmp_path / "Vault"
-    core = cli_core_result()
+    coverage = (
+        CoverageUnit(
+            provider="crossref",
+            component=CoverageComponent.CROSSREF_SUPPLEMENT,
+            status=CoverageStatus.COMPLETE,
+            doi="10.5555/paper",
+        ),
+    )
+    core = cli_core_result(coverage=coverage)
     core_calls: list[tuple[Path, DateRangeSpec | None, str | None, str | None]] = []
     materialize_calls: list[tuple[_CanonicalCoreResult, Path]] = []
 
@@ -2857,7 +2931,7 @@ def test_materialize_cli_uses_shared_core_then_formal_materialization_path(
         progress_callback: object = None,
     ) -> RunResult:
         materialize_calls.append((received_core, destination))
-        return cli_run_result(RunOutcome.COMPLETED)
+        return cli_run_result(RunOutcome.COMPLETED, coverage=coverage)
 
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli._run_canonical_core",
@@ -2897,6 +2971,7 @@ def test_materialize_cli_uses_shared_core_then_formal_materialization_path(
     assert materialize_calls == [(core, output_dir)]
     assert captured.out == ""
     assert "Materialization completed" in captured.err
+    assert "Crossref supplement coverage: 1/1 complete" in captured.err
 
 
 @pytest.mark.parametrize(

@@ -19,6 +19,11 @@ from urllib.request import Request, urlopen
 from pydantic import ValidationError
 
 from literature_monitor.config import JournalConfig
+from literature_monitor.coverage import (
+    CoverageComponent,
+    CoverageStatus,
+    CoverageUnit,
+)
 from literature_monitor.identifiers import normalize_doi
 from literature_monitor.models import (
     Author,
@@ -137,6 +142,7 @@ class DiscoveryResult:
     sources: tuple[ResolvedSource, ...]
     records: tuple[OpenAlexWorkRecord, ...]
     issues: tuple[DiscoveryIssue, ...]
+    coverage: tuple[CoverageUnit, ...] = ()
 
     @property
     def has_errors(self) -> bool:
@@ -516,13 +522,17 @@ def _journal_name_matches(journal_name: str, source: _SourceHit) -> bool:
     return expected in {_normalized_journal_name(candidate) for candidate in candidates}
 
 
-def resolve_journal_source(
+def _resolve_journal_source(
     client: OpenAlexClient,
     journal: JournalConfig,
     *,
     progress_callback: ProgressCallback | None = None,
     operation: str | None = None,
-) -> tuple[ResolvedSource | None, tuple[DiscoveryIssue, ...]]:
+) -> tuple[
+    ResolvedSource | None,
+    tuple[DiscoveryIssue, ...],
+    CoverageStatus | None,
+]:
     hits: list[_SourceHit] = []
     unresolved: list[str] = []
     request_failures: list[tuple[str, str]] = []
@@ -610,7 +620,14 @@ def resolve_journal_source(
                 ),
             )
         )
-        return None, tuple(issues)
+        status = (
+            CoverageStatus.UNAVAILABLE
+            if unresolved
+            and not request_failures
+            and not source_validation_failures
+            else CoverageStatus.FAILED
+        )
+        return None, tuple(issues), status
 
     for issn in unresolved:
         issues.append(
@@ -657,10 +674,10 @@ def resolve_journal_source(
                 ),
             )
         )
-        return None, tuple(issues)
+        return None, tuple(issues), CoverageStatus.FAILED
 
     if source_validation_failures:
-        return None, tuple(issues)
+        return None, tuple(issues), CoverageStatus.FAILED
 
     source = hits[0]
     if not _journal_name_matches(journal.name, source):
@@ -675,7 +692,7 @@ def resolve_journal_source(
                 ),
             )
         )
-        return None, tuple(issues)
+        return None, tuple(issues), CoverageStatus.FAILED
 
     return (
         ResolvedSource(
@@ -689,7 +706,24 @@ def resolve_journal_source(
             issn=source.issn,
         ),
         tuple(issues),
+        None,
     )
+
+
+def resolve_journal_source(
+    client: OpenAlexClient,
+    journal: JournalConfig,
+    *,
+    progress_callback: ProgressCallback | None = None,
+    operation: str | None = None,
+) -> tuple[ResolvedSource | None, tuple[DiscoveryIssue, ...]]:
+    source, issues, _ = _resolve_journal_source(
+        client,
+        journal,
+        progress_callback=progress_callback,
+        operation=operation,
+    )
+    return source, issues
 
 
 def _parse_publication_date(value: Any) -> date | None:
@@ -913,9 +947,10 @@ def discover_journals(
     sources: list[ResolvedSource] = []
     records: list[tuple[int, OpenAlexWorkRecord]] = []
     issues: list[DiscoveryIssue] = []
+    coverage: list[CoverageUnit] = []
 
     for journal_index, journal in enumerate(journals):
-        source, resolution_issues = resolve_journal_source(
+        source, resolution_issues, resolution_status = _resolve_journal_source(
             client,
             journal,
             progress_callback=progress_callback,
@@ -923,6 +958,14 @@ def discover_journals(
         )
         issues.extend(resolution_issues)
         if source is None:
+            coverage.append(
+                CoverageUnit(
+                    provider="openalex",
+                    component=CoverageComponent.OPENALEX_DISCOVERY,
+                    status=resolution_status or CoverageStatus.FAILED,
+                    journal=journal.name,
+                )
+            )
             continue
         sources.append(source)
         activity = ActivityUpdate(
@@ -935,6 +978,8 @@ def discover_journals(
             total=None,
             unit="work",
         )
+        completed_pages = 0
+        dropped_record = False
         try:
             if progress_callback is None:
                 pages = client.iter_work_pages(source.openalex_id, from_date, to_date)
@@ -947,11 +992,13 @@ def discover_journals(
                     activity=activity,
                 )
             for page in pages:
+                completed_pages += 1
                 for payload in page["results"]:
                     record_id = payload.get("id") if isinstance(payload, dict) else None
                     try:
                         record, warnings = _normalize_work(payload, source, timestamp)
                     except (OpenAlexError, ValidationError) as error:
+                        dropped_record = True
                         issues.append(
                             DiscoveryIssue(
                                 severity=IssueSeverity.ERROR,
@@ -982,6 +1029,31 @@ def discover_journals(
                     message=str(error),
                 )
             )
+            coverage.append(
+                CoverageUnit(
+                    provider="openalex",
+                    component=CoverageComponent.OPENALEX_DISCOVERY,
+                    status=(
+                        CoverageStatus.PARTIAL
+                        if completed_pages
+                        else CoverageStatus.FAILED
+                    ),
+                    journal=journal.name,
+                )
+            )
+        else:
+            coverage.append(
+                CoverageUnit(
+                    provider="openalex",
+                    component=CoverageComponent.OPENALEX_DISCOVERY,
+                    status=(
+                        CoverageStatus.PARTIAL
+                        if dropped_record
+                        else CoverageStatus.COMPLETE
+                    ),
+                    journal=journal.name,
+                )
+            )
 
     records.sort(
         key=lambda item: (
@@ -994,4 +1066,5 @@ def discover_journals(
         sources=tuple(sources),
         records=tuple(record for _, record in records),
         issues=tuple(issues),
+        coverage=tuple(coverage),
     )

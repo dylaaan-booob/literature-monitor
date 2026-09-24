@@ -23,6 +23,11 @@ from literature_monitor.config import (
     resolve_runtime_date,
     validate_runtime_keyword,
 )
+from literature_monitor.coverage import (
+    CoverageSummary,
+    CoverageUnit,
+    summarize_coverage,
+)
 from literature_monitor.crossref import (
     CrossrefClient,
     CrossrefDiscoveryIssue,
@@ -144,8 +149,13 @@ class RunResult:
     errors: tuple[MonitorIssue, ...]
     outcome: RunOutcome
     statistics: MonitorStatistics
+    coverage: tuple[CoverageUnit, ...] = ()
     resolved_sources: tuple[ResolvedSource, ...] = ()
     log_level: LogLevel | None = None
+
+    @property
+    def coverage_summary(self) -> tuple[CoverageSummary, ...]:
+        return summarize_coverage(self.coverage)
 
 
 @dataclass(frozen=True)
@@ -178,6 +188,11 @@ class _CanonicalCoreResult:
     errors: tuple[MonitorIssue, ...]
     outcome: RunOutcome
     statistics: MonitorStatistics
+    coverage: tuple[CoverageUnit, ...] = ()
+
+    @property
+    def coverage_summary(self) -> tuple[CoverageSummary, ...]:
+        return summarize_coverage(self.coverage)
 
     @property
     def log_level(self) -> LogLevel | None:
@@ -506,6 +521,7 @@ def _run_canonical_core(
         crossref.records,
         progress_callback=progress_callback,
     )
+    coverage = (*openalex.coverage, *crossref.coverage, *retrieval.coverage)
     _emit_activity(
         progress_callback,
         ActivityUpdate(
@@ -585,6 +601,7 @@ def _run_canonical_core(
                     + len(retrieval.issues)
                 ),
             ),
+            coverage=coverage,
         )
     except SearchBackendError as error:
         issue = _search_issue(
@@ -613,6 +630,7 @@ def _run_canonical_core(
                     + len(retrieval.issues)
                 ),
             ),
+            coverage=coverage,
         )
 
     _emit_activity(
@@ -687,6 +705,7 @@ def _run_canonical_core(
         errors=errors,
         outcome=_run_outcome(warnings, errors),
         statistics=statistics,
+        coverage=coverage,
     )
 
 
@@ -709,6 +728,7 @@ def _materialize_canonical_result(
             errors=core.errors,
             outcome=RunOutcome.INVALID_CONFIGURATION,
             statistics=core.statistics,
+            coverage=core.coverage,
             resolved_sources=core.resolved_sources,
             log_level=core.log_level,
         )
@@ -741,6 +761,7 @@ def _materialize_canonical_result(
             core.statistics,
             materialization_issues=len(materialization.issues),
         ),
+        coverage=core.coverage,
         resolved_sources=core.resolved_sources,
         log_level=core.log_level,
     )

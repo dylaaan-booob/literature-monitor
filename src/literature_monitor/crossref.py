@@ -21,6 +21,11 @@ from urllib.request import Request, urlopen
 from pydantic import Field, ValidationError, model_validator
 
 from literature_monitor.config import JournalConfig
+from literature_monitor.coverage import (
+    CoverageComponent,
+    CoverageStatus,
+    CoverageUnit,
+)
 from literature_monitor.identifiers import normalize_doi
 from literature_monitor.models import (
     Author,
@@ -194,6 +199,7 @@ class CrossrefDiscoveryIssue:
 class CrossrefDiscoveryResult:
     records: tuple[CrossrefWorkRecord, ...]
     issues: tuple[CrossrefDiscoveryIssue, ...]
+    coverage: tuple[CoverageUnit, ...] = ()
 
     @property
     def has_errors(self) -> bool:
@@ -1017,6 +1023,7 @@ def discover_crossref_journals(
 
     records: list[tuple[int, int, CrossrefWorkRecord]] = []
     issues: list[CrossrefDiscoveryIssue] = []
+    coverage: list[CoverageUnit] = []
     for journal_index, journal in enumerate(journals):
         for issn_index, issn in enumerate(journal.issn):
             activity = ActivityUpdate(
@@ -1029,6 +1036,8 @@ def discover_crossref_journals(
                 total=None,
                 unit="work",
             )
+            completed_pages = 0
+            dropped_record = False
             try:
                 if progress_callback is None:
                     pages = client.iter_journal_work_pages(issn, from_date, to_date)
@@ -1041,6 +1050,7 @@ def discover_crossref_journals(
                         activity=activity,
                     )
                 for page in pages:
+                    completed_pages += 1
                     message = page["message"]
                     for item in message["items"]:
                         raw_doi = item.get("DOI") if isinstance(item, dict) else None
@@ -1050,6 +1060,7 @@ def discover_crossref_journals(
                                 timestamp,
                             )
                         except CrossrefRecordError as error:
+                            dropped_record = True
                             issues.append(
                                 CrossrefDiscoveryIssue(
                                     severity=EnrichmentIssueSeverity.WARNING,
@@ -1105,6 +1116,11 @@ def discover_crossref_journals(
                         message=str(error),
                     )
                 )
+                status = (
+                    CoverageStatus.PARTIAL
+                    if completed_pages
+                    else CoverageStatus.UNAVAILABLE
+                )
             except CrossrefRequestError as error:
                 issues.append(
                     CrossrefDiscoveryIssue(
@@ -1115,6 +1131,26 @@ def discover_crossref_journals(
                         message=str(error),
                     )
                 )
+                status = (
+                    CoverageStatus.PARTIAL
+                    if completed_pages
+                    else CoverageStatus.FAILED
+                )
+            else:
+                status = (
+                    CoverageStatus.PARTIAL
+                    if dropped_record
+                    else CoverageStatus.COMPLETE
+                )
+            coverage.append(
+                CoverageUnit(
+                    provider="crossref",
+                    component=CoverageComponent.CROSSREF_DISCOVERY,
+                    status=status,
+                    journal=journal.name,
+                    issn=issn,
+                )
+            )
         if journal.issn:
             _report_activity(
                 progress_callback,
@@ -1141,6 +1177,7 @@ def discover_crossref_journals(
     return CrossrefDiscoveryResult(
         records=tuple(record for _, _, record in records),
         issues=tuple(issues),
+        coverage=tuple(coverage),
     )
 
 

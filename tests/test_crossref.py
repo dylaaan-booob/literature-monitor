@@ -24,6 +24,7 @@ from literature_monitor.crossref import (
     normalize_crossref_work,
 )
 from literature_monitor.config import JournalConfig
+from literature_monitor.coverage import CoverageComponent, CoverageStatus
 from literature_monitor.models import (
     Author,
     CanonicalMetadata,
@@ -698,6 +699,17 @@ def test_discovery_isolates_issn_failures_and_validates_venue_identity() -> None
         "work_retrieval",
         "venue_validation",
     }
+    assert [
+        (unit.issn, unit.status) for unit in result.coverage
+    ] == [
+        ("0006-341X", CoverageStatus.FAILED),
+        ("1541-0420", CoverageStatus.COMPLETE),
+    ]
+    assert all(
+        unit.component is CoverageComponent.CROSSREF_DISCOVERY
+        and unit.journal == "Biometrics"
+        for unit in result.coverage
+    )
 
 
 def test_discovery_keeps_records_from_pages_before_later_request_failure() -> None:
@@ -724,6 +736,33 @@ def test_discovery_keeps_records_from_pages_before_later_request_failure() -> No
     assert [record.doi for record in result.records] == ["10.5555/first-page"]
     assert result.has_errors
     assert [issue.stage for issue in result.issues] == ["work_retrieval"]
+    assert result.coverage[0].status is CoverageStatus.PARTIAL
+
+
+def test_discovery_later_page_not_found_is_partial() -> None:
+    valid = discovered_message("10.5555/first-page-404", issns=["0006-341X"])
+
+    class PartialNotFoundClient:
+        def iter_journal_work_pages(
+            self,
+            issn: str,
+            from_date: date,
+            to_date: date,
+        ) -> Any:
+            yield list_payload([valid])
+            raise CrossrefNotFoundError("later page was not found")
+
+    result = discover_crossref_journals(
+        PartialNotFoundClient(),  # type: ignore[arg-type]
+        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
+    )
+
+    assert [record.doi for record in result.records] == ["10.5555/first-page-404"]
+    assert [issue.stage for issue in result.issues] == ["journal_not_found"]
+    assert result.coverage[0].status is CoverageStatus.PARTIAL
 
 
 def test_discovery_uses_alternate_issn_after_not_found() -> None:
@@ -746,6 +785,45 @@ def test_discovery_uses_alternate_issn_after_not_found() -> None:
     assert [record.doi for record in result.records] == ["10.5555/alternate"]
     assert [issue.stage for issue in result.issues] == ["journal_not_found"]
     assert not result.has_errors
+    assert [unit.status for unit in result.coverage] == [
+        CoverageStatus.UNAVAILABLE,
+        CoverageStatus.COMPLETE,
+    ]
+
+
+def test_discovery_zero_results_is_complete() -> None:
+    client = JournalDiscoveryClient({"0006-341X": [list_payload([])]})
+
+    result = discover_crossref_journals(
+        client,  # type: ignore[arg-type]
+        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
+    )
+
+    assert result.records == ()
+    assert result.coverage[0].status is CoverageStatus.COMPLETE
+
+
+def test_discovery_field_warning_keeps_complete_coverage() -> None:
+    message = discovered_message("10.5555/warning", issns=["0006-341X"])
+    message["abstract"] = 42
+    client = JournalDiscoveryClient(
+        {"0006-341X": [list_payload([message])]}
+    )
+
+    result = discover_crossref_journals(
+        client,  # type: ignore[arg-type]
+        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
+    )
+
+    assert [record.doi for record in result.records] == ["10.5555/warning"]
+    assert any(issue.stage == "field_normalization" for issue in result.issues)
+    assert result.coverage[0].status is CoverageStatus.COMPLETE
 
 
 def test_discovery_progress_uses_total_results_without_extra_request() -> None:
@@ -836,6 +914,7 @@ def test_discovery_skips_malformed_item_without_discarding_valid_peer() -> None:
 
     assert [record.doi for record in result.records] == ["10.5555/valid-peer"]
     assert any(issue.stage == "record_normalization" for issue in result.issues)
+    assert result.coverage[0].status is CoverageStatus.PARTIAL
 
 
 @pytest.mark.parametrize(
@@ -874,6 +953,9 @@ def test_discovery_venue_validation_paths(
     )
 
     assert bool(result.records) is accepted
+    assert all(
+        unit.status is CoverageStatus.COMPLETE for unit in result.coverage
+    )
 
 
 def test_discovered_crossref_record_attaches_all_openalex_doi_anchors() -> None:
@@ -904,6 +986,7 @@ def test_discovered_crossref_record_attaches_all_openalex_doi_anchors() -> None:
         "https://openalex.org/W2",
     ]
     assert result.supplement_records == ()
+    assert result.coverage == ()
 
 
 def test_doi_gap_supplementation_fetches_shared_doi_once() -> None:
@@ -922,6 +1005,10 @@ def test_doi_gap_supplementation_fetches_shared_doi_once() -> None:
 
     assert len(opener.requests) == 1
     assert len(result.supplement_records) == 1
+    assert len(result.coverage) == 1
+    assert result.coverage[0].component is CoverageComponent.CROSSREF_SUPPLEMENT
+    assert result.coverage[0].status is CoverageStatus.COMPLETE
+    assert result.coverage[0].doi == "10.5555/shared"
     crossref_evidence = next(
         item for item in result.evidence if item.provenance.provider == "crossref"
     )
@@ -958,6 +1045,15 @@ def test_doi_supplement_progress_has_exact_total_and_completes_every_work_unit()
     assert [record.doi for record in result.supplement_records] == [
         "10.5555/a",
         "10.5555/c",
+    ]
+    assert [
+        (unit.doi, unit.status) for unit in result.coverage
+    ] == [
+        ("10.5555/a", CoverageStatus.COMPLETE),
+        ("10.5555/b", CoverageStatus.UNAVAILABLE),
+        ("10.5555/c", CoverageStatus.COMPLETE),
+        ("10.5555/d", CoverageStatus.FAILED),
+        ("10.5555/e", CoverageStatus.FAILED),
     ]
     completed = [
         event.activity

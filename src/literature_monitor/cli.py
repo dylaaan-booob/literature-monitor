@@ -325,6 +325,32 @@ def _log_monitor_issues(
         _log_monitor_issue(logger, issue, cli_date_fields=cli_date_fields)
 
 
+def _log_coverage_summary(
+    logger: logging.Logger,
+    result: _CanonicalCoreResult | RunResult,
+) -> None:
+    labels = {
+        "openalex_discovery": "OpenAlex",
+        "crossref_discovery": "Crossref discovery",
+        "crossref_supplement": "Crossref supplement",
+    }
+    for summary in result.coverage_summary:
+        if summary.total_units == 0:
+            continue
+        parts = [f"{summary.complete}/{summary.total_units} complete"]
+        if summary.partial:
+            parts.append(f"{summary.partial} partial")
+        if summary.unavailable:
+            parts.append(f"{summary.unavailable} unavailable")
+        if summary.failed:
+            parts.append(f"{summary.failed} failed")
+        logger.info(
+            "%s coverage: %s",
+            labels[summary.component.value],
+            " · ".join(parts),
+        )
+
+
 def _log_canonicalization_summary(
     logger: logging.Logger,
     result: _CanonicalCoreResult,
@@ -345,6 +371,7 @@ def _log_canonicalization_summary(
         stats.canonicalization_issues,
         stats.provider_issues,
     )
+    _log_coverage_summary(logger, result)
 
 
 def _log_materialization_summary(
@@ -375,6 +402,7 @@ def _log_materialization_summary(
         stats.canonicalization_issues,
         stats.provider_issues,
     )
+    _log_coverage_summary(logger, result)
 
 
 def _match_local_search(

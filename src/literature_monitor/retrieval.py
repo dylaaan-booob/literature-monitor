@@ -7,6 +7,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
+from literature_monitor.coverage import (
+    CoverageComponent,
+    CoverageStatus,
+    CoverageUnit,
+)
 from literature_monitor.crossref import (
     CrossrefClient,
     CrossrefNotFoundError,
@@ -33,6 +38,7 @@ class EvidenceRetrievalResult:
     evidence: tuple[ProviderWorkEvidence, ...]
     supplement_records: tuple[CrossrefWorkRecord, ...]
     issues: tuple[EnrichmentIssue, ...]
+    coverage: tuple[CoverageUnit, ...] = ()
 
     @property
     def has_errors(self) -> bool:
@@ -101,6 +107,7 @@ def assemble_provider_evidence(
         evidence.append(record.to_evidence(supplements=anchors))
 
     supplements: list[CrossrefWorkRecord] = []
+    coverage: list[CoverageUnit] = []
     pending_dois = tuple(sorted(set(openalex_by_doi) - discovered_dois))
     total_dois = len(pending_dois)
     for doi_index, doi in enumerate(pending_dois):
@@ -144,6 +151,7 @@ def assemble_provider_evidence(
                 )
                 for record in matching
             )
+            status = CoverageStatus.UNAVAILABLE
         except CrossrefRequestError as error:
             issues.extend(
                 EnrichmentIssue(
@@ -155,6 +163,7 @@ def assemble_provider_evidence(
                 )
                 for record in matching
             )
+            status = CoverageStatus.FAILED
         except CrossrefRecordError as error:
             issues.extend(
                 EnrichmentIssue(
@@ -166,6 +175,7 @@ def assemble_provider_evidence(
                 )
                 for record in matching
             )
+            status = CoverageStatus.FAILED
         else:
             supplements.append(crossref_record)
             anchors = tuple(_anchor(record) for record in matching)
@@ -180,6 +190,15 @@ def assemble_provider_evidence(
                 )
                 for warning in warnings
             )
+            status = CoverageStatus.COMPLETE
+        coverage.append(
+            CoverageUnit(
+                provider="crossref",
+                component=CoverageComponent.CROSSREF_SUPPLEMENT,
+                status=status,
+                doi=doi,
+            )
+        )
         # 成功、not-found、请求失败与记录错误都完成了一个 DOI work unit。
         _report_activity(
             progress_callback,
@@ -194,4 +213,5 @@ def assemble_provider_evidence(
         evidence=tuple(evidence),
         supplement_records=tuple(supplements),
         issues=tuple(issues),
+        coverage=tuple(coverage),
     )

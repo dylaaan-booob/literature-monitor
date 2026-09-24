@@ -33,6 +33,7 @@ from literature_monitor.application.settings import (
     SettingsValidationResult,
 )
 from literature_monitor.config import JournalConfig, LogLevel, parse_monitor_definition
+from literature_monitor.coverage import CoverageComponent, CoverageStatus, CoverageUnit
 from literature_monitor.date_range import DateRangeSpec, ResolvedDateRange
 from literature_monitor.progress import (
     PROGRESS_STAGES,
@@ -327,6 +328,33 @@ def make_run_result() -> RunResult:
         errors=(error,),
         outcome=RunOutcome.COMPLETED_WITH_ERRORS,
         statistics=MonitorStatistics(),
+        coverage=(
+            CoverageUnit(
+                provider="openalex",
+                component=CoverageComponent.OPENALEX_DISCOVERY,
+                status=CoverageStatus.COMPLETE,
+                journal="Biometrics",
+            ),
+            CoverageUnit(
+                provider="openalex",
+                component=CoverageComponent.OPENALEX_DISCOVERY,
+                status=CoverageStatus.FAILED,
+                journal="Annals of Statistics",
+            ),
+            CoverageUnit(
+                provider="crossref",
+                component=CoverageComponent.CROSSREF_DISCOVERY,
+                status=CoverageStatus.UNAVAILABLE,
+                journal="Biometrics",
+                issn="0006-341X",
+            ),
+            CoverageUnit(
+                provider="crossref",
+                component=CoverageComponent.CROSSREF_SUPPLEMENT,
+                status=CoverageStatus.COMPLETE,
+                doi="10.5555/paper",
+            ),
+        ),
     )
 
 
@@ -865,6 +893,12 @@ def test_finished_run_result_renders_summary_and_issues(tmp_path: Path) -> None:
     assert "6 existing" in response.text
     assert "one source warning" in response.text
     assert "one source error" in response.text
+    assert "OpenAlex coverage: 1/2 complete · 1 failed" in response.text
+    assert (
+        "Crossref discovery coverage: 0/1 complete · 1 unavailable"
+        in response.text
+    )
+    assert "Crossref supplement coverage: 1/1 complete" in response.text
 
 
 def test_unexpected_run_error_renders_only_safe_coordinator_text(tmp_path: Path) -> None:

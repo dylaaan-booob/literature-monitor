@@ -83,6 +83,16 @@ provider pacing is known, retry waits remain 1 second and then 2 seconds.
 Endpoint-specific 404 handling is unchanged, and other HTTP 4xx responses are
 not retried. Retry and pacing state remain process-local and transient.
 
+Each production run also carries process-local retrieval coverage for the work
+units it actually executed: OpenAlex discovery per configured journal, Crossref
+discovery per journal/queried ISSN, and Crossref DOI supplementation per lookup
+that entered the pending set. Coverage distinguishes complete, partial,
+unavailable, and failed execution without claiming that the bibliographic
+universe itself is complete. CLI completion summaries and the GUI finished-run
+panel show compact per-component counts. Coverage is not written to monitor
+configuration, workspace Markdown, indexes, checkpoints, or run history, and it
+does not change existing outcomes, exit codes, or materialization behavior.
+
 The selected output directory contains:
 
 ```text

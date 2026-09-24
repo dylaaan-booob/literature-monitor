@@ -25,6 +25,7 @@ from literature_monitor.canonicalize import (
     EvidenceConsolidationResult,
 )
 from literature_monitor.config import JournalConfig, load_config
+from literature_monitor.coverage import CoverageComponent, CoverageStatus, CoverageUnit
 from literature_monitor.crossref import (
     CrossrefDiscoveryIssue,
     CrossrefDiscoveryResult,
@@ -136,6 +137,9 @@ def install_core_mocks(
     openalex_issues: tuple[DiscoveryIssue, ...] = (),
     crossref_issues: tuple[CrossrefDiscoveryIssue, ...] = (),
     retrieval_issues: tuple[EnrichmentIssue, ...] = (),
+    openalex_coverage: tuple[CoverageUnit, ...] = (),
+    crossref_coverage: tuple[CoverageUnit, ...] = (),
+    retrieval_coverage: tuple[CoverageUnit, ...] = (),
     consolidation_issues: tuple[CanonicalizationIssue, ...] = (),
     canonicalization_issues: tuple[CanonicalizationIssue, ...] = (),
     progress_callbacks: list[ProgressCallback | None] | None = None,
@@ -181,6 +185,7 @@ def install_core_mocks(
             sources=tuple(resolved_source(journal) for journal in journals),
             records=(oa_record,),  # type: ignore[arg-type]
             issues=openalex_issues,
+            coverage=openalex_coverage,
         )
 
     def discover_crossref(
@@ -211,6 +216,7 @@ def install_core_mocks(
         return CrossrefDiscoveryResult(
             records=(cr_record,),  # type: ignore[arg-type]
             issues=crossref_issues,
+            coverage=crossref_coverage,
         )
 
     def assemble(
@@ -241,6 +247,7 @@ def install_core_mocks(
             evidence=(openalex_evidence, crossref_evidence),  # type: ignore[arg-type]
             supplement_records=(cr_record,),  # type: ignore[arg-type]
             issues=retrieval_issues,
+            coverage=retrieval_coverage,
         )
 
     def consolidate(evidence: tuple[object, ...]) -> EvidenceConsolidationResult:
@@ -304,6 +311,7 @@ def test_runtime_contract_has_no_semantic_scholar_specific_issue_or_statistics_s
     assert "SEMANTIC_SCHOLAR" not in MonitorIssueComponent.__members__
     assert "semantic_scholar_supplement_records" not in MonitorStatistics.__dataclass_fields__
     assert "semantic_scholar_discovery_records" not in MonitorStatistics.__dataclass_fields__
+    assert "coverage" not in MonitorStatistics.__dataclass_fields__
 
 
 def test_canonical_core_preserves_real_orchestration_order_and_stops_before_materialization(
@@ -330,6 +338,70 @@ def test_canonical_core_preserves_real_orchestration_order_and_stops_before_mate
         "consolidate",
         "match",
         "canonicalize",
+    ]
+
+
+def test_canonical_core_preserves_coverage_order_and_summarizes_components(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = write_monitor(tmp_path)
+    openalex = (
+        CoverageUnit(
+            provider="openalex",
+            component=CoverageComponent.OPENALEX_DISCOVERY,
+            status=CoverageStatus.COMPLETE,
+            journal="Biometrics",
+        ),
+    )
+    crossref = (
+        CoverageUnit(
+            provider="crossref",
+            component=CoverageComponent.CROSSREF_DISCOVERY,
+            status=CoverageStatus.COMPLETE,
+            journal="Biometrics",
+            issn="0006-341X",
+        ),
+        CoverageUnit(
+            provider="crossref",
+            component=CoverageComponent.CROSSREF_DISCOVERY,
+            status=CoverageStatus.UNAVAILABLE,
+            journal="Biometrics",
+            issn="1541-0420",
+        ),
+    )
+    supplement = (
+        CoverageUnit(
+            provider="crossref",
+            component=CoverageComponent.CROSSREF_SUPPLEMENT,
+            status=CoverageStatus.FAILED,
+            doi="10.5555/missing",
+        ),
+    )
+    install_core_mocks(
+        monkeypatch,
+        openalex_coverage=openalex,
+        crossref_coverage=crossref,
+        retrieval_coverage=supplement,
+    )
+
+    result = _run_canonical_core(config_path)
+
+    assert result.coverage == (*openalex, *crossref, *supplement)
+    assert [
+        (
+            summary.component,
+            summary.total_units,
+            summary.complete,
+            summary.partial,
+            summary.unavailable,
+            summary.failed,
+        )
+        for summary in result.coverage_summary
+    ] == [
+        (CoverageComponent.OPENALEX_DISCOVERY, 1, 1, 0, 0, 0),
+        (CoverageComponent.CROSSREF_DISCOVERY, 2, 1, 0, 1, 0),
+        (CoverageComponent.CROSSREF_SUPPLEMENT, 1, 0, 0, 0, 1),
     ]
 
 
@@ -362,7 +434,15 @@ def test_materialize_consumes_the_same_canonical_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_path = write_monitor(tmp_path)
-    paper = install_core_mocks(monkeypatch)
+    coverage = (
+        CoverageUnit(
+            provider="openalex",
+            component=CoverageComponent.OPENALEX_DISCOVERY,
+            status=CoverageStatus.COMPLETE,
+            journal="Biometrics",
+        ),
+    )
+    paper = install_core_mocks(monkeypatch, openalex_coverage=coverage)
     core = _run_canonical_core(config_path)
     output_dir = tmp_path / "explicit"
     received: list[tuple[tuple[CanonicalPaper, ...], Path]] = []
@@ -402,6 +482,7 @@ def test_materialize_consumes_the_same_canonical_result(
     assert result.updated_papers == 1
     assert result.created_authors == 1
     assert result.existing_authors == 1
+    assert result.coverage == coverage
 
 
 def test_run_monitor_uses_core_materialization_and_progress_contract(
@@ -644,6 +725,7 @@ def test_incomplete_override_never_borrows_config_date_fields(
     assert result.outcome is RunOutcome.INVALID_CONFIGURATION
     assert result.errors[0].component is MonitorIssueComponent.DATE_RANGE
     assert "must be combined with another date field" in result.errors[0].message
+    assert result.coverage == ()
 
 
 def test_preflight_failure_occurs_before_provider_work_and_skips_workspace_stage(
@@ -669,6 +751,7 @@ def test_preflight_failure_occurs_before_provider_work_and_skips_workspace_stage
         ProgressStage.CHECKING_MONITOR
     ]
     assert all(event.activity is None for event in progress_events)
+    assert result.coverage == ()
 
 
 def test_provider_error_still_materializes_successful_papers(
@@ -676,6 +759,14 @@ def test_provider_error_still_materializes_successful_papers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_path = write_monitor(tmp_path)
+    failed_coverage = (
+        CoverageUnit(
+            provider="openalex",
+            component=CoverageComponent.OPENALEX_DISCOVERY,
+            status=CoverageStatus.FAILED,
+            journal="Biometrics",
+        ),
+    )
     install_core_mocks(
         monkeypatch,
         openalex_issues=(
@@ -686,6 +777,7 @@ def test_provider_error_still_materializes_successful_papers(
                 message="provider unavailable",
             ),
         ),
+        openalex_coverage=failed_coverage,
     )
     materialized: list[CanonicalPaper] = []
 
@@ -705,6 +797,7 @@ def test_provider_error_still_materializes_successful_papers(
     assert len(materialized) == 1
     assert result.outcome is RunOutcome.COMPLETED_WITH_ERRORS
     assert any(issue.component is MonitorIssueComponent.OPENALEX for issue in result.errors)
+    assert result.coverage == failed_coverage
 
 
 def test_provider_warning_is_nonfatal(

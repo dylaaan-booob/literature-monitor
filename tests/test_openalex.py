@@ -12,6 +12,7 @@ from pydantic import ValidationError
 import literature_monitor.openalex as openalex_module
 from literature_monitor.canonicalize import canonicalize_records
 from literature_monitor.config import JournalConfig
+from literature_monitor.coverage import CoverageComponent, CoverageStatus
 from literature_monitor.models import (
     CanonicalMetadata,
     EvidenceVersionRole,
@@ -376,6 +377,10 @@ def test_discovery_pages_normalizes_records_and_builds_venue_first_query() -> No
 
     assert not result.has_errors
     assert len(result.sources) == 1
+    assert len(result.coverage) == 1
+    assert result.coverage[0].component is CoverageComponent.OPENALEX_DISCOVERY
+    assert result.coverage[0].status is CoverageStatus.COMPLETE
+    assert result.coverage[0].journal == "Biometrics"
     assert [record.external_ids.openalex for record in result.records] == [
         "https://openalex.org/W4389363697",
         "https://openalex.org/W7125247299",
@@ -446,6 +451,102 @@ def test_source_resolution_and_discovery_report_natural_progress_without_extra_r
     assert [(item.current, item.total) for item in pages] == [(1, 2), (2, 2)]
     assert works[-1].label == "Completed OpenAlex journal discovery"
     assert (works[-1].current, works[-1].total) == (2, 2)
+
+
+def test_discovery_zero_results_and_unresolved_alternate_issn_are_complete() -> None:
+    empty_page = deepcopy(fixture("works_page_1.json"))
+    empty_page["results"] = []
+    empty_page["meta"]["count"] = 0
+    empty_page["meta"]["next_cursor"] = None
+    client, _ = make_client(
+        fixture("source_cybernetics.json"),
+        http_error(404),
+        empty_page,
+    )
+
+    result = discover_journals(
+        client,
+        (
+            JournalConfig(
+                name="IEEE Transactions on Cybernetics",
+                issn=("2168-2267", "2168-2275"),
+            ),
+        ),
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+    assert result.records == ()
+    assert result.coverage[0].status is CoverageStatus.COMPLETE
+
+
+def test_discovery_later_page_failure_is_partial() -> None:
+    client, _ = make_client(
+        fixture("source_biometrics.json"),
+        fixture("works_page_1.json"),
+        TimeoutError("timed out"),
+        TimeoutError("timed out"),
+        TimeoutError("timed out"),
+    )
+
+    result = discover_journals(
+        client,
+        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+    assert result.records
+    assert result.coverage[0].status is CoverageStatus.PARTIAL
+    assert any(issue.stage == "work_retrieval" for issue in result.issues)
+
+
+def test_discovery_source_absence_is_unavailable() -> None:
+    client, _ = make_client(http_error(404))
+
+    result = discover_journals(
+        client,
+        (JournalConfig(name="Missing Journal", issn=("0006-341X",)),),
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+    assert result.records == ()
+    assert result.coverage[0].status is CoverageStatus.UNAVAILABLE
+
+
+def test_discovery_source_request_failure_is_failed() -> None:
+    client, _ = make_client(
+        TimeoutError("timed out"),
+        TimeoutError("timed out"),
+        TimeoutError("timed out"),
+    )
+
+    result = discover_journals(
+        client,
+        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+    assert result.records == ()
+    assert result.coverage[0].status is CoverageStatus.FAILED
+
+
+def test_discovery_source_validation_failure_is_failed() -> None:
+    payload = fixture("source_biometrics.json")
+    payload["type"] = "conference"
+    client, _ = make_client(payload)
+
+    result = discover_journals(
+        client,
+        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+    assert result.records == ()
+    assert result.coverage[0].status is CoverageStatus.FAILED
 
 
 @pytest.mark.parametrize("count", (None, "2", -1, 0, True))
@@ -710,6 +811,7 @@ def test_model_validation_failure_skips_only_the_bad_record(
     assert len(result.issues) == 1
     assert result.issues[0].stage == "record_normalization"
     assert result.issues[0].record_id == "https://openalex.org/W100"
+    assert result.coverage[0].status is CoverageStatus.PARTIAL
 
 
 def test_bad_record_in_one_journal_does_not_stop_later_journals() -> None:

@@ -274,7 +274,7 @@ Provider retirement does not narrow the durable data model. Existing Paper Markd
 
 ### 6.4 Provider request reliability
 
-Production provider clients remain synchronous. Provider request reliability is transient runtime behavior: it must not introduce an asyncio provider rewrite, worker pool, concurrent request framework, durable retry history, persisted provider cursor/checkpoint state, coverage state, resume state, scheduler state, or another persistent execution state.
+Production provider clients remain synchronous. Provider request reliability is transient runtime behavior: it must not introduce an asyncio provider rewrite, worker pool, concurrent request framework, durable retry history, persisted provider cursor/checkpoint state, durable coverage state, resume state, scheduler state, or another persistent execution state.
 
 OpenAlex Works discovery continues to use cursor pagination with `per_page=100`. Crossref journal discovery continues to use cursor pagination and defaults to `rows=1000`, using the latest valid `next-cursor` from each full page while retaining repeated-cursor and malformed-response protection. Crossref DOI supplementation remains one DOI per request.
 
@@ -286,7 +286,52 @@ Provider pacing remains serial and transient. If a pacing delay actually occurs 
 
 A failed provider request remains isolated according to the existing retrieval rules. Evidence already obtained successfully from another provider, journal, page, or request remains usable and must not be discarded because a later request fails.
 
-### 6.5 Publisher fallback
+### 6.5 Run coverage state
+
+Each production run records transient, process-local retrieval coverage for the provider work units it actually executes. Coverage describes execution completeness for this run; it does not claim that a provider or the bibliographic universe is globally complete. A provider may successfully return zero records and still have `COMPLETE` coverage.
+
+Coverage is separate from provider issues. Coverage states whether a retrieval work unit completed reliably, while issues continue to carry concrete warnings, errors, and diagnostics. Coverage must not change `RunOutcome`, CLI exit codes, provider failure isolation, canonicalization, or materialization behavior.
+
+The provider-neutral coverage model has these components:
+
+- `OPENALEX_DISCOVERY`;
+- `CROSSREF_DISCOVERY`;
+- `CROSSREF_SUPPLEMENT`.
+
+Each work unit has one of these statuses:
+
+- `COMPLETE`;
+- `PARTIAL`;
+- `UNAVAILABLE`;
+- `FAILED`.
+
+A coverage unit has a stable identity only for the current run. OpenAlex discovery is identified by provider/component plus configured journal. Crossref discovery is identified by provider/component plus configured journal and queried ISSN. Crossref supplementation is identified by provider/component plus normalized DOI. Coverage order is deterministic. Coverage must not add UUIDs, database IDs, durable execution identities, persisted cursors, checkpoints, watermarks, resume state, scheduler state, run history, or another execution database.
+
+OpenAlex discovery coverage is:
+
+- `COMPLETE` when a journal Source is established, Works pagination reaches its natural end, and no returned work item is lost to normalization or validation failure. Zero works is valid `COMPLETE`. An unresolved alternate configured ISSN does not by itself lower coverage when another ISSN reliably resolves to the same usable Source and Works retrieval completes.
+- `PARTIAL` when at least one Works page completes and a later pagination/request failure occurs, or when any returned work item is dropped because normalization or validation fails.
+- `UNAVAILABLE` when OpenAlex normally cannot establish a usable Source for the journal, such as when all relevant Source lookups are not found.
+- `FAILED` when a transient request failure, provider response validation failure, conflicting Source identity, journal identity mismatch, or another provider error prevents trustworthy Source coverage, or when Works retrieval fails before any page completes.
+
+Crossref discovery coverage is one work unit per configured journal plus queried ISSN:
+
+- `COMPLETE` when cursor traversal reaches its natural end without losing a returned work item. Zero records is valid `COMPLETE`. Venue-mismatch exclusion and field-normalization warnings that retain the record do not lower coverage.
+- `PARTIAL` when at least one page completes and a later request or pagination failure occurs, or when a returned work item is dropped by record normalization.
+- `UNAVAILABLE` for the endpoint-specific journal/ISSN not-found case.
+- `FAILED` when request, response-envelope, or cursor failure occurs before any page completes.
+
+Crossref supplementation coverage is one work unit for each normalized DOI lookup that is actually executed. Successful lookup and normalization is `COMPLETE`; authoritative not-found is `UNAVAILABLE`; request, invalid-response, or record-normalization failure is `FAILED`. Singleton DOI lookup does not use `PARTIAL`. A DOI that never enters the pending lookup set must not create a supplementation coverage unit.
+
+Coverage is produced at provider execution boundaries and carried with the existing provider results; application orchestration combines those units into the canonical production result in deterministic order. Preflight or invalid-configuration failures that execute no providers have empty coverage and must not invent failed provider units.
+
+`RunResult` exposes the current run's coverage and a compact derived per-component summary containing total units plus counts for complete, partial, unavailable, and failed states. Coverage is not duplicated into `MonitorStatistics`.
+
+The `run`, `canonicalize`, and `materialize` CLI completion summaries display compact structured coverage without printing every successful unit. The Local Web finished-run view displays compact coverage only while the current process still holds the finished `RunResult`; it must not persist browser-side coverage, add run history, add a coverage API/database, or restore discarded process results after refresh.
+
+Coverage is retrieval execution metadata, not Paper workflow state. It must not be written to Paper Markdown, Author Markdown, Inbox, monitor YAML, `.obsidian`, SQLite FTS indexes, or other persistent Web state, and it must not affect canonical identity, keyword filtering, Paper status, human notes, materialization merge, or Zotero export.
+
+### 6.6 Publisher fallback
 
 Publisher fallback is deliberately excluded from MVP.
 
@@ -2341,7 +2386,7 @@ v0.4.1 is released and complete. Its feature implementation, final independent a
 
 R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, and v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback are completed release history. v0.4.1 remains the current released and completed baseline.
 
-v0.4.2 development begins with the provider contract defined in §6: OpenAlex is the sole primary discovery provider, Crossref is the secondary discovery/bibliographic provider, and Semantic Scholar is retired from production retrieval. This provider-contract change does not start the later v0.4.2 reliability work on batching, rate limits, retry policy, coverage state, resume semantics, or scheduling.
+v0.4.2 development is in progress. A1 provider-contract work is complete: OpenAlex is the sole primary discovery provider, Crossref is the secondary discovery/bibliographic provider, and Semantic Scholar is retired from production retrieval. A2 provider request reliability is complete, including the current synchronous pagination, transient retry, and provider pacing contract in §6.4. A3 transient run coverage in §6.5 is the current implemented stage. Durable coverage, resume/checkpoint semantics, late-index recovery, scheduling, and other later reliability work remain outside A3.
 
 ---
 

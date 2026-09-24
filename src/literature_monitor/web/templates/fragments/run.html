@@ -104,6 +104,12 @@
         {% endif %}
         <span>Papers: {{ result.canonical_paper_count }} canonical · {{ result.created_papers }} created · {{ result.matched_existing_papers }} matched · {{ result.updated_papers }} updated</span>
         <span>Authors: {{ result.created_authors }} created · {{ result.existing_authors }} existing</span>
+        {% for coverage in result.coverage_summary %}
+          {% if coverage.total_units %}
+            {% set coverage_label = "OpenAlex" if coverage.component.value == "openalex_discovery" else ("Crossref discovery" if coverage.component.value == "crossref_discovery" else "Crossref supplement") %}
+            <span>{{ coverage_label }} coverage: {{ coverage.complete }}/{{ coverage.total_units }} complete{% if coverage.partial %} · {{ coverage.partial }} partial{% endif %}{% if coverage.unavailable %} · {{ coverage.unavailable }} unavailable{% endif %}{% if coverage.failed %} · {{ coverage.failed }} failed{% endif %}</span>
+          {% endif %}
+        {% endfor %}
         {% if result.warnings %}
           <span>{{ result.warnings|length }} warning{{ "" if result.warnings|length == 1 else "s" }}</span>
         {% endif %}
