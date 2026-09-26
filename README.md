@@ -9,11 +9,12 @@ safely updates durable Paper and Author Markdown, and exports kept papers.
 v0.4.1 is the latest released baseline. It adds shared transient runtime
 progress, Activity, current-Activity ETA, inactivity feedback, and corresponding
 CLI/Web presentation while preserving the existing production and durable-state
-boundaries. v0.4.2 development has completed the provider-contract, request
-reliability, transient run-coverage, and durable latest-run snapshot stages. The
-normalized provider-result cache stage is complete. The current A6 stage adds
-explicit exact-range cache reuse; default runs remain live and checkpoint
-resume is not enabled.
+boundaries. v0.4.2 A1–A6 implementation and the final independent audit are
+complete. The repository is now in v0.4.2 release preparation; v0.4.2 is not yet
+released. The completed work adds provider-contract cleanup, request reliability,
+transient run coverage, a durable latest-run diagnostic snapshot, a normalized
+provider-result cache, and explicit exact-range cache reuse. Default runs remain
+live and checkpoint resume is not enabled.
 
 ## Setup
 
@@ -184,12 +185,12 @@ A valid snapshot prints its resolved date range, recorded outcome, and the same
 compact per-component coverage counts used by run summaries. Missing or invalid
 snapshot data exits `1`; invalid monitor configuration exits `2`.
 
-**last-run snapshot ≠ resume checkpoint.** The snapshot never causes the next
-run to skip provider requests, change its discovery window, restore a cursor, or
-alter canonicalization/materialization. Automatic resume is still unimplemented.
-Safely skipping a previously complete work unit would require a separate durable
-provider evidence/result cache, or another explicit contract that can restore
-the evidence belonging to skipped work.
+**last-run snapshot ≠ provider cache ≠ checkpoint resume.** `last-run.json`
+alone never authorizes request skipping, changes the discovery window, restores
+a cursor, or alters canonicalization/materialization. A6 may explicitly reuse
+matching A5 `provider-cache.json` units only when `--reuse-provider-cache` is
+requested and the resolved date range and durable work-unit identity match.
+This is not automatic resume, checkpoint recovery, or freshness authority.
 
 The supported decision model is one monitor to one decision workspace. Paper
 UUID stability, `candidate` / `rejected` / `kept` / `in_zotero`
