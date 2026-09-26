@@ -138,11 +138,23 @@ class OpenAlexWorkRecord(DomainModel):
 
 
 @dataclass(frozen=True)
+class OpenAlexDiscoveryUnitResult:
+    """Journal-local normalized output and diagnostics from one execution."""
+
+    journal: JournalConfig
+    coverage: CoverageUnit
+    source: ResolvedSource | None
+    records: tuple[OpenAlexWorkRecord, ...]
+    issues: tuple[DiscoveryIssue, ...]
+
+
+@dataclass(frozen=True)
 class DiscoveryResult:
     sources: tuple[ResolvedSource, ...]
     records: tuple[OpenAlexWorkRecord, ...]
     issues: tuple[DiscoveryIssue, ...]
     coverage: tuple[CoverageUnit, ...] = ()
+    units: tuple[OpenAlexDiscoveryUnitResult, ...] = ()
 
     @property
     def has_errors(self) -> bool:
@@ -948,8 +960,11 @@ def discover_journals(
     records: list[tuple[int, OpenAlexWorkRecord]] = []
     issues: list[DiscoveryIssue] = []
     coverage: list[CoverageUnit] = []
+    units: list[OpenAlexDiscoveryUnitResult] = []
 
     for journal_index, journal in enumerate(journals):
+        issue_start = len(issues)
+        unit_records: list[OpenAlexWorkRecord] = []
         source, resolution_issues, resolution_status = _resolve_journal_source(
             client,
             journal,
@@ -966,6 +981,13 @@ def discover_journals(
                     journal=journal.name,
                 )
             )
+            units.append(OpenAlexDiscoveryUnitResult(
+                journal=journal,
+                coverage=coverage[-1],
+                source=None,
+                records=(),
+                issues=tuple(issues[issue_start:]),
+            ))
             continue
         sources.append(source)
         activity = ActivityUpdate(
@@ -1010,6 +1032,7 @@ def discover_journals(
                         )
                         continue
                     records.append((journal_index, record))
+                    unit_records.append(record)
                     for warning in warnings:
                         issues.append(
                             DiscoveryIssue(
@@ -1055,6 +1078,18 @@ def discover_journals(
                 )
             )
 
+        unit_records.sort(key=lambda record: (
+            record.metadata.publication_date or date.max,
+            record.external_ids.openalex or "",
+        ))
+        units.append(OpenAlexDiscoveryUnitResult(
+            journal=journal,
+            coverage=coverage[-1],
+            source=source,
+            records=tuple(unit_records),
+            issues=tuple(issues[issue_start:]),
+        ))
+
     records.sort(
         key=lambda item: (
             item[0],
@@ -1067,4 +1102,5 @@ def discover_journals(
         records=tuple(record for _, record in records),
         issues=tuple(issues),
         coverage=tuple(coverage),
+        units=tuple(units),
     )

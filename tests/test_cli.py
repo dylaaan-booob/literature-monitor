@@ -24,6 +24,7 @@ from literature_monitor.application.run_state import (
     last_run_snapshot_path,
     write_last_run_snapshot,
 )
+from literature_monitor.application.provider_cache import provider_cache_path
 from literature_monitor.cli import _build_parser, main
 from literature_monitor.cli_progress import _CliProgressRenderer
 from literature_monitor.config import JournalConfig, load_config
@@ -2908,6 +2909,50 @@ def cli_core_result(
         ),
         coverage=coverage,
     )
+
+
+@pytest.mark.parametrize("command", [
+    "validate", "openalex-discover", "crossref-discover", "openalex-filter",
+    "crossref-enrich", "canonicalize", "materialize", "export-kept", "last-run",
+])
+def test_nonproduction_commands_preserve_provider_cache(command, tmp_path, monkeypatch, capsys):
+    config_path = config_with_date_policy(tmp_path, "from_date: 2026-01-01\nto_date: 2026-01-31\n")
+    output_dir = tmp_path / "workspace"
+    config_path.write_text(config_path.read_text() + f"output_dir: {output_dir}\n")
+    cache_path = provider_cache_path(output_dir)
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_bytes(b"existing cache must remain untouched")
+    write_last_run_snapshot(output_dir, LastRunSnapshot(
+        1, ResolvedDateRange(date(2026, 1, 1), date(2026, 1, 31)),
+        RecordedRunOutcome.COMPLETED, (),
+    ))
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("nonproduction command must not write provider cache or call run_monitor")
+
+    monkeypatch.setattr("literature_monitor.application.provider_cache.write_provider_cache", unexpected)
+    monkeypatch.setattr("literature_monitor.application.monitor.write_provider_cache", unexpected)
+    monkeypatch.setattr("literature_monitor.cli.run_monitor", unexpected)
+    monkeypatch.setattr("literature_monitor.cli.OpenAlexClient", lambda **kwargs: object())
+    monkeypatch.setattr("literature_monitor.cli.CrossrefClient", lambda **kwargs: object())
+    monkeypatch.setattr("literature_monitor.cli.discover_journals", lambda *args: filter_diagnostic_result())
+    monkeypatch.setattr("literature_monitor.cli.discover_crossref_journals", lambda *args: crossref_discovery_result())
+    monkeypatch.setattr("literature_monitor.cli.enrich_records", lambda client, records: EnrichmentResult(
+        tuple(EnrichedWorkRecord(openalex=record) for record in records), (),
+    ))
+    monkeypatch.setattr("literature_monitor.cli._run_canonical_core", lambda *args, **kwargs: cli_core_result())
+    monkeypatch.setattr("literature_monitor.cli.validate_monitor", lambda *args, **kwargs: ValidationResult(
+        ResolvedDateRange(date(2026, 1, 1), date(2026, 1, 31)), 2, 3, (), (), (), ValidationOutcome.VALID,
+    ))
+    if command == "export-kept":
+        arguments = (command, "--output-dir", str(output_dir))
+    elif command == "materialize":
+        arguments = (command, "--config", str(config_path), "--output-dir", str(output_dir))
+    else:
+        arguments = (command, "--config", str(config_path))
+    assert main(arguments) == 0
+    capsys.readouterr()
+    assert cache_path.read_bytes() == b"existing cache must remain untouched"
 
 
 def test_canonicalize_cli_calls_shared_application_core_and_emits_ndjson(

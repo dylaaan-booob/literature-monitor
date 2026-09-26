@@ -693,6 +693,13 @@ def test_discovery_isolates_issn_failures_and_validates_venue_identity() -> None
     )
 
     assert client.calls == ["0006-341X", "1541-0420"]
+    assert [unit.issn for unit in result.units] == client.calls
+    assert result.units[0].records == ()
+    assert result.units[1].records == result.records
+    assert [issue.stage for issue in result.units[0].issues] == ["work_retrieval"]
+    assert [issue.stage for issue in result.units[1].issues] == ["venue_validation"]
+    assert tuple(issue for unit in result.units for issue in unit.issues) == result.issues
+    assert tuple(unit.coverage for unit in result.units) == result.coverage
     assert [record.doi for record in result.records] == ["10.5555/valid"]
     assert result.has_errors
     assert {issue.stage for issue in result.issues} >= {
@@ -940,13 +947,20 @@ def test_discovery_venue_validation_paths(
 ) -> None:
     if message.get("ISSN") is None:
         message.pop("ISSN", None)
+    from literature_monitor.crossref import crossref_record_matches_journal
+
+    journal = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"))
+    normalized, _ = normalize_crossref_discovered_work(
+        message, datetime(2026, 9, 19, tzinfo=timezone.utc),
+    )
+    assert crossref_record_matches_journal(normalized, journal) is accepted
     client = JournalDiscoveryClient(
         {"0006-341X": [list_payload([message])], "1541-0420": []}
     )
 
     result = discover_crossref_journals(
         client,  # type: ignore[arg-type]
-        (JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420")),),
+        (journal,),
         date(2026, 1, 1),
         date(2026, 1, 31),
         retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
@@ -1005,6 +1019,10 @@ def test_doi_gap_supplementation_fetches_shared_doi_once() -> None:
 
     assert len(opener.requests) == 1
     assert len(result.supplement_records) == 1
+    assert result.units[0].doi == "10.5555/shared"
+    assert result.units[0].record == result.supplement_records[0]
+    assert result.units[0].issues == result.issues
+    assert tuple(unit.coverage for unit in result.units) == result.coverage
     assert len(result.coverage) == 1
     assert result.coverage[0].component is CoverageComponent.CROSSREF_SUPPLEMENT
     assert result.coverage[0].status is CoverageStatus.COMPLETE
@@ -1042,6 +1060,10 @@ def test_doi_supplement_progress_has_exact_total_and_completes_every_work_unit()
     )
 
     assert len(opener.requests) == 6
+    assert tuple(unit.coverage for unit in result.units) == result.coverage
+    assert tuple(unit.record for unit in result.units if unit.record is not None) == result.supplement_records
+    assert tuple(issue for unit in result.units for issue in unit.issues) == result.issues
+    assert all(issue.doi == unit.doi for unit in result.units for issue in unit.issues)
     assert [record.doi for record in result.supplement_records] == [
         "10.5555/a",
         "10.5555/c",

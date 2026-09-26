@@ -196,10 +196,22 @@ class CrossrefDiscoveryIssue:
 
 
 @dataclass(frozen=True)
+class CrossrefDiscoveryUnitResult:
+    """Normalized output and diagnostics for a configured journal/ISSN query."""
+
+    journal: JournalConfig
+    issn: str
+    coverage: CoverageUnit
+    records: tuple[CrossrefWorkRecord, ...]
+    issues: tuple[CrossrefDiscoveryIssue, ...]
+
+
+@dataclass(frozen=True)
 class CrossrefDiscoveryResult:
     records: tuple[CrossrefWorkRecord, ...]
     issues: tuple[CrossrefDiscoveryIssue, ...]
     coverage: tuple[CoverageUnit, ...] = ()
+    units: tuple[CrossrefDiscoveryUnitResult, ...] = ()
 
     @property
     def has_errors(self) -> bool:
@@ -879,6 +891,21 @@ def _normalize_issns(message: dict[str, Any], warnings: list[str]) -> list[str]:
     return sorted(normalized)
 
 
+def validate_normalized_crossref_record(record: CrossrefWorkRecord) -> None:
+    """Validate durable normalized values without reconstructing raw warnings."""
+
+    if normalize_doi(record.doi) != record.doi:
+        raise ValueError("Crossref DOI must already be normalized")
+    if record.provenance.provider != "crossref" or record.provenance.record_id != record.doi:
+        raise ValueError("Crossref record provenance must match its DOI")
+    if (any(not _valid_issn(issn) for issn in record.issns)
+            or record.issns != tuple(sorted(set(record.issns)))):
+        raise ValueError("Crossref ISSNs must be valid, normalized, sorted and unique")
+    for author in record.authors:
+        if author.orcid is not None and _normalize_orcid(author.orcid) != author.orcid:
+            raise ValueError("Crossref author ORCID must already be canonical")
+
+
 def _normalize_crossref_message(
     message: object,
     retrieved_at: datetime,
@@ -995,7 +1022,9 @@ def _normalize_journal_name(value: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
 
 
-def _venue_matches(record: CrossrefWorkRecord, journal: JournalConfig) -> bool:
+def crossref_record_matches_journal(record: CrossrefWorkRecord, journal: JournalConfig) -> bool:
+    """Match configured venue identity, using journal name only without ISSNs."""
+
     if record.issns:
         return bool(set(record.issns) & set(journal.issn))
     return (
@@ -1024,8 +1053,11 @@ def discover_crossref_journals(
     records: list[tuple[int, int, CrossrefWorkRecord]] = []
     issues: list[CrossrefDiscoveryIssue] = []
     coverage: list[CoverageUnit] = []
+    units: list[CrossrefDiscoveryUnitResult] = []
     for journal_index, journal in enumerate(journals):
         for issn_index, issn in enumerate(journal.issn):
+            issue_start = len(issues)
+            unit_records: list[CrossrefWorkRecord] = []
             activity = ActivityUpdate(
                 kind=ActivityKind.WORKING,
                 source="crossref",
@@ -1084,7 +1116,7 @@ def discover_crossref_journals(
                             )
                             for warning in warnings
                         )
-                        if not _venue_matches(record, journal):
+                        if not crossref_record_matches_journal(record, journal):
                             identity = (
                                 f"ISSNs {', '.join(record.issns)}"
                                 if record.issns
@@ -1106,6 +1138,7 @@ def discover_crossref_journals(
                             )
                             continue
                         records.append((journal_index, issn_index, record))
+                        unit_records.append(record)
             except CrossrefNotFoundError as error:
                 issues.append(
                     CrossrefDiscoveryIssue(
@@ -1151,6 +1184,14 @@ def discover_crossref_journals(
                     issn=issn,
                 )
             )
+            unit_records.sort(key=lambda record: (record.doi, record.provenance.record_id))
+            units.append(CrossrefDiscoveryUnitResult(
+                journal=journal,
+                issn=issn,
+                coverage=coverage[-1],
+                records=tuple(unit_records),
+                issues=tuple(issues[issue_start:]),
+            ))
         if journal.issn:
             _report_activity(
                 progress_callback,
@@ -1178,6 +1219,7 @@ def discover_crossref_journals(
         records=tuple(record for _, _, record in records),
         issues=tuple(issues),
         coverage=tuple(coverage),
+        units=tuple(units),
     )
 
 

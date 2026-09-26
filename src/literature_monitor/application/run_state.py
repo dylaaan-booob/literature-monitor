@@ -10,6 +10,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from literature_monitor.application.runtime_metadata import (
+    METADATA_DIRECTORY_NAME,
+    metadata_directory,
+)
 from literature_monitor.coverage import (
     CoverageComponent,
     CoverageStatus,
@@ -26,7 +30,6 @@ from literature_monitor.safe_write import (
 )
 
 LAST_RUN_SCHEMA_VERSION = 1
-_METADATA_DIRECTORY_NAME = ".literature-monitor"
 _LAST_RUN_FILENAME = "last-run.json"
 
 
@@ -71,7 +74,7 @@ class LastRunSnapshotWriteError(RuntimeError):
 
 
 def last_run_snapshot_path(output_dir: Path) -> Path:
-    return output_dir / _METADATA_DIRECTORY_NAME / _LAST_RUN_FILENAME
+    return output_dir / METADATA_DIRECTORY_NAME / _LAST_RUN_FILENAME
 
 
 def _require_exact_keys(
@@ -280,40 +283,11 @@ def _parse_snapshot(contents: str) -> LastRunSnapshot:
     )
 
 
-def _metadata_directory(
-    output_dir: Path,
-    *,
-    create: bool,
-) -> Path | None:
-    path = output_dir / _METADATA_DIRECTORY_NAME
-    try:
-        mode = path.lstat().st_mode
-    except FileNotFoundError:
-        if not create:
-            return None
-        try:
-            path.mkdir(parents=True)
-        except FileExistsError:
-            pass
-        except OSError as error:
-            raise OSError(f"cannot create runtime metadata directory: {error}") from error
-        try:
-            mode = path.lstat().st_mode
-        except OSError as error:
-            raise OSError(f"cannot inspect runtime metadata directory: {error}") from error
-    except OSError as error:
-        raise OSError(f"cannot inspect runtime metadata directory: {error}") from error
-
-    if not stat.S_ISDIR(mode):
-        raise OSError("runtime metadata path is not a regular directory")
-    return path
-
-
 def write_last_run_snapshot(output_dir: Path, snapshot: LastRunSnapshot) -> None:
     path = last_run_snapshot_path(output_dir)
     try:
         contents = _serialize_snapshot(snapshot)
-        metadata_dir = _metadata_directory(output_dir, create=True)
+        metadata_dir = metadata_directory(output_dir, create=True)
         assert metadata_dir is not None
 
         try:
@@ -333,7 +307,7 @@ def write_last_run_snapshot(output_dir: Path, snapshot: LastRunSnapshot) -> None
 def read_last_run_snapshot(output_dir: Path) -> LastRunReadResult:
     path = last_run_snapshot_path(output_dir)
     try:
-        metadata_dir = _metadata_directory(output_dir, create=False)
+        metadata_dir = metadata_directory(output_dir, create=False)
     except OSError as error:
         return LastRunReadResult(
             status=LastRunReadStatus.INVALID,

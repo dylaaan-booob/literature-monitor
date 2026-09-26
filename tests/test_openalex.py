@@ -396,6 +396,11 @@ def test_discovery_pages_normalizes_records_and_builds_venue_first_query() -> No
     assert second.metadata.abstract is None
     assert second.authors[0].name == "Mehdi Moradi"
     assert second.authors[0].openalex_id is None
+    assert result.units[0].journal.name == "Biometrics"
+    assert result.units[0].source == result.sources[0]
+    assert result.units[0].records == result.records
+    assert result.units[0].issues == result.issues
+    assert tuple(unit.coverage for unit in result.units) == result.coverage
 
     work_requests = [request for request, _ in opener.requests[1:]]
     first_query = parse_qs(urlparse(work_requests[0].full_url).query)
@@ -849,6 +854,12 @@ def test_bad_record_in_one_journal_does_not_stop_later_journals() -> None:
         "https://openalex.org/W200"
     ]
     assert len(result.sources) == 2
+    assert result.units[0].records == ()
+    assert result.units[0].issues == result.issues
+    assert result.units[1].records == result.records
+    assert result.units[1].issues == ()
+    assert tuple(unit.source for unit in result.units) == result.sources
+    assert tuple(unit.coverage for unit in result.units) == result.coverage
     assert result.has_errors
     assert any(
         issue.journal == "Biometrics" and issue.stage == "record_normalization"

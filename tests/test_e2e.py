@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from literature_monitor.cli import main
+from literature_monitor.application.provider_cache import ProviderCacheReadStatus, read_provider_cache
 from literature_monitor.crossref import CrossrefClient
 from literature_monitor.inbox import render_default_inbox_base
 from literature_monitor.naming import paper_filename
@@ -255,6 +256,9 @@ def test_run_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     assert main(run_args) == 0
     first_cli = capsys.readouterr()
     assert first_cli.out == ""
+    cache_result = read_provider_cache(output_dir)
+    assert cache_result.status is ProviderCacheReadStatus.AVAILABLE
+    assert cache_result.cache.units
 
     paper_paths = tuple(sorted((output_dir / "Papers").glob("*.md")))
     author_paths = tuple(sorted((output_dir / "Authors").glob("*.md")))

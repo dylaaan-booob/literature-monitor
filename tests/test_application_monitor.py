@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
 import pytest
 
 from literature_monitor.application import monitor
+from literature_monitor.application.provider_cache import (
+    ProviderCacheReadStatus,
+    build_provider_cache,
+    provider_cache_path,
+    read_provider_cache,
+    write_provider_cache,
+)
 from literature_monitor.application.monitor import (
     MonitorIssueComponent,
     MonitorStatistics,
@@ -39,6 +47,7 @@ from literature_monitor.coverage import CoverageComponent, CoverageStatus, Cover
 from literature_monitor.crossref import (
     CrossrefDiscoveryIssue,
     CrossrefDiscoveryResult,
+    CrossrefDiscoveryUnitResult,
     EnrichmentIssue,
     EnrichmentIssueSeverity,
 )
@@ -60,6 +69,7 @@ from literature_monitor.models import (
 from literature_monitor.openalex import (
     DiscoveryIssue,
     DiscoveryResult,
+    OpenAlexDiscoveryUnitResult,
     IssueSeverity,
     OpenAlexClient,
     ResolvedSource,
@@ -70,7 +80,7 @@ from literature_monitor.progress import (
     ProgressCallback,
     ProgressEvent,
 )
-from literature_monitor.retrieval import EvidenceRetrievalResult
+from literature_monitor.retrieval import CrossrefSupplementUnitResult, EvidenceRetrievalResult
 from literature_monitor.search import SearchBackendError, SearchExpressionError, SearchableProjection
 
 
@@ -150,6 +160,9 @@ def install_core_mocks(
     openalex_coverage: tuple[CoverageUnit, ...] = (),
     crossref_coverage: tuple[CoverageUnit, ...] = (),
     retrieval_coverage: tuple[CoverageUnit, ...] = (),
+    openalex_units: tuple[OpenAlexDiscoveryUnitResult, ...] = (),
+    crossref_units: tuple[CrossrefDiscoveryUnitResult, ...] = (),
+    retrieval_units: tuple[CrossrefSupplementUnitResult, ...] = (),
     consolidation_issues: tuple[CanonicalizationIssue, ...] = (),
     canonicalization_issues: tuple[CanonicalizationIssue, ...] = (),
     progress_callbacks: list[ProgressCallback | None] | None = None,
@@ -196,6 +209,7 @@ def install_core_mocks(
             records=(oa_record,),  # type: ignore[arg-type]
             issues=openalex_issues,
             coverage=openalex_coverage,
+            units=openalex_units,
         )
 
     def discover_crossref(
@@ -227,6 +241,7 @@ def install_core_mocks(
             records=(cr_record,),  # type: ignore[arg-type]
             issues=crossref_issues,
             coverage=crossref_coverage,
+            units=crossref_units,
         )
 
     def assemble(
@@ -258,6 +273,7 @@ def install_core_mocks(
             supplement_records=(cr_record,),  # type: ignore[arg-type]
             issues=retrieval_issues,
             coverage=retrieval_coverage,
+            units=retrieval_units,
         )
 
     def consolidate(evidence: tuple[object, ...]) -> EvidenceConsolidationResult:
@@ -315,6 +331,180 @@ def materialization_result(
         existing_authors=(output_dir / "Authors" / "existing.md",),
         issues=issues,
     )
+
+
+def clean_openalex_unit() -> OpenAlexDiscoveryUnitResult:
+    journal = JournalConfig(name="Biometrics", issn=("0006-341X",))
+    return OpenAlexDiscoveryUnitResult(
+        journal=journal,
+        coverage=CoverageUnit("openalex", CoverageComponent.OPENALEX_DISCOVERY,
+                              CoverageStatus.COMPLETE, journal=journal.name),
+        source=replace(resolved_source(journal), openalex_id="https://openalex.org/S8265502"),
+        records=(), issues=(),
+    )
+
+
+def seed_provider_cache(output_dir: Path) -> bytes:
+    unit = clean_openalex_unit()
+    write_provider_cache(output_dir, build_provider_cache(
+        ResolvedDateRange(date(2025, 1, 1), date(2025, 1, 31)),
+        DiscoveryResult((), (), (), units=(unit,)),
+        CrossrefDiscoveryResult((), ()), EvidenceRetrievalResult((), (), ()),
+    ))
+    return provider_cache_path(output_dir).read_bytes()
+
+
+def test_production_replaces_cache_including_empty_results_without_reading_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import literature_monitor.application.provider_cache as cache_module
+
+    config_path = write_monitor(tmp_path)
+    output_dir = tmp_path / "workspace"
+    seed_provider_cache(output_dir)
+    events = []
+    unit = clean_openalex_unit()
+    install_core_mocks(monkeypatch, events=events, openalex_units=(unit,))
+
+    def unexpected_read(*args, **kwargs):
+        raise AssertionError("production must not consume the cache")
+
+    monkeypatch.setattr(cache_module, "read_provider_cache", unexpected_read)
+    assert run_monitor(config_path).outcome is RunOutcome.COMPLETED
+    first = read_provider_cache(output_dir)
+    assert first.status is ProviderCacheReadStatus.AVAILABLE
+    assert len(first.cache.units) == 1
+    assert first.cache.resolved_date_range.from_date == date(2026, 1, 1)
+    install_core_mocks(monkeypatch, events=events)
+    assert run_monitor(config_path).outcome is RunOutcome.COMPLETED
+    second = read_provider_cache(output_dir)
+    assert second.cache.units == ()
+    assert events.count("openalex") == events.count("crossref") == events.count("supplement") == 2
+    assert {path.name for path in provider_cache_path(output_dir).parent.iterdir()} == {
+        "provider-cache.json", "last-run.json",
+    }
+
+
+def test_completed_with_errors_still_caches_clean_units(tmp_path, monkeypatch):
+    config_path = write_monitor(tmp_path)
+    unit = clean_openalex_unit()
+    install_core_mocks(monkeypatch, openalex_units=(unit,), crossref_issues=(
+        CrossrefDiscoveryIssue(EnrichmentIssueSeverity.ERROR, "work_retrieval",
+                              "Biometrics", "0006-341X", "provider failure"),
+    ))
+    result = run_monitor(config_path)
+    assert result.outcome is RunOutcome.COMPLETED_WITH_ERRORS
+    assert len(read_provider_cache(tmp_path / "workspace").cache.units) == 1
+
+
+@pytest.mark.parametrize("snapshot_failure", [False, True])
+def test_cache_failure_preserves_materialization_and_prior_cache_before_snapshot(
+    tmp_path, monkeypatch, snapshot_failure,
+):
+    import literature_monitor.safe_write as safe_write
+
+    config_path = write_monitor(tmp_path)
+    output_dir = tmp_path / "workspace"
+    previous = seed_provider_cache(output_dir)
+    install_core_mocks(monkeypatch)
+    original_replace = safe_write.os.replace
+
+    def fail_cache_replace(source, destination):
+        if Path(destination) == provider_cache_path(output_dir):
+            # This boundary must occur after actual Paper/Author materialization.
+            assert list((output_dir / "Papers").glob("*.md"))
+            assert list((output_dir / "Authors").glob("*.md"))
+            raise OSError("cache disk failure")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(safe_write.os, "replace", fail_cache_replace)
+    if snapshot_failure:
+        def fail_snapshot(*args):
+            raise LastRunSnapshotWriteError(last_run_snapshot_path(output_dir), "snapshot failure")
+        monkeypatch.setattr(monitor, "write_last_run_snapshot", fail_snapshot)
+    result = run_monitor(config_path)
+    assert result.outcome is RunOutcome.COMPLETED_WITH_WARNINGS
+    assert result.created_papers == 1 and result.created_authors == 1
+    assert provider_cache_path(output_dir).read_bytes() == previous
+    assert [issue.component for issue in result.warnings] == (
+        [MonitorIssueComponent.PROVIDER_CACHE, MonitorIssueComponent.COVERAGE_SNAPSHOT]
+        if snapshot_failure else [MonitorIssueComponent.PROVIDER_CACHE]
+    )
+    if not snapshot_failure:
+        assert read_last_run_snapshot(output_dir).snapshot.outcome is RecordedRunOutcome.COMPLETED_WITH_WARNINGS
+
+
+def test_snapshot_failure_does_not_roll_back_successful_cache(tmp_path, monkeypatch):
+    config_path = write_monitor(tmp_path)
+    output_dir = tmp_path / "workspace"
+    previous = seed_provider_cache(output_dir)
+    install_core_mocks(monkeypatch)
+
+    def fail_snapshot(*args):
+        assert read_provider_cache(output_dir).cache.units == ()
+        raise LastRunSnapshotWriteError(last_run_snapshot_path(output_dir), "snapshot failure")
+
+    monkeypatch.setattr(monitor, "write_last_run_snapshot", fail_snapshot)
+    result = run_monitor(config_path)
+    assert result.outcome is RunOutcome.COMPLETED_WITH_WARNINGS
+    assert result.warnings[0].component is MonitorIssueComponent.COVERAGE_SNAPSHOT
+    assert provider_cache_path(output_dir).read_bytes() != previous
+
+
+def test_cache_schema_failure_is_warning_after_materialization(tmp_path, monkeypatch):
+    config_path = write_monitor(tmp_path)
+    output_dir = tmp_path / "workspace"
+    previous = seed_provider_cache(output_dir)
+    unit = clean_openalex_unit()
+    # Source normalization accepts an optional empty ISSN-L without an issue;
+    # the independent cache schema rejects that field, after materialization.
+    unit = replace(unit, source=replace(unit.source, issn_l=""))
+    install_core_mocks(monkeypatch, openalex_units=(unit,))
+    result = run_monitor(config_path)
+    assert result.outcome is RunOutcome.COMPLETED_WITH_WARNINGS
+    assert result.warnings[0].component is MonitorIssueComponent.PROVIDER_CACHE
+    assert list((output_dir / "Papers").glob("*.md"))
+    assert list((output_dir / "Authors").glob("*.md"))
+    assert provider_cache_path(output_dir).read_bytes() == previous
+    assert read_last_run_snapshot(output_dir).snapshot.outcome is RecordedRunOutcome.COMPLETED_WITH_WARNINGS
+
+
+@pytest.mark.parametrize("failure", ["invalid_config", "preflight", "canonicalization", "materialization"])
+def test_non_normal_completion_preserves_cache(tmp_path, monkeypatch, failure):
+    config_path = write_monitor(tmp_path)
+    output_dir = tmp_path / "workspace"
+    previous = seed_provider_cache(output_dir)
+    install_core_mocks(monkeypatch)
+    if failure == "invalid_config":
+        config_path.write_text("unknown: invalid\n")
+    elif failure == "preflight":
+        def fail_preflight(*args):
+            raise SearchBackendError("FTS unavailable")
+        monkeypatch.setattr(monitor, "validate_runtime_keyword", fail_preflight)
+    else:
+        def explode(*args, **kwargs):
+            raise RuntimeError("unexpected exception")
+        monkeypatch.setattr(monitor, "canonicalize_records" if failure == "canonicalization" else "materialize_papers", explode)
+    if failure in {"invalid_config", "preflight"}:
+        assert run_monitor(config_path).outcome is RunOutcome.INVALID_CONFIGURATION
+    else:
+        with pytest.raises(RuntimeError, match="unexpected exception"):
+            run_monitor(config_path)
+    assert provider_cache_path(output_dir).read_bytes() == previous
+
+
+def test_validate_and_diagnostic_core_materialization_leave_cache_unchanged(tmp_path, monkeypatch):
+    config_path = write_monitor(tmp_path)
+    output_dir = tmp_path / "workspace"
+    previous = seed_provider_cache(output_dir)
+    install_core_mocks(monkeypatch, openalex_units=(clean_openalex_unit(),))
+    monkeypatch.setattr(monitor, "resolve_journal_source", lambda client, journal, **kwargs: (resolved_source(journal), ()))
+    assert validate_monitor(config_path).outcome is ValidationOutcome.VALID
+    core = _run_canonical_core(config_path)
+    assert core.provider_cache.units
+    assert provider_cache_path(output_dir).read_bytes() == previous
+    assert _materialize_canonical_result(core, output_dir).outcome is RunOutcome.COMPLETED
+    assert provider_cache_path(output_dir).read_bytes() == previous
 
 
 def test_runtime_contract_has_no_semantic_scholar_specific_issue_or_statistics_surface() -> None:
@@ -759,9 +949,9 @@ def test_second_production_run_replaces_single_latest_snapshot(
         from_date=date(2026, 2, 1),
         to_date=date(2026, 2, 28),
     )
-    assert [path.name for path in (output_dir / ".literature-monitor").iterdir()] == [
-        "last-run.json"
-    ]
+    assert {path.name for path in (output_dir / ".literature-monitor").iterdir()} == {
+        "last-run.json", "provider-cache.json",
+    }
 
 
 def test_snapshot_write_failure_is_warning_after_materialization(

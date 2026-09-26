@@ -34,11 +34,22 @@ from literature_monitor.progress import (
 
 
 @dataclass(frozen=True)
+class CrossrefSupplementUnitResult:
+    """Normalized output and diagnostics from one DOI lookup."""
+
+    doi: str
+    coverage: CoverageUnit
+    record: CrossrefWorkRecord | None
+    issues: tuple[EnrichmentIssue, ...]
+
+
+@dataclass(frozen=True)
 class EvidenceRetrievalResult:
     evidence: tuple[ProviderWorkEvidence, ...]
     supplement_records: tuple[CrossrefWorkRecord, ...]
     issues: tuple[EnrichmentIssue, ...]
     coverage: tuple[CoverageUnit, ...] = ()
+    units: tuple[CrossrefSupplementUnitResult, ...] = ()
 
     @property
     def has_errors(self) -> bool:
@@ -108,9 +119,12 @@ def assemble_provider_evidence(
 
     supplements: list[CrossrefWorkRecord] = []
     coverage: list[CoverageUnit] = []
+    units: list[CrossrefSupplementUnitResult] = []
     pending_dois = tuple(sorted(set(openalex_by_doi) - discovered_dois))
     total_dois = len(pending_dois)
     for doi_index, doi in enumerate(pending_dois):
+        issue_start = len(issues)
+        crossref_record = None
         matching = sorted(
             openalex_by_doi[doi],
             key=lambda item: item.provenance.record_id,
@@ -199,6 +213,12 @@ def assemble_provider_evidence(
                 doi=doi,
             )
         )
+        units.append(CrossrefSupplementUnitResult(
+            doi=doi,
+            coverage=coverage[-1],
+            record=crossref_record,
+            issues=tuple(issues[issue_start:]),
+        ))
         # 成功、not-found、请求失败与记录错误都完成了一个 DOI work unit。
         _report_activity(
             progress_callback,
@@ -214,4 +234,5 @@ def assemble_provider_evidence(
         supplement_records=tuple(supplements),
         issues=tuple(issues),
         coverage=tuple(coverage),
+        units=tuple(units),
     )

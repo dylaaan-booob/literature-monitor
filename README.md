@@ -10,8 +10,9 @@ v0.4.1 is the latest released baseline. It adds shared transient runtime
 progress, Activity, current-Activity ETA, inactivity feedback, and corresponding
 CLI/Web presentation while preserving the existing production and durable-state
 boundaries. v0.4.2 development has completed the provider-contract, request
-reliability, and transient run-coverage stages; the current A4 stage adds only a
-durable latest-run coverage snapshot and read-only diagnostic surface.
+reliability, transient run-coverage, and durable latest-run snapshot stages. The
+current A5 stage adds a durable cache of normalized reusable provider results;
+cache consumption and resume are not enabled.
 
 ## Setup
 
@@ -111,7 +112,8 @@ The selected output directory contains:
 ├── Papers/
 ├── Authors/
 └── .literature-monitor/
-    └── last-run.json
+    ├── last-run.json
+    └── provider-cache.json
 ```
 
 `.literature-monitor/last-run.json` is application-owned metadata for the latest
@@ -119,6 +121,27 @@ successfully persisted completed production run, not Paper/Author workflow state
 not run history. Deleting it does not remove Papers, Authors, decisions, or
 notes, and the next normal run remains valid. Materialization scanners do not
 treat this hidden metadata directory as Paper data.
+
+`.literature-monitor/provider-cache.json` contains normalized reusable provider
+results, including record-level provenance, rather than raw API responses. Only
+COMPLETE work units with no warning/error issues enter the cache; clean
+zero-result discovery units are included. Units retain their configured journal,
+queried ISSN or normalized DOI identity, in provider execution order. The cache
+is application-owned metadata, not Paper workflow state, and is safe to delete.
+Only one successfully persisted cache is retained, with no historical files.
+
+Normal production `run` attempts cache replacement after Paper materialization,
+including replacement with an empty cache, and before writing `last-run.json`.
+A cache-write failure preserves the previous complete cache when possible and
+adds a warning reflected in the subsequent snapshot outcome; it does not roll
+back Papers/Authors. Snapshot-write failure does not roll back a successful
+cache write. The strict application reader distinguishes valid, missing, and
+invalid caches without rewriting them or contacting providers.
+
+A5 does not read the cache during normal execution, so it currently does not
+reduce provider requests. Provider cache exists does not mean resume is enabled:
+there is no skip-complete execution, automatic resume, persisted cursor, or
+watermark.
 
 Paper Markdown remains the durable workflow state: UUIDs, review status, human
 notes, unknown human-owned frontmatter, and unmanaged sections survive reruns
@@ -227,8 +250,9 @@ The workflow does not add monitor/workspace UUIDs, workspace ownership
 markers, a global research-work or decision registry, last-successful-run
 synchronization state, provider cursors/watermarks/checkpoints, incremental
 delta / “What's New” state, scheduler or daemon durable state, notifications,
-run history, or a workflow/execution database. The single A4 last-run snapshot
-is observational metadata only and does not change those execution boundaries.
+run history, or a workflow/execution database. The A4 last-run snapshot is
+observational metadata and the A5 provider cache is inert during normal
+execution; neither changes those execution boundaries.
 The local GUI does not write directly to the Zotero API.
 
 ## Validate configuration
@@ -527,8 +551,8 @@ The command writes to:
 ```
 
 This legacy / diagnostic `materialize` command does not create or replace
-`.literature-monitor/last-run.json`; only the normal production `run` path
-owns that snapshot.
+`.literature-monitor/last-run.json` or `provider-cache.json`; only the normal
+production `run` path owns those metadata writes.
 
 Incremental materialization scans existing Markdown and recovers Paper identity
 from UUIDs, external identifiers, version keys, and source keys before using the

@@ -9,6 +9,12 @@ from datetime import date
 from enum import Enum
 from pathlib import Path
 
+from literature_monitor.application.provider_cache import (
+    ProviderCacheWriteError,
+    ProviderResultCache,
+    build_provider_cache,
+    write_provider_cache,
+)
 from literature_monitor.application.run_state import (
     LAST_RUN_SCHEMA_VERSION,
     LastRunSnapshot,
@@ -99,6 +105,7 @@ class MonitorIssueComponent(str, Enum):
     CANONICALIZATION = "canonicalization"
     MATERIALIZATION = "materialization"
     COVERAGE_SNAPSHOT = "coverage_snapshot"
+    PROVIDER_CACHE = "provider_cache"
 
 
 @dataclass(frozen=True)
@@ -197,6 +204,7 @@ class _CanonicalCoreResult:
     outcome: RunOutcome
     statistics: MonitorStatistics
     coverage: tuple[CoverageUnit, ...] = ()
+    provider_cache: ProviderResultCache | None = None
 
     @property
     def coverage_summary(self) -> tuple[CoverageSummary, ...]:
@@ -540,6 +548,9 @@ def _run_canonical_core(
         progress_callback=progress_callback,
     )
     coverage = (*openalex.coverage, *crossref.coverage, *retrieval.coverage)
+    provider_cache = build_provider_cache(
+        prepared.resolved_date_range, openalex, crossref, retrieval,
+    )
     _emit_activity(
         progress_callback,
         ActivityUpdate(
@@ -724,6 +735,7 @@ def _run_canonical_core(
         outcome=_run_outcome(warnings, errors),
         statistics=statistics,
         coverage=coverage,
+        provider_cache=provider_cache,
     )
 
 
@@ -807,6 +819,23 @@ def run_monitor(
 
     assert output_dir is not None
     assert result.resolved_date_range is not None
+    assert core.provider_cache is not None
+    try:
+        write_provider_cache(output_dir, core.provider_cache)
+    except ProviderCacheWriteError as error:
+        warning = MonitorIssue(
+            severity=MonitorIssueSeverity.WARNING,
+            component=MonitorIssueComponent.PROVIDER_CACHE,
+            stage="persistence",
+            message=f"failed to persist reusable provider result cache: {error}",
+            path=error.path,
+        )
+        warnings = (*result.warnings, warning)
+        result = replace(
+            result,
+            warnings=warnings,
+            outcome=_run_outcome(warnings, result.errors),
+        )
     snapshot = LastRunSnapshot(
         schema_version=LAST_RUN_SCHEMA_VERSION,
         resolved_date_range=result.resolved_date_range,
