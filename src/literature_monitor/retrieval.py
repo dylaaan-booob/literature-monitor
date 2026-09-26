@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
@@ -38,7 +38,7 @@ class CrossrefSupplementUnitResult:
     """Normalized output and diagnostics from one DOI lookup."""
 
     doi: str
-    coverage: CoverageUnit
+    coverage: CoverageUnit | None
     record: CrossrefWorkRecord | None
     issues: tuple[EnrichmentIssue, ...]
 
@@ -81,6 +81,7 @@ def assemble_provider_evidence(
     *,
     retrieved_at: datetime | None = None,
     progress_callback: ProgressCallback | None = None,
+    supplied_supplements: Mapping[str, CrossrefWorkRecord] | None = None,
 ) -> EvidenceRetrievalResult:
     """Attach discovered Crossref evidence and supplement uncovered OA DOIs once."""
 
@@ -121,14 +122,24 @@ def assemble_provider_evidence(
     coverage: list[CoverageUnit] = []
     units: list[CrossrefSupplementUnitResult] = []
     pending_dois = tuple(sorted(set(openalex_by_doi) - discovered_dois))
-    total_dois = len(pending_dois)
-    for doi_index, doi in enumerate(pending_dois):
+    supplied_supplements = supplied_supplements or {}
+    total_dois = sum(doi not in supplied_supplements for doi in pending_dois)
+    doi_index = 0
+    for doi in pending_dois:
         issue_start = len(issues)
         crossref_record = None
         matching = sorted(
             openalex_by_doi[doi],
             key=lambda item: item.provenance.record_id,
         )
+        if doi in supplied_supplements:
+            crossref_record = supplied_supplements[doi]
+            if crossref_record.doi != doi:
+                raise ValueError("supplied supplement must match the pending DOI")
+            supplements.append(crossref_record)
+            evidence.append(crossref_record.to_evidence(supplements=tuple(_anchor(record) for record in matching)))
+            units.append(CrossrefSupplementUnitResult(doi, None, crossref_record, ()))
+            continue
         activity = ActivityUpdate(
             kind=ActivityKind.WORKING,
             source="crossref",
@@ -228,6 +239,7 @@ def assemble_provider_evidence(
                 current=doi_index + 1,
             ),
         )
+        doi_index += 1
 
     return EvidenceRetrievalResult(
         evidence=tuple(evidence),

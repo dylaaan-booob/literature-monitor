@@ -10,11 +10,14 @@ from enum import Enum
 from pathlib import Path
 
 from literature_monitor.application.provider_cache import (
+    ProviderCacheReadStatus,
     ProviderCacheWriteError,
     ProviderResultCache,
     build_provider_cache,
+    read_provider_cache,
     write_provider_cache,
 )
+from literature_monitor.application.provider_reuse import retrieve_with_reuse
 from literature_monitor.application.run_state import (
     LAST_RUN_SCHEMA_VERSION,
     LastRunSnapshot,
@@ -37,6 +40,10 @@ from literature_monitor.config import (
     validate_runtime_keyword,
 )
 from literature_monitor.coverage import (
+    CoverageComponent,
+    ProviderReuseUnit,
+    ProviderReuseSummary,
+    summarize_reuse,
     CoverageSummary,
     CoverageUnit,
     summarize_coverage,
@@ -167,6 +174,11 @@ class RunResult:
     coverage: tuple[CoverageUnit, ...] = ()
     resolved_sources: tuple[ResolvedSource, ...] = ()
     log_level: LogLevel | None = None
+    reused_units: tuple[ProviderReuseUnit, ...] = ()
+
+    @property
+    def reuse_summary(self) -> tuple[ProviderReuseSummary, ...]:
+        return summarize_reuse(self.reused_units)
 
     @property
     def coverage_summary(self) -> tuple[CoverageSummary, ...]:
@@ -205,6 +217,11 @@ class _CanonicalCoreResult:
     statistics: MonitorStatistics
     coverage: tuple[CoverageUnit, ...] = ()
     provider_cache: ProviderResultCache | None = None
+    reused_units: tuple[ProviderReuseUnit, ...] = ()
+
+    @property
+    def reuse_summary(self) -> tuple[ProviderReuseSummary, ...]:
+        return summarize_reuse(self.reused_units)
 
     @property
     def coverage_summary(self) -> tuple[CoverageSummary, ...]:
@@ -397,6 +414,44 @@ def _prepare_invocation(
     except ConfigurationError as error:
         return None, None, _configuration_issue(error, config_path)
 
+    date_spec = date_override if date_override is not None else config.date_spec
+    try:
+        resolved_date_range = resolve_runtime_date(
+            config,
+            today=date.today(),
+            date_spec=date_spec,
+        )
+    except DateRangeError as error:
+        return (
+            None,
+            config,
+            _date_issue(
+                error,
+                config_path=config_path,
+                stage="date_override" if date_override is not None else "configured_date",
+            ),
+        )
+
+    journals = config.journals
+    if journal_name is not None:
+        journals = tuple(
+            journal
+            for journal in journals
+            if journal.name.casefold() == journal_name.strip().casefold()
+        )
+        if not journals:
+            return (
+                None,
+                config,
+                MonitorIssue(
+                    severity=MonitorIssueSeverity.ERROR,
+                    component=MonitorIssueComponent.CONFIGURATION,
+                    stage="journal_override",
+                    message=f"unknown configured journal {journal_name!r}",
+                    config_path=config_path,
+                ),
+            )
+
     try:
         validate_runtime_keyword(config)
     except SearchExpressionError as error:
@@ -437,44 +492,6 @@ def _prepare_invocation(
                 stage="fts5_backend",
             )
 
-    date_spec = date_override if date_override is not None else config.date_spec
-    try:
-        resolved_date_range = resolve_runtime_date(
-            config,
-            today=date.today(),
-            date_spec=date_spec,
-        )
-    except DateRangeError as error:
-        return (
-            None,
-            config,
-            _date_issue(
-                error,
-                config_path=config_path,
-                stage="date_override" if date_override is not None else "configured_date",
-            ),
-        )
-
-    journals = config.journals
-    if journal_name is not None:
-        journals = tuple(
-            journal
-            for journal in journals
-            if journal.name.casefold() == journal_name.strip().casefold()
-        )
-        if not journals:
-            return (
-                None,
-                config,
-                MonitorIssue(
-                    severity=MonitorIssueSeverity.ERROR,
-                    component=MonitorIssueComponent.CONFIGURATION,
-                    stage="journal_override",
-                    message=f"unknown configured journal {journal_name!r}",
-                    config_path=config_path,
-                ),
-            )
-
     return (
         _PreparedInvocation(
             config=config,
@@ -510,6 +527,7 @@ def _run_canonical_core(
     journal_name: str | None = None,
     keyword_expression: str | None = None,
     progress_callback: ProgressCallback | None = None,
+    reuse_provider_cache: bool = False,
 ) -> _CanonicalCoreResult:
     _emit_progress(progress_callback, ProgressStage.CHECKING_MONITOR)
     prepared, config, preflight_issue = _prepare_invocation(
@@ -522,34 +540,64 @@ def _run_canonical_core(
         return _invalid_core_result(config, preflight_issue)
     assert prepared is not None
 
+    cache_issues: list[MonitorIssue] = []
+    cached_units = ()
+    if reuse_provider_cache:
+        read_result = read_provider_cache(prepared.config.output_dir)
+        if read_result.status is ProviderCacheReadStatus.INVALID:
+            cache_issues.append(MonitorIssue(
+                severity=MonitorIssueSeverity.WARNING, component=MonitorIssueComponent.PROVIDER_CACHE,
+                stage="cache_read", message=f"invalid provider cache; running live: {read_result.error}",
+                path=read_result.path,
+            ))
+        elif read_result.cache is not None and read_result.cache.resolved_date_range == prepared.resolved_date_range:
+            cached_units = read_result.cache.units
+
     _emit_progress(progress_callback, ProgressStage.DISCOVERING_PAPERS)
     crossref_client = CrossrefClient(mailto=os.environ.get("CROSSREF_MAILTO"))
     openalex_client = OpenAlexClient(api_key=os.environ.get("OPENALEX_API_KEY"))
-    openalex = discover_journals(
-        openalex_client,
-        prepared.journals,
-        prepared.resolved_date_range.from_date,
-        prepared.resolved_date_range.to_date,
-        progress_callback=progress_callback,
-    )
-    crossref = discover_crossref_journals(
-        crossref_client,
-        prepared.journals,
-        prepared.resolved_date_range.from_date,
-        prepared.resolved_date_range.to_date,
-        progress_callback=progress_callback,
-    )
+    reused_cached_units = ()
+    if cached_units:
+        openalex, crossref, retrieval, reused_cached_units = retrieve_with_reuse(
+            openalex_client, crossref_client, prepared.journals,
+            prepared.resolved_date_range, cached_units, progress_callback=progress_callback,
+        )
+    else:
+        openalex = discover_journals(
+            openalex_client,
+            prepared.journals,
+            prepared.resolved_date_range.from_date,
+            prepared.resolved_date_range.to_date,
+            progress_callback=progress_callback,
+        )
+        crossref = discover_crossref_journals(
+            crossref_client,
+            prepared.journals,
+            prepared.resolved_date_range.from_date,
+            prepared.resolved_date_range.to_date,
+            progress_callback=progress_callback,
+        )
 
-    _emit_progress(progress_callback, ProgressStage.COMBINING_METADATA)
-    retrieval = assemble_provider_evidence(
-        crossref_client,
-        openalex.records,
-        crossref.records,
-        progress_callback=progress_callback,
+        _emit_progress(progress_callback, ProgressStage.COMBINING_METADATA)
+        retrieval = assemble_provider_evidence(
+            crossref_client,
+            openalex.records,
+            crossref.records,
+            progress_callback=progress_callback,
+        )
+
+    reused_units = (
+        *(ProviderReuseUnit("openalex", CoverageComponent.OPENALEX_DISCOVERY, journal=unit.journal.name)
+          for unit in openalex.units if unit.coverage is None),
+        *(ProviderReuseUnit("crossref", CoverageComponent.CROSSREF_DISCOVERY, journal=unit.journal.name, issn=unit.issn)
+          for unit in crossref.units if unit.coverage is None),
+        *(ProviderReuseUnit("crossref", CoverageComponent.CROSSREF_SUPPLEMENT, doi=unit.doi)
+          for unit in retrieval.units if unit.coverage is None),
     )
     coverage = (*openalex.coverage, *crossref.coverage, *retrieval.coverage)
     provider_cache = build_provider_cache(
         prepared.resolved_date_range, openalex, crossref, retrieval,
+        reused_units=reused_cached_units,
     )
     _emit_activity(
         progress_callback,
@@ -574,6 +622,7 @@ def _run_canonical_core(
     )
 
     issues: list[MonitorIssue] = [
+        *cache_issues,
         *(_openalex_issue(issue) for issue in openalex.issues),
         *(_crossref_discovery_issue(issue) for issue in crossref.issues),
         *(_enrichment_issue(issue) for issue in retrieval.issues),
@@ -631,6 +680,7 @@ def _run_canonical_core(
                 ),
             ),
             coverage=coverage,
+            reused_units=reused_units,
         )
     except SearchBackendError as error:
         issue = _search_issue(
@@ -660,6 +710,7 @@ def _run_canonical_core(
                 ),
             ),
             coverage=coverage,
+            reused_units=reused_units,
         )
 
     _emit_activity(
@@ -736,6 +787,7 @@ def _run_canonical_core(
         statistics=statistics,
         coverage=coverage,
         provider_cache=provider_cache,
+        reused_units=reused_units,
     )
 
 
@@ -759,6 +811,7 @@ def _materialize_canonical_result(
             outcome=RunOutcome.INVALID_CONFIGURATION,
             statistics=core.statistics,
             coverage=core.coverage,
+            reused_units=core.reused_units,
             resolved_sources=core.resolved_sources,
             log_level=core.log_level,
         )
@@ -792,6 +845,7 @@ def _materialize_canonical_result(
             materialization_issues=len(materialization.issues),
         ),
         coverage=core.coverage,
+        reused_units=core.reused_units,
         resolved_sources=core.resolved_sources,
         log_level=core.log_level,
     )
@@ -802,11 +856,13 @@ def run_monitor(
     *,
     date_override: DateRangeSpec | None = None,
     progress_callback: ProgressCallback | None = None,
+    reuse_provider_cache: bool = False,
 ) -> RunResult:
     core = _run_canonical_core(
         config_path,
         date_override=date_override,
         progress_callback=progress_callback,
+        reuse_provider_cache=reuse_provider_cache,
     )
     output_dir = core.config.output_dir if core.config is not None else None
     result = _materialize_canonical_result(
@@ -841,6 +897,7 @@ def run_monitor(
         resolved_date_range=result.resolved_date_range,
         outcome=RecordedRunOutcome(result.outcome.value),
         coverage=result.coverage,
+        reused_units=result.reused_units,
     )
     try:
         write_last_run_snapshot(output_dir, snapshot)

@@ -84,7 +84,7 @@ class RunCoordinator:
         self._unexpected_error: UnexpectedRunError | None = None
         self._worker: threading.Thread | None = None
 
-    def start(self) -> StartResult:
+    def start(self, *, reuse_provider_cache: bool = False) -> StartResult:
         """Start a production run on a dedicated worker if none is active."""
 
         with self._lock:
@@ -99,6 +99,7 @@ class RunCoordinator:
             self._unexpected_error = None
             worker = threading.Thread(
                 target=self._run_worker,
+                args=(reuse_provider_cache,),
                 name="literature-monitor-run",
             )
             self._worker = worker
@@ -168,13 +169,14 @@ class RunCoordinator:
                     at=datetime.now(timezone.utc),
                 )
 
-    def _run_worker(self) -> None:
+    def _run_worker(self, reuse_provider_cache: bool) -> None:
         result: RunResult | None = None
         unexpected_error: UnexpectedRunError | None = None
         try:
             result = run_monitor(
                 self._config_path,
                 progress_callback=self._update_progress,
+                reuse_provider_cache=reuse_provider_cache,
             )
         except BaseException as error:
             LOGGER.exception("Unexpected exception during monitor run")

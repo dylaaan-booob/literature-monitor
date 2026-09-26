@@ -21,6 +21,7 @@ from literature_monitor.coverage import (
     CoverageComponent,
     CoverageStatus,
     CoverageUnit,
+    ProviderReuseUnit,
 )
 from literature_monitor.date_range import ResolvedDateRange
 
@@ -105,12 +106,13 @@ def test_snapshot_roundtrip_preserves_schema_order_and_derived_summary(
 
     path = last_run_snapshot_path(output_dir)
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert list(payload) == [
         "schema_version",
         "resolved_date_range",
         "outcome",
         "coverage",
+        "reused_units",
     ]
     assert "coverage_summary" not in payload
     assert set(payload["coverage"][0]) == {
@@ -156,6 +158,7 @@ def test_snapshot_payload_contains_only_a4_contract_fields(tmp_path: Path) -> No
         "resolved_date_range",
         "outcome",
         "coverage",
+        "reused_units",
     }
     persisted_keys = set(payload)
     persisted_keys.update(payload["resolved_date_range"])
@@ -166,6 +169,7 @@ def test_snapshot_payload_contains_only_a4_contract_fields(tmp_path: Path) -> No
         "resolved_date_range",
         "outcome",
         "coverage",
+        "reused_units",
         "from_date",
         "to_date",
         "provider",
@@ -318,13 +322,88 @@ def test_corrupt_snapshot_is_reported_without_rewrite(tmp_path: Path) -> None:
 def test_unknown_schema_version_is_rejected(tmp_path: Path) -> None:
     output_dir = tmp_path / "workspace"
     payload = raw_payload()
-    payload["schema_version"] = 2
+    payload["schema_version"] = 3
     write_raw_snapshot(output_dir, payload)
 
     result = read_last_run_snapshot(output_dir)
 
     assert result.status is LastRunReadStatus.INVALID
-    assert "unsupported schema_version 2" in (result.error or "")
+    assert "unsupported schema_version 3" in (result.error or "")
+
+
+def test_v1_remains_read_only_with_empty_reuse_and_historical_duplicate_coverage(tmp_path):
+    payload = raw_payload()
+    payload["coverage"] *= 2
+    path = write_raw_snapshot(tmp_path, payload)
+    before = path.read_bytes()
+    result = read_last_run_snapshot(tmp_path)
+    assert result.status is LastRunReadStatus.AVAILABLE
+    assert result.snapshot.schema_version == 1 and result.snapshot.reused_units == ()
+    assert path.read_bytes() == before
+
+
+def test_v2_roundtrip_reuse_and_live_are_separate(tmp_path):
+    from dataclasses import replace
+    reused = (
+        ProviderReuseUnit("openalex", CoverageComponent.OPENALEX_DISCOVERY, journal="Other journal"),
+        ProviderReuseUnit("crossref", CoverageComponent.CROSSREF_DISCOVERY, journal="Biometrics", issn="1541-0420"),
+        ProviderReuseUnit("crossref", CoverageComponent.CROSSREF_SUPPLEMENT, doi="10.5555/reused"),
+    )
+    snapshot = replace(sample_snapshot(), reused_units=reused)
+    write_last_run_snapshot(tmp_path, snapshot)
+    assert read_last_run_snapshot(tmp_path).snapshot == snapshot
+    assert [summary.reused_units for summary in snapshot.reuse_summary] == [1, 1, 1]
+
+
+@pytest.mark.parametrize("case", [
+    "duplicate_live", "duplicate_reuse", "overlap", "reversed", "interleaved",
+    "provider", "component", "journal", "issn", "doi", "noncanonical_doi", "status", "not_array",
+])
+def test_invalid_v2_reporting_is_rejected_without_rewriting(tmp_path, case):
+    payload = raw_payload()
+    payload["schema_version"] = 2
+    reused = {"provider": "crossref", "component": "crossref_supplement",
+              "journal": None, "issn": None, "doi": "10.5555/reused"}
+    payload["reused_units"] = [reused]
+    if case == "duplicate_live":
+        payload["coverage"] *= 2
+    elif case == "duplicate_reuse":
+        payload["reused_units"] *= 2
+    elif case == "overlap":
+        payload["reused_units"] = [{k: v for k, v in payload["coverage"][0].items() if k != "status"}]
+    elif case in {"reversed", "interleaved"}:
+        oa = {"provider": "openalex", "component": "openalex_discovery", "journal": "Other", "issn": None, "doi": None}
+        payload["reused_units"] = [reused, oa]
+        if case == "interleaved":
+            payload["reused_units"] = [oa, reused, dict(oa, journal="Third")]
+    elif case == "noncanonical_doi":
+        reused["doi"] = "https://doi.org/10.5555/reused"
+    elif case == "status":
+        reused["status"] = "COMPLETE"
+    elif case == "not_array":
+        payload["reused_units"] = {}
+    else:
+        reused[case] = {"provider": "openalex", "component": "wrong", "journal": "Unexpected",
+                        "issn": "0006-341X", "doi": None}[case]
+    path = write_raw_snapshot(tmp_path, payload)
+    before = path.read_bytes()
+    result = read_last_run_snapshot(tmp_path)
+    assert result.status is LastRunReadStatus.INVALID and result.error
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_v2_invalid_writer_preserves_existing_snapshot(tmp_path, existing):
+    from dataclasses import replace
+    valid = sample_snapshot()
+    path = last_run_snapshot_path(tmp_path)
+    if existing:
+        write_last_run_snapshot(tmp_path, valid)
+    before = path.read_bytes() if path.exists() else None
+    duplicate = replace(valid, coverage=(*valid.coverage, valid.coverage[0]))
+    with pytest.raises(LastRunSnapshotWriteError, match="duplicate"):
+        write_last_run_snapshot(tmp_path, duplicate)
+    assert (path.read_bytes() if path.exists() else None) == before
 
 
 @pytest.mark.parametrize(

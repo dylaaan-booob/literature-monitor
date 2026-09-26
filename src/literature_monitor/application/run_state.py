@@ -19,17 +19,21 @@ from literature_monitor.coverage import (
     CoverageStatus,
     CoverageSummary,
     CoverageUnit,
+    ProviderReuseUnit,
+    ProviderReuseSummary,
+    summarize_reuse,
+    validate_reporting_identity,
+    reporting_identity,
     summarize_coverage,
 )
 from literature_monitor.date_range import DateRangeError, ResolvedDateRange
-from literature_monitor.identifiers import normalize_doi
 from literature_monitor.safe_write import (
     atomic_create_text,
     atomic_replace_text,
     read_text_exact,
 )
 
-LAST_RUN_SCHEMA_VERSION = 1
+LAST_RUN_SCHEMA_VERSION = 2
 _LAST_RUN_FILENAME = "last-run.json"
 
 
@@ -51,6 +55,11 @@ class LastRunSnapshot:
     resolved_date_range: ResolvedDateRange
     outcome: RecordedRunOutcome
     coverage: tuple[CoverageUnit, ...]
+    reused_units: tuple[ProviderReuseUnit, ...] = ()
+
+    @property
+    def reuse_summary(self) -> tuple[ProviderReuseSummary, ...]:
+        return summarize_reuse(self.reused_units)
 
     @property
     def coverage_summary(self) -> tuple[CoverageSummary, ...]:
@@ -107,42 +116,24 @@ def _require_optional_string(value: object, *, field: str) -> str | None:
 
 
 def _validate_coverage_identity(unit: CoverageUnit) -> None:
-    if not isinstance(unit.provider, str) or not unit.provider:
-        raise ValueError("coverage provider must be a non-empty string")
-    journal = _require_optional_string(unit.journal, field="coverage journal")
-    issn = _require_optional_string(unit.issn, field="coverage issn")
-    doi = _require_optional_string(unit.doi, field="coverage doi")
+    validate_reporting_identity(unit)
+    if unit.component is CoverageComponent.CROSSREF_SUPPLEMENT and unit.status is CoverageStatus.PARTIAL:
+        raise ValueError("Crossref supplement coverage cannot be PARTIAL")
 
-    if unit.component is CoverageComponent.OPENALEX_DISCOVERY:
-        if unit.provider != "openalex" or journal is None or issn is not None or doi is not None:
-            raise ValueError(
-                "OpenAlex discovery coverage requires provider=openalex and journal only"
-            )
-        return
 
-    if unit.component is CoverageComponent.CROSSREF_DISCOVERY:
-        if unit.provider != "crossref" or journal is None or issn is None or doi is not None:
-            raise ValueError(
-                "Crossref discovery coverage requires provider=crossref, journal, and issn"
-            )
-        return
-
-    if unit.component is CoverageComponent.CROSSREF_SUPPLEMENT:
-        if unit.provider != "crossref" or journal is not None or issn is not None or doi is None:
-            raise ValueError(
-                "Crossref supplement coverage requires provider=crossref and doi only"
-            )
-        try:
-            normalized = normalize_doi(doi)
-        except ValueError as error:
-            raise ValueError("Crossref supplement coverage DOI is invalid") from error
-        if normalized != doi:
-            raise ValueError("Crossref supplement coverage DOI must already be normalized")
-        if unit.status is CoverageStatus.PARTIAL:
-            raise ValueError("Crossref supplement coverage cannot be PARTIAL")
-        return
-
-    raise ValueError(f"unsupported coverage component {unit.component!r}")
+def _validate_v2_units(
+    coverage: tuple[CoverageUnit, ...], reused_units: tuple[ProviderReuseUnit, ...],
+) -> None:
+    live = [reporting_identity(unit) for unit in coverage]
+    reused = [reporting_identity(unit) for unit in reused_units]
+    if len(set(live)) != len(live) or len(set(reused)) != len(reused):
+        raise ValueError("duplicate live coverage or reused identity")
+    if set(live) & set(reused):
+        raise ValueError("live coverage and reused identities must be disjoint")
+    phases = list(CoverageComponent)
+    order = [phases.index(unit.component) for unit in reused_units]
+    if order != sorted(order):
+        raise ValueError("reused component phases must be monotonic")
 
 
 def _serialize_snapshot(snapshot: LastRunSnapshot) -> str:
@@ -171,6 +162,7 @@ def _serialize_snapshot(snapshot: LastRunSnapshot) -> str:
             }
         )
 
+    _validate_v2_units(snapshot.coverage, snapshot.reused_units)
     payload = {
         "schema_version": LAST_RUN_SCHEMA_VERSION,
         "resolved_date_range": {
@@ -179,6 +171,11 @@ def _serialize_snapshot(snapshot: LastRunSnapshot) -> str:
         },
         "outcome": snapshot.outcome.value,
         "coverage": coverage,
+        "reused_units": [
+            {"provider": unit.provider, "component": unit.component.value,
+             "journal": unit.journal, "issn": unit.issn, "doi": unit.doi}
+            for unit in snapshot.reused_units
+        ],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
@@ -234,6 +231,18 @@ def _parse_coverage_unit(value: object, *, index: int) -> CoverageUnit:
     return unit
 
 
+def _parse_reuse_unit(value: object) -> ProviderReuseUnit:
+    raw = _require_exact_keys(value, label="reused unit",
+                              expected={"provider", "component", "journal", "issn", "doi"})
+    try:
+        component = CoverageComponent(raw["component"])
+    except (TypeError, ValueError) as error:
+        raise ValueError("reused component is invalid") from error
+    unit = ProviderReuseUnit(raw["provider"], component, raw["journal"], raw["issn"], raw["doi"])
+    validate_reporting_identity(unit)
+    return unit
+
+
 def _parse_snapshot(contents: str) -> LastRunSnapshot:
     try:
         value = json.loads(contents)
@@ -242,11 +251,12 @@ def _parse_snapshot(contents: str) -> LastRunSnapshot:
     raw = _require_exact_keys(
         value,
         label="snapshot",
-        expected={"schema_version", "resolved_date_range", "outcome", "coverage"},
+        expected={"schema_version", "resolved_date_range", "outcome", "coverage"}
+        | ({"reused_units"} if isinstance(value, dict) and value.get("schema_version") == 2 else set()),
     )
 
     schema_version = raw["schema_version"]
-    if type(schema_version) is not int or schema_version != LAST_RUN_SCHEMA_VERSION:
+    if type(schema_version) is not int or schema_version not in (1, 2):
         raise ValueError(f"unsupported schema_version {schema_version!r}")
 
     raw_range = _require_exact_keys(
@@ -275,11 +285,19 @@ def _parse_snapshot(contents: str) -> LastRunSnapshot:
         for index, item in enumerate(raw_coverage)
     )
 
+    reused_units = ()
+    if schema_version == 2:
+        if not isinstance(raw["reused_units"], list):
+            raise ValueError("reused_units must be an array")
+        reused_units = tuple(_parse_reuse_unit(item) for item in raw["reused_units"])
+        _validate_v2_units(coverage, reused_units)
+
     return LastRunSnapshot(
-        schema_version=LAST_RUN_SCHEMA_VERSION,
+        schema_version=schema_version,
         resolved_date_range=resolved_date_range,
         outcome=outcome,
         coverage=coverage,
+        reused_units=reused_units,
     )
 
 

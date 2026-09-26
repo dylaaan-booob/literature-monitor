@@ -280,7 +280,7 @@ def create_app(config_path: Path) -> FastAPI:
         )
 
     @app.post("/run", response_class=HTMLResponse)
-    def start_run(
+    async def start_run(
         request: Request,
         csrf_token_value: Annotated[str | None, Form(alias="csrf_token")] = None,
     ) -> HTMLResponse:
@@ -289,7 +289,11 @@ def create_app(config_path: Path) -> FastAPI:
                 '<p class="notice error">Invalid or missing CSRF token.</p>',
                 status_code=403,
             )
-        start_result = app.state.run_coordinator.start()
+        choices = (await request.form()).getlist("reuse_provider_cache")
+        if len(choices) > 1 or any(choice not in {"false", "true"} for choice in choices):
+            return HTMLResponse('<p class="notice error">Invalid cache reuse choice.</p>', status_code=422)
+        reuse_provider_cache = choices[0] if choices else "false"
+        start_result = app.state.run_coordinator.start(reuse_provider_cache=reuse_provider_cache == "true")
         snapshot = app.state.run_coordinator.snapshot()
         response = templates.TemplateResponse(
             request,

@@ -142,7 +142,7 @@ class OpenAlexDiscoveryUnitResult:
     """Journal-local normalized output and diagnostics from one execution."""
 
     journal: JournalConfig
-    coverage: CoverageUnit
+    coverage: CoverageUnit | None
     source: ResolvedSource | None
     records: tuple[OpenAlexWorkRecord, ...]
     issues: tuple[DiscoveryIssue, ...]
@@ -940,6 +940,151 @@ def _normalize_work(
     )
 
 
+def discover_openalex_journal(
+    client: OpenAlexClient,
+    journal: JournalConfig,
+    from_date: date,
+    to_date: date,
+    *,
+    retrieved_at: datetime,
+    progress_callback: ProgressCallback | None = None,
+    unit_index: int = 0,
+) -> OpenAlexDiscoveryUnitResult:
+    """Execute one full configured journal, with a caller-owned phase timestamp."""
+
+    if from_date > to_date:
+        raise ValueError("from_date must not be after to_date")
+    timestamp = retrieved_at or datetime.now(timezone.utc)
+    if timestamp.utcoffset() is None:
+        raise ValueError("retrieved_at must include a timezone")
+    timestamp = timestamp.astimezone(timezone.utc)
+
+    issues: list[DiscoveryIssue] = []
+    unit_records: list[OpenAlexWorkRecord] = []
+    coverage: list[CoverageUnit] = []
+    source, resolution_issues, resolution_status = _resolve_journal_source(
+        client,
+        journal,
+        progress_callback=progress_callback,
+        operation=f"source_resolution:{unit_index}",
+    )
+    issues.extend(resolution_issues)
+    if source is None:
+        coverage.append(
+            CoverageUnit(
+                provider="openalex",
+                component=CoverageComponent.OPENALEX_DISCOVERY,
+                status=resolution_status or CoverageStatus.FAILED,
+                journal=journal.name,
+            )
+        )
+        return OpenAlexDiscoveryUnitResult(
+            journal=journal,
+            coverage=coverage[-1],
+            source=None,
+            records=(),
+            issues=tuple(issues),
+        )
+    activity = ActivityUpdate(
+        kind=ActivityKind.WORKING,
+        source="openalex",
+        operation=f"works_discovery:{unit_index}",
+        label="Discovering OpenAlex works",
+        detail=journal.name,
+        current=0,
+        total=None,
+        unit="work",
+    )
+    completed_pages = 0
+    dropped_record = False
+    try:
+        if progress_callback is None:
+            pages = client.iter_work_pages(source.openalex_id, from_date, to_date)
+        else:
+            pages = client.iter_work_pages(
+                source.openalex_id,
+                from_date,
+                to_date,
+                progress_callback=progress_callback,
+                activity=activity,
+            )
+        for page in pages:
+            completed_pages += 1
+            for payload in page["results"]:
+                record_id = payload.get("id") if isinstance(payload, dict) else None
+                try:
+                    record, warnings = _normalize_work(payload, source, timestamp)
+                except (OpenAlexError, ValidationError) as error:
+                    dropped_record = True
+                    issues.append(
+                        DiscoveryIssue(
+                            severity=IssueSeverity.ERROR,
+                            stage="record_normalization",
+                            journal=journal.name,
+                            record_id=record_id if isinstance(record_id, str) else None,
+                            message=str(error),
+                        )
+                    )
+                    continue
+                unit_records.append(record)
+                for warning in warnings:
+                    issues.append(
+                        DiscoveryIssue(
+                            severity=IssueSeverity.WARNING,
+                            stage="record_normalization",
+                            journal=journal.name,
+                            record_id=record.external_ids.openalex,
+                            message=warning,
+                        )
+                    )
+    except OpenAlexError as error:
+        issues.append(
+            DiscoveryIssue(
+                severity=IssueSeverity.ERROR,
+                stage="work_retrieval",
+                journal=journal.name,
+                message=str(error),
+            )
+        )
+        coverage.append(
+            CoverageUnit(
+                provider="openalex",
+                component=CoverageComponent.OPENALEX_DISCOVERY,
+                status=(
+                    CoverageStatus.PARTIAL
+                    if completed_pages
+                    else CoverageStatus.FAILED
+                ),
+                journal=journal.name,
+            )
+        )
+    else:
+        coverage.append(
+            CoverageUnit(
+                provider="openalex",
+                component=CoverageComponent.OPENALEX_DISCOVERY,
+                status=(
+                    CoverageStatus.PARTIAL
+                    if dropped_record
+                    else CoverageStatus.COMPLETE
+                ),
+                journal=journal.name,
+            )
+        )
+
+    unit_records.sort(key=lambda record: (
+        record.metadata.publication_date or date.max,
+        record.external_ids.openalex or "",
+    ))
+    return OpenAlexDiscoveryUnitResult(
+        journal=journal,
+        coverage=coverage[-1],
+        source=source,
+        records=tuple(unit_records),
+        issues=tuple(issues),
+    )
+
+
 def discover_journals(
     client: OpenAlexClient,
     journals: Sequence[JournalConfig],
@@ -956,151 +1101,17 @@ def discover_journals(
         raise ValueError("retrieved_at must include a timezone")
     timestamp = timestamp.astimezone(timezone.utc)
 
-    sources: list[ResolvedSource] = []
-    records: list[tuple[int, OpenAlexWorkRecord]] = []
-    issues: list[DiscoveryIssue] = []
-    coverage: list[CoverageUnit] = []
-    units: list[OpenAlexDiscoveryUnitResult] = []
-
-    for journal_index, journal in enumerate(journals):
-        issue_start = len(issues)
-        unit_records: list[OpenAlexWorkRecord] = []
-        source, resolution_issues, resolution_status = _resolve_journal_source(
-            client,
-            journal,
-            progress_callback=progress_callback,
-            operation=f"source_resolution:{journal_index}",
+    units = tuple(
+        discover_openalex_journal(
+            client, journal, from_date, to_date, retrieved_at=timestamp,
+            progress_callback=progress_callback, unit_index=index,
         )
-        issues.extend(resolution_issues)
-        if source is None:
-            coverage.append(
-                CoverageUnit(
-                    provider="openalex",
-                    component=CoverageComponent.OPENALEX_DISCOVERY,
-                    status=resolution_status or CoverageStatus.FAILED,
-                    journal=journal.name,
-                )
-            )
-            units.append(OpenAlexDiscoveryUnitResult(
-                journal=journal,
-                coverage=coverage[-1],
-                source=None,
-                records=(),
-                issues=tuple(issues[issue_start:]),
-            ))
-            continue
-        sources.append(source)
-        activity = ActivityUpdate(
-            kind=ActivityKind.WORKING,
-            source="openalex",
-            operation=f"works_discovery:{journal_index}",
-            label="Discovering OpenAlex works",
-            detail=journal.name,
-            current=0,
-            total=None,
-            unit="work",
-        )
-        completed_pages = 0
-        dropped_record = False
-        try:
-            if progress_callback is None:
-                pages = client.iter_work_pages(source.openalex_id, from_date, to_date)
-            else:
-                pages = client.iter_work_pages(
-                    source.openalex_id,
-                    from_date,
-                    to_date,
-                    progress_callback=progress_callback,
-                    activity=activity,
-                )
-            for page in pages:
-                completed_pages += 1
-                for payload in page["results"]:
-                    record_id = payload.get("id") if isinstance(payload, dict) else None
-                    try:
-                        record, warnings = _normalize_work(payload, source, timestamp)
-                    except (OpenAlexError, ValidationError) as error:
-                        dropped_record = True
-                        issues.append(
-                            DiscoveryIssue(
-                                severity=IssueSeverity.ERROR,
-                                stage="record_normalization",
-                                journal=journal.name,
-                                record_id=record_id if isinstance(record_id, str) else None,
-                                message=str(error),
-                            )
-                        )
-                        continue
-                    records.append((journal_index, record))
-                    unit_records.append(record)
-                    for warning in warnings:
-                        issues.append(
-                            DiscoveryIssue(
-                                severity=IssueSeverity.WARNING,
-                                stage="record_normalization",
-                                journal=journal.name,
-                                record_id=record.external_ids.openalex,
-                                message=warning,
-                            )
-                        )
-        except OpenAlexError as error:
-            issues.append(
-                DiscoveryIssue(
-                    severity=IssueSeverity.ERROR,
-                    stage="work_retrieval",
-                    journal=journal.name,
-                    message=str(error),
-                )
-            )
-            coverage.append(
-                CoverageUnit(
-                    provider="openalex",
-                    component=CoverageComponent.OPENALEX_DISCOVERY,
-                    status=(
-                        CoverageStatus.PARTIAL
-                        if completed_pages
-                        else CoverageStatus.FAILED
-                    ),
-                    journal=journal.name,
-                )
-            )
-        else:
-            coverage.append(
-                CoverageUnit(
-                    provider="openalex",
-                    component=CoverageComponent.OPENALEX_DISCOVERY,
-                    status=(
-                        CoverageStatus.PARTIAL
-                        if dropped_record
-                        else CoverageStatus.COMPLETE
-                    ),
-                    journal=journal.name,
-                )
-            )
-
-        unit_records.sort(key=lambda record: (
-            record.metadata.publication_date or date.max,
-            record.external_ids.openalex or "",
-        ))
-        units.append(OpenAlexDiscoveryUnitResult(
-            journal=journal,
-            coverage=coverage[-1],
-            source=source,
-            records=tuple(unit_records),
-            issues=tuple(issues[issue_start:]),
-        ))
-
-    records.sort(
-        key=lambda item: (
-            item[0],
-            item[1].metadata.publication_date or date.max,
-            item[1].external_ids.openalex or "",
-        )
+        for index, journal in enumerate(journals)
     )
     return DiscoveryResult(
-        sources=tuple(sources),
-        records=tuple(record for _, record in records),
-        issues=tuple(issues),
-        coverage=tuple(coverage),
-        units=tuple(units),
+        sources=tuple(unit.source for unit in units if unit.source is not None),
+        records=tuple(record for unit in units for record in unit.records),
+        issues=tuple(issue for unit in units for issue in unit.issues),
+        coverage=tuple(unit.coverage for unit in units),
+        units=units,
     )

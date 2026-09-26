@@ -11,8 +11,9 @@ progress, Activity, current-Activity ETA, inactivity feedback, and corresponding
 CLI/Web presentation while preserving the existing production and durable-state
 boundaries. v0.4.2 development has completed the provider-contract, request
 reliability, transient run-coverage, and durable latest-run snapshot stages. The
-current A5 stage adds a durable cache of normalized reusable provider results;
-cache consumption and resume are not enabled.
+normalized provider-result cache stage is complete. The current A6 stage adds
+explicit exact-range cache reuse; default runs remain live and checkpoint
+resume is not enabled.
 
 ## Setup
 
@@ -138,10 +139,35 @@ back Papers/Authors. Snapshot-write failure does not roll back a successful
 cache write. The strict application reader distinguishes valid, missing, and
 invalid caches without rewriting them or contacting providers.
 
-A5 does not read the cache during normal execution, so it currently does not
-reduce provider requests. Provider cache exists does not mean resume is enabled:
-there is no skip-complete execution, automatic resume, persisted cursor, or
-watermark.
+A5 originally produced an inert cache. A6 offers explicit reuse:
+
+```bash
+uv run literature-monitor run \
+  --config monitor.yaml \
+  --reuse-provider-cache
+```
+
+A normal `run` still executes all provider work live without reading the cache.
+The explicit reuse action requires exactly the same resolved date range; missing
+cache or a different range falls back to live execution without a warning. An
+invalid/unreadable cache emits a warning and also runs live. Matching current
+journal/ISSN/DOI work units skip provider requests, including cached empty
+discovery results; missing units run live. CLI and Web report cache reuse
+separately from live provider coverage. The Web offers “Run with cache reuse”
+alongside normal Run, without saving the choice as a setting.
+
+Reused records retain their original provider `retrieved_at`. After
+materialization, the next cache retains reused current units plus new clean
+live units, in current execution order, and drops stale unrelated units. The
+cache remains safe to delete. The latest-run snapshot now uses schema v2 and
+records separate reused identities; valid v1 snapshots remain readable without
+migration.
+
+Provider cache exists does not mean freshness, synchronization, or checkpoint
+resume is enabled. Explicit reuse cannot continue an interrupted provider
+cursor or partial page, discover late-indexed changes, or provide a watermark,
+TTL, automatic reuse policy, or retry queue. The cache can predate the latest
+run if a later write failed.
 
 Paper Markdown remains the durable workflow state: UUIDs, review status, human
 notes, unknown human-owned frontmatter, and unmanaged sections survive reruns
@@ -251,8 +277,8 @@ markers, a global research-work or decision registry, last-successful-run
 synchronization state, provider cursors/watermarks/checkpoints, incremental
 delta / “What's New” state, scheduler or daemon durable state, notifications,
 run history, or a workflow/execution database. The A4 last-run snapshot is
-observational metadata and the A5 provider cache is inert during normal
-execution; neither changes those execution boundaries.
+observational metadata; A6 adds only explicit exact-range consumption of A5
+results and leaves default execution fully live.
 The local GUI does not write directly to the Zotero API.
 
 ## Validate configuration

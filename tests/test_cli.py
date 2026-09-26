@@ -1057,6 +1057,7 @@ def test_run_cli_shapes_date_override_for_application(
         *,
         date_override: DateRangeSpec | None = None,
         progress_callback: ProgressCallback | None = None,
+        reuse_provider_cache: bool = False,
     ) -> RunResult:
         calls.append((path, date_override))
         assert progress_callback is not None
@@ -1088,6 +1089,7 @@ def test_run_cli_passes_none_without_date_override(
         *,
         date_override: DateRangeSpec | None = None,
         progress_callback: ProgressCallback | None = None,
+        reuse_provider_cache: bool = False,
     ) -> RunResult:
         received.append(date_override)
         assert progress_callback is not None
@@ -1101,6 +1103,49 @@ def test_run_cli_passes_none_without_date_override(
     assert main(("run", "--config", str(config_path))) == 0
     capsys.readouterr()  # type: ignore[attr-defined]
     assert received == [None]
+
+
+@pytest.mark.parametrize("reuse", [False, True])
+def test_run_cli_passes_explicit_reuse_mode_and_reports_it(tmp_path, monkeypatch, capsys, reuse):
+    from dataclasses import replace
+    from literature_monitor.coverage import ProviderReuseUnit
+    modes = []
+    def run(path, *, date_override, progress_callback, reuse_provider_cache):
+        modes.append(reuse_provider_cache)
+        result = cli_run_result(RunOutcome.COMPLETED)
+        return replace(result, reused_units=(ProviderReuseUnit("openalex", CoverageComponent.OPENALEX_DISCOVERY,
+                       journal="Biometrics"),) if reuse else ())
+    monkeypatch.setattr("literature_monitor.cli.run_monitor", run)
+    args = ["run", "--config", str(tmp_path / "monitor.yaml")]
+    assert main((*args, *(("--reuse-provider-cache",) if reuse else ()))) == 0
+    assert modes == [reuse]
+    captured = capsys.readouterr()
+    assert ("Cache reuse: OpenAlex 1" in captured.err) is reuse
+
+
+@pytest.mark.parametrize("command", ["validate", "canonicalize", "materialize", "openalex-discover",
+    "crossref-discover", "openalex-filter", "crossref-enrich", "last-run", "export-kept", "gui"])
+def test_only_run_exposes_cache_reuse_option(command):
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args([command, "--config", "monitor.yaml", "--reuse-provider-cache"])
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_last_run_cli_shows_v2_reuse_separately_and_reads_v1(tmp_path, capsys, version):
+    import json
+    config_path, config = validate_config(tmp_path)
+    path = last_run_snapshot_path(config.output_dir)
+    path.parent.mkdir(parents=True)
+    payload = {"schema_version": version, "resolved_date_range": {"from_date": "2026-01-01", "to_date": "2026-01-31"},
+               "outcome": "COMPLETED", "coverage": []}
+    if version == 2:
+        payload["reused_units"] = [{"provider": "openalex", "component": "openalex_discovery", "journal": "Biometrics", "issn": None, "doi": None}]
+    path.write_text(json.dumps(payload))
+    before = path.read_bytes()
+    assert main(("last-run", "--config", str(config_path))) == 0
+    assert ("Cache reuse: OpenAlex 1" in capsys.readouterr().err) is (version == 2)
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize(
@@ -1131,7 +1176,7 @@ def test_run_cli_maps_structured_outcome_to_exit_code(
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.run_monitor",
-        lambda path, *, date_override=None, progress_callback=None: value,
+        lambda path, *, date_override=None, progress_callback=None, reuse_provider_cache=False: value,
     )
 
     result = main(("run", "--config", str(tmp_path / "monitor.yaml")))
@@ -1180,7 +1225,7 @@ def test_run_cli_logs_compact_structured_coverage_summary(
     value = cli_run_result(RunOutcome.COMPLETED, coverage=coverage)
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.run_monitor",
-        lambda path, *, date_override=None, progress_callback=None: value,
+        lambda path, *, date_override=None, progress_callback=None, reuse_provider_cache=False: value,
     )
 
     result = main(("run", "--config", str(tmp_path / "monitor.yaml")))
@@ -1206,6 +1251,7 @@ def test_run_cli_non_tty_progress_is_plain_stderr(
         *,
         date_override: DateRangeSpec | None = None,
         progress_callback: ProgressCallback | None = None,
+        reuse_provider_cache: bool = False,
     ) -> RunResult:
         assert progress_callback is not None
         progress_callback(
@@ -1272,6 +1318,7 @@ def test_run_cli_tty_progress_cleans_before_summary(
         *,
         date_override: DateRangeSpec | None = None,
         progress_callback: ProgressCallback | None = None,
+        reuse_provider_cache: bool = False,
     ) -> RunResult:
         assert progress_callback is not None
         progress_callback(
@@ -1524,6 +1571,7 @@ def test_run_cli_tty_cleanup_on_unexpected_exception(
         *,
         date_override: DateRangeSpec | None = None,
         progress_callback: ProgressCallback | None = None,
+        reuse_provider_cache: bool = False,
     ) -> RunResult:
         assert progress_callback is not None
         progress_callback(
@@ -2923,7 +2971,7 @@ def test_nonproduction_commands_preserve_provider_cache(command, tmp_path, monke
     cache_path.parent.mkdir(parents=True)
     cache_path.write_bytes(b"existing cache must remain untouched")
     write_last_run_snapshot(output_dir, LastRunSnapshot(
-        1, ResolvedDateRange(date(2026, 1, 1), date(2026, 1, 31)),
+        LAST_RUN_SCHEMA_VERSION, ResolvedDateRange(date(2026, 1, 1), date(2026, 1, 31)),
         RecordedRunOutcome.COMPLETED, (),
     ))
 

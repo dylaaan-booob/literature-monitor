@@ -112,6 +112,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="run a persistent monitor and materialize its workspace",
     )
     _add_monitor_date_arguments(run_parser)
+    run_parser.add_argument("--reuse-provider-cache", action="store_true",
+                            help="explicitly reuse matching provider units from an exact-range cache")
     last_run_parser = subparsers.add_parser(
         "last-run",
         help="show the latest successfully persisted production-run coverage snapshot",
@@ -355,10 +357,14 @@ def _log_coverage_summary(
         if summary.failed:
             parts.append(f"{summary.failed} failed")
         logger.info(
-            "%s coverage: %s",
+            "Live %s coverage: %s",
             labels[summary.component.value],
             " · ".join(parts),
         )
+    reused = [f"{labels[summary.component.value]} {summary.reused_units}"
+              for summary in result.reuse_summary if summary.reused_units]
+    if reused:
+        logger.info("Cache reuse: %s", " · ".join(reused))
 
 
 def _log_canonicalization_summary(
@@ -561,6 +567,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.config,
                 date_override=_date_override_from_args(args),
                 progress_callback=progress,
+                reuse_provider_cache=args.reuse_provider_cache,
             )
         finally:
             progress.close()

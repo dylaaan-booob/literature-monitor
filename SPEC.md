@@ -2,7 +2,7 @@
 
 **Status:** Active; v0.4.1 is the current released and completed baseline
 
-**Stage:** v0.4.2 development; A5 Durable Provider Result Cache
+**Stage:** v0.4.2 development; A6 Explicit Exact-Range Provider Cache Reuse
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
@@ -121,7 +121,7 @@ MVP includes:
 - stable application-layer boundaries shared by the CLI and Web application;
 - transient process-local run coordination with no persistent run history;
 - one application-owned last-run retrieval-coverage snapshot representing the latest successfully persisted completed production run, with no execution-control or history semantics;
-- one inert, replaceable provider-result cache containing normalized results of clean COMPLETE work units, with no cache consumption or resume semantics;
+- one replaceable provider-result cache containing normalized results of clean COMPLETE work units, with explicit exact-range reuse but no default reuse or checkpoint resume semantics;
 - safe overlapping reruns;
 - export of `kept` paper identifiers for Zotero;
 - logs sufficient to inspect unresolved journals, failed enrichment, and partial metadata.
@@ -339,7 +339,7 @@ A4 may persist exactly one application-owned last-run coverage snapshot at `<out
 
 The snapshot is a durable observation of the latest successfully persisted completed normal production `run_monitor()`. A snapshot write failure deliberately preserves the previous valid file, so the snapshot need not describe the chronologically most recent completed execution. It is not a durable provider result cache, resume checkpoint, synchronization cursor, or authority for future provider execution. A later run must not use it to skip provider requests, change the discovery window, retry automatically, restore a cursor, infer late-index coverage, change canonicalization/materialization, or determine resume eligibility. Deleting the snapshot must not damage Paper/Author workflow state or prevent a future normal run.
 
-The snapshot uses versioned JSON with `schema_version = 1` and stores only:
+A4 originally wrote versioned JSON with `schema_version = 1` and the following fields. A6 writers use schema v2 and add separate reuse identities under §6.8; valid v1 remains readable without migration:
 
 - the resolved inclusive `from_date` / `to_date` used by that production run;
 - the recorded outcome: `COMPLETED`, `COMPLETED_WITH_WARNINGS`, or `COMPLETED_WITH_ERRORS`;
@@ -367,7 +367,7 @@ A4 still provides no automatic resume. Safe future skip-complete behavior would 
 
 ### 6.7 Durable provider-result cache
 
-A5 supplies the normalized provider data needed by a future explicit cache-consumption contract. It persists one application-owned, versioned JSON file at `<output_dir>/.literature-monitor/provider-cache.json`, alongside the independent A4 snapshot. The file represents the latest successfully persisted reusable provider-result cache, which may precede the latest execution if a later cache write failed. It is replaceable and safe to delete; it is not Paper/Author workflow state, run history, raw API response storage, or a database.
+A5 originally produced an inert cache; A6 introduces explicit consumption under §6.8. A5 persists one application-owned, versioned JSON file at `<output_dir>/.literature-monitor/provider-cache.json`, alongside the independent A4 snapshot. The file represents the latest successfully persisted reusable provider-result cache, which may precede the latest execution if a later cache write failed. It is replaceable and safe to delete; it is not Paper/Author workflow state, run history, raw API response storage, or a database.
 
 Provider execution retains explicit unit-local identity, coverage, normalized output, and issues. OpenAlex discovery retains the configured journal, its coverage, resolved `ResolvedSource` when available, ordered `OpenAlexWorkRecord` values, and journal-local issues. Crossref discovery retains the configured journal, queried ISSN, coverage, ordered `CrossrefWorkRecord` values, and query-local issues. Crossref supplementation retains the normalized DOI, coverage, successful record when present, and lookup-local issues. These additional result boundaries preserve the existing flattened sources, records, evidence, issues, and coverage interfaces. Cache membership must not be reconstructed by guessing from flattened records.
 
@@ -393,9 +393,31 @@ AVAILABLE also requires clean execution semantics: every Crossref discovery reco
 
 Cached configured journals must satisfy the production journal validation contract, including valid checksums and already-normalized ISSNs. Crossref discovery and supplement records must retain normalized DOI/provenance identity, valid already-normalized ISSNs in sorted unique order, and canonical non-null author ORCIDs according to the production normalizers. Null ORCIDs remain valid; the reader validates durable values without reconstructing raw provider responses or historical normalization warnings.
 
-**Provider cache exists ≠ resume enabled.** A5 is inert during normal execution: no cache lookup, request skipping, retry of incomplete units from cache, date-window changes, automatic resume, or resume UI/CLI controls. Provider cursor persistence, watermark, late-index recovery, automatic retry state, run history, scheduler/daemon, notification, and persistent execution databases remain excluded. Future consumption/skip-complete behavior requires a separate explicit contract.
+**Provider cache exists ≠ resume enabled.** A5 alone introduced no cache consumption. A6 leaves default runs live and adds only explicit exact-range reuse. Provider cursor persistence, watermark, late-index recovery, automatic retry state, run history, scheduler/daemon, notification, and persistent execution databases remain excluded.
 
-### 6.8 Publisher fallback
+### 6.8 Explicit exact-range provider cache reuse
+
+A6 allows only production `run --reuse-provider-cache`, or the Web's explicit “Run with cache reuse” action, to consume A5 provider results. Default production runs and all diagnostics remain live and never read the provider cache. Reuse intent is transient: it is not a monitor setting, browser-storage preference, or durable coordinator state. Configuration, resolved date range, current journals/overrides, and keyword/runtime preflight must succeed before any cache read.
+
+The entire cache is eligible only when its resolved inclusive date range exactly equals the current range. Missing caches and different ranges execute all units live without a warning; overlap or subset ranges confer no eligibility. INVALID caches produce one application `PROVIDER_CACHE` warning at `cache_read` and fall back to all-live execution. The reader never repairs/deletes/rewrites anything. Existing A5 persistence may subsequently replace a regular invalid cache; unsafe filesystem objects may also cause an independent persistence warning. `last-run.json` is never an eligibility authority.
+
+Three identities remain distinct: **A5 durable cache matching identity ≠ A6 reuse-reporting identity ≠ A3 live coverage**. The shared A5 key uses provider/component plus casefold-normalized configured journal name and the ordered configured ISSN tuple; Crossref discovery additionally uses the queried ISSN. Supplements use provider/component plus normalized DOI. Lookup, duplicate validation, and rebuilding use this single key definition, never record-content matching. `ProviderReuseUnit` contains only provider, component, journal, ISSN, and DOI; it is for reporting and cannot reconstruct cached data.
+
+Execution follows current OpenAlex journal order, current Crossref full-journal/ISSN order, then sorted current pending DOI order, not historical cache ordering. Matching discovery units contribute their validated ordered records (and OpenAlex source), including clean empty results, without provider requests. Misses execute at real journal/ISSN provider boundaries, preserving full configured venue matching and one normalized `retrieved_at` timestamp per live provider phase. Provider modules do not import application cache/snapshot/Web types.
+
+Supplement eligibility is determined only after the combined current discovery records establish pending DOIs. Already-discovered and no-longer-pending cached supplements are ignored. Supplied Crossref records acquire supplement anchors from current matching OpenAlex records, using the existing anchor sort order; historical anchors are never persisted or replayed. Combined evidence passes through the unchanged consolidation, keyword filtering, canonicalization, and materialization pipeline. Existing record statistics count both live and reused records, not requests.
+
+A3 coverage describes only actually live-executed units. Reused units have no coverage; no synthetic COMPLETE or REUSED status is created. Reuse is exposed separately on the core and `RunResult`, with summaries in `CoverageComponent` declaration order, and in CLI/Web completion diagnostics. It is not a warning and does not independently change the outcome. Reused units emit no provider-request/retry/waiting activity and create no new `ProgressStage`.
+
+After materialization, rebuild the current cache in current execution order using original validated reused durable units plus new clean COMPLETE live units. Reused units retain original record provenance, including `retrieved_at`, and remain reusable on subsequent explicit runs; irrelevant historical units disappear. Rebuilding does not fabricate coverage or derive durable records from reporting references. Cache persistence precedes snapshot persistence, with existing A5 warning/rollback boundaries unchanged.
+
+A6 writers emit last-run schema v2: the existing resolved date range, recorded outcome, and live `coverage`, plus `reused_units` identities only. The shared reporting identity validator applies to coverage and reuse: OpenAlex requires provider=openalex and journal only; Crossref discovery requires provider=crossref, journal and ISSN; supplement requires provider=crossref and normalized DOI only. V2 requires unique live identities, unique reused identities, disjoint live/reused sets, and monotonic reused component phases. Valid v1 snapshots remain read-only and readable with empty reuse, without retroactive v2 uniqueness constraints. Unknown future versions are INVALID. No records, timestamps, cache paths/generation IDs, UUIDs, request counts, or history are added to the snapshot.
+
+CLI exposes the new flag only on `run`; `last-run` shows live coverage and a separate reuse summary when non-empty. Web idle/finished panels offer normal and explicit reuse actions through a conservative transient `/run` form value, preserving CSRF. Coordinator `start(reuse_provider_cache=False)` binds the mode as a worker argument; an opposite-mode request while RUNNING returns ALREADY_RUNNING without changing the active worker. Finished presentation is process-local except for the separate latest-run v2 diagnostic.
+
+Explicit reuse is not freshness authority, synchronization, or checkpoint resume. It cannot continue pagination, recover partial pages or interrupted cursors, predict provider updates, or restore an interrupted process. Default/automatic reuse, persistent reuse settings, TTL, cursor/watermark, late-index recovery, retry queues, scheduler/daemon, notifications, run history, and execution databases remain excluded.
+
+### 6.9 Publisher fallback
 
 Publisher fallback is deliberately excluded from MVP.
 
@@ -2450,7 +2472,7 @@ v0.4.1 is released and complete. Its feature implementation, final independent a
 
 R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, and v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback are completed release history. v0.4.1 remains the current released and completed baseline.
 
-v0.4.2 development is in progress. A1 provider-contract work is complete: OpenAlex is the sole primary discovery provider, Crossref is the secondary discovery/bibliographic provider, and Semantic Scholar is retired from production retrieval. A2 provider request reliability in §6.4, A3 transient run coverage in §6.5, and A4 durable latest-run coverage snapshot in §6.6 are complete. A5 durable provider-result cache in §6.7 is the current stage. The cache is inert: cache consumption, skip-complete execution, resume/checkpoint execution semantics, provider cursors/watermarks, late-index recovery, automatic retry state, run history, scheduling/notification, and persistent execution databases remain unimplemented.
+v0.4.2 development is in progress. A1 provider-contract work is complete: OpenAlex is the sole primary discovery provider, Crossref is the secondary discovery/bibliographic provider, and Semantic Scholar is retired from production retrieval. A2 provider request reliability in §6.4, A3 transient run coverage in §6.5, A4 durable latest-run coverage snapshot in §6.6, and A5 durable provider-result cache in §6.7 are complete. A6 explicit exact-range provider cache reuse in §6.8 is the current stage. Default/automatic reuse, checkpoint resume, provider cursors/watermarks, late-index recovery, automatic retry state, run history, scheduling/notification, and persistent execution databases remain unimplemented.
 
 ---
 

@@ -184,6 +184,26 @@ CachedProviderUnit = Annotated[
 ]
 
 
+def provider_cache_key(
+    provider: str, component: str, *, journal: JournalConfig | None = None,
+    issn: str | None = None, doi: str | None = None,
+) -> tuple[object, ...]:
+    """A5 durable identity: full configured identity, not reporting identity."""
+
+    if component == "crossref_supplement":
+        return (provider, component, doi)
+    assert journal is not None
+    key = (provider, component, (journal.name.casefold(), journal.issn))
+    return (*key, issn) if component == "crossref_discovery" else key
+
+
+def cached_unit_key(unit: CachedProviderUnit) -> tuple[object, ...]:
+    if isinstance(unit, CachedCrossrefSupplement):
+        return provider_cache_key(unit.provider, unit.component, doi=unit.doi)
+    return provider_cache_key(unit.provider, unit.component, journal=unit.journal,
+                              issn=unit.issn if isinstance(unit, CachedCrossrefDiscovery) else None)
+
+
 class ProviderResultCache(DomainModel):
     schema_version: Annotated[int, Field(strict=True)]
     resolved_date_range: ResolvedDateRange
@@ -201,14 +221,7 @@ class ProviderResultCache(DomainModel):
             if phase < previous_phase:
                 raise ValueError("provider component phase order must be monotonic")
             previous_phase = phase
-            if isinstance(unit, CachedCrossrefSupplement):
-                identity = (unit.provider, unit.component, unit.doi)
-            else:
-                # Retain configured identity rather than resolved provider IDs.
-                journal_identity = (unit.journal.name.casefold(), unit.journal.issn)
-                identity = (unit.provider, unit.component, journal_identity)
-                if isinstance(unit, CachedCrossrefDiscovery):
-                    identity = (*identity, unit.issn)
+            identity = cached_unit_key(unit)
             if identity in seen:
                 raise ValueError("duplicate work-unit identity in provider cache")
             seen.add(identity)
@@ -220,26 +233,38 @@ def build_provider_cache(
     openalex: DiscoveryResult,
     crossref: CrossrefDiscoveryResult,
     retrieval: EvidenceRetrievalResult,
+    *,
+    reused_units: tuple[CachedProviderUnit, ...] = (),
 ) -> ProviderResultCache:
     """Select at execution boundaries; never infer membership from flat records."""
 
     # Provider-domain values are already normalized. Defer cache-schema
     # validation to persistence so a rejected candidate cannot block Papers.
     units: list[CachedProviderUnit] = []
+    reused = {cached_unit_key(unit): unit for unit in reused_units}
     for unit in openalex.units:
-        if unit.coverage.status is CoverageStatus.COMPLETE and not unit.issues:
+        key = provider_cache_key("openalex", "openalex_discovery", journal=unit.journal)
+        if key in reused:
+            units.append(reused[key])
+        elif unit.coverage is not None and unit.coverage.status is CoverageStatus.COMPLETE and not unit.issues:
             units.append(CachedOpenAlexDiscovery.model_construct(
                 provider="openalex", component="openalex_discovery",
                 journal=unit.journal, source=unit.source, records=unit.records,
             ))
     for unit in crossref.units:
-        if unit.coverage.status is CoverageStatus.COMPLETE and not unit.issues:
+        key = provider_cache_key("crossref", "crossref_discovery", journal=unit.journal, issn=unit.issn)
+        if key in reused:
+            units.append(reused[key])
+        elif unit.coverage is not None and unit.coverage.status is CoverageStatus.COMPLETE and not unit.issues:
             units.append(CachedCrossrefDiscovery.model_construct(
                 provider="crossref", component="crossref_discovery",
                 journal=unit.journal, issn=unit.issn, records=unit.records,
             ))
     for unit in retrieval.units:
-        if unit.coverage.status is CoverageStatus.COMPLETE and not unit.issues:
+        key = provider_cache_key("crossref", "crossref_supplement", doi=unit.doi)
+        if key in reused:
+            units.append(reused[key])
+        elif unit.coverage is not None and unit.coverage.status is CoverageStatus.COMPLETE and not unit.issues:
             units.append(CachedCrossrefSupplement.model_construct(
                 provider="crossref", component="crossref_supplement",
                 doi=unit.doi, record=unit.record,

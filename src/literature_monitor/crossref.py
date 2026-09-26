@@ -201,7 +201,7 @@ class CrossrefDiscoveryUnitResult:
 
     journal: JournalConfig
     issn: str
-    coverage: CoverageUnit
+    coverage: CoverageUnit | None
     records: tuple[CrossrefWorkRecord, ...]
     issues: tuple[CrossrefDiscoveryIssue, ...]
 
@@ -1034,6 +1034,167 @@ def crossref_record_matches_journal(record: CrossrefWorkRecord, journal: Journal
     )
 
 
+def discover_crossref_journal_issn(
+    client: CrossrefClient,
+    journal: JournalConfig,
+    issn: str,
+    from_date: date,
+    to_date: date,
+    *,
+    retrieved_at: datetime,
+    progress_callback: ProgressCallback | None = None,
+    journal_index: int = 0,
+    issn_index: int = 0,
+) -> CrossrefDiscoveryUnitResult:
+    """Execute one ISSN query against the full configured venue identity."""
+
+    if issn not in journal.issn:
+        raise ValueError("queried ISSN must belong to the configured journal")
+    if from_date > to_date:
+        raise ValueError("from_date must not be after to_date")
+    timestamp = retrieved_at or datetime.now(timezone.utc)
+    if timestamp.utcoffset() is None:
+        raise ValueError("retrieved_at must include a timezone")
+    timestamp = timestamp.astimezone(timezone.utc)
+
+    issues: list[CrossrefDiscoveryIssue] = []
+    unit_records: list[CrossrefWorkRecord] = []
+    coverage: list[CoverageUnit] = []
+    activity = ActivityUpdate(
+        kind=ActivityKind.WORKING,
+        source="crossref",
+        operation=f"journal_discovery:{journal_index}:{issn_index}",
+        label="Discovering Crossref works",
+        detail=f"{journal.name} · ISSN {issn}",
+        current=0,
+        total=None,
+        unit="work",
+    )
+    completed_pages = 0
+    dropped_record = False
+    try:
+        if progress_callback is None:
+            pages = client.iter_journal_work_pages(issn, from_date, to_date)
+        else:
+            pages = client.iter_journal_work_pages(
+                issn,
+                from_date,
+                to_date,
+                progress_callback=progress_callback,
+                activity=activity,
+            )
+        for page in pages:
+            completed_pages += 1
+            message = page["message"]
+            for item in message["items"]:
+                raw_doi = item.get("DOI") if isinstance(item, dict) else None
+                try:
+                    record, warnings = normalize_crossref_discovered_work(
+                        item,
+                        timestamp,
+                    )
+                except CrossrefRecordError as error:
+                    dropped_record = True
+                    issues.append(
+                        CrossrefDiscoveryIssue(
+                            severity=EnrichmentIssueSeverity.WARNING,
+                            stage="record_normalization",
+                            journal=journal.name,
+                            issn=issn,
+                            doi=raw_doi if isinstance(raw_doi, str) else None,
+                            message=str(error),
+                        )
+                    )
+                    continue
+                issues.extend(
+                    CrossrefDiscoveryIssue(
+                        severity=EnrichmentIssueSeverity.WARNING,
+                        stage="field_normalization",
+                        journal=journal.name,
+                        issn=issn,
+                        record_id=record.provenance.record_id,
+                        doi=record.doi,
+                        message=warning,
+                    )
+                    for warning in warnings
+                )
+                if not crossref_record_matches_journal(record, journal):
+                    identity = (
+                        f"ISSNs {', '.join(record.issns)}"
+                        if record.issns
+                        else f"journal {record.journal!r}"
+                    )
+                    issues.append(
+                        CrossrefDiscoveryIssue(
+                            severity=EnrichmentIssueSeverity.WARNING,
+                            stage="venue_validation",
+                            journal=journal.name,
+                            issn=issn,
+                            record_id=record.provenance.record_id,
+                            doi=record.doi,
+                            message=(
+                                f"record {identity} does not match configured "
+                                "journal identity"
+                            ),
+                        )
+                    )
+                    continue
+                unit_records.append(record)
+    except CrossrefNotFoundError as error:
+        issues.append(
+            CrossrefDiscoveryIssue(
+                severity=EnrichmentIssueSeverity.WARNING,
+                stage="journal_not_found",
+                journal=journal.name,
+                issn=issn,
+                message=str(error),
+            )
+        )
+        status = (
+            CoverageStatus.PARTIAL
+            if completed_pages
+            else CoverageStatus.UNAVAILABLE
+        )
+    except CrossrefRequestError as error:
+        issues.append(
+            CrossrefDiscoveryIssue(
+                severity=EnrichmentIssueSeverity.ERROR,
+                stage="work_retrieval",
+                journal=journal.name,
+                issn=issn,
+                message=str(error),
+            )
+        )
+        status = (
+            CoverageStatus.PARTIAL
+            if completed_pages
+            else CoverageStatus.FAILED
+        )
+    else:
+        status = (
+            CoverageStatus.PARTIAL
+            if dropped_record
+            else CoverageStatus.COMPLETE
+        )
+    coverage.append(
+        CoverageUnit(
+            provider="crossref",
+            component=CoverageComponent.CROSSREF_DISCOVERY,
+            status=status,
+            journal=journal.name,
+            issn=issn,
+        )
+    )
+    unit_records.sort(key=lambda record: (record.doi, record.provenance.record_id))
+    return CrossrefDiscoveryUnitResult(
+        journal=journal,
+        issn=issn,
+        coverage=coverage[-1],
+        records=tuple(unit_records),
+        issues=tuple(issues),
+    )
+
+
 def discover_crossref_journals(
     client: CrossrefClient,
     journals: Sequence[JournalConfig],
@@ -1050,147 +1211,13 @@ def discover_crossref_journals(
         raise ValueError("retrieved_at must include a timezone")
     timestamp = timestamp.astimezone(timezone.utc)
 
-    records: list[tuple[int, int, CrossrefWorkRecord]] = []
-    issues: list[CrossrefDiscoveryIssue] = []
-    coverage: list[CoverageUnit] = []
     units: list[CrossrefDiscoveryUnitResult] = []
     for journal_index, journal in enumerate(journals):
         for issn_index, issn in enumerate(journal.issn):
-            issue_start = len(issues)
-            unit_records: list[CrossrefWorkRecord] = []
-            activity = ActivityUpdate(
-                kind=ActivityKind.WORKING,
-                source="crossref",
-                operation=f"journal_discovery:{journal_index}:{issn_index}",
-                label="Discovering Crossref works",
-                detail=f"{journal.name} · ISSN {issn}",
-                current=0,
-                total=None,
-                unit="work",
-            )
-            completed_pages = 0
-            dropped_record = False
-            try:
-                if progress_callback is None:
-                    pages = client.iter_journal_work_pages(issn, from_date, to_date)
-                else:
-                    pages = client.iter_journal_work_pages(
-                        issn,
-                        from_date,
-                        to_date,
-                        progress_callback=progress_callback,
-                        activity=activity,
-                    )
-                for page in pages:
-                    completed_pages += 1
-                    message = page["message"]
-                    for item in message["items"]:
-                        raw_doi = item.get("DOI") if isinstance(item, dict) else None
-                        try:
-                            record, warnings = normalize_crossref_discovered_work(
-                                item,
-                                timestamp,
-                            )
-                        except CrossrefRecordError as error:
-                            dropped_record = True
-                            issues.append(
-                                CrossrefDiscoveryIssue(
-                                    severity=EnrichmentIssueSeverity.WARNING,
-                                    stage="record_normalization",
-                                    journal=journal.name,
-                                    issn=issn,
-                                    doi=raw_doi if isinstance(raw_doi, str) else None,
-                                    message=str(error),
-                                )
-                            )
-                            continue
-                        issues.extend(
-                            CrossrefDiscoveryIssue(
-                                severity=EnrichmentIssueSeverity.WARNING,
-                                stage="field_normalization",
-                                journal=journal.name,
-                                issn=issn,
-                                record_id=record.provenance.record_id,
-                                doi=record.doi,
-                                message=warning,
-                            )
-                            for warning in warnings
-                        )
-                        if not crossref_record_matches_journal(record, journal):
-                            identity = (
-                                f"ISSNs {', '.join(record.issns)}"
-                                if record.issns
-                                else f"journal {record.journal!r}"
-                            )
-                            issues.append(
-                                CrossrefDiscoveryIssue(
-                                    severity=EnrichmentIssueSeverity.WARNING,
-                                    stage="venue_validation",
-                                    journal=journal.name,
-                                    issn=issn,
-                                    record_id=record.provenance.record_id,
-                                    doi=record.doi,
-                                    message=(
-                                        f"record {identity} does not match configured "
-                                        "journal identity"
-                                    ),
-                                )
-                            )
-                            continue
-                        records.append((journal_index, issn_index, record))
-                        unit_records.append(record)
-            except CrossrefNotFoundError as error:
-                issues.append(
-                    CrossrefDiscoveryIssue(
-                        severity=EnrichmentIssueSeverity.WARNING,
-                        stage="journal_not_found",
-                        journal=journal.name,
-                        issn=issn,
-                        message=str(error),
-                    )
-                )
-                status = (
-                    CoverageStatus.PARTIAL
-                    if completed_pages
-                    else CoverageStatus.UNAVAILABLE
-                )
-            except CrossrefRequestError as error:
-                issues.append(
-                    CrossrefDiscoveryIssue(
-                        severity=EnrichmentIssueSeverity.ERROR,
-                        stage="work_retrieval",
-                        journal=journal.name,
-                        issn=issn,
-                        message=str(error),
-                    )
-                )
-                status = (
-                    CoverageStatus.PARTIAL
-                    if completed_pages
-                    else CoverageStatus.FAILED
-                )
-            else:
-                status = (
-                    CoverageStatus.PARTIAL
-                    if dropped_record
-                    else CoverageStatus.COMPLETE
-                )
-            coverage.append(
-                CoverageUnit(
-                    provider="crossref",
-                    component=CoverageComponent.CROSSREF_DISCOVERY,
-                    status=status,
-                    journal=journal.name,
-                    issn=issn,
-                )
-            )
-            unit_records.sort(key=lambda record: (record.doi, record.provenance.record_id))
-            units.append(CrossrefDiscoveryUnitResult(
-                journal=journal,
-                issn=issn,
-                coverage=coverage[-1],
-                records=tuple(unit_records),
-                issues=tuple(issues[issue_start:]),
+            units.append(discover_crossref_journal_issn(
+                client, journal, issn, from_date, to_date,
+                retrieved_at=timestamp, progress_callback=progress_callback,
+                journal_index=journal_index, issn_index=issn_index,
             ))
         if journal.issn:
             _report_activity(
@@ -1201,24 +1228,13 @@ def discover_crossref_journals(
                     operation=f"journal_completion:{journal_index}",
                     label="Completed Crossref journal discovery",
                     detail=journal.name,
-                    current=len(journal.issn),
-                    total=len(journal.issn),
-                    unit="issn",
+                    current=len(journal.issn), total=len(journal.issn), unit="issn",
                 ),
             )
-
-    records.sort(
-        key=lambda item: (
-            item[0],
-            item[1],
-            item[2].doi,
-            item[2].provenance.record_id,
-        )
-    )
     return CrossrefDiscoveryResult(
-        records=tuple(record for _, _, record in records),
-        issues=tuple(issues),
-        coverage=tuple(coverage),
+        records=tuple(record for unit in units for record in unit.records),
+        issues=tuple(issue for unit in units for issue in unit.issues),
+        coverage=tuple(unit.coverage for unit in units),
         units=tuple(units),
     )
 

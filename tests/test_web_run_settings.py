@@ -387,7 +387,8 @@ class StubCoordinator:
         self.start_calls = 0
         self.snapshot_calls = 0
 
-    def start(self) -> StartResult:
+    def start(self, *, reuse_provider_cache: bool = False) -> StartResult:
+        self.reuse_provider_cache = reuse_provider_cache
         self.start_calls += 1
         if self.snapshot_after_start is not None:
             self.current_snapshot = self.snapshot_after_start
@@ -427,6 +428,47 @@ def test_run_post_requires_csrf_before_start(tmp_path: Path) -> None:
 
     assert response.status_code == 403
     assert coordinator.start_calls == 0
+
+
+@pytest.mark.parametrize("choice,expected", [(None, False), ("false", False), ("true", True)])
+def test_run_form_binds_transient_reuse_choice(tmp_path, choice, expected):
+    app = create_app(tmp_path / "monitor.yaml")
+    coordinator = StubCoordinator()
+    app.state.run_coordinator = coordinator
+    with TestClient(app, base_url="http://localhost") as client:
+        html = client.get("/fragments/run").text
+        assert "Run with cache reuse" in html
+        data = {"csrf_token": csrf_from_html(html)}
+        if choice is not None:
+            data["reuse_provider_cache"] = choice
+        response = client.post("/run", data=data)
+    assert response.status_code == 200
+    assert coordinator.reuse_provider_cache is expected
+    assert not (tmp_path / "monitor.yaml").exists()
+
+
+@pytest.mark.parametrize("choice", ["1", "yes", "TRUE", "", "unexpected"])
+def test_run_form_rejects_noncanonical_reuse_values(tmp_path, choice):
+    app = create_app(tmp_path / "monitor.yaml")
+    coordinator = StubCoordinator()
+    app.state.run_coordinator = coordinator
+    with TestClient(app, base_url="http://localhost") as client:
+        csrf = csrf_from_html(client.get("/fragments/run").text)
+        response = client.post("/run", data={"csrf_token": csrf, "reuse_provider_cache": choice})
+    assert response.status_code == 422 and coordinator.start_calls == 0
+
+
+def test_finished_fragment_distinguishes_reuse_from_live_coverage(tmp_path):
+    from literature_monitor.coverage import ProviderReuseUnit
+    result = replace(make_run_result(), reused_units=(ProviderReuseUnit("openalex", CoverageComponent.OPENALEX_DISCOVERY,
+                     journal="Cached journal"),))
+    app = create_app(tmp_path / "monitor.yaml")
+    app.state.run_coordinator = StubCoordinator(snapshot=finished_snapshot(result=result))
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get("/fragments/run")
+    assert "Cache reuse: OpenAlex 1" in response.text
+    assert "Live OpenAlex coverage:" in response.text
+    assert "Run again with cache reuse" in response.text
 
 
 @pytest.mark.parametrize(

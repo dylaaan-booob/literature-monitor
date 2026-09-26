@@ -333,6 +333,13 @@ def test_run_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     expected_ids = dict(ids_by_path)
     expected_authors = set(author_paths)
 
+    before_reuse = snapshot_files(output_dir)
+    assert main((*run_args, "--reuse-provider-cache")) == 0
+    reuse_cli = capsys.readouterr()
+    assert "Cache reuse:" in reuse_cli.err
+    assert not openalex_openers[-1].requests and not crossref_openers[-1].requests
+    assert snapshot_files(output_dir) == before_reuse
+
     assert main(run_args) == 0
     second_cli = capsys.readouterr()
     assert second_cli.out == ""
@@ -356,9 +363,10 @@ def test_run_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     assert inbox_path.read_bytes() == custom_inbox
     assert list(output_dir.glob("*.base")) == [inbox_path]
 
-    assert len(openalex_openers) == 2
-    assert len(crossref_openers) == 2
-    for opener in openalex_openers:
+    assert len(openalex_openers) == 3
+    assert len(crossref_openers) == 3
+    assert not openalex_openers[1].requests and not crossref_openers[1].requests
+    for opener in (openalex_openers[0], openalex_openers[2]):
         assert opener.payloads == []
         parsed_requests = [urlparse(request.full_url) for request, _ in opener.requests]
         assert [request.path for request in parsed_requests] == [
@@ -375,7 +383,7 @@ def test_run_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
                 "from_publication_date:2026-01-01,"
                 "to_publication_date:2026-01-31"
             ]
-    for opener in crossref_openers:
+    for opener in (crossref_openers[0], crossref_openers[2]):
         assert opener.payloads == []
         assert len(opener.requests) == 1
         request, _timeout = opener.requests[0]

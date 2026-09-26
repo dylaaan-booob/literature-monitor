@@ -21,7 +21,8 @@
           hx-target="#run-panel"
           hx-swap="outerHTML">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit">Run</button>
+      <button type="submit" name="reuse_provider_cache" value="false">Run</button>
+      <button type="submit" name="reuse_provider_cache" value="true">Run with cache reuse</button>
     </form>
   {% elif run_snapshot.status.value == "RUNNING" %}
     {% if not run_snapshot.worker_alive %}
@@ -107,7 +108,13 @@
         {% for coverage in result.coverage_summary %}
           {% if coverage.total_units %}
             {% set coverage_label = "OpenAlex" if coverage.component.value == "openalex_discovery" else ("Crossref discovery" if coverage.component.value == "crossref_discovery" else "Crossref supplement") %}
-            <span>{{ coverage_label }} coverage: {{ coverage.complete }}/{{ coverage.total_units }} complete{% if coverage.partial %} · {{ coverage.partial }} partial{% endif %}{% if coverage.unavailable %} · {{ coverage.unavailable }} unavailable{% endif %}{% if coverage.failed %} · {{ coverage.failed }} failed{% endif %}</span>
+            <span>Live {{ coverage_label }} coverage: {{ coverage.complete }}/{{ coverage.total_units }} complete{% if coverage.partial %} · {{ coverage.partial }} partial{% endif %}{% if coverage.unavailable %} · {{ coverage.unavailable }} unavailable{% endif %}{% if coverage.failed %} · {{ coverage.failed }} failed{% endif %}</span>
+          {% endif %}
+        {% endfor %}
+        {% for reuse in result.reuse_summary %}
+          {% if reuse.reused_units %}
+            {% set reuse_label = "OpenAlex" if reuse.component.value == "openalex_discovery" else ("Crossref discovery" if reuse.component.value == "crossref_discovery" else "Crossref supplement") %}
+            <span>Cache reuse: {{ reuse_label }} {{ reuse.reused_units }}</span>
           {% endif %}
         {% endfor %}
         {% if result.warnings %}
@@ -146,7 +153,8 @@
           hx-target="#run-panel"
           hx-swap="outerHTML">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit">Run again</button>
+      <button type="submit" name="reuse_provider_cache" value="false">Run again</button>
+      <button type="submit" name="reuse_provider_cache" value="true">Run again with cache reuse</button>
     </form>
   {% endif %}
 </section>
