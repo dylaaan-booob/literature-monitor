@@ -18,6 +18,16 @@ from literature_monitor.application.monitor import (
     run_monitor,
     validate_monitor,
 )
+from literature_monitor.application.run_state import (
+    LAST_RUN_SCHEMA_VERSION,
+    LastRunReadStatus,
+    LastRunSnapshot,
+    LastRunSnapshotWriteError,
+    RecordedRunOutcome,
+    last_run_snapshot_path,
+    read_last_run_snapshot,
+    write_last_run_snapshot,
+)
 from literature_monitor.canonicalize import (
     CanonicalizationIssue,
     CanonicalizationResult,
@@ -32,7 +42,7 @@ from literature_monitor.crossref import (
     EnrichmentIssue,
     EnrichmentIssueSeverity,
 )
-from literature_monitor.date_range import DateRangeSpec
+from literature_monitor.date_range import DateRangeSpec, ResolvedDateRange
 from literature_monitor.materialize import (
     MaterializationIssue,
     MaterializationIssueSeverity,
@@ -339,6 +349,7 @@ def test_canonical_core_preserves_real_orchestration_order_and_stops_before_mate
         "match",
         "canonicalize",
     ]
+    assert not last_run_snapshot_path(tmp_path / "workspace").exists()
 
 
 def test_canonical_core_preserves_coverage_order_and_summarizes_components(
@@ -483,6 +494,7 @@ def test_materialize_consumes_the_same_canonical_result(
     assert result.created_authors == 1
     assert result.existing_authors == 1
     assert result.coverage == coverage
+    assert not (output_dir / ".literature-monitor").exists()
 
 
 def test_run_monitor_uses_core_materialization_and_progress_contract(
@@ -679,6 +691,14 @@ def test_application_date_override_forms_are_complete_and_ephemeral(
         ("openalex", *expected),
         ("crossref", *expected),
     ]
+    snapshot_result = read_last_run_snapshot(tmp_path / "workspace")
+    assert snapshot_result.status is LastRunReadStatus.AVAILABLE
+    assert snapshot_result.snapshot is not None
+    assert (
+        snapshot_result.snapshot.resolved_date_range.from_date,
+        snapshot_result.snapshot.resolved_date_range.to_date,
+    ) == expected
+    assert snapshot_result.snapshot.outcome is RecordedRunOutcome.COMPLETED
 
 
 def test_persisted_date_policy_is_used_without_override(
@@ -704,11 +724,102 @@ def test_persisted_date_policy_is_used_without_override(
     assert result.resolved_date_range.to_date == date(2026, 3, 15)
 
 
+def test_second_production_run_replaces_single_latest_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = write_monitor(tmp_path, date_policy="window_days: 7\n")
+    install_core_mocks(monkeypatch)
+    monkeypatch.setattr(
+        monitor,
+        "materialize_papers",
+        lambda papers, output_dir, **kwargs: materialization_result(output_dir),
+    )
+
+    run_monitor(
+        config_path,
+        date_override=DateRangeSpec(
+            from_date=date(2026, 1, 1),
+            to_date=date(2026, 1, 31),
+        ),
+    )
+    run_monitor(
+        config_path,
+        date_override=DateRangeSpec(
+            from_date=date(2026, 2, 1),
+            to_date=date(2026, 2, 28),
+        ),
+    )
+
+    output_dir = tmp_path / "workspace"
+    snapshot_result = read_last_run_snapshot(output_dir)
+    assert snapshot_result.status is LastRunReadStatus.AVAILABLE
+    assert snapshot_result.snapshot is not None
+    assert snapshot_result.snapshot.resolved_date_range == ResolvedDateRange(
+        from_date=date(2026, 2, 1),
+        to_date=date(2026, 2, 28),
+    )
+    assert [path.name for path in (output_dir / ".literature-monitor").iterdir()] == [
+        "last-run.json"
+    ]
+
+
+def test_snapshot_write_failure_is_warning_after_materialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = write_monitor(tmp_path)
+    install_core_mocks(monkeypatch)
+    materialized: list[CanonicalPaper] = []
+
+    def materialize(
+        papers: tuple[CanonicalPaper, ...],
+        destination: Path,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> MaterializationResult:
+        materialized.extend(papers)
+        return materialization_result(destination)
+
+    def fail_snapshot(output_dir: Path, snapshot: LastRunSnapshot) -> None:
+        raise LastRunSnapshotWriteError(
+            last_run_snapshot_path(output_dir),
+            "snapshot disk failure",
+        )
+
+    monkeypatch.setattr(monitor, "materialize_papers", materialize)
+    monkeypatch.setattr(monitor, "write_last_run_snapshot", fail_snapshot)
+
+    result = run_monitor(config_path)
+
+    assert len(materialized) == 1
+    assert result.outcome is RunOutcome.COMPLETED_WITH_WARNINGS
+    assert result.errors == ()
+    assert result.statistics.materialization_issues == 0
+    assert result.warnings[-1].component is MonitorIssueComponent.COVERAGE_SNAPSHOT
+    assert result.warnings[-1].stage == "write"
+    assert "snapshot disk failure" in result.warnings[-1].message
+
+
 def test_incomplete_override_never_borrows_config_date_fields(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_path = write_monitor(tmp_path, date_policy="window_days: 14\n")
+    output_dir = tmp_path / "workspace"
+    write_last_run_snapshot(
+        output_dir,
+        LastRunSnapshot(
+            schema_version=LAST_RUN_SCHEMA_VERSION,
+            resolved_date_range=ResolvedDateRange(
+                from_date=date(2025, 12, 1),
+                to_date=date(2025, 12, 31),
+            ),
+            outcome=RecordedRunOutcome.COMPLETED,
+            coverage=(),
+        ),
+    )
+    previous_snapshot = last_run_snapshot_path(output_dir).read_bytes()
 
     def unexpected_provider(*args: object, **kwargs: object) -> object:
         raise AssertionError("provider work must not start")
@@ -726,6 +837,7 @@ def test_incomplete_override_never_borrows_config_date_fields(
     assert result.errors[0].component is MonitorIssueComponent.DATE_RANGE
     assert "must be combined with another date field" in result.errors[0].message
     assert result.coverage == ()
+    assert last_run_snapshot_path(output_dir).read_bytes() == previous_snapshot
 
 
 def test_preflight_failure_occurs_before_provider_work_and_skips_workspace_stage(
@@ -752,6 +864,7 @@ def test_preflight_failure_occurs_before_provider_work_and_skips_workspace_stage
     ]
     assert all(event.activity is None for event in progress_events)
     assert result.coverage == ()
+    assert not last_run_snapshot_path(tmp_path / "workspace").exists()
 
 
 def test_provider_error_still_materializes_successful_papers(
@@ -798,6 +911,11 @@ def test_provider_error_still_materializes_successful_papers(
     assert result.outcome is RunOutcome.COMPLETED_WITH_ERRORS
     assert any(issue.component is MonitorIssueComponent.OPENALEX for issue in result.errors)
     assert result.coverage == failed_coverage
+    snapshot_result = read_last_run_snapshot(tmp_path / "workspace")
+    assert snapshot_result.status is LastRunReadStatus.AVAILABLE
+    assert snapshot_result.snapshot is not None
+    assert snapshot_result.snapshot.outcome is RecordedRunOutcome.COMPLETED_WITH_ERRORS
+    assert snapshot_result.snapshot.coverage == failed_coverage
 
 
 def test_provider_warning_is_nonfatal(
@@ -827,6 +945,10 @@ def test_provider_warning_is_nonfatal(
     assert result.outcome is RunOutcome.COMPLETED_WITH_WARNINGS
     assert result.errors == ()
     assert any(issue.component is MonitorIssueComponent.OPENALEX for issue in result.warnings)
+    snapshot_result = read_last_run_snapshot(tmp_path / "workspace")
+    assert snapshot_result.status is LastRunReadStatus.AVAILABLE
+    assert snapshot_result.snapshot is not None
+    assert snapshot_result.snapshot.outcome is RecordedRunOutcome.COMPLETED_WITH_WARNINGS
 
 
 @pytest.mark.parametrize(
@@ -904,6 +1026,20 @@ def test_unexpected_programming_exception_propagates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_path = write_monitor(tmp_path)
+    output_dir = tmp_path / "workspace"
+    write_last_run_snapshot(
+        output_dir,
+        LastRunSnapshot(
+            schema_version=LAST_RUN_SCHEMA_VERSION,
+            resolved_date_range=ResolvedDateRange(
+                from_date=date(2025, 11, 1),
+                to_date=date(2025, 11, 30),
+            ),
+            outcome=RecordedRunOutcome.COMPLETED,
+            coverage=(),
+        ),
+    )
+    previous_snapshot = last_run_snapshot_path(output_dir).read_bytes()
     install_core_mocks(monkeypatch)
 
     def explode(*args: object) -> object:
@@ -913,6 +1049,8 @@ def test_unexpected_programming_exception_propagates(
 
     with pytest.raises(RuntimeError, match="programming failure"):
         run_monitor(config_path)
+
+    assert last_run_snapshot_path(output_dir).read_bytes() == previous_snapshot
 
 
 def test_validate_monitor_success_and_only_resolves_sources(
@@ -996,6 +1134,7 @@ def test_validate_monitor_success_and_only_resolves_sources(
     assert result.configured_journal_count == 2
     assert result.configured_issn_count == 3
     assert len(result.resolved_sources) == 2
+    assert not last_run_snapshot_path(config.output_dir).exists()
 
 
 def test_validate_monitor_reuses_openalex_request_retry_progress(

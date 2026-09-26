@@ -9,7 +9,9 @@ safely updates durable Paper and Author Markdown, and exports kept papers.
 v0.4.1 is the latest released baseline. It adds shared transient runtime
 progress, Activity, current-Activity ETA, inactivity feedback, and corresponding
 CLI/Web presentation while preserving the existing production and durable-state
-boundaries.
+boundaries. v0.4.2 development has completed the provider-contract, request
+reliability, and transient run-coverage stages; the current A4 stage adds only a
+durable latest-run coverage snapshot and read-only diagnostic surface.
 
 ## Setup
 
@@ -83,15 +85,23 @@ provider pacing is known, retry waits remain 1 second and then 2 seconds.
 Endpoint-specific 404 handling is unchanged, and other HTTP 4xx responses are
 not retried. Retry and pacing state remain process-local and transient.
 
-Each production run also carries process-local retrieval coverage for the work
-units it actually executed: OpenAlex discovery per configured journal, Crossref
-discovery per journal/queried ISSN, and Crossref DOI supplementation per lookup
-that entered the pending set. Coverage distinguishes complete, partial,
-unavailable, and failed execution without claiming that the bibliographic
-universe itself is complete. CLI completion summaries and the GUI finished-run
-panel show compact per-component counts. Coverage is not written to monitor
-configuration, workspace Markdown, indexes, checkpoints, or run history, and it
-does not change existing outcomes, exit codes, or materialization behavior.
+Each production run also carries retrieval coverage for the work units it
+actually executed: OpenAlex discovery per configured journal, Crossref discovery
+per journal/queried ISSN, and Crossref DOI supplementation per lookup that
+entered the pending set. Coverage distinguishes complete, partial, unavailable,
+and failed execution without claiming that the bibliographic universe itself is
+complete. CLI completion summaries and the GUI finished-run panel show compact
+per-component counts.
+
+After a normal production `run` completes, the application attempts to
+atomically replace one last-run snapshot. When replacement succeeds, that file
+represents the latest successfully persisted completed production run and
+contains its resolved date range, recorded outcome, and ordered coverage units.
+It does not persist provider payloads, issue text, statistics, workflow
+decisions, cursors, retry state, timestamps, or historical runs. Snapshot
+persistence is diagnostic metadata only; a write failure is reported as a
+warning after normal Paper materialization, does not roll back the workspace,
+and leaves any previously valid snapshot in place.
 
 The selected output directory contains:
 
@@ -99,13 +109,38 @@ The selected output directory contains:
 <output-dir>/
 ├── Inbox.base
 ├── Papers/
-└── Authors/
+├── Authors/
+└── .literature-monitor/
+    └── last-run.json
 ```
 
-Paper Markdown is the durable workflow state: UUIDs, review status, human notes,
-unknown human-owned frontmatter, and unmanaged sections survive reruns according
-to the existing materialization rules. `Inbox.base` is presentation only. It is
-created when missing and an existing customized file is preserved.
+`.literature-monitor/last-run.json` is application-owned metadata for the latest
+successfully persisted completed production run, not Paper/Author workflow state. Only one snapshot is retained; it is
+not run history. Deleting it does not remove Papers, Authors, decisions, or
+notes, and the next normal run remains valid. Materialization scanners do not
+treat this hidden metadata directory as Paper data.
+
+Paper Markdown remains the durable workflow state: UUIDs, review status, human
+notes, unknown human-owned frontmatter, and unmanaged sections survive reruns
+according to the existing materialization rules. `Inbox.base` is presentation
+only. It is created when missing and an existing customized file is preserved.
+
+Read the snapshot without contacting providers or modifying the workspace:
+
+```bash
+uv run literature-monitor last-run --config monitor.yaml
+```
+
+A valid snapshot prints its resolved date range, recorded outcome, and the same
+compact per-component coverage counts used by run summaries. Missing or invalid
+snapshot data exits `1`; invalid monitor configuration exits `2`.
+
+**last-run snapshot ≠ resume checkpoint.** The snapshot never causes the next
+run to skip provider requests, change its discovery window, restore a cursor, or
+alter canonicalization/materialization. Automatic resume is still unimplemented.
+Safely skipping a previously complete work unit would require a separate durable
+provider evidence/result cache, or another explicit contract that can restore
+the evidence belonging to skipped work.
 
 The supported decision model is one monitor to one decision workspace. Paper
 UUID stability, `candidate` / `rejected` / `kept` / `in_zotero`
@@ -189,11 +224,12 @@ Optional provider credentials/contact information remain environment settings,
 not monitor fields: `OPENALEX_API_KEY` and `CROSSREF_MAILTO`.
 
 The workflow does not add monitor/workspace UUIDs, workspace ownership
-markers, a global research-work or decision registry, last-successful-run state,
-provider cursors/watermarks/checkpoints, incremental delta / “What's New” state,
-scheduler or daemon durable state, notifications, or a workflow/execution
-database. The local GUI does not change those boundaries and does not write
-directly to the Zotero API.
+markers, a global research-work or decision registry, last-successful-run
+synchronization state, provider cursors/watermarks/checkpoints, incremental
+delta / “What's New” state, scheduler or daemon durable state, notifications,
+run history, or a workflow/execution database. The single A4 last-run snapshot
+is observational metadata only and does not change those execution boundaries.
+The local GUI does not write directly to the Zotero API.
 
 ## Validate configuration
 
@@ -489,6 +525,10 @@ The command writes to:
 ├── Papers/
 └── Authors/
 ```
+
+This legacy / diagnostic `materialize` command does not create or replace
+`.literature-monitor/last-run.json`; only the normal production `run` path
+owns that snapshot.
 
 Incremental materialization scans existing Markdown and recovers Paper identity
 from UUIDs, external identifiers, version keys, and source keys before using the

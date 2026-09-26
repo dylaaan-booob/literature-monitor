@@ -17,6 +17,13 @@ from literature_monitor.application.monitor import (
     ValidationResult,
     _CanonicalCoreResult,
 )
+from literature_monitor.application.run_state import (
+    LAST_RUN_SCHEMA_VERSION,
+    LastRunSnapshot,
+    RecordedRunOutcome,
+    last_run_snapshot_path,
+    write_last_run_snapshot,
+)
 from literature_monitor.cli import _build_parser, main
 from literature_monitor.cli_progress import _CliProgressRenderer
 from literature_monitor.config import JournalConfig, load_config
@@ -613,6 +620,22 @@ def test_run_parser_rejects_diagnostic_and_output_overrides(
     assert captured.value.code == 2
 
 
+def test_last_run_parser_accepts_only_config() -> None:
+    args = _build_parser().parse_args(
+        ("last-run", "--config", "monitor.yaml")
+    )
+
+    assert args.command == "last-run"
+    assert args.config == Path("monitor.yaml")
+
+    with pytest.raises(SystemExit) as captured:
+        _build_parser().parse_args(
+            ("last-run", "--config", "monitor.yaml", "--window-days", "14")
+        )
+
+    assert captured.value.code == 2
+
+
 def test_materialize_parser_still_requires_output_dir() -> None:
     with pytest.raises(SystemExit) as captured:
         _build_parser().parse_args(("materialize", "--config", "monitor.yaml"))
@@ -634,6 +657,132 @@ def test_non_date_commands_do_not_accept_date_arguments(
         _build_parser().parse_args(arguments)
 
     assert captured.value.code == 2
+
+
+@pytest.mark.parametrize("log_level", ("INFO", "WARNING", "ERROR"))
+def test_last_run_cli_reads_snapshot_without_provider_work_or_writes(
+    log_level: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path, config = validate_config(tmp_path)
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "log_level: INFO",
+            f"log_level: {log_level}",
+        ),
+        encoding="utf-8",
+    )
+    coverage = (
+        CoverageUnit(
+            provider="openalex",
+            component=CoverageComponent.OPENALEX_DISCOVERY,
+            status=CoverageStatus.COMPLETE,
+            journal="Biometrics",
+        ),
+        CoverageUnit(
+            provider="crossref",
+            component=CoverageComponent.CROSSREF_DISCOVERY,
+            status=CoverageStatus.PARTIAL,
+            journal="Biometrics",
+            issn="0006-341X",
+        ),
+    )
+    write_last_run_snapshot(
+        config.output_dir,
+        LastRunSnapshot(
+            schema_version=LAST_RUN_SCHEMA_VERSION,
+            resolved_date_range=ResolvedDateRange(
+                from_date=date(2026, 2, 1),
+                to_date=date(2026, 2, 28),
+            ),
+            outcome=RecordedRunOutcome.COMPLETED_WITH_WARNINGS,
+            coverage=coverage,
+        ),
+    )
+    whitelist_path = tmp_path / "journals.md"
+    before = {
+        config_path: config_path.read_bytes(),
+        whitelist_path: whitelist_path.read_bytes(),
+        last_run_snapshot_path(config.output_dir): last_run_snapshot_path(
+            config.output_dir
+        ).read_bytes(),
+    }
+
+    def unexpected(*args: object, **kwargs: object) -> object:
+        raise AssertionError("last-run must remain read-only and offline")
+
+    for name in (
+        "OpenAlexClient",
+        "CrossrefClient",
+        "run_monitor",
+        "_run_canonical_core",
+        "_materialize_canonical_result",
+        "validate_monitor",
+    ):
+        monkeypatch.setattr(f"literature_monitor.cli.{name}", unexpected)
+
+    result = main(("last-run", "--config", str(config_path)))
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.out == ""
+    assert (
+        "Last persisted run: 2026-02-01 → 2026-02-28 · COMPLETED_WITH_WARNINGS"
+        in captured.err
+    )
+    assert "OpenAlex coverage: 1/1 complete" in captured.err
+    assert "Crossref discovery coverage: 0/1 complete · 1 partial" in captured.err
+    for path, contents in before.items():
+        assert path.read_bytes() == contents
+
+
+def test_last_run_cli_missing_snapshot_exits_one(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path, _config = validate_config(tmp_path)
+
+    result = main(("last-run", "--config", str(config_path)))
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.out == ""
+    assert "No last-run snapshot found" in captured.err
+
+
+def test_last_run_cli_corrupt_snapshot_exits_one_without_rewrite(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path, config = validate_config(tmp_path)
+    path = last_run_snapshot_path(config.output_dir)
+    path.parent.mkdir(parents=True)
+    contents = b"{ corrupt\n"
+    path.write_bytes(contents)
+
+    result = main(("last-run", "--config", str(config_path)))
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.out == ""
+    assert "Invalid last-run snapshot" in captured.err
+    assert path.read_bytes() == contents
+
+
+def test_last_run_cli_invalid_monitor_config_exits_two(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "missing.yaml"
+
+    result = main(("last-run", "--config", str(config_path)))
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert str(config_path) in captured.err
 
 
 @pytest.mark.parametrize(

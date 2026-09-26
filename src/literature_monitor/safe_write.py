@@ -41,6 +41,44 @@ def create_text_exclusive(path: Path, contents: str) -> None:
         raise
 
 
+def atomic_create_text(path: Path, contents: str) -> None:
+    """Atomically create complete UTF-8 text without replacing an existing path."""
+
+    temporary: Path | None = None
+    descriptor: int | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        )
+        temporary = Path(temporary_name)
+        handle = os.fdopen(descriptor, "w", encoding="utf-8", newline="")
+        descriptor = None
+        with handle:
+            handle.write(contents)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        # 先完成同目录临时文件，再用硬链接建立目标，避免首次创建时暴露半写文件。
+        # 目标已存在时 link 会失败，因此不会覆盖并发创建的用户对象。
+        os.link(temporary, path)
+        temporary.unlink()
+        temporary = None
+    except Exception:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+
+
 def atomic_replace_text(path: Path, contents: str) -> None:
     """Replace a path with complete UTF-8 text using a same-directory temp file."""
 

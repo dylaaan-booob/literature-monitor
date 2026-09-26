@@ -23,6 +23,11 @@ from literature_monitor.application.monitor import (
     run_monitor,
     validate_monitor,
 )
+from literature_monitor.application.run_state import (
+    LastRunReadStatus,
+    LastRunSnapshot,
+    read_last_run_snapshot,
+)
 from literature_monitor.cli_progress import _CliProgressRenderer
 from literature_monitor.config import ConfigurationError, load_config
 from literature_monitor.crossref import (
@@ -107,6 +112,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="run a persistent monitor and materialize its workspace",
     )
     _add_monitor_date_arguments(run_parser)
+    last_run_parser = subparsers.add_parser(
+        "last-run",
+        help="show the latest successfully persisted production-run coverage snapshot",
+    )
+    last_run_parser.add_argument("--config", type=Path, required=True)
     discover = subparsers.add_parser(
         "openalex-discover",
         help="diagnose OpenAlex discovery (NDJSON output is not a stable export)",
@@ -327,7 +337,7 @@ def _log_monitor_issues(
 
 def _log_coverage_summary(
     logger: logging.Logger,
-    result: _CanonicalCoreResult | RunResult,
+    result: _CanonicalCoreResult | RunResult | LastRunSnapshot,
 ) -> None:
     labels = {
         "openalex_discovery": "OpenAlex",
@@ -483,6 +493,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             len(result.issues),
         )
         return 1 if result.has_errors else 0
+    if args.command == "last-run":
+        try:
+            config = load_config(args.config)
+        except ConfigurationError as error:
+            logger.error("%s", error)
+            return 2
+        read_result = read_last_run_snapshot(config.output_dir)
+        if read_result.status is LastRunReadStatus.NOT_FOUND:
+            logger.error("No last-run snapshot found: %s", read_result.path)
+            return 1
+        if read_result.status is LastRunReadStatus.INVALID:
+            logger.error(
+                "Invalid last-run snapshot [%s]: %s",
+                read_result.path,
+                read_result.error,
+            )
+            return 1
+
+        snapshot = read_result.snapshot
+        assert snapshot is not None
+        logger.info(
+            "Last persisted run: %s → %s · %s",
+            snapshot.resolved_date_range.from_date.isoformat(),
+            snapshot.resolved_date_range.to_date.isoformat(),
+            snapshot.outcome.value,
+        )
+        _log_coverage_summary(logger, snapshot)
+        return 0
     if args.command == "validate":
         progress = _CliProgressRenderer(
             sys.stderr,

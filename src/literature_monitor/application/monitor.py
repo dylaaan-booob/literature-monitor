@@ -9,6 +9,13 @@ from datetime import date
 from enum import Enum
 from pathlib import Path
 
+from literature_monitor.application.run_state import (
+    LAST_RUN_SCHEMA_VERSION,
+    LastRunSnapshot,
+    LastRunSnapshotWriteError,
+    RecordedRunOutcome,
+    write_last_run_snapshot,
+)
 from literature_monitor.canonicalize import (
     CanonicalizationIssue,
     canonicalize_records,
@@ -91,6 +98,7 @@ class MonitorIssueComponent(str, Enum):
     CONSOLIDATION = "consolidation"
     CANONICALIZATION = "canonicalization"
     MATERIALIZATION = "materialization"
+    COVERAGE_SNAPSHOT = "coverage_snapshot"
 
 
 @dataclass(frozen=True)
@@ -356,6 +364,16 @@ def _materialization_issue(issue: MaterializationIssue) -> MonitorIssue:
         stage="write",
         message=issue.message,
         path=issue.path,
+    )
+
+
+def _coverage_snapshot_issue(error: LastRunSnapshotWriteError) -> MonitorIssue:
+    return MonitorIssue(
+        severity=MonitorIssueSeverity.WARNING,
+        component=MonitorIssueComponent.COVERAGE_SNAPSHOT,
+        stage="write",
+        message=f"failed to persist latest-run coverage snapshot: {error}",
+        path=error.path,
     )
 
 
@@ -779,11 +797,33 @@ def run_monitor(
         progress_callback=progress_callback,
     )
     output_dir = core.config.output_dir if core.config is not None else None
-    return _materialize_canonical_result(
+    result = _materialize_canonical_result(
         core,
         output_dir,
         progress_callback=progress_callback,
     )
+    if result.outcome is RunOutcome.INVALID_CONFIGURATION:
+        return result
+
+    assert output_dir is not None
+    assert result.resolved_date_range is not None
+    snapshot = LastRunSnapshot(
+        schema_version=LAST_RUN_SCHEMA_VERSION,
+        resolved_date_range=result.resolved_date_range,
+        outcome=RecordedRunOutcome(result.outcome.value),
+        coverage=result.coverage,
+    )
+    try:
+        write_last_run_snapshot(output_dir, snapshot)
+    except LastRunSnapshotWriteError as error:
+        warning = _coverage_snapshot_issue(error)
+        warnings = (*result.warnings, warning)
+        return replace(
+            result,
+            warnings=warnings,
+            outcome=_run_outcome(warnings, result.errors),
+        )
+    return result
 
 
 def validate_monitor(

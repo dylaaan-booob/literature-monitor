@@ -2,7 +2,7 @@
 
 **Status:** Active; v0.4.1 is the current released and completed baseline
 
-**Stage:** v0.4.1 released / closeout complete
+**Stage:** v0.4.2 development; A4 Durable Last-Run Coverage Snapshot
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
@@ -120,6 +120,7 @@ MVP includes:
 - a local Python Web UI adapter implemented with FastAPI, Jinja2, and vendored HTMX;
 - stable application-layer boundaries shared by the CLI and Web application;
 - transient process-local run coordination with no persistent run history;
+- one application-owned last-run retrieval-coverage snapshot representing the latest successfully persisted completed production run, with no execution-control or history semantics;
 - safe overlapping reruns;
 - export of `kept` paper identifiers for Zotero;
 - logs sufficient to inspect unresolved journals, failed enrichment, and partial metadata.
@@ -172,7 +173,7 @@ MVP does **not** include:
 - query versioning;
 - Crossref update-date, created-date, index-date, or another provider update timestamp as a discovery date;
 - persisted last-run or last-successful-run timestamps;
-- persisted last-used date ranges, provider cursors, provider watermarks, late-index recovery cursors, checkpoints, run history, delta / What's New state, notification state, scheduler state, or automatic retry state;
+- persisted date ranges used as synchronization or discovery-window authority, provider cursors, provider watermarks, late-index recovery cursors, checkpoints, run history, delta / What's New state, notification state, scheduler state, or automatic retry state;
 - a persistent execution database;
 - scheduler, daemon, or cron management;
 - notifications;
@@ -274,7 +275,7 @@ Provider retirement does not narrow the durable data model. Existing Paper Markd
 
 ### 6.4 Provider request reliability
 
-Production provider clients remain synchronous. Provider request reliability is transient runtime behavior: it must not introduce an asyncio provider rewrite, worker pool, concurrent request framework, durable retry history, persisted provider cursor/checkpoint state, durable coverage state, resume state, scheduler state, or another persistent execution state.
+Production provider clients remain synchronous. Provider request reliability is transient runtime behavior: it must not introduce an asyncio provider rewrite, worker pool, concurrent request framework, durable retry history, persisted provider cursor/checkpoint state, resume state, scheduler state, or another persistent execution state. The A4 latest-run coverage snapshot in §6.6 is observational metadata only and is not provider request state.
 
 OpenAlex Works discovery continues to use cursor pagination with `per_page=100`. Crossref journal discovery continues to use cursor pagination and defaults to `rows=1000`, using the latest valid `next-cursor` from each full page while retaining repeated-cursor and malformed-response protection. Crossref DOI supplementation remains one DOI per request.
 
@@ -305,7 +306,7 @@ Each work unit has one of these statuses:
 - `UNAVAILABLE`;
 - `FAILED`.
 
-A coverage unit has a stable identity only for the current run. OpenAlex discovery is identified by provider/component plus configured journal. Crossref discovery is identified by provider/component plus configured journal and queried ISSN. Crossref supplementation is identified by provider/component plus normalized DOI. Coverage order is deterministic. Coverage must not add UUIDs, database IDs, durable execution identities, persisted cursors, checkpoints, watermarks, resume state, scheduler state, run history, or another execution database.
+A coverage unit identifies work performed by one run. OpenAlex discovery is identified by provider/component plus configured journal. Crossref discovery is identified by provider/component plus configured journal and queried ISSN. Crossref supplementation is identified by provider/component plus normalized DOI. Coverage order is deterministic. These fields do not become a durable execution identity when copied into the A4 latest-run snapshot: coverage must not add UUIDs, database IDs, persisted cursors, checkpoints, watermarks, resume state, scheduler state, run history, or another execution database.
 
 OpenAlex discovery coverage is:
 
@@ -327,11 +328,43 @@ Coverage is produced at provider execution boundaries and carried with the exist
 
 `RunResult` exposes the current run's coverage and a compact derived per-component summary containing total units plus counts for complete, partial, unavailable, and failed states. Coverage is not duplicated into `MonitorStatistics`.
 
-The `run`, `canonicalize`, and `materialize` CLI completion summaries display compact structured coverage without printing every successful unit. The Local Web finished-run view displays compact coverage only while the current process still holds the finished `RunResult`; it must not persist browser-side coverage, add run history, add a coverage API/database, or restore discarded process results after refresh.
+The `run`, `canonicalize`, and `materialize` CLI completion summaries display compact structured coverage without printing every successful unit. The Local Web finished-run view displays compact coverage only while the current process still holds the finished `RunResult`; it must not persist browser-side coverage, add run history, add a coverage API/database, or restore discarded process results after refresh. A4 adds the separate read-only `last-run` CLI diagnostic over the durable snapshot defined below; it does not restore a discarded Web `RunResult`.
 
-Coverage is retrieval execution metadata, not Paper workflow state. It must not be written to Paper Markdown, Author Markdown, Inbox, monitor YAML, `.obsidian`, SQLite FTS indexes, or other persistent Web state, and it must not affect canonical identity, keyword filtering, Paper status, human notes, materialization merge, or Zotero export.
+Coverage is retrieval execution metadata, not Paper workflow state. Except for the single A4 latest-run snapshot at `<output_dir>/.literature-monitor/last-run.json`, it must not be written to Paper Markdown, Author Markdown, Inbox, monitor YAML, `.obsidian`, SQLite FTS indexes, or other persistent Web state, and it must not affect canonical identity, keyword filtering, Paper status, human notes, materialization merge, or Zotero export.
 
-### 6.6 Publisher fallback
+### 6.6 Durable latest-run coverage snapshot
+
+A4 may persist exactly one application-owned last-run coverage snapshot at `<output_dir>/.literature-monitor/last-run.json`. A valid file represents the latest successfully persisted completed production run. The hidden `.literature-monitor/` directory is runtime metadata, not Paper/Author workflow state, and materialization scanners must not treat it as Paper data. A4 defines no historical run files.
+
+The snapshot is a durable observation of the latest successfully persisted completed normal production `run_monitor()`. A snapshot write failure deliberately preserves the previous valid file, so the snapshot need not describe the chronologically most recent completed execution. It is not a durable provider result cache, resume checkpoint, synchronization cursor, or authority for future provider execution. A later run must not use it to skip provider requests, change the discovery window, retry automatically, restore a cursor, infer late-index coverage, change canonicalization/materialization, or determine resume eligibility. Deleting the snapshot must not damage Paper/Author workflow state or prevent a future normal run.
+
+The snapshot uses versioned JSON with `schema_version = 1` and stores only:
+
+- the resolved inclusive `from_date` / `to_date` used by that production run;
+- the recorded outcome: `COMPLETED`, `COMPLETED_WITH_WARNINGS`, or `COMPLETED_WITH_ERRORS`;
+- the ordered A3 coverage units, preserving provider, component, status, journal, ISSN, and DOI identity fields.
+
+It must not persist derived coverage summaries, provider raw responses, canonical papers, issue text, `MonitorStatistics`, workflow decisions, UUIDs, provider cursors, config fingerprints, retry state, timestamps, or historical runs. A consumer must derive compact per-component summaries again from the ordered coverage units.
+
+Only a normal production `run_monitor()` that reaches a non-`INVALID_CONFIGURATION` `RunResult` may replace the snapshot. This includes clean, warning, and error completions because partial/failed coverage remains diagnostically useful. `validate`, provider diagnostics, `canonicalize`, legacy/diagnostic `materialize`, and `export-kept` must not write it. GUI Run needs no second persistence path because it already executes production `run_monitor()` through the existing `RunCoordinator`.
+
+Invalid configuration, deterministic preflight failure, an unexpected exception before a normal `RunResult`, and snapshot serialization/write failure must preserve any previous valid snapshot. Snapshot creation and replacement use complete-file filesystem semantics: replacement is atomic, a failed replacement preserves the prior complete file when possible, temporary files are cleaned up, and an unexpected symlink or incompatible filesystem object at the metadata directory or snapshot path must be reported rather than replaced or destroyed. Cross-process coordination for simultaneous runs against one workspace remains outside A4.
+
+Snapshot persistence failure occurs after normal Paper materialization and must not roll back those writes. It is an application-level warning distinct from provider and materialization issues. A3 coverage status itself still does not change `RunOutcome`; an A4 filesystem warning follows the existing result invariant, so an otherwise clean completion becomes `COMPLETED_WITH_WARNINGS` while CLI warning-only exit semantics remain non-fatal.
+
+The application-level reader is fail-soft and read-only. Missing snapshot, valid snapshot, and invalid/unreadable snapshot are distinguishable. Malformed JSON, unknown schema version, invalid date/outcome/component/status, invalid component-specific coverage identity, and filesystem read failure are structured read failures. The reader must not delete or rewrite a corrupt file, contact providers, repair unknown schemas, or treat corruption as an empty successful snapshot.
+
+Persisted coverage identity is validated as follows:
+
+- OpenAlex discovery requires journal and forbids ISSN/DOI;
+- Crossref discovery requires journal and ISSN and forbids DOI;
+- Crossref supplementation requires an already-normalized DOI and forbids journal/ISSN.
+
+`literature-monitor last-run --config monitor.yaml` loads the configured `output_dir` and reads this snapshot only. It performs no provider request, canonicalization, materialization, or write. A valid snapshot exits `0` and reports the resolved date range, recorded outcome, and the same compact summary logic used for A3 coverage. Missing or invalid/unreadable snapshot exits `1`; invalid monitor configuration exits `2`. The command has no date, journal, or keyword overrides and is a human-readable diagnostic rather than a frozen machine API.
+
+A4 still provides no automatic resume. Safe future skip-complete behavior would require a separate durable provider-evidence/result-cache contract, or another explicit mechanism that can restore the evidence belonging to skipped work units. The latest-run snapshot alone is never sufficient.
+
+### 6.7 Publisher fallback
 
 Publisher fallback is deliberately excluded from MVP.
 
@@ -2386,7 +2419,7 @@ v0.4.1 is released and complete. Its feature implementation, final independent a
 
 R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, and v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback are completed release history. v0.4.1 remains the current released and completed baseline.
 
-v0.4.2 development is in progress. A1 provider-contract work is complete: OpenAlex is the sole primary discovery provider, Crossref is the secondary discovery/bibliographic provider, and Semantic Scholar is retired from production retrieval. A2 provider request reliability is complete, including the current synchronous pagination, transient retry, and provider pacing contract in §6.4. A3 transient run coverage in §6.5 is the current implemented stage. Durable coverage, resume/checkpoint semantics, late-index recovery, scheduling, and other later reliability work remain outside A3.
+v0.4.2 development is in progress. A1 provider-contract work is complete: OpenAlex is the sole primary discovery provider, Crossref is the secondary discovery/bibliographic provider, and Semantic Scholar is retired from production retrieval. A2 provider request reliability in §6.4 is complete. A3 transient run coverage in §6.5 is complete. A4 durable latest-run coverage snapshot in §6.6 is the current stage. Resume/checkpoint execution semantics, provider result caching, late-index recovery, scheduling, and other later reliability work remain unimplemented.
 
 ---
 

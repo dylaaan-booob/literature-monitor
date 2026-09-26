@@ -8,6 +8,7 @@ import pytest
 import literature_monitor.safe_write as safe_write_module
 from literature_monitor.safe_write import (
     ContentChangedError,
+    atomic_create_text,
     atomic_replace_text,
     create_text_exclusive,
     read_text_exact,
@@ -21,6 +22,28 @@ def test_read_text_exact_preserves_utf8_and_newlines(tmp_path: Path) -> None:
     path.write_bytes(payload.encode("utf-8"))
 
     assert read_text_exact(path) == payload
+
+
+def test_atomic_create_writes_complete_target_content(tmp_path: Path) -> None:
+    path = tmp_path / "state.txt"
+
+    atomic_create_text(path, "new\n完整内容\n")
+
+    assert path.read_bytes() == "new\n完整内容\n".encode("utf-8")
+    assert tuple(tmp_path.glob(".state.txt.*.tmp")) == ()
+
+
+def test_atomic_create_refuses_existing_target_without_replacement(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.txt"
+    path.write_text("external", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        atomic_create_text(path, "generated")
+
+    assert path.read_text(encoding="utf-8") == "external"
+    assert tuple(tmp_path.glob(".state.txt.*.tmp")) == ()
 
 
 def test_atomic_replace_writes_complete_target_content(tmp_path: Path) -> None:

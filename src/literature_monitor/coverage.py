@@ -1,4 +1,4 @@
-"""Transient provider retrieval coverage for one production run."""
+"""Provider retrieval coverage for run results and latest-run diagnostics."""
 
 from __future__ import annotations
 
