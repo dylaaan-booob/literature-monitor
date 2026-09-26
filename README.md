@@ -6,15 +6,15 @@ secondary discovery and bibliographic evidence, consolidates provider evidence
 before local keyword filtering, canonicalizes retained papers and versions,
 safely updates durable Paper and Author Markdown, and exports kept papers.
 
-v0.4.1 is the latest released baseline. It adds shared transient runtime
-progress, Activity, current-Activity ETA, inactivity feedback, and corresponding
-CLI/Web presentation while preserving the existing production and durable-state
-boundaries. v0.4.2 A1–A6 implementation and the final independent audit are
-complete. The repository is now in v0.4.2 release preparation; v0.4.2 is not yet
-released. The completed work adds provider-contract cleanup, request reliability,
-transient run coverage, a durable latest-run diagnostic snapshot, a normalized
-provider-result cache, and explicit exact-range cache reuse. Default runs remain
-live and checkpoint resume is not enabled.
+v0.4.2 is the latest released baseline. It completes the A1–A6 provider
+reliability, coverage, and explicit cache-reuse work while preserving the existing
+durable workflow model. Semantic Scholar is retired from supported production
+retrieval while historical identifiers and provenance remain readable. Additions
+include bounded OpenAlex/Crossref retries, Crossref rate-aware pacing, transient
+per-work-unit retrieval coverage, a durable latest-run diagnostic snapshot, a
+normalized provider-result cache, and explicit exact-range cache reuse for CLI
+and Web. Default runs remain live; explicit reuse is not checkpoint resume or
+freshness authority.
 
 ## Setup
 

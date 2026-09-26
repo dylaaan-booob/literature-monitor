@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — Specification v1.3
 
-**Status:** Active; v0.4.1 remains the current released and completed baseline until the v0.4.2 release transaction completes
+**Status:** Active; v0.4.2 is the current released and completed baseline
 
-**Stage:** v0.4.2 release preparation / closeout
+**Stage:** v0.4.2 released / closeout complete
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
@@ -1997,7 +1997,7 @@ The full closeout sequence is complete. v0.4.1 is released and is the current re
 
 ### 24.10 v0.4.2 Provider Reliability, Coverage, and Explicit Cache Reuse
 
-The separately reviewed A1–A6 feature implementation and the final independent audit are complete. The repository is now in v0.4.2 release preparation / closeout; v0.4.2 is not yet released.
+The separately reviewed A1–A6 feature implementation and the final independent audit are complete. The v0.4.2 release transaction and closeout are complete.
 
 The completed bounded result includes:
 
@@ -2021,7 +2021,7 @@ v0.4.2 feature implementation complete
 → GitHub Release
 ```
 
-The first two steps are complete, and the repository is currently at release preparation. The remaining release transaction has not yet occurred; v0.4.1 remains the current released and completed baseline until it completes.
+The full closeout sequence is complete. v0.4.2 is released and is the current released and completed baseline.
 
 ---
 
@@ -2498,9 +2498,11 @@ v0.4.1 is released and complete. Its feature implementation, final independent a
 
 ## 28. Current Project Stage
 
-R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, and v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback are completed release history. v0.4.1 remains the current released and completed baseline.
+R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback, and v0.4.2 Provider Reliability, Coverage, and Explicit Cache Reuse are completed release history. v0.4.2 is the current released and completed baseline.
 
-v0.4.2 A1 provider-contract cleanup, A2 provider request reliability in §6.4, A3 transient run coverage in §6.5, A4 durable latest-run coverage snapshot in §6.6, A5 durable provider-result cache in §6.7, and A6 explicit exact-range provider cache reuse in §6.8 are complete. The final independent audit is complete. The current stage is v0.4.2 release preparation / closeout, following the sequence in §24.10; the release transaction has not yet occurred. OpenAlex remains the primary discovery provider, Crossref the secondary discovery/bibliographic provider, and Semantic Scholar is not a supported production retrieval provider. Default/automatic reuse, checkpoint resume, provider cursors/watermarks, late-index recovery, automatic retry state, run history, scheduling/notification, and persistent execution databases remain unimplemented.
+The v0.4.2 release and closeout are complete. No subsequent product-development stage is established by this closeout.
+
+OpenAlex remains the primary discovery provider, Crossref the secondary discovery/bibliographic provider, and Semantic Scholar is not a supported production retrieval provider. Default/automatic reuse, checkpoint resume, provider cursors/watermarks, late-index recovery, automatic retry state, run history, scheduling/notification, and persistent execution databases remain unimplemented.
 
 ---
 
