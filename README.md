@@ -6,12 +6,12 @@ secondary discovery and bibliographic evidence, consolidates provider evidence
 before local keyword filtering, canonicalizes retained papers and versions,
 safely updates durable Paper and Author Markdown, and exports kept papers.
 
-v0.4.2 remains the latest released version. The v0.4.3 Retrieval Efficiency &
-Revision-Validated Provider Evidence implementation (A1–A8), independent stage
-reviews, and final independent audit are complete. The repository is now in
-v0.4.3 release preparation / closeout; v0.4.3 has not yet been released.
+v0.4.3 is the latest released version. It completes the Retrieval Efficiency &
+Revision-Validated Provider Evidence work while preserving the existing durable
+workflow model. Its A1–A8 implementation, independent stage reviews, final
+independent audit, release transaction, and closeout are complete.
 
-The development workflow automatically reuses revision-validated Provider
+The workflow automatically reuses revision-validated Provider
 state while establishing live candidate membership on every Run. It batches
 OpenAlex Source/Works retrieval, hydrates locations/version hints only for
 retained Works, and uses live Crossref manifests and revisions to reuse or

@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.4.2 remains the current/latest completed released baseline until the v0.4.3 release transaction completes; v0.4.3 remains unreleased
+**Status:** Active; v0.4.3 is the current/latest released and completed baseline
 
-**Stage:** v0.4.3 release preparation / closeout
+**Stage:** v0.4.3 released / closeout complete
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
@@ -2007,7 +2007,7 @@ The full closeout sequence is complete. v0.4.2 is released and is the current re
 
 ### 24.11 v0.4.3 Retrieval Efficiency & Revision-Validated Provider Evidence
 
-The separately reviewed A1–A8 implementation and the final independent audit are complete. The repository is now in v0.4.3 release preparation / closeout; v0.4.3 is not yet released.
+The separately reviewed A1–A8 implementation and the final independent audit are complete. The v0.4.3 release transaction and closeout are complete.
 
 The completed bounded result includes:
 
@@ -2032,7 +2032,7 @@ v0.4.3 feature implementation complete
 → GitHub Release
 ```
 
-Implementation and final audit are complete, and the repository is at the release-preparation step. Tag creation, main/tag pushes, and GitHub Release publication have not yet been performed; v0.4.2 remains the latest released baseline until that transaction completes.
+The full closeout sequence is complete. v0.4.3 is released and is the current released and completed baseline.
 
 ---
 
@@ -2506,15 +2506,15 @@ Obsidian remains a supported presentation of the same Markdown workspace; it is 
 
 v0.4.1 is released and complete. Its feature implementation, final independent audit, release preparation, and release transaction are complete, and the runtime progress/activity contract and acceptance criteria in §29 were implemented and verified without changing the durable workflow model or canonical production path.
 
-v0.4.2 remains the latest completed released baseline (§24.10) until the v0.4.3 release transaction completes. v0.4.3 A1–A8 implementation, independent stage reviews, and final independent audit are complete. The §30 contract and §23.16 acceptance requirements remain in force along with the preserved workflow acceptance criteria. The repository is in v0.4.3 release preparation / closeout; v0.4.3 is not yet released.
+v0.4.3 is released and complete. Its A1–A8 implementation, independent stage reviews, final independent audit, release preparation, release transaction, and closeout are complete (§24.11). The §30 contract and §23.16 acceptance requirements remain in force along with the preserved workflow acceptance criteria.
 
 ---
 
 ## 28. Current Project Stage
 
-R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback, and v0.4.2 Provider Reliability, Coverage, and Explicit Cache Reuse are completed release history. v0.4.2 is the current released and completed baseline.
+R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback, v0.4.2 Provider Reliability, Coverage, and Explicit Cache Reuse, and v0.4.3 Retrieval Efficiency & Revision-Validated Provider Evidence are completed release history. v0.4.3 is the current released and completed baseline.
 
-The v0.4.2 release and closeout are complete. v0.4.3 Retrieval Efficiency & Revision-Validated Provider Evidence A1–A8 implementation, independent stage reviews, and final independent audit are complete. The current project stage is v0.4.3 release preparation / closeout, following §24.11; the release transaction has not yet occurred.
+The v0.4.3 release and closeout are complete, following §24.11. No subsequent product-development stage is established by this closeout.
 
 OpenAlex remains the primary discovery provider, Crossref the secondary discovery/bibliographic provider, and Semantic Scholar remains excluded. Automatic revision-validated Provider-state reuse is in scope for v0.4.3. Checkpoint resume, provider cursors/watermarks, late-index recovery, run history, scheduling/notification, and persistent execution databases remain excluded; the reconstructible Provider-state DB is not execution state.
 
@@ -2832,7 +2832,7 @@ Regression coverage must include at least:
 
 ## 30. v0.4.3 Retrieval Efficiency & Revision-Validated Provider Evidence Contract
 
-This is the authoritative current development contract. It supersedes conflicting released v0.4.2 retrieval/cache behavior; §24.10 and §6.8 retain that release history. A1–A8 implementation, independent stage reviews, and final independent audit are complete, with acceptance defined in §23.16. The repository is in v0.4.3 release preparation / closeout; v0.4.3 is not yet released.
+This is the authoritative v0.4.3 retrieval contract. It supersedes conflicting released v0.4.2 retrieval/cache behavior; §24.10 and §6.8 retain that release history. A1–A8 implementation, independent stage reviews, final independent audit, release preparation, release transaction, and closeout are complete, with acceptance defined in §23.16. v0.4.3 is released.
 
 ### 30.1 Live membership and preserved domain semantics
 
