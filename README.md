@@ -7,9 +7,9 @@ before local keyword filtering, canonicalizes retained papers and versions,
 safely updates durable Paper and Author Markdown, and exports kept papers.
 
 v0.4.2 remains the latest released version. The v0.4.3 Retrieval Efficiency &
-Revision-Validated Provider Evidence implementation (A1–A8) and independent
-stage reviews are complete. v0.4.3 remains unreleased; release preparation has
-not yet been performed and is a separate subsequent step.
+Revision-Validated Provider Evidence implementation (A1–A8), independent stage
+reviews, and final independent audit are complete. The repository is now in
+v0.4.3 release preparation / closeout; v0.4.3 has not yet been released.
 
 The development workflow automatically reuses revision-validated Provider
 state while establishing live candidate membership on every Run. It batches

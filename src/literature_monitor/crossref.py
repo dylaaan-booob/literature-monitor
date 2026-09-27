@@ -649,7 +649,7 @@ class CrossrefClient:
             url = f"{url}?{urlencode(query)}"
         headers = {
             "Accept": "application/json",
-            "User-Agent": "literature-monitor/0.4.2",
+            "User-Agent": "literature-monitor/0.4.3",
         }
 
         self._wait_for_rate_limit(
