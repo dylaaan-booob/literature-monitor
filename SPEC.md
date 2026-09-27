@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.4.3 is the current/latest released and completed baseline; v0.4.4 is in development and unreleased
+**Status:** Active; v0.4.3 remains the current/latest released and completed baseline until the v0.4.4 release transaction completes; v0.4.4 is unreleased and in release preparation / closeout
 
-**Stage:** v0.4.4 contract established / development; v0.4.3 released / closeout complete
+**Stage:** v0.4.4 release preparation / closeout; v0.4.3 released / closeout complete
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
@@ -1822,7 +1822,7 @@ v0.4.3 is accepted only when §30 is implemented and the following observable sc
 
 ### 23.17 v0.4.4 elapsed-aware pacing and partial Provider evidence
 
-v0.4.4 is accepted only when §31 is implemented and the following observable scenarios are demonstrated. These are development acceptance requirements, not a claim of completed implementation or review:
+The §31 implementation is complete. A1–A5 implementation and independent stage reviews are complete; the following observable scenarios have been demonstrated and passed the final independent audit. These acceptance requirements remain in force. v0.4.4 remains unreleased at release preparation / closeout:
 
 - Deterministic monotonic-clock checks show that Crossref response latency shorter than the known interval leaves only the remainder to wait, while latency equal to or longer than that interval leaves no proactive wait. Wall-clock changes have no effect. Interleaved singleton DOI and list/filter requests retain independent header-derived intervals/deadlines; missing or malformed headers preserve the corresponding last valid state without a pacing-only probe or successful-response failure.
 - Retry checks cover the existing maximum of three attempts, HTTP 429/5xx and supported transport/timeout failures, immediate failure for other HTTP 4xx, endpoint-specific 404 behavior, and the 1-second/2-second fallback. A known class interval is satisfied without adding redundant full pacing and retry sleeps. Actual proactive waits report `WAITING`; retries after real failures report `RETRYING` with unchanged Activity identity and stage values.
@@ -2051,6 +2051,36 @@ v0.4.3 feature implementation complete
 ```
 
 The full closeout sequence is complete. v0.4.3 is released and is the current released and completed baseline.
+
+### 24.12 v0.4.4 Crossref Elapsed-Aware Pacing & Partial Provider Evidence Semantics
+
+The A1–A5 implementation, independent stage reviews, and final independent audit are complete. The repository is now at v0.4.4 release preparation / closeout; v0.4.4 has not yet been released.
+
+The completed bounded result includes:
+
+- elapsed-aware process-local monotonic Crossref pacing, with network and processing elapsed time counting toward request spacing;
+- independent Provider-derived pacing state for singleton DOI and list/filter requests;
+- composition of retry and pacing deadlines without redundant full waits;
+- partial OpenAlex Provider evidence admission using valid Work identity, trustworthy Source attribution, and DOI-or-title;
+- Source attribution and severity corrections, preserving normal absence as `UNAVAILABLE` plus `WARNING` and genuine remote/identity failures as `FAILED` plus `ERROR`;
+- DOI-anchored Crossref supplementation of partial OpenAlex evidence and direct local matching for title-only evidence without an unconditional production missing-DOI warning;
+- post-consolidation unsearchable warnings and candidate exclusion protecting `NOT`/complement matching;
+- historical diagnostic compatibility with partial Provider evidence while preserving discovery → local filtering → enrichment order;
+- unchanged durable schemas, five workflow stages, canonical eligibility, and Paper/Author workflow ownership, without generic Provider field synthesis.
+
+The release closeout sequence is:
+
+```text
+v0.4.4 feature implementation complete
+→ final audit complete
+→ release-preparation commit
+→ tag
+→ push main
+→ push tag
+→ GitHub Release
+```
+
+After the release-preparation commit, only the first three steps of this sequence are complete. Tag creation, push main, push tag, and GitHub Release remain pending. v0.4.4 remains unreleased; v0.4.3 remains the current/latest released and completed baseline until that release transaction completes.
 
 ---
 
@@ -2526,7 +2556,7 @@ v0.4.1 is released and complete. Its feature implementation, final independent a
 
 v0.4.3 is released and complete. Its A1–A8 implementation, independent stage reviews, final independent audit, release preparation, release transaction, and closeout are complete (§24.11). The §30 contract and §23.16 acceptance requirements remain in force along with the preserved workflow acceptance criteria, subject only to the v0.4.4 supersede boundary in §31.1.
 
-v0.4.4 is in development and unreleased. Completion requires implementation of §31 and demonstration of §23.17 acceptance; establishing this contract alone does not establish implementation, acceptance, or release completion.
+v0.4.4 §31 implementation is complete, the §23.17 acceptance scenarios have been demonstrated, and the final independent audit passed. The repository is at release preparation / closeout (§24.12). v0.4.4 remains unreleased until the later release transaction completes.
 
 ---
 
@@ -2534,7 +2564,7 @@ v0.4.4 is in development and unreleased. Completion requires implementation of �
 
 R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback, v0.4.2 Provider Reliability, Coverage, and Explicit Cache Reuse, and v0.4.3 Retrieval Efficiency & Revision-Validated Provider Evidence are completed release history. v0.4.3 is the current released and completed baseline.
 
-The v0.4.3 release and closeout are complete, following §24.11. v0.4.4 Crossref Elapsed-Aware Pacing & Partial Provider Evidence Semantics is now the development stage under §31, with acceptance defined once in §23.17. v0.4.4 has not been released; v0.4.3 remains the latest released baseline.
+The v0.4.3 release and closeout are complete, following §24.11. v0.4.4 Crossref Elapsed-Aware Pacing & Partial Provider Evidence Semantics implementation under §31 and the final independent audit are complete; the §23.17 acceptance scenarios have been demonstrated. The current stage is v0.4.4 release preparation / closeout (§24.12). Its release transaction has not yet occurred; v0.4.4 remains unreleased and v0.4.3 remains the latest released baseline.
 
 OpenAlex remains the primary discovery provider, Crossref the secondary discovery/bibliographic provider, and Semantic Scholar remains excluded. Automatic revision-validated Provider-state reuse is in scope for v0.4.3. Checkpoint resume, provider cursors/watermarks, late-index recovery, run history, scheduling/notification, and persistent execution databases remain excluded; the reconstructible Provider-state DB is not execution state.
 
@@ -2982,7 +3012,7 @@ The scope exclusions in §4.2 remain in force. v0.4.3 additionally makes these b
 
 ## 31. v0.4.4 Crossref Elapsed-Aware Pacing & Partial Provider Evidence Semantics Contract
 
-This is the authoritative v0.4.4 development contract. v0.4.4 is unreleased; v0.4.3 remains the latest released and completed baseline. Acceptance is defined once in §23.17. Contract establishment does not claim implementation, review, acceptance, or release completion.
+This is the authoritative v0.4.4 contract. Its implementation and independent stage reviews are complete, the §23.17 acceptance scenarios have been demonstrated, and the final independent audit passed. Acceptance remains defined once in §23.17. The repository is at release preparation / closeout (§24.12). v0.4.4 remains unreleased; v0.4.3 remains the latest released and completed baseline until the later release transaction completes.
 
 ### 31.1 Authority and preserved release contracts
 
