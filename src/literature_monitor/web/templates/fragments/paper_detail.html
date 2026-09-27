@@ -1,4 +1,6 @@
-<section class="panel paper-detail" id="paper-detail">
+<section class="panel paper-detail" id="paper-detail"
+         data-active-view="{{ active_view }}"
+         data-selected-paper-id="{{ selected_paper.paper_id if selected_paper else '' }}">
   {% if selected_paper %}
     {% set paper = selected_paper %}
     <h2>{{ paper.title }}</h2>
@@ -49,31 +51,37 @@
     <div class="decision-actions">
       {% if paper.status.value == "candidate" %}
         <form method="post"
+              action="/papers/{{ paper.paper_id }}/keep"
               hx-post="/papers/{{ paper.paper_id }}/keep"
               hx-target="#workspace-root"
               hx-swap="outerHTML">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="expected_status" value="{{ paper.status.value }}">
           <input type="hidden" name="view" value="{{ active_view }}">
+          <input type="hidden" name="position" value="{{ selected_position }}">
           <button type="submit">Keep</button>
         </form>
         <form method="post"
+              action="/papers/{{ paper.paper_id }}/reject"
               hx-post="/papers/{{ paper.paper_id }}/reject"
               hx-target="#workspace-root"
               hx-swap="outerHTML">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="expected_status" value="{{ paper.status.value }}">
           <input type="hidden" name="view" value="{{ active_view }}">
+          <input type="hidden" name="position" value="{{ selected_position }}">
           <button type="submit" class="secondary">Reject</button>
         </form>
       {% elif paper.status.value == "kept" %}
         <form method="post"
+              action="/papers/{{ paper.paper_id }}/mark-in-zotero"
               hx-post="/papers/{{ paper.paper_id }}/mark-in-zotero"
               hx-target="#workspace-root"
               hx-swap="outerHTML">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="expected_status" value="{{ paper.status.value }}">
           <input type="hidden" name="view" value="{{ active_view }}">
+          <input type="hidden" name="position" value="{{ selected_position }}">
           <button type="submit">Mark in Zotero</button>
         </form>
       {% endif %}

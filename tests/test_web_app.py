@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -451,7 +452,7 @@ def test_unknown_paper_detail_is_safe_normal_fragment(
         response = client.get(f"/fragments/papers/{uuid4()}")
 
     assert response.status_code == 200
-    assert "Paper not found in the current workspace." in response.text
+    assert "Paper not found in the current view." in response.text
     assert "Traceback" not in response.text
 
 
@@ -579,9 +580,10 @@ def test_each_decision_route_calls_exact_application_action(
 
     monkeypatch.setattr(web_app, attribute, fake_action)
     app = create_app(tmp_path / "monitor.yaml")
+    view = "kept" if expected_status is WorkflowStatus.KEPT else "inbox"
 
     with TestClient(app, base_url="http://localhost") as client:
-        page = client.get("/", params={"paper": str(paper.paper_id)})
+        page = client.get("/", params={"paper": str(paper.paper_id), "view": view})
         csrf = csrf_from_html(page.text)
         response = client.post(
             f"/papers/{paper.paper_id}/{route_suffix}",
@@ -656,9 +658,179 @@ def test_state_conflict_renders_message_and_refreshed_disk_state(
 
     assert response.status_code == 200
     assert "Paper status changed on disk." in response.text
-    assert "Status" in response.text
-    assert "kept" in response.text
+    assert 'data-selected-paper-id=""' in response.text
+    assert 'aria-current="true"' not in response.text
     assert load_calls == 2
+
+
+def selected_id(html: str) -> str:
+    return re.search(r'data-selected-paper-id="([^"]*)"', html).group(1)
+
+
+@pytest.mark.parametrize("surface", ["/", "/fragments/workspace", "/fragments/papers"])
+@pytest.mark.parametrize("in_view", [False, True])
+def test_selection_is_current_view_only_and_detail_click_keeps_list_target(tmp_path, monkeypatch, surface, in_view):
+    candidate = make_paper(title="Current view Paper")
+    kept = make_paper(title="Other view Paper", status=WorkflowStatus.KEPT)
+    snapshot = WorkspaceSnapshot((candidate, kept), ())
+    monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
+    monkeypatch.setattr(web_app, "load_workspace", lambda output: snapshot)
+    requested = candidate if in_view else kept
+    detail_only = surface == "/fragments/papers"
+    route = f"{surface}/{requested.paper_id}" if detail_only else surface
+    with TestClient(create_app(tmp_path / "monitor.yaml"), base_url="http://localhost") as client:
+        text = client.get(route, params={"view": "inbox", "paper": str(requested.paper_id)}).text
+    assert selected_id(text) == (str(candidate.paper_id) if in_view else "")
+    assert "Other view Paper" not in text
+    if detail_only:
+        assert 'id="paper-list"' not in text
+        assert 'data-active-view="inbox"' in text
+    else:
+        assert text.count('aria-current="true"') == int(in_view)
+        assert f'href="/?view=inbox&paper={candidate.paper_id}"' in text
+        assert f'hx-get="/fragments/papers/{candidate.paper_id}?view=inbox"' in text
+        assert 'hx-target="#paper-detail"' in text
+        if in_view:
+            assert 'name="position" value="0"' in text
+
+
+@pytest.mark.parametrize("index,count,position,retained,expected", [
+    (1, 3, "1", False, "C"),
+    (2, 3, "2", False, "B"),
+    (0, 1, "0", False, None),
+    (1, 3, "999999", True, "B refreshed"),
+    (1, 3, "-7", False, "A"),
+    (1, 3, "999999999999999999999999999", False, "C"),
+    (1, 3, "malformed", False, "A"),
+    (1, 3, None, False, "A"),
+])
+def test_successful_decision_uses_refreshed_view_for_safe_neighbor_navigation(
+    tmp_path, monkeypatch, index, count, position, retained, expected,
+):
+    before = WorkspaceSnapshot(tuple(make_paper(title=label) for label in ("A", "B", "C")[:count]), ())
+    target = before.papers[index]
+    after = WorkspaceSnapshot(tuple(
+        replace(paper, title="B refreshed", status=WorkflowStatus.CANDIDATE)
+        if retained and paper.paper_id == target.paper_id else
+        replace(paper, status=WorkflowStatus.KEPT) if paper.paper_id == target.paper_id else paper
+        for paper in before.papers
+    ), ())
+    current = before
+    loads, calls = [], []
+    monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
+
+    def load(output):
+        loads.append(current)
+        return current
+
+    def action(output, paper_id, expected_status):
+        nonlocal current
+        calls.append((output, paper_id, expected_status))
+        current = after
+        return decision_result(paper_id, expected_status, resulting_status=WorkflowStatus.KEPT)
+
+    monkeypatch.setattr(web_app, "load_workspace", load)
+    monkeypatch.setattr(web_app, "keep_paper", action)
+    with TestClient(create_app(tmp_path / "monitor.yaml"), base_url="http://localhost") as client:
+        page = client.get("/", params={"paper": str(target.paper_id)})
+        form = {"csrf_token": csrf_from_html(page.text), "expected_status": "candidate", "view": "inbox"}
+        if position is not None:
+            form["position"] = position
+        response = client.post(f"/papers/{target.paper_id}/keep", data=form)
+    assert response.status_code == 200
+    assert calls == [(tmp_path, target.paper_id, WorkflowStatus.CANDIDATE)]
+    assert loads == [before, after]
+    selected = next((paper for paper in after.inbox if paper.title == expected), None)
+    assert selected_id(response.text) == (str(selected.paper_id) if selected else "")
+    assert response.text.count('aria-current="true"') == int(selected is not None)
+    assert f'data-selection-stepped="{"true" if selected and not retained else "false"}"' in response.text
+
+
+@pytest.mark.parametrize("outcome", [DecisionOutcome.STATE_CONFLICT, DecisionOutcome.IO_FAILURE])
+@pytest.mark.parametrize("retained", [False, True])
+def test_failed_decision_ignores_position_and_revalidates_original_uuid(tmp_path, monkeypatch, outcome, retained):
+    before = WorkspaceSnapshot(tuple(make_paper(title=label) for label in ("A", "B", "C")), ())
+    target = before.papers[1]
+    after = before if retained else WorkspaceSnapshot(tuple(
+        replace(paper, status=WorkflowStatus.KEPT) if paper.paper_id == target.paper_id else paper
+        for paper in before.papers
+    ), ())
+    current, calls = before, []
+    monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
+    monkeypatch.setattr(web_app, "load_workspace", lambda output: current)
+
+    def action(output, paper_id, expected_status):
+        nonlocal current
+        calls.append((output, paper_id, expected_status))
+        current = after
+        return decision_result(paper_id, expected_status, outcome=outcome, message="Expected decision failure")
+
+    monkeypatch.setattr(web_app, "keep_paper", action)
+    with TestClient(create_app(tmp_path / "monitor.yaml"), base_url="http://localhost") as client:
+        page = client.get("/", params={"paper": str(target.paper_id)})
+        text = client.post(f"/papers/{target.paper_id}/keep", data={
+            "csrf_token": csrf_from_html(page.text), "expected_status": "candidate", "view": "inbox", "position": "1",
+        }).text
+    assert calls == [(tmp_path, target.paper_id, WorkflowStatus.CANDIDATE)]
+    assert "Expected decision failure" in text
+    assert selected_id(text) == (str(target.paper_id) if retained else "")
+    assert 'data-selection-stepped="false"' in text
+
+
+@pytest.mark.parametrize("left_view", [False, True])
+def test_workspace_refresh_revalidates_transient_selected_uuid(tmp_path, monkeypatch, left_view):
+    paper = make_paper()
+    current = WorkspaceSnapshot((paper,), ())
+    monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
+    monkeypatch.setattr(web_app, "load_workspace", lambda output: current)
+    with TestClient(create_app(tmp_path / "monitor.yaml"), base_url="http://localhost") as client:
+        params = {"view": "inbox", "paper": str(paper.paper_id)}
+        assert selected_id(client.get("/", params=params).text) == str(paper.paper_id)
+        if left_view:
+            current = WorkspaceSnapshot((replace(paper, status=WorkflowStatus.KEPT),), ())
+        text = client.get("/fragments/workspace", params=params).text
+    assert selected_id(text) == ("" if left_view else str(paper.paper_id))
+    assert text.count('aria-current="true"') == int(not left_view)
+
+
+def test_workspace_pane_css_and_transient_selection_contract(tmp_path):
+    with TestClient(create_app(tmp_path / "monitor.yaml"), base_url="http://localhost") as client:
+        css = client.get("/static/app.css").text
+        js = client.get("/static/app.js").text
+    assert "@media (min-width: 761px)" in css
+    assert "height: var(--workspace-pane-height, auto)" in css
+    assert "overflow-y: auto" in css and '[aria-current="true"]' in css
+    mobile = css.split("@media (max-width: 760px)")[1]
+    assert "height: auto" in mobile and "overflow: visible" in mobile
+    assert "getBoundingClientRect().top" in js and "window.innerHeight" in js
+    assert "localStorage" not in js and "sessionStorage" not in js
+
+
+@pytest.mark.parametrize("failure", ["invalid_status", "config"])
+def test_pre_action_failure_has_no_neighbor_navigation_or_mutation(tmp_path, monkeypatch, failure):
+    target, peer = make_paper(title="Original"), make_paper(title="Peer")
+    current = WorkspaceSnapshot((target, peer), ())
+    monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
+    monkeypatch.setattr(web_app, "load_workspace", lambda output: current)
+    monkeypatch.setattr(web_app, "keep_paper", lambda *args: pytest.fail("invalid input must not mutate"))
+    with TestClient(create_app(tmp_path / "monitor.yaml"), base_url="http://localhost") as client:
+        page = client.get("/", params={"paper": str(target.paper_id)})
+        current = WorkspaceSnapshot((replace(target, status=WorkflowStatus.KEPT), peer), ())
+        if failure == "config":
+            def config_failed(path):
+                raise web_app.ConfigurationError("Configuration changed on disk")
+            monkeypatch.setattr(web_app, "load_config", config_failed)
+        response = client.post(f"/papers/{target.paper_id}/keep", data={
+            "csrf_token": csrf_from_html(page.text), "expected_status": "invalid",
+            "view": "inbox", "position": "0",
+        })
+    assert response.status_code == (400 if failure == "invalid_status" else 200)
+    if failure == "invalid_status":
+        assert selected_id(response.text) == ""
+    else:
+        assert "Configuration needs attention" in response.text
+        assert 'id="paper-detail"' not in response.text
+    assert 'data-selection-stepped="false"' in response.text
 
 
 @pytest.mark.parametrize(

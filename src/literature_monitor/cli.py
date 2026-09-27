@@ -45,6 +45,7 @@ from literature_monitor.date_range import (
     ResolvedDateRange,
     resolve_date_range,
 )
+from literature_monitor.diagnostics import RunDiagnostic, summarize_run_diagnostics
 from literature_monitor.keywords import (
     KeywordExpression,
     KeywordSyntaxError,
@@ -377,6 +378,22 @@ def _log_coverage_summary(
         )
 
 
+def _log_run_diagnostics(logger: logging.Logger, diagnostics: Sequence[RunDiagnostic]) -> None:
+    summaries = summarize_run_diagnostics(diagnostics)
+    if not summaries:
+        return
+    logger.info("Run diagnostics: %s", " · ".join(
+        f"{summary.kind.value} {summary.logical_groups} logical group"
+        + ("s" if summary.logical_groups != 1 else "") for summary in summaries
+    ))
+    for diagnostic in diagnostics:
+        context = []
+        if diagnostic.journal:
+            context.append(f"journal={diagnostic.journal}")
+        context.extend((f"records={','.join(diagnostic.record_ids)}", diagnostic.message))
+        logger.info("Diagnostic [%s] · %s", diagnostic.kind.value, " · ".join(context))
+
+
 def _log_canonicalization_summary(
     logger: logging.Logger,
     result: _CanonicalCoreResult,
@@ -398,6 +415,7 @@ def _log_canonicalization_summary(
         stats.provider_issues,
     )
     _log_coverage_summary(logger, result)
+    _log_run_diagnostics(logger, result.diagnostics)
 
 
 def _log_materialization_summary(
@@ -429,6 +447,7 @@ def _log_materialization_summary(
         stats.provider_issues,
     )
     _log_coverage_summary(logger, result)
+    _log_run_diagnostics(logger, result.diagnostics)
 
 
 def _match_local_search(

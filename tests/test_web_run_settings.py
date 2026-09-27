@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import re
+from html import escape
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -35,6 +36,7 @@ from literature_monitor.application.settings import (
 from literature_monitor.config import JournalConfig, LogLevel, parse_monitor_definition
 from literature_monitor.coverage import CoverageComponent, CoverageStatus, CoverageUnit
 from literature_monitor.date_range import DateRangeSpec, ResolvedDateRange
+from literature_monitor.diagnostics import RunDiagnostic, RunDiagnosticKind
 from literature_monitor.progress import (
     PROGRESS_STAGES,
     ActivityKind,
@@ -1038,6 +1040,73 @@ def test_finished_run_result_renders_summary_and_issues(tmp_path: Path) -> None:
         in response.text
     )
     assert "Crossref supplement coverage: 1/1 complete" in response.text
+    assert "Run diagnostics" not in response.text
+
+
+@pytest.mark.parametrize("with_issues", [False, True])
+def test_finished_run_diagnostics_are_separate_logical_groups_with_context(tmp_path, with_issues):
+    diagnostics = (
+        RunDiagnostic(RunDiagnosticKind.REPEATED_TITLE_SEPARATION, "Independent works retained", ("W1", "W2", "W3")),
+        RunDiagnostic(RunDiagnosticKind.NON_CANDIDATE_EXCLUSION, "Issue volume excluded", ("W4", "10.5555/a", "W5"), "Biometrics"),
+        RunDiagnostic(RunDiagnosticKind.SCOPE_DISPUTE, "Scope unresolved context", ("W6", "10.5555/b"), "Biometrics"),
+        RunDiagnostic(RunDiagnosticKind.NON_CANDIDATE_EXCLUSION, "Another volume excluded", ("W7",)),
+    )
+    result = replace(make_run_result(), diagnostics=diagnostics)
+    if not with_issues:
+        result = replace(result, warnings=(), errors=(), outcome=RunOutcome.COMPLETED,
+                         coverage=(CoverageUnit("openalex", CoverageComponent.OPENALEX_DISCOVERY,
+                                                CoverageStatus.COMPLETE, journal="Biometrics"),))
+    app = create_app(tmp_path / "monitor.yaml")
+    app.state.run_coordinator = StubCoordinator(snapshot=finished_snapshot(result=result))
+    with TestClient(app, base_url="http://localhost") as client:
+        for _ in range(2):
+            response = client.get("/fragments/run")
+            assert response.status_code == 200
+            text = response.text
+            assert f"Run finished · {result.outcome.value}" in text
+            assert "Diagnostics: 4 logical groups" in text
+            labels = ("non_candidate_exclusion · 2 logical groups", "scope_dispute · 1 logical group",
+                      "repeated_title_separation · 1 logical group")
+            assert all(label in text for label in labels)
+            assert text.index(labels[0]) < text.index(labels[1]) < text.index(labels[2])
+            assert "conflicting_doi_separation" not in text
+            details = re.search(r"<summary>Run diagnostics</summary>(.*?)</details>", text, re.S)
+            assert details is not None
+            diagnostic_context = details.group(1)
+            assert "journal=Biometrics" in diagnostic_context
+            assert "records=W4, 10.5555/a, W5" in diagnostic_context
+            assert "Scope unresolved context" in diagnostic_context
+            assert "Warning ·" not in diagnostic_context and "Error ·" not in diagnostic_context
+            assert ("Run issues" in text) is with_issues
+            assert ("<span>1 warning</span>" in text) is with_issues
+            assert ("<span>1 error</span>" in text) is with_issues
+            if with_issues:
+                issues = re.search(r"<summary>Run issues</summary>(.*?)</details>", text, re.S).group(1)
+                assert "one source warning" in issues and "one source error" in issues
+                assert all(d.message not in issues and d.kind.value not in issues for d in diagnostics)
+            else:
+                assert "Warning ·" not in text and "Error ·" not in text
+                assert "OpenAlex coverage: 1/1 complete" in text
+    assert app.state.run_coordinator.current_snapshot.result is result
+
+
+def test_run_diagnostic_context_uses_normal_template_escaping(tmp_path):
+    diagnostic = RunDiagnostic(
+        RunDiagnosticKind.CONFLICTING_DOI_SEPARATION,
+        "<script>alert(1)</script>",
+        ("<img src=x onerror=alert(1)>", "W<2>&3"),
+        "<b>Biometrics</b> & Other",
+    )
+    result = replace(make_run_result(), warnings=(), errors=(), outcome=RunOutcome.COMPLETED,
+                     diagnostics=(diagnostic,))
+    app = create_app(tmp_path / "monitor.yaml")
+    app.state.run_coordinator = StubCoordinator(snapshot=finished_snapshot(result=result))
+    with TestClient(app, base_url="http://localhost") as client:
+        text = client.get("/fragments/run").text
+    assert "Diagnostics: 1 logical group" in text
+    assert "conflicting_doi_separation · 1 logical group" in text
+    for value in (diagnostic.message, diagnostic.journal, *diagnostic.record_ids):
+        assert value not in text and escape(value) in text
 
 
 def test_unexpected_run_error_renders_only_safe_coordinator_text(tmp_path: Path) -> None:

@@ -11,6 +11,10 @@ from datetime import date
 from enum import Enum
 from pathlib import Path
 
+from literature_monitor.application.candidate_eligibility import (
+    filter_candidate_evidence,
+    scope_dispute_diagnostic,
+)
 from literature_monitor.application.crossref_retrieval import CrossrefRetrieval
 from literature_monitor.application.openalex_retrieval import hydrate_retained_openalex_versions
 from literature_monitor.application.provider_state import (
@@ -30,6 +34,7 @@ from literature_monitor.canonicalize import (
     canonicalize_records,
     consolidate_evidence,
 )
+from literature_monitor.diagnostics import RunDiagnostic, RunDiagnosticSummary, summarize_run_diagnostics
 from literature_monitor.config import (
     ConfigurationError,
     JournalConfig,
@@ -103,6 +108,7 @@ class MonitorIssueComponent(str, Enum):
     OPENALEX = "openalex"
     CROSSREF_DISCOVERY = "crossref_discovery"
     CROSSREF_SUPPLEMENT = "crossref_supplement"
+    CANDIDATE_ELIGIBILITY = "candidate_eligibility"
     CONSOLIDATION = "consolidation"
     CANONICALIZATION = "canonicalization"
     MATERIALIZATION = "materialization"
@@ -179,10 +185,15 @@ class RunResult:
     resolved_sources: tuple[ResolvedSource, ...] = ()
     log_level: LogLevel | None = None
     state_usage: ProviderStateUsage = ProviderStateUsage()
+    diagnostics: tuple[RunDiagnostic, ...] = ()
 
     @property
     def coverage_summary(self) -> tuple[CoverageSummary, ...]:
         return summarize_coverage(self.coverage)
+
+    @property
+    def diagnostic_summary(self) -> tuple[RunDiagnosticSummary, ...]:
+        return summarize_run_diagnostics(self.diagnostics)
 
 
 @dataclass(frozen=True)
@@ -218,6 +229,7 @@ class _CanonicalCoreResult:
     coverage: tuple[CoverageUnit, ...] = ()
     pending_state: ProviderState = ProviderState()
     state_usage: ProviderStateUsage = ProviderStateUsage()
+    diagnostics: tuple[RunDiagnostic, ...] = ()
 
     @property
     def coverage_summary(self) -> tuple[CoverageSummary, ...]:
@@ -574,7 +586,11 @@ def _execute_canonical_core(
         crossref = discovery.discovery
         _emit_progress(progress_callback, ProgressStage.COMBINING_METADATA)
         retrieval = crossref_execution.supplement(openalex.records)
-        evidence = assemble_live_provider_evidence(openalex.records, crossref.records, retrieval.evidence)
+        candidates = filter_candidate_evidence(openalex, crossref, retrieval, prepared.journals)
+        diagnostics = list(candidates.diagnostics)
+        evidence = assemble_live_provider_evidence(
+            candidates.openalex_records, candidates.crossref_records, candidates.supplement_evidence,
+        )
         coverage = (*openalex.coverage, *crossref.coverage, *retrieval.coverage)
         _emit_activity(
             progress_callback,
@@ -587,6 +603,7 @@ def _execute_canonical_core(
             ),
         )
         consolidation = consolidate_evidence(evidence)
+        diagnostics.extend(consolidation.diagnostics)
         _emit_activity(
             progress_callback,
             ActivityUpdate(
@@ -615,23 +632,27 @@ def _execute_canonical_core(
         _emit_progress(progress_callback, ProgressStage.MATCHING_LITERATURE)
         searchable_clusters = []
         for cluster in consolidation.clusters:
+            eligibility = candidates.cluster_eligibility(cluster.evidence)
             projection = build_searchable_projection(cluster.evidence)
             if projection.titles or projection.author_keywords or projection.abstracts:
-                searchable_clusters.append((cluster, projection))
+                searchable_clusters.append((cluster, projection, eligibility))
             else:
-                issues.append(
-                    MonitorIssue(
-                        severity=MonitorIssueSeverity.WARNING,
-                        component=MonitorIssueComponent.SEARCH,
-                        stage="unsearchable",
-                        message="consolidated evidence has no searchable title, author keywords, or abstract",
-                        record_ids=tuple(sorted({
-                            record.provenance.record_id for record in cluster.evidence
-                        })),
+                if eligibility.has_eligible:
+                    issues.append(
+                        MonitorIssue(
+                            severity=MonitorIssueSeverity.WARNING,
+                            component=MonitorIssueComponent.SEARCH,
+                            stage="unsearchable",
+                            message="consolidated evidence has no searchable title, author keywords, or abstract",
+                            record_ids=tuple(sorted({
+                                record.provenance.record_id for record in cluster.evidence
+                            })),
+                        )
                     )
-                )
+                if eligibility.has_disputed:
+                    diagnostics.append(scope_dispute_diagnostic(cluster.evidence))
         projections = tuple(
-            projection for _cluster, projection in searchable_clusters
+            projection for _cluster, projection, _eligibility in searchable_clusters
         )
         _emit_activity(
             progress_callback,
@@ -673,6 +694,7 @@ def _execute_canonical_core(
                     ),
                 ),
                 coverage=coverage,
+                diagnostics=tuple(diagnostics),
             )
         except SearchBackendError as error:
             issue = _search_issue(
@@ -702,6 +724,7 @@ def _execute_canonical_core(
                     ),
                 ),
                 coverage=coverage,
+                diagnostics=tuple(diagnostics),
             )
 
         _emit_activity(
@@ -714,11 +737,21 @@ def _execute_canonical_core(
                 detail=f"{sum(matches)} matched clusters",
             ),
         )
-        retained_clusters = tuple(
-            cluster
-            for (cluster, _projection), matched in zip(searchable_clusters, matches, strict=True)
-            if matched
-        )
+        retained_clusters = []
+        for (cluster, _projection, eligibility), matched in zip(searchable_clusters, matches, strict=True):
+            if eligibility.has_disputed:
+                if matched and not eligibility.has_strong_eligible:
+                    issues.append(MonitorIssue(
+                        severity=MonitorIssueSeverity.WARNING,
+                        component=MonitorIssueComponent.CANDIDATE_ELIGIBILITY,
+                        stage="scope_dispute",
+                        message="topic-matched candidate scope is unresolved without strong eligible evidence",
+                        record_ids=tuple(sorted({record.provenance.record_id for record in cluster.evidence})),
+                    ))
+                else:
+                    diagnostics.append(scope_dispute_diagnostic(cluster.evidence))
+            if matched:
+                retained_clusters.append(cluster)
         retained_evidence = tuple(
             evidence
             for cluster in retained_clusters
@@ -807,6 +840,7 @@ def _execute_canonical_core(
             coverage=coverage,
             pending_state=ProviderState(crossref_execution.pending_changes, versions.pending_changes),
             state_usage=usage,
+            diagnostics=tuple(diagnostics),
         )
 
 
@@ -831,6 +865,7 @@ def _materialize_canonical_result(
             statistics=core.statistics,
             coverage=core.coverage,
             state_usage=core.state_usage,
+            diagnostics=core.diagnostics,
             resolved_sources=core.resolved_sources,
             log_level=core.log_level,
         )
@@ -865,6 +900,7 @@ def _materialize_canonical_result(
         ),
         coverage=core.coverage,
         state_usage=core.state_usage,
+        diagnostics=core.diagnostics,
         resolved_sources=core.resolved_sources,
         log_level=core.log_level,
     )

@@ -16,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from literature_monitor.application.decisions import (
+    DecisionOutcome,
     DecisionResult,
     keep_paper,
     mark_paper_in_zotero,
@@ -108,13 +109,13 @@ def _view_papers(
 
 
 def _find_paper(
-    workspace: WorkspaceSnapshot | None,
+    papers: tuple[WorkspacePaper, ...],
     paper_id: UUID | None,
 ) -> WorkspacePaper | None:
-    if workspace is None or paper_id is None:
+    if paper_id is None:
         return None
     return next(
-        (paper for paper in workspace.papers if paper.paper_id == paper_id),
+        (paper for paper in papers if paper.paper_id == paper_id),
         None,
     )
 
@@ -128,10 +129,23 @@ def _workspace_context(
     selected_paper_id: UUID | None = None,
     decision_result: DecisionResult | None = None,
     decision_message: str | None = None,
+    navigation_position: str | None = None,
 ) -> dict[str, object]:
     workspace, config_error = _workspace_state(config_path)
     selected_view, view_papers = _view_papers(workspace, view)
-    selected_paper = _find_paper(workspace, selected_paper_id)
+    selected_paper = _find_paper(view_papers, selected_paper_id)
+    selection_stepped = False
+    if (selected_paper is None and view_papers and decision_result is not None
+            and decision_result.outcome is DecisionOutcome.UPDATED):
+        # 位置只影响成功后的展示；mutation 始终由 UUID 和 expected-status 决定。
+        try:
+            position = int(navigation_position) if navigation_position is not None else 0
+        except ValueError:
+            position = 0
+        selected_paper = view_papers[max(0, min(position, len(view_papers) - 1))]
+        selection_stepped = True
+    selected_position = next((index for index, paper in enumerate(view_papers)
+                              if paper == selected_paper), None)
     return {
         "request": request,
         "csrf_token": csrf_token,
@@ -140,6 +154,8 @@ def _workspace_context(
         "active_view": selected_view,
         "papers": view_papers,
         "selected_paper": selected_paper,
+        "selected_position": selected_position,
+        "selection_stepped": selection_stepped,
         "decision_result": decision_result,
         "decision_message": decision_message,
     }
@@ -494,7 +510,7 @@ def create_app(config_path: Path) -> FastAPI:
             selected_paper_id=paper_id,
         )
         if context["selected_paper"] is None:
-            context["detail_message"] = "Paper not found in the current workspace."
+            context["detail_message"] = "Paper not found in the current view."
         return templates.TemplateResponse(
             request,
             "fragments/paper_detail.html",
@@ -530,6 +546,7 @@ def create_app(config_path: Path) -> FastAPI:
         expected_status_value: str | None,
         submitted_csrf: str | None,
         view: str,
+        navigation_position: str | None,
         action: Callable[[Path, UUID, WorkflowStatus], DecisionResult],
     ) -> HTMLResponse:
         if not _csrf_valid(submitted_csrf, csrf_token):
@@ -580,6 +597,7 @@ def create_app(config_path: Path) -> FastAPI:
             view=view,
             selected_paper_id=paper_id,
             decision_result=result,
+            navigation_position=navigation_position,
         )
         return templates.TemplateResponse(
             request,
@@ -594,6 +612,7 @@ def create_app(config_path: Path) -> FastAPI:
         expected_status: Annotated[str | None, Form()] = None,
         csrf_token_value: Annotated[str | None, Form(alias="csrf_token")] = None,
         view: Annotated[str, Form()] = "inbox",
+        position: Annotated[str | None, Form()] = None,
     ) -> HTMLResponse:
         return apply_decision(
             request,
@@ -601,6 +620,7 @@ def create_app(config_path: Path) -> FastAPI:
             expected_status_value=expected_status,
             submitted_csrf=csrf_token_value,
             view=view,
+            navigation_position=position,
             action=keep_paper,
         )
 
@@ -611,6 +631,7 @@ def create_app(config_path: Path) -> FastAPI:
         expected_status: Annotated[str | None, Form()] = None,
         csrf_token_value: Annotated[str | None, Form(alias="csrf_token")] = None,
         view: Annotated[str, Form()] = "inbox",
+        position: Annotated[str | None, Form()] = None,
     ) -> HTMLResponse:
         return apply_decision(
             request,
@@ -618,6 +639,7 @@ def create_app(config_path: Path) -> FastAPI:
             expected_status_value=expected_status,
             submitted_csrf=csrf_token_value,
             view=view,
+            navigation_position=position,
             action=reject_paper,
         )
 
@@ -628,6 +650,7 @@ def create_app(config_path: Path) -> FastAPI:
         expected_status: Annotated[str | None, Form()] = None,
         csrf_token_value: Annotated[str | None, Form(alias="csrf_token")] = None,
         view: Annotated[str, Form()] = "kept",
+        position: Annotated[str | None, Form()] = None,
     ) -> HTMLResponse:
         return apply_decision(
             request,
@@ -635,6 +658,7 @@ def create_app(config_path: Path) -> FastAPI:
             expected_status_value=expected_status,
             submitted_csrf=csrf_token_value,
             view=view,
+            navigation_position=position,
             action=mark_paper_in_zotero,
         )
 

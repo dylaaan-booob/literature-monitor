@@ -1834,6 +1834,31 @@ The §31 implementation is complete. A1–A5 implementation and independent stag
 - Tolerable ingestion-time sparsity alone emits no missing-field RunIssues; genuine warnings/errors, including the post-consolidation unsearchable and `insufficient_metadata` warnings above, follow the existing `RunOutcome` precedence without Provider-specific exceptions. Historical `openalex-filter` and `crossref-enrich` diagnostics accept partial OpenAlex evidence/search projections while preserving their historical stage order and diagnostic role.
 - Compatibility checks preserve Provider-state schema and persistence, Crossref revision reuse/manifest/alias/semantic-hash behavior, Paper/Author Markdown and monitor YAML schemas, the five ProgressStages, and inert `provider-cache.json` bytes. New last-run files remain schema v2; historical v1/v2 snapshots display their recorded outcomes without reinterpretation under the new issue-severity policy. Existing workflow preservation and unaffected §23.16 acceptance remain applicable.
 
+### 23.18 v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace
+
+v0.4.5 is the active development stage. The following are required observable acceptance scenarios for the §32 contract, pending implementation and verification; they are not completed acceptance, final-audit, or release claims:
+
+- A Crossref `journal-issue` is `INELIGIBLE` before topic matching, including with a target ISSN or an empty searchable projection. It creates neither a candidate nor an `unsearchable` warning. OpenAlex `paratext` or `book-chapter` misclassification does not veto exact Crossref `journal-article` evidence with a target ISSN.
+- An explicit non-journal Crossref type without a target ISSN is excluded even when its container name equals the configured journal name. `other` or missing Crossref type is `SCOPE_DISPUTED`; `journal-article` with explicit non-target ISSNs is also disputed. A `journal-article` without ISSNs may use strict configured/resolved journal-name equality as weak venue support, never as an override for nonmatching ISSNs.
+- Crossref supplement `UNAVAILABLE` is authoritative Crossref absence and uses OpenAlex `primary_location.is_published`: true → `ELIGIBLE`, false → `INELIGIBLE`, missing/invalid/unknown → `SCOPE_DISPUTED`, without unconditional exclusion. Crossref `FAILED` is an execution failure: true → `ELIGIBLE`, false → `SCOPE_DISPUTED`, missing/invalid/unknown → `SCOPE_DISPUTED`; `is_published=false` alone cannot exclude the candidate, and the existing Provider execution error remains. DOI-less OpenAlex evidence independently uses true → `ELIGIBLE`, false → `INELIGIBLE`, missing/invalid/unknown → `SCOPE_DISPUTED`, without manufacturing Crossref coverage. These eligibility decisions do not change the existing supplementation coverage/status meanings.
+- Alias supplementation evaluates the exact prime record against the OpenAlex anchor through `CrossrefSupplementUnit.requested_doi` / `anchors`, preserving requested-DOI coverage and prime-DOI evidence/state identity. The prime record's eligibility applies to the requesting anchor even when the two DOIs differ.
+- `INELIGIBLE` evidence never enters `assemble_live_provider_evidence`, consolidation, matching, canonicalization, or retained version hydration. Exclusion leaves retrieval coverage, Provider-state usage reporting, and otherwise valid acquired-record persistence unchanged.
+- Unmatched disputed evidence produces only a diagnostic. A matched disputed cluster with no strong eligible evidence produces a Candidate Eligibility warning; a matching cluster with strong eligible evidence retains the dispute as a diagnostic without that warning. Unsearchable eligible evidence and insufficient matched canonical metadata retain their genuine warnings.
+- Author identity fallback distinguishes `MATCH`, `INCONCLUSIVE`, and `CONFLICT`. Same normalized names, count, and sequence with a one-sided ORCID or OpenAlex author ID do not automatically conflict; missing/inadequate evidence stays inconclusive and contradictory comparable IDs conflict. Title fallback merges only on `MATCH`.
+- Blocked title fallback and refusal to merge conflicting DOI components leave the work identities separate and produce typed consolidation diagnostics counted once per logical group, rather than pairwise Run warnings. Genuine snapshot identifier conflicts and material metadata conflicts remain warnings/errors.
+- Once DOI or equivalent high-confidence evidence establishes same-work identity, initials/full given names, name display order, period/whitespace, and Unicode hyphen differences can compare equivalent without changing author sequence or migrating representative display names. Nonconflicting identifiers can enrich the representative; conflicting identifiers cannot be silently replaced.
+- Deterministic abstract normalization treats equivalent HTML/JATS, Unicode, whitespace, dash/punctuation, and structural section-label representations equally. A real body-content difference still warns; no fuzzy, embedding, or LLM similarity is used.
+- An otherwise clean Run containing only diagnostics returns `COMPLETED`. Real warnings/errors retain `ERROR → COMPLETED_WITH_ERRORS`, else `WARNING → COMPLETED_WITH_WARNINGS`, else `COMPLETED`, and existing CLI exit semantics. CLI/Web display diagnostics separately; diagnostics are absent from `last-run.json`, Paper/Author Markdown, monitor YAML, and durable Provider state.
+- A valid logical schema-v1 Provider-state DB is validated with the v1 semantic-hash algorithm, converted to current v2 state in memory, and immediately reusable after live revision validation in that same Run; it does not force a cold start or mutate the DB during reading.
+- At the normal production persistence boundary, one transaction recomputes every historical Crossref semantic hash with `work_type`, updates logical schema metadata to v2, and writes current pending state. Out-of-window Crossref and OpenAlex rows survive, and unchanged `record_json` need not be rewritten. SQLite layout and both Provider serialization versions remain unchanged.
+- A migration/write failure rolls back the whole transaction, leaving the original v1 state readable and reusable by a later Run. Completed Paper/Author materialization survives and a Provider-state persistence warning is reported. Warning/error production completions reaching the boundary can migrate; `INVALID_CONFIGURATION`, diagnostics, `validate`, `canonicalize`, and legacy/diagnostic `materialize` do not migrate or acquire new state access.
+- At desktop width, the list and detail panes have equal, viewport-bounded height and independent vertical scrolling. Selection has a visible active state; clicking another Paper updates detail and preserves list scroll. Workspace replacement restores the list's current scroll neighborhood without durable frontend state.
+- After a successful decision removes the selected Paper from the active view, selection prefers the next Paper at its former position, then the preceding Paper; an empty view shows empty detail. A Paper that remains in the view stays selected. Every rendered selection belongs to the current active view, including after view switches or refreshes.
+- A failed decision, state conflict, or I/O failure displays refreshed real disk state and the failure, without reporting successful neighbor navigation. Out-of-range navigation positions are clamped and never influence decision authorization, UUID validation, or expected-status checks.
+- At viewport width ≤760px, the workspace returns to ordinary single-column document flow, without desktop pane-height constraints or nested pane scrolling. Both list and detail remain reachable through page scrolling.
+- Existing CSRF, compare-before-replace, Markdown ownership/preservation, UUID identity, Zotero, retrieval coverage, revision reuse/alias behavior, five-stage progress, inert legacy cache, and historical last-run compatibility continue to hold within §32.1's narrow supersede boundary.
+- Final acceptance requires the full automated suite plus manual desktop and mobile Web smoke demonstrating scrolling, active selection, view membership, successful decisions, refreshed failure states, empty views, and scroll-neighborhood restoration. These checks remain pending for this development contract.
+
 ---
 
 ## 24. Suggested Implementation Sequence
@@ -2564,7 +2589,9 @@ v0.4.4 is released and complete. Its §31 implementation and §23.17 acceptance 
 
 R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback, v0.4.2 Provider Reliability, Coverage, and Explicit Cache Reuse, v0.4.3 Retrieval Efficiency & Revision-Validated Provider Evidence, and v0.4.4 Crossref Elapsed-Aware Pacing & Partial Provider Evidence Semantics are completed release history. v0.4.4 is the current released and completed baseline.
 
-The v0.4.4 release and closeout are complete, following §24.12. Its §31 implementation, independent stage reviews, and final independent audit are complete; the §23.17 acceptance scenarios have been demonstrated. No subsequent product-development stage is established by this closeout.
+The v0.4.4 release and closeout are complete, following §24.12. Its §31 implementation, independent stage reviews, and final independent audit are complete; the §23.17 acceptance scenarios have been demonstrated.
+
+v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace is now the active development stage. §32 is its authoritative development contract and §23.18 defines its pending acceptance. Implementation, automated verification, manual Web smoke, independent reviews, final audit, and release work remain pending. v0.4.5 is not complete, audited, released, or tagged; the released baseline and package version remain v0.4.4 / `0.4.4`.
 
 OpenAlex remains the primary discovery provider, Crossref the secondary discovery/bibliographic provider, and Semantic Scholar remains excluded. Automatic revision-validated Provider-state reuse is in scope for v0.4.3. Checkpoint resume, provider cursors/watermarks, late-index recovery, run history, scheduling/notification, and persistent execution databases remain excluded; the reconstructible Provider-state DB is not execution state.
 
@@ -3122,3 +3149,150 @@ The existing §4.2 and §30.11 scope exclusions remain in force. v0.4.4 addition
 - last-run schema or Provider-state schema upgrades;
 - release transaction, tag creation, or push as part of this development contract;
 - release version or User-Agent bumps during implementation.
+
+---
+
+## 32. v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace Contract
+
+This is the authoritative v0.4.5 development contract and the source of truth for subsequent bounded implementation tasks. Acceptance is defined in §23.18 and remains pending; this section establishes requirements, not implementation, test, audit, or release completion.
+
+### 32.1 Authority and supersede boundary
+
+§§30–31 remain intact as historical release contracts. v0.4.5 supersedes only conflicting clauses concerning:
+
+- candidate eligibility, warning classification, and Provider-state semantics in §§31.5–31.6;
+- the Crossref semantic-hash contract in §30.8, for consumption of `work_type` and logical schema-v2 migration;
+- older conservative title-fallback behavior that emits Run warnings merely because a merge is refused;
+- Web acceptance/UI behavior that conflicts with the desktop master-detail, selection, scrolling, and mobile flow specified in §32.6.
+
+All unaffected v0.4.4/v0.4.3 contracts continue to apply: journal/publication-date retrieval, coverage and provider failure isolation, elapsed-aware pacing/retries, live revision validation and reuse, alias identities, Provider transport/concurrency, Markdown ownership, human decisions/notes, internal UUIDs, Zotero, five-stage/per-source progress, and historical last-run compatibility. Historical version-specific exclusions describe those versions; only the explicitly scoped Provider-state logical schema upgrade is introduced here. There is no general permission to expand retrieval, taxonomy, workflow, or persistence scope.
+
+### 32.2 Candidate eligibility boundary and evidence
+
+Candidate eligibility is transient pipeline state with exactly three values: `ELIGIBLE`, `INELIGIBLE`, and `SCOPE_DISPUTED`. It is evaluated after current Crossref supplementation completes and before `assemble_live_provider_evidence` / evidence consolidation. It is separate from Provider retrieval validity, publication-date membership, and the canonical title + journal + at least one author invariant in §9.2.
+
+Downstream eligibility filtering does not rewrite retrieval coverage, turn successful retrieval into failure, reduce Provider-state usage counts for acquired/reused evidence, or prevent otherwise valid acquired Provider records from being persisted under the existing production boundary. An ineligible current record may be stored as reconstructible Provider evidence, but historical state alone still cannot create candidates.
+
+OpenAlex `type` has no veto and is not an allow/deny list. Normalization additionally carries `primary_location.is_published` as true, false, or unknown; missing, malformed, or non-boolean values are unknown, without truthiness coercion. This evidence is transient and explicitly excluded from durable Provider state, `ProviderWorkEvidence`, Paper/Author Markdown, and existing diagnostic JSON surfaces. It must remain available to the eligibility boundary without extending those serialized representations. Current Source attribution and partial-evidence validation in §§31.3–31.4 remain mandatory.
+
+The exact current Crossref record controls type/venue classification. Target ISSN means an explicitly matching normalized ISSN/EISSN for the configured/resolved journal associated with the current anchor; matching an unrelated whitelist journal is not sufficient. A target match among supplied ISSNs is support; nonempty ISSNs with no target match are explicit non-target evidence. A configured/resolved journal-name fallback uses strict normalized equality and is available only where specified below.
+
+| Exact Crossref evidence | Eligibility |
+| --- | --- |
+| `journal-issue`, regardless of ISSN, name, or OpenAlex type/publication flag | `INELIGIBLE`. An issue/container is not an article candidate. |
+| `journal-article` with a target ISSN | `ELIGIBLE`, with strong eligible evidence. This overrides an OpenAlex `paratext` / `book-chapter` label or contradictory publication flag for this anchor. |
+| `journal-article` with explicit ISSNs but none matching the target | `SCOPE_DISPUTED`; container-name equality cannot override the ISSNs. |
+| `journal-article` without usable ISSNs, with configured/resolved journal-name equality | `ELIGIBLE`, with weak venue support. |
+| `journal-article` without usable ISSNs and without that name support | `SCOPE_DISPUTED`. |
+| `other` or missing/unusable type, with or without venue support | `SCOPE_DISPUTED`. |
+| Any other explicit non-journal type without a target ISSN | `INELIGIBLE`; a matching journal/container name cannot rescue it. |
+| Any other explicit non-journal type with a target ISSN | `SCOPE_DISPUTED` because type and venue evidence disagree. |
+
+This is a bounded product rule, not a publication-taxonomy framework. Crossref discovery still uses the existing live journal/date manifest without a `type:journal-article` filter; retrieval must retain the evidence needed for this downstream decision.
+
+### 32.3 Supplement absence, publication fallback, and disputed matching
+
+For DOI-anchored OpenAlex evidence, successful supplementation applies §32.2 to the exact returned record. When no exact record is available, distinguish authoritative Crossref absence, execution failure, and DOI-less evidence as follows. A missing/unresolved supplement verdict without exact evidence must not be fabricated as `UNAVAILABLE`; absent applicable publication evidence leaves scope disputed.
+
+Crossref supplement `UNAVAILABLE` is authoritative Crossref absence, not an execution failure or unconditional exclusion. Use OpenAlex publication evidence:
+
+| OpenAlex `primary_location.is_published` | Eligibility |
+| --- | --- |
+| true | `ELIGIBLE` under the already validated target Source attribution. |
+| false | `INELIGIBLE`. |
+| missing / invalid / unknown | `SCOPE_DISPUTED`. |
+
+Crossref supplement `FAILED` is execution failure and establishes neither authoritative absence nor a trustworthy type/venue verdict. Retain the existing Provider execution error; a failed lookup cannot exclude a candidate solely because OpenAlex reports `is_published=false`:
+
+| OpenAlex `primary_location.is_published` | Eligibility |
+| --- | --- |
+| true | `ELIGIBLE` under the already validated target Source attribution. |
+| false | `SCOPE_DISPUTED`. |
+| missing / invalid / unknown | `SCOPE_DISPUTED`. |
+
+DOI-less OpenAlex evidence has no Crossref DOI lookup and independently uses its original publication mapping:
+
+| OpenAlex `primary_location.is_published` | Eligibility |
+| --- | --- |
+| true | `ELIGIBLE` under the already validated target Source attribution. |
+| false | `INELIGIBLE`. |
+| missing / invalid / unknown | `SCOPE_DISPUTED`. |
+
+A DOI-less record must not invent a supplement coverage unit. These eligibility decisions do not change the existing supplementation coverage/status meanings of `UNAVAILABLE` or `FAILED`. A `FAILED` lookup remains an error even if independent OpenAlex evidence is eligible; candidate fallback never masks execution failure. Publication fallback is eligible evidence but does not supply exact Crossref journal-article/target-ISSN confirmation.
+
+Alias eligibility follows `CrossrefSupplementUnit.requested_doi` / `anchors`: the requested DOI identifies the current OpenAlex anchor and supplementation coverage, while the resolved prime DOI identifies the exact Crossref evidence and state. Apply the prime record's verdict to its requesting anchor rather than joining only on equal requested/prime DOI strings. Do not persist alias mappings or detach supplement evidence from current anchors.
+
+`INELIGIBLE` records and their excluded supplement contributions do not enter consolidation, searchable projection, topic matching, canonicalization, or retained OpenAlex version hydration. They cannot produce `unsearchable`, including with empty fields or pure `NOT` expressions. These exclusions operate per anchored candidate and do not suppress independent valid candidates from another current anchor.
+
+`SCOPE_DISPUTED` evidence continues through consolidation and local matching to protect recall. Its scope diagnostic remains inspectable even if no topic matches. Only a truly topic-matched cluster containing unresolved disputed evidence and lacking strong eligible evidence emits a Candidate Eligibility warning. Strong eligible evidence means exact current Crossref `journal-article` with target ISSN for that same identity cluster; a coincidentally matching title, weak name-only venue support, or OpenAlex publication fallback is insufficient to clear the dispute. Strong support suppresses only the eligibility warning, not contradictory metadata/identifier warnings or Provider execution errors. Unmatched disputes remain diagnostics only. A disputed-only cluster with an empty projection stays diagnostic-only and is omitted from matching, including pure `NOT` expressions; it cannot manufacture a match or an eligibility/unsearchable warning. Genuinely eligible unsearchable clusters and matched insufficient canonical metadata retain their warnings.
+
+### 32.4 Identity, consolidation, and metadata equivalence
+
+Author identity for conservative title fallback has three results:
+
+- `MATCH`: sufficient author evidence agrees in count and sequence, with compatible normalized names/identities and no conflicting comparable stable identifier.
+- `INCONCLUSIVE`: evidence is missing or insufficient to establish either agreement or contradiction; absence of an ID or author list is not itself a conflict.
+- `CONFLICT`: actual contradictory comparable ORCID/OpenAlex author IDs or incompatible author names/count/sequence establish disagreement.
+
+One-sided ORCID or OpenAlex author IDs must not automatically yield `CONFLICT`. If normalized names, author count, and sequence agree with adequate evidence, a missing corresponding ID on one side permits `MATCH`; different ID namespaces are not directly contradictory values. Title fallback merges only on `MATCH`; both other results preserve independent work identities. Distinct DOI components continue to forbid silent title-based merging, even with otherwise compatible authors. This does not authorize conference-to-journal or preprint-to-publication lifecycle grouping.
+
+Blocked title fallback and refusal to merge conflicting DOI components become typed consolidation diagnostics. Each logical fallback/conflict group is counted once per diagnostic kind using deterministic group membership, rather than emitting an issue for every pairwise comparison. These diagnostics explain preserved separation without manufacturing a Run warning. Genuine snapshot identifier conflicts, such as contradictory stable IDs inside an already established identity, remain warning/error conditions.
+
+Same-work author metadata comparison is a separate operation after DOI or equivalent high-confidence identity has been established. It tolerates deterministic representation equivalence for initials versus full given names, given/family display order, periods/whitespace, Unicode normalization, and Unicode hyphens. Name display order does not authorize reordering the author sequence; substantive author/count/order differences and incompatible comparable IDs remain conflicts. Preserve the current representative display name and merge only nonconflicting identifiers. Do not migrate existing author display names or silently replace conflicting identifiers.
+
+Abstract comparison uses only deterministic normalization: extract text from HTML/JATS and decode entities, normalize Unicode and whitespace, normalize representational dash/punctuation variants, and disregard structural section-label differences when the body content is unchanged. Structural labels may be removed only as labels, not by deleting matching words throughout the prose. Normalization must preserve substantive text and order, including meaningful numbers, symbols, and negation. Equivalent normalized text does not warn; a genuine body-content difference remains a metadata warning. No fuzzy threshold, embedding, semantic similarity, or LLM comparison is permitted.
+
+### 32.5 Run diagnostics and Provider-state v2
+
+Run diagnostics are typed transient observations separate from warnings/errors. CLI and Web completion views display their kinds, logical-group counts, and useful context separately from real issues and coverage. Diagnostics do not change `RunOutcome`, CLI exit codes, or coverage and are not serialized into `last-run.json`, Paper/Author Markdown, monitor YAML, Provider-state tables, or any new durable history. An otherwise clean diagnostics-only Run is `COMPLETED`. Genuine metadata conflicts, snapshot identifier conflicts, eligible unsearchable clusters, matched unresolved scope disputes, request failures, and materialization/persistence failures retain warning/error handling and the existing precedence in §31.5.
+
+From v0.4.5, normalized Crossref `work_type` is a consumed semantic-hash field: changing only `work_type` changes the current hash; revision/retrieval timestamps and unconsumed fields remain excluded. Logical Provider-state schema advances from v1 to v2. SQLite table layout and Crossref/OpenAlex normalized serialization versions remain unchanged; no new column, table, completion record, diagnostic history, or Paper/workflow state is introduced.
+
+A valid v1 DB is supported input. Validate its schema, strict normalized records, and stored semantic hashes with the original v1 hash algorithm before conversion. Do not validate a stored v1 hash with the v2 algorithm or treat that expected difference as corruption. Once valid, convert to current v2 hashes/state in memory without writing the DB. That state is immediately available for the current Run's normal live-revision-validated reuse, without a cold start. Invalid v1 or v2 state retains the existing warning/all-live and safe-replacement behavior in §30.5; validation failure must not be disguised as successful migration.
+
+Only the existing normal production persistence boundary performs durable v1→v2 migration. In the same transaction:
+
+1. Recompute/update semantic hashes for every historical Crossref row with the v2 algorithm, including rows outside the current discovery window.
+2. Update singleton logical schema metadata to v2.
+3. Apply the current Run's pending Provider-state changes.
+
+Commit all three together or roll them all back. Preserve historical out-of-window Crossref/OpenAlex rows; unchanged `record_json` does not require rewriting. OpenAlex version-state serialization/binding remains unchanged. New DBs use logical schema v2; valid v2 DBs continue the normal transactional pending-state update path. No WAL or cross-thread connection sharing is introduced.
+
+Migration failure is a Provider-state persistence failure: roll back to the original still-readable v1 logical state, preserve its rows/schema/hashes, and emit a `MonitorIssueComponent.PROVIDER_STATE` persistence warning. Already completed Paper/Author materialization is not rolled back. The warning participates in the ordinary completion precedence; existing errors remain errors. A normal production Run reaching the persistence boundary may migrate even when completion contains warnings/errors; no clean-outcome-only migration gate is introduced.
+
+`INVALID_CONFIGURATION`, read-only diagnostics, `validate`, `canonicalize`, legacy/diagnostic `materialize`, and other non-production paths must not trigger migration or gain Provider-state access. Reads/conversion alone do not migrate. Existing unsafe-filesystem and rollback protections remain in force, and legacy `provider-cache.json` remains inert and untouched.
+
+`last-run.json` remains schema v2, with `reused_units=[]` for new Runs. Historical v1/v2 snapshots and their recorded outcomes remain readable without reinterpretation, migration, or rewriting. Provider-state logical schema v2 is independent of last-run schema v2. Paper/Author Markdown and monitor YAML schemas remain unchanged.
+
+### 32.6 Scrollable master-detail Web workspace
+
+At desktop viewport widths greater than 760px, the workspace is a viewport-bounded, equal-height two-column master-detail layout. Determine pane height from the available viewport/layout space rather than one fixed pixel height. The Paper list and detail pane each use `overflow-y: auto` and scroll independently; a long detail must not expand the list pane or force desktop review into an unbounded document.
+
+The selected Paper has a visible active state in the list. Clicking a Paper changes selection/detail without replacing or resetting list scroll. A selected Paper must belong to the current active workflow view loaded from real disk state (§25.4). View switches and refreshes must revalidate selection against that view; an out-of-view UUID cannot leave stale detail visible. An empty view renders empty detail with no active Paper.
+
+After a successful decision, reload the workspace from disk. If the Paper still belongs to the active view, retain it as selected. If it leaves the view, prefer the item now at the Paper's former list position (its next neighbor), otherwise the preceding item, otherwise empty detail. Workspace replacement restores the current list scroll neighborhood so the adjacent review context remains visible rather than jumping to the top. Scroll/selection/navigation hints are transient presentation data, not durable frontend state or authoritative workflow data.
+
+Decision failure, state conflict, or I/O failure also reloads real disk state and displays the failure. Keep the previous selection only if still in the active view; otherwise render a valid refreshed selection/empty detail without claiming that the attempted decision succeeded or that a successful next-Paper step occurred. Neighbor navigation associated with success must not be fabricated from a submitted position when the decision failed.
+
+Navigation index/position is only a presentation hint. Validate and clamp it to the refreshed view's bounds; it must not authorize workflow mutations, identify filesystem targets, bypass UUID lookup, or replace expected-status/transition checks. Existing decision actions, CSRF, compare-before-replace, and status-only Markdown preservation remain unchanged.
+
+At widths ≤760px, remove desktop pane-height constraints and nested pane scrolling. List and detail stack in normal single-column document flow with ordinary page scrolling. Do not add virtualization, keyboard screening, collapsible detail state, or a frontend database. Existing local Web startup, Settings, RunCoordinator, run progress/polling, security, and Zotero behavior remain applicable.
+
+### 32.7 Explicit exclusions and delivery boundary
+
+The unaffected exclusions in §4.2 and the preserved release contracts remain in force. v0.4.5 excludes:
+
+- Crossref manifest `type:journal-article` filtering and OpenAlex type allow/deny lists;
+- a publication-taxonomy framework;
+- conference→journal or preprint→publication lifecycle merging;
+- persistent global research-work identity;
+- fuzzy/AI author disambiguation or semantic abstract similarity;
+- author display-name migration;
+- durable diagnostic history/tables;
+- `last-run.json` schema changes or Paper/Author Markdown schema changes;
+- checkpoint/resume, scheduler, notifications, or persistent execution state;
+- list virtualization, keyboard screening, collapsible detail state, or a frontend database;
+- unrelated retrieval/performance refactors;
+- release, tag, push, version bump, or User-Agent bump within this development contract.
+
+Establishing this contract changes only `SPEC.md`. Later implementation tasks must satisfy §23.18 before v0.4.5 can be described as accepted; final acceptance includes the full automated suite and desktop/mobile manual Web smoke, with results reported at their actual verification level.

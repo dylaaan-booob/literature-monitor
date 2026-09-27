@@ -8,6 +8,8 @@
       {% for paper in papers %}
         <li>
           <a href="/?view={{ active_view }}&paper={{ paper.paper_id }}"
+             data-paper-id="{{ paper.paper_id }}"
+             {% if selected_paper and paper.paper_id == selected_paper.paper_id %}aria-current="true"{% endif %}
              hx-get="/fragments/papers/{{ paper.paper_id }}?view={{ active_view }}"
              hx-target="#paper-detail"
              hx-swap="outerHTML">

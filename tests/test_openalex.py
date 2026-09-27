@@ -1510,6 +1510,46 @@ def test_raw_updated_at_is_ignored_and_legacy_select_remains_unchanged():
     assert not warnings
 
 
+@pytest.mark.parametrize("raw,expected", [
+    (True, True), (False, False), (None, None), ("true", None), ("false", None),
+    (0, None), (1, None), ([], None), ({}, None),
+])
+def test_is_published_is_strict_transient_evidence_without_diagnostic_shape_change(raw, expected):
+    payload = a4_work()
+    payload["primary_location"]["is_published"] = raw
+    client, transport = make_client(a4_sources(fixture("source_biometrics.json")), a4_page(payload))
+    with client:
+        result = a4_discover(client, a4_journals()[:1])
+    record, = result.records
+    assert record.is_published is expected
+    assert not result.issues
+    fields = {"metadata", "external_ids", "authors", "source_id", "provenance", "version_hints"}
+    assert set(record.model_dump()) == fields
+    assert set(json.loads(record.model_dump_json())) == fields
+    assert "is_published" not in record.to_evidence().model_dump()
+    assert not hasattr(record.to_evidence(), "is_published")
+    assert record.model_dump() == record.model_copy(update={"is_published": None}).model_dump()
+    assert record.model_dump_json() == record.model_copy(update={"is_published": None}).model_dump_json()
+    legacy, warnings = openalex_module._normalize_work(payload, result.sources[0], record.provenance.retrieved_at)
+    assert legacy.is_published is expected and not warnings
+    assert legacy.model_dump() == record.model_dump()
+    validated = openalex_module.OpenAlexWorkRecord.model_validate({**record.model_dump(), "is_published": raw})
+    assert validated.is_published is expected
+    assert len(transport.requests) == 2
+    assert "primary_location" in transport.requests[1].url.params["select"].split(",")
+
+
+@pytest.mark.parametrize("location", [None, {}, {"is_published": None}])
+def test_missing_primary_location_publication_has_unknown_value_without_warning(location):
+    client, _ = make_client(a4_sources(fixture("source_biometrics.json")), a4_page(a4_work()))
+    with client:
+        result = a4_discover(client, a4_journals()[:1])
+    payload = a4_work()
+    payload["primary_location"] = location
+    record, warnings = openalex_module._normalize_work(payload, result.sources[0], result.records[0].provenance.retrieved_at)
+    assert record.is_published is None and not warnings
+
+
 @pytest.mark.parametrize("mode", ["matching", "changed", "missing", "malformed"])
 @pytest.mark.parametrize("partial", [False, True])
 def test_provider_updated_date_drives_internal_version_state_binding(mode, partial):

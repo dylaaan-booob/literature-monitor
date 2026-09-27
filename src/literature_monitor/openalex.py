@@ -128,6 +128,12 @@ class OpenAlexWorkRecord(DomainModel):
     provenance: MetadataSource
     version_hints: tuple[OpenAlexVersionHint, ...] = ()
     updated_at: datetime | None = Field(default=None, exclude=True)
+    is_published: bool | None = Field(default=None, exclude=True)
+
+    @field_validator("is_published", mode="before")
+    @classmethod
+    def normalize_publication_flag(cls, value: object) -> bool | None:
+        return value if type(value) is bool else None
 
     @field_validator("metadata", mode="before")
     @classmethod
@@ -1096,6 +1102,10 @@ def _normalize_work(
             ),
             version_hints=version_hints,
             updated_at=updated_at,
+            is_published=(
+                payload["primary_location"].get("is_published")
+                if isinstance(payload.get("primary_location"), dict) else None
+            ),
         ),
         tuple(warnings),
     )

@@ -3,6 +3,7 @@ import logging
 from io import StringIO
 from datetime import date, datetime, timezone
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -41,6 +42,7 @@ from literature_monitor.crossref import (
     EnrichmentResult,
 )
 from literature_monitor.date_range import DateRangeSpec, ResolvedDateRange
+from literature_monitor.diagnostics import RunDiagnostic, RunDiagnosticKind
 from literature_monitor.kept_export import KeptExportIssue, KeptExportResult
 from literature_monitor.logging_setup import LOGGER_NAME, configure_logging
 from literature_monitor.models import (
@@ -3175,6 +3177,48 @@ def test_nonproduction_commands_preserve_provider_cache(command, tmp_path, monke
     assert main(arguments) == 0
     capsys.readouterr()
     assert cache_path.read_bytes() == b"existing cache must remain untouched"
+
+
+@pytest.mark.parametrize("command", ["run", "canonicalize", "materialize"])
+@pytest.mark.parametrize("with_error", [False, True])
+def test_completion_diagnostics_are_informational_and_keep_stdout_and_exit_semantics(
+    tmp_path, monkeypatch, capsys, command, with_error,
+):
+    diagnostics = (
+        RunDiagnostic(RunDiagnosticKind.SCOPE_DISPUTE, "Scope unresolved context", ("W1", "10.5555/a"), "Biometrics"),
+        RunDiagnostic(RunDiagnosticKind.NON_CANDIDATE_EXCLUSION, "Issue volume excluded", ("W2", "10.5555/b", "W3"), "Biometrics"),
+        RunDiagnostic(RunDiagnosticKind.NON_CANDIDATE_EXCLUSION, "Another exclusion", ("W4",)),
+        RunDiagnostic(RunDiagnosticKind.REPEATED_TITLE_SEPARATION, "Different works retained", ("W5", "W6")),
+        RunDiagnostic(RunDiagnosticKind.CONFLICTING_DOI_SEPARATION, "Distinct DOI components", ("10.5555/c", "10.5555/d")),
+    )
+    errors = (MonitorIssue(MonitorIssueSeverity.ERROR, MonitorIssueComponent.OPENALEX,
+                           "discovery", "Actual provider failure"),) if with_error else ()
+    outcome = RunOutcome.COMPLETED_WITH_ERRORS if with_error else RunOutcome.COMPLETED
+    core = replace(cli_core_result(outcome, errors=errors), diagnostics=diagnostics)
+    result = replace(cli_run_result(outcome, errors=errors), diagnostics=diagnostics)
+    monkeypatch.setattr("literature_monitor.cli.run_monitor", lambda *args, **kwargs: result)
+    monkeypatch.setattr("literature_monitor.cli._run_canonical_core", lambda *args, **kwargs: core)
+    args = [command, "--config", str(tmp_path / "monitor.yaml")]
+    if command == "materialize":
+        args += ["--output-dir", str(tmp_path / "Vault")]
+
+    assert main(args) == int(with_error)
+    captured = capsys.readouterr()
+    assert captured.out == ("".join(paper.model_dump_json() + "\n" for paper in core.papers)
+                            if command == "canonicalize" else "")
+    assert "Run diagnostics: non_candidate_exclusion 2 logical groups · scope_dispute 1 logical group" in captured.err
+    assert "repeated_title_separation 1 logical group · conflicting_doi_separation 1 logical group" in captured.err
+    assert "Diagnostic [scope_dispute] · journal=Biometrics · records=W1,10.5555/a · Scope unresolved context" in captured.err
+    assert "Diagnostic [non_candidate_exclusion] · records=W4 · Another exclusion" in captured.err
+    diagnostic_lines = [line for line in captured.err.splitlines()
+                        if "Run diagnostics:" in line or "Diagnostic [" in line]
+    assert len(diagnostic_lines) == 6
+    assert all(" INFO literature_monitor: " in line for line in diagnostic_lines)
+    assert ("ERROR " in captured.err) is with_error
+    assert "WARNING " not in captured.err
+    if command == "materialize":
+        assert list((tmp_path / "Vault" / "Papers").glob("*.md"))
+    assert result.outcome is outcome and core.outcome is outcome
 
 
 def test_canonicalize_cli_calls_shared_application_core_and_emits_ndjson(

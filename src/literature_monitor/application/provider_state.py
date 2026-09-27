@@ -26,7 +26,7 @@ from literature_monitor.identifiers import normalize_doi
 from literature_monitor.openalex import OpenAlexVersionHint
 from literature_monitor.provider_revision import parse_revision_timestamp
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CROSSREF_SERIALIZATION_VERSION = 1
 OPENALEX_SERIALIZATION_VERSION = 1
 STATE_FILENAME = "provider-state.sqlite3"
@@ -163,12 +163,23 @@ def deserialize_openalex_versions(text: str) -> tuple[OpenAlexVersionHint, ...]:
     return hints
 
 
-def crossref_semantic_hash(record: CrossrefWorkRecord) -> str:
-    """Fields consumed by to_evidence and venue validation; excludes work_type."""
-    data = record.model_dump(mode="json", include={
+def _crossref_semantic_hash(record: CrossrefWorkRecord, *, include_work_type: bool) -> str:
+    fields = {
         "doi", "title", "journal", "abstract", "authors", "issns", "dates", "relations",
-    })
+    }
+    if include_work_type:
+        fields.add("work_type")
+    data = record.model_dump(mode="json", include=fields)
     return hashlib.sha256(_json(data).encode("utf-8")).hexdigest()
+
+
+def _crossref_semantic_hash_v1(record: CrossrefWorkRecord) -> str:
+    """仅用于验证 legacy digest，保持原 v1 算法。"""
+    return _crossref_semantic_hash(record, include_work_type=False)
+
+
+def crossref_semantic_hash(record: CrossrefWorkRecord) -> str:
+    return _crossref_semantic_hash(record, include_work_type=True)
 
 
 @dataclass(frozen=True)
@@ -261,6 +272,13 @@ def _connect(path: Path, *, readonly: bool) -> sqlite3.Connection:
                            uri=True, timeout=0)
 
 
+def _schema_version(connection: sqlite3.Connection) -> int:
+    rows = connection.execute("SELECT singleton, schema_version FROM schema_metadata").fetchall()
+    if rows not in ([(1, 1)], [(1, SCHEMA_VERSION)]):
+        raise ValueError("unsupported Provider-state schema version")
+    return rows[0][1]
+
+
 def _read_connection(connection: sqlite3.Connection) -> ProviderState:
     if connection.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
         raise ValueError("corrupt Provider-state DB")
@@ -269,19 +287,25 @@ def _read_connection(connection: sqlite3.Connection) -> ProviderState:
     schema = connection.execute("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name").fetchall()
     if sorted(row[0] for row in schema) != sorted(_SCHEMA):
         raise ValueError("incompatible Provider-state schema")
-    if connection.execute("SELECT singleton, schema_version FROM schema_metadata").fetchall() != [(1, SCHEMA_VERSION)]:
-        raise ValueError("unsupported Provider-state schema version")
-    crossref = tuple(CrossrefRecordState(
-        doi, _read_time(indexed), _read_time(retrieved), digest, deserialize_crossref_record(payload),
-    ) for doi, indexed, retrieved, digest, payload in connection.execute(
+    version = _schema_version(connection)
+    hash_record = _crossref_semantic_hash_v1 if version == 1 else crossref_semantic_hash
+    crossref = []
+    for doi, indexed, retrieved, digest, payload in connection.execute(
         "SELECT doi, indexed_at, retrieved_at, semantic_hash, record_json FROM crossref_records ORDER BY doi"
-    ))
+    ):
+        record = deserialize_crossref_record(payload)
+        # 先按 durable 版本验证 digest，再构造满足当前 invariant 的内存对象。
+        if digest != hash_record(record):
+            raise ValueError("Crossref state semantic hash mismatch")
+        crossref.append(CrossrefRecordState(
+            doi, _read_time(indexed), _read_time(retrieved), crossref_semantic_hash(record), record,
+        ))
     openalex = tuple(OpenAlexVersionState(
         work_id, _read_time(revision), _read_time(retrieved), deserialize_openalex_versions(payload),
     ) for work_id, revision, retrieved, payload in connection.execute(
         "SELECT work_id, hydrated_against_updated_at, retrieved_at, versions_json FROM openalex_versions ORDER BY work_id"
     ))
-    return ProviderState(crossref, openalex)
+    return ProviderState(tuple(crossref), openalex)
 
 
 def read_provider_state(output_dir: Path) -> ProviderStateReadResult:
@@ -389,9 +413,18 @@ def update_provider_state(output_dir: Path, changes: ProviderState) -> None:
         return
     with closing(_connect(directory / STATE_FILENAME, readonly=False)) as connection, connection:
         connection.execute("BEGIN IMMEDIATE")
-        _read_connection(connection)
+        previous = _read_connection(connection)
+        if _schema_version(connection) == 1:
+            # 全历史 rehash、版本更新与 pending upsert 必须共同提交或回滚。
+            connection.executemany(
+                "UPDATE crossref_records SET semantic_hash=? WHERE doi=?",
+                [(row.semantic_hash, row.doi) for row in previous.crossref_records],
+            )
+            connection.execute("UPDATE schema_metadata SET schema_version=? WHERE singleton=1", (SCHEMA_VERSION,))
         _upsert_changes(connection, changes)
         _read_connection(connection)
+        if _schema_version(connection) != SCHEMA_VERSION:
+            raise ValueError("Provider-state migration did not reach current schema")
 
 
 def replace_invalid_provider_state(output_dir: Path, fresh_state: ProviderState) -> None:

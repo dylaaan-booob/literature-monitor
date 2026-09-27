@@ -7,10 +7,14 @@ from typing import Any
 import pytest
 
 from literature_monitor.canonicalize import (
+    AuthorIdentity,
+    _authors_compatible,
+    _normalize_abstract,
     CanonicalizationResult,
     canonicalize_records,
     consolidate_evidence,
 )
+from literature_monitor.diagnostics import RunDiagnosticKind
 from literature_monitor.crossref import (
     CrossrefPartialDate,
     CrossrefRelation,
@@ -261,7 +265,8 @@ def test_public_consolidation_keeps_conflicting_dois_separate() -> None:
     result = consolidate_evidence((first, second))
 
     assert len(result.clusters) == 2
-    assert any(issue.stage == "identifier_conflict" for issue in result.issues)
+    assert not result.issues
+    assert [d.kind for d in result.diagnostics] == [RunDiagnosticKind.CONFLICTING_DOI_SEPARATION]
 
 
 def test_crossref_only_sufficient_evidence_canonicalizes() -> None:
@@ -654,13 +659,11 @@ def test_matching_stable_author_ids_are_compatible() -> None:
 @pytest.mark.parametrize(
     ("left", "right"),
     [
-        (author("Ada", openalex_id="A1"), author("Ada")),
         (author("Ada", openalex_id="A1"), author("Ada", openalex_id="A2")),
-        (author("Ada", openalex_id="A1"), author("Ada", orcid="O1")),
         (author("Ada", orcid="O1"), author("Ada", orcid="O2")),
     ],
 )
-def test_insufficient_or_conflicting_stable_author_evidence_blocks_fallback(
+def test_conflicting_stable_author_evidence_blocks_fallback(
     left: Author,
     right: Author,
 ) -> None:
@@ -672,7 +675,8 @@ def test_insufficient_or_conflicting_stable_author_evidence_blocks_fallback(
     )
 
     assert len(result.papers) == 2
-    assert [issue.stage for issue in result.issues] == ["blocked_match"]
+    assert not result.issues
+    assert [d.kind for d in result.diagnostics] == [RunDiagnosticKind.REPEATED_TITLE_SEPARATION]
 
 
 def test_different_author_counts_block_title_fallback() -> None:
@@ -684,7 +688,8 @@ def test_different_author_counts_block_title_fallback() -> None:
     )
 
     assert len(result.papers) == 2
-    assert [issue.stage for issue in result.issues] == ["blocked_match"]
+    assert not result.issues
+    assert [d.kind for d in result.diagnostics] == [RunDiagnosticKind.REPEATED_TITLE_SEPARATION]
 
 
 def test_different_titles_do_not_create_dedup_issue() -> None:
@@ -705,7 +710,8 @@ def test_conflicting_doi_components_are_not_fallback_merged() -> None:
     )
 
     assert len(result.papers) == 2
-    assert [issue.stage for issue in result.issues] == ["identifier_conflict"]
+    assert not result.issues
+    assert [d.kind for d in result.diagnostics] == [RunDiagnosticKind.CONFLICTING_DOI_SEPARATION]
 
 
 def test_doi_free_bridge_cannot_transitively_merge_conflicting_dois() -> None:
@@ -718,7 +724,8 @@ def test_doi_free_bridge_cannot_transitively_merge_conflicting_dois() -> None:
     )
 
     assert len(result.papers) == 2
-    assert any(issue.stage == "identifier_conflict" for issue in result.issues)
+    assert not result.issues
+    assert [d.kind for d in result.diagnostics] == [RunDiagnosticKind.CONFLICTING_DOI_SEPARATION]
 
 
 def test_journal_origin_without_crossref_is_final() -> None:
@@ -1283,3 +1290,227 @@ def test_reversed_input_is_semantically_order_independent() -> None:
         paper_projection(paper) for paper in reverse.papers
     ]
     assert forward.issues == reverse.issues
+
+
+@pytest.mark.parametrize(('left', 'right', 'expected'), [
+    ((author('Ada Author', openalex_id='A1'),), (author('ada  author'),), AuthorIdentity.MATCH),
+    ((author('Ada Author', orcid='O1'),), (author('Ada Author'),), AuthorIdentity.MATCH),
+    ((author('Ada Author', openalex_id='A1'),), (author('Ada Author', orcid='O1'),), AuthorIdentity.MATCH),
+    ((author('Ada', openalex_id='A1'),), (author('A. Author', openalex_id='A1'),), AuthorIdentity.MATCH),
+    ((author('Ada', openalex_id='A1'),), (author('Ada', openalex_id='A2'),), AuthorIdentity.CONFLICT),
+    ((author('Ada', orcid='O1'),), (author('Ada', orcid='O2'),), AuthorIdentity.CONFLICT),
+    ((author('Ada'),), (), AuthorIdentity.INCONCLUSIVE),
+    ((), (), AuthorIdentity.INCONCLUSIVE),
+    ((author('Ada'),), (author('Ada'), author('Grace')), AuthorIdentity.CONFLICT),
+    ((author('Ada'), author('Grace')), (author('Grace'), author('Ada')), AuthorIdentity.CONFLICT),
+    ((author('Ada Lovelace'),), (author('A. Lovelace'),), AuthorIdentity.CONFLICT),
+])
+def test_title_author_identity_tristate_and_observable_grouping(left, right, expected):
+    assert _authors_compatible(left, right) is expected
+    assert _authors_compatible(right, left) is expected
+    first = openalex('W1').to_evidence().model_copy(update={'authors': left})
+    second = openalex('W2').to_evidence().model_copy(update={'authors': right})
+    result = consolidate_evidence((first, second))
+    assert not result.issues
+    assert len(result.clusters) == (1 if expected is AuthorIdentity.MATCH else 2)
+    assert [d.kind for d in result.diagnostics] == (
+        [] if expected is AuthorIdentity.MATCH else [RunDiagnosticKind.REPEATED_TITLE_SEPARATION]
+    )
+
+
+@pytest.mark.parametrize('size', [3, 4, 8])
+@pytest.mark.parametrize('reason', ['missing_authors', 'different_authors', 'doi', 'both'])
+def test_title_separation_diagnostics_are_logical_and_order_independent(size, reason):
+    records = tuple(
+        openalex(f'W{i}', doi=f'10.5555/{i}' if reason in {'doi', 'both'} else None)
+        .to_evidence().model_copy(update={
+            'authors': (() if reason == 'missing_authors' else
+                        (author(f'Author {i}' if reason == 'different_authors' or
+                                (reason == 'both' and i == size - 1) else 'Ada Author'),))
+        }) for i in range(size)
+    )
+    forward = consolidate_evidence(records)
+    reverse = consolidate_evidence(tuple(reversed(records)))
+    assert len(forward.clusters) == size
+    assert not forward.issues and forward.diagnostics == reverse.diagnostics
+    expected = ({RunDiagnosticKind.CONFLICTING_DOI_SEPARATION} if reason == 'doi' else
+                {RunDiagnosticKind.REPEATED_TITLE_SEPARATION})
+    if reason == 'both':
+        expected.add(RunDiagnosticKind.CONFLICTING_DOI_SEPARATION)
+    assert {d.kind for d in forward.diagnostics} == expected
+    assert len(forward.diagnostics) == len(expected)
+    all_ids = {r.provenance.record_id for r in records}
+    for diagnostic in forward.diagnostics:
+        expected_ids = all_ids
+        if reason == 'both' and diagnostic.kind is RunDiagnosticKind.CONFLICTING_DOI_SEPARATION:
+            expected_ids = all_ids - {records[-1].provenance.record_id}
+        assert diagnostic.record_ids == tuple(sorted(expected_ids))
+    if reason != 'missing_authors':
+        canonical = canonicalize_records(records)
+        assert not canonical.issues and canonical.diagnostics == forward.diagnostics
+
+
+def test_one_sided_author_id_cannot_bridge_comparable_id_conflicts():
+    records = tuple(openalex(f'W{i}', authors=(a,)).to_evidence() for i, a in enumerate((
+        author('Ada', openalex_id='A1'), author('Ada'), author('Ada', openalex_id='A2'),
+    )))
+    result = consolidate_evidence(records)
+    assert len(result.clusters) == 2 and not result.issues
+    diagnostic, = result.diagnostics
+    assert diagnostic.kind is RunDiagnosticKind.REPEATED_TITLE_SEPARATION
+    assert set(diagnostic.record_ids) == {r.provenance.record_id for r in records}
+
+
+_AUTHOR_EQUIVALENTS = [
+    ('Ada Lovelace', 'A. Lovelace'),
+    ('Ada Lovelace', 'Lovelace, Ada'),
+    ('Ada B. Lovelace', 'Ada B Lovelace'),
+    ('Ada  Lovelace', 'Ada Lovelace'),
+    ('Ａｄａ Lovelace', 'Ada Lovelace'),
+    ('José Smith', 'Jose\u0301 Smith'),
+    ('Ada Smith‐Jones', 'Ada Smith-Jones'),
+    ('Ada Smith‑Jones', 'Ada Smith-Jones'),
+]
+
+
+def established_pair(layer, *, authors_left=None, authors_right=None, abstract_left=None, abstract_right=None):
+    # 用额外完整度固定 representative，验证比较不会改写选中的原文。
+    first = openalex('W1', doi='10.5555/equivalent', authors=authors_left,
+                     abstract=abstract_left, author_keywords=('statistics',)).to_evidence()
+    if layer == 'cross_provider':
+        second = crossref('10.5555/equivalent', title='A Study', journal='Biometrics',
+                          authors=authors_right or (author(),), abstract=abstract_right).to_evidence()
+    else:
+        second = openalex('W1' if layer == 'snapshot' else 'W2', doi='10.5555/equivalent',
+                          authors=authors_right, abstract=abstract_right).to_evidence()
+    return first, second
+
+
+@pytest.mark.parametrize('layer', ['snapshot', 'same_version', 'cross_provider'])
+@pytest.mark.parametrize(('left', 'right'), _AUTHOR_EQUIVALENTS)
+def test_established_identity_author_representation_equivalence(layer, left, right):
+    records = established_pair(layer, authors_left=(author(left),), authors_right=(author(right),))
+    result = canonicalize_records(records)
+    assert not result.issues and not result.diagnostics
+    assert len(result.papers) == 1
+    assert result.papers[0].authors[0].name == left
+
+
+def test_equivalent_author_representation_enriches_ids_without_display_churn():
+    representative = openalex('W1', doi='10.5555/equivalent',
+                             authors=(author('Ada Lovelace', openalex_id='A1'),)).to_evidence()
+    additional = crossref('10.5555/equivalent', title='A Study', journal='Biometrics',
+                         authors=(author('Lovelace, A.', orcid='O1'),)).to_evidence()
+    result = canonicalize_records((representative, additional))
+    assert not result.issues
+    assert result.papers[0].authors == (author('Ada Lovelace', openalex_id='A1', orcid='O1'),)
+
+
+@pytest.mark.parametrize('layer', ['snapshot', 'same_version', 'cross_provider'])
+@pytest.mark.parametrize(('left', 'right'), [
+    ((author('Ada Lovelace'),), (author('Grace Hopper'),)),
+    ((author('Ada Lovelace'),), (author('Ada Lovelace'), author('Grace Hopper'))),
+    ((author('Ada Lovelace'), author('Grace Hopper')), (author('Grace Hopper'), author('Ada Lovelace'))),
+    ((author('Ada Lovelace', openalex_id='A1'),), (author('A. Lovelace', openalex_id='A2'),)),
+    ((author('Ada Lovelace', orcid='O1'),), (author('A. Lovelace', orcid='O2'),)),
+])
+def test_established_identity_genuine_author_conflicts_remain_issues(layer, left, right):
+    records = established_pair(layer, authors_left=left, authors_right=right)
+    result = canonicalize_records(records)
+    assert any(i.stage == 'metadata_conflict' and 'authors' in i.message for i in result.issues)
+    assert not result.diagnostics
+    assert result.papers[0].authors == left
+
+
+_ABSTRACT_EQUIVALENTS = [
+    ('Methods\nWe test.', 'We test.'),
+    ('Methods:\nWe test.', 'We test.'),
+    ('We test.\n\nResults:\nWe find 3 effects.', 'We test.\nWe find 3 effects.'),
+    ('We test.\nResults:\nWe find 3 effects.', 'We test.\nWe find 3 effects.'),
+    ('BACKGROUND\nWe test.', 'We test.'),
+    ('Background\nWe test.\nMethods\nWe find.', 'We test.\nWe find.'),
+    ('We test.\nResults\nWe find 3 effects.', 'We test.\nWe find 3 effects.'),
+    ('We test an intervention\n\nResults\nWe find 3 effects.',
+     'We test an intervention\nWe find 3 effects.'),
+    ('<p>We <i>find</i> 3 effects.</p>', 'We find 3 effects.'),
+    ('We <i>find</i> 3 effects.', 'We find 3 effects.'),
+    ('x<sub>1</sub>', 'x1'),
+    ('<jats:italic>text</jats:italic>', 'text'),
+    ('We<br/>find 3 effects.', 'We find 3 effects.'),
+    ('We<jats:break/>find 3 effects.', 'We find 3 effects.'),
+    ('<p>Use <i> as the imaginary unit.</p>', 'Use <i> as the imaginary unit.'),
+    ('<p>We <em>find</em> 3 effects.</p>', 'We find 3 effects.'),
+    ('<jats:p>We <jats:italic>find</jats:italic> 3 effects.</jats:p>', 'We find 3 effects.'),
+    ('<p>p < 0.05 and q > 0.1</p>', 'p < 0.05 and q > 0.1'),
+    ('<p>Use <T> as the statistic.</p>', 'Use <T> as the statistic.'),
+    ('Use &lt;T&gt; as the statistic.', 'Use <T> as the statistic.'),
+    ('<jats:abstract><jats:p>We find 3 effects.</jats:p></jats:abstract>', 'We find 3 effects.'),
+    ('Effect A &amp; B is &lt; 3.', 'Effect A & B is < 3.'),
+    ('We\n find\t 3 effects.', 'We find 3 effects.'),
+    ('Ｆｉｎｄ café effects.', 'Find cafe\u0301 effects.'),
+    ('“We find” 1–3 effects…', '"We find" 1-3 effects...'),
+    ('<abstract><sec><title>Background</title><p>We test.</p></sec>'
+     '<sec><title>Methods</title><p>We find 3 effects.</p></sec></abstract>',
+     'We test. We find 3 effects.'),
+    ('Background: We test.\nMethods: We find 3 effects.', 'We test. We find 3 effects.'),
+    ('<h2>Results</h2><p>We find 3 effects.</p>', 'We find 3 effects.'),
+    ('<jats:sec><jats:title>Methods</jats:title><jats:p>We test.</jats:p>'
+     '<jats:p>We find 3 effects.</jats:p></jats:sec>', 'We test. We find 3 effects.'),
+]
+
+
+@pytest.mark.parametrize('layer', ['snapshot', 'same_version', 'cross_provider'])
+@pytest.mark.parametrize(('left', 'right'), _ABSTRACT_EQUIVALENTS)
+def test_established_identity_abstract_representation_equivalence(layer, left, right):
+    records = established_pair(layer, abstract_left=left, abstract_right=right)
+    result = canonicalize_records(records)
+    assert not result.issues and not result.diagnostics
+    assert result.papers[0].metadata.abstract == left
+
+
+@pytest.mark.parametrize('layer', ['snapshot', 'same_version', 'cross_provider'])
+@pytest.mark.parametrize(('left', 'right'), [
+    ('We find 3 effects.', 'We find 4 effects.'),
+    ('We do not find effects.', 'We do find effects.'),
+    ('We find beneficial effects.', 'We find harmful effects.'),
+    ('We compare Methods with Results.', 'We compare with.'),
+    ('We compare\nMethods\nwith Results.', 'We compare with Results.'),
+    ('A + B < 3.', 'A - B < 3.'),
+    ('We test. We succeed.', 'We succeed. We test.'),
+    ('Use <T> as the statistic.', 'Use as the statistic.'),
+    ('Use <i> as the imaginary unit.', 'Use as the imaginary unit.'),
+    ('Let <sub> denote the subgroup.', 'Let denote the subgroup.'),
+    ('We compare\nMethods:\nwith Results.', 'We compare with Results.'),
+    ('The <beta> coefficient changed.', 'The coefficient changed.'),
+    ('Use <T>value</T> as the statistic.', 'Use value as the statistic.'),
+    ('Use <beta/> as the coefficient.', 'Use as the coefficient.'),
+    ('Use <science:p> as the statistic.', 'Use as the statistic.'),
+])
+def test_established_identity_real_abstract_differences_remain_issues(layer, left, right):
+    records = established_pair(layer, abstract_left=left, abstract_right=right)
+    result = canonicalize_records(records)
+    assert any(i.stage == 'metadata_conflict' and 'abstract' in i.message for i in result.issues)
+    assert not result.diagnostics
+    assert result.papers[0].metadata.abstract == left
+
+
+@pytest.mark.parametrize('raw', [
+    'Use <T> as the statistic.',
+    'Use <i> as the imaginary unit.',
+    'Let <sub> denote the subgroup.',
+    'Let </sub> denote the subgroup.',
+    'The <beta> coefficient changed.',
+    'Use <T>value</T> as the statistic.',
+    'Use <beta/> as the coefficient.',
+    'Use <science:p> as the statistic.',
+    'Use\n<T>value</T> as the statistic.',
+    'p < 0.05 and q > 0.1',
+    'We compare\nMethods\nwith Results.',
+    'We compare\nMethods:\nwith Results.',
+    'We compare Methods with Results.',
+    'Methods',
+    'Methods:',
+    'We compare\nMethods',
+])
+def test_abstract_comparison_preserves_scientific_angle_tokens_and_operators(raw):
+    assert _normalize_abstract(raw) == ' '.join(raw.split())

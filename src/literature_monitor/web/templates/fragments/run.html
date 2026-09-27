@@ -114,6 +114,24 @@
         {% set usage = result.state_usage %}
         <span>Provider state: Crossref metadata {{ usage.crossref_reused }} reused · {{ usage.crossref_refreshed }} refreshed · {{ usage.crossref_new }} new</span>
         <span>Provider state: OpenAlex versions {{ usage.openalex_versions_reused }} reused · {{ usage.openalex_versions_hydrated }} hydrated</span>
+        {% if result.diagnostics %}
+          <div class="run-diagnostics">
+            <span>Diagnostics: {{ result.diagnostics|length }} logical group{{ "" if result.diagnostics|length == 1 else "s" }}</span>
+            <ul>
+              {% for summary in result.diagnostic_summary %}
+                <li>{{ summary.kind.value }} · {{ summary.logical_groups }} logical group{{ "" if summary.logical_groups == 1 else "s" }}</li>
+              {% endfor %}
+            </ul>
+            <details>
+              <summary>Run diagnostics</summary>
+              <ul>
+                {% for diagnostic in result.diagnostics %}
+                  <li>{{ diagnostic.kind.value }}{% if diagnostic.journal %} · journal={{ diagnostic.journal }}{% endif %} · records={{ diagnostic.record_ids|join(", ") }} · {{ diagnostic.message }}</li>
+                {% endfor %}
+              </ul>
+            </details>
+          </div>
+        {% endif %}
         {% if result.warnings %}
           <span>{{ result.warnings|length }} warning{{ "" if result.warnings|length == 1 else "s" }}</span>
         {% endif %}

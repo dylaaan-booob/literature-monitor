@@ -25,7 +25,7 @@ ISSN = "0006-341X"
 
 
 def cr_record(doi="10.5555/a", revision=REV, title="statistics study"):
-    return {"DOI": doi, "ISSN": [ISSN], "indexed": {"date-time": revision},
+    return {"DOI": doi, "type": "journal-article", "ISSN": [ISSN], "indexed": {"date-time": revision},
             "title": [title], "container-title": ["Biometrics"],
             "author": [{"given": "Ada", "family": "Author"}],
             "published": {"date-parts": [[2026, 1, 1]]}}
@@ -41,7 +41,8 @@ def oa_work(number=1, doi="10.5555/a", title="statistics study", revision=REV):
             "title": title, "publication_date": "2026-01-01", "updated_date": revision,
             "abstract_inverted_index": None,
             "authorships": [{"author": {"display_name": "Ada Author"}}],
-            "primary_location": {"source": {"id": "https://openalex.org/S1", "display_name": "Biometrics"}}}
+            "primary_location": {"is_published": True,
+                                 "source": {"id": "https://openalex.org/S1", "display_name": "Biometrics"}}}
 
 
 def work_list(items):
@@ -141,6 +142,150 @@ def execution(tmp_path, monkeypatch):
 
 def state_warnings(result):
     return [issue for issue in result.warnings if issue.component is monitor.MonitorIssueComponent.PROVIDER_STATE]
+
+
+def durable_state(path):
+    with sqlite3.connect(path) as connection:
+        rows = tuple(connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+                     for table in ("schema_metadata", "crossref_records", "openalex_versions"))
+    connection.close()
+    return rows
+
+
+def seed_v1(execution, work_type="journal-article"):
+    e = execution
+    e.path.parent.mkdir(parents=True)
+    current = cr_state().record.model_copy(update={"work_type": work_type})
+    history = cr_state("10.5555/history").record
+    with sqlite3.connect(e.path) as connection:
+        for statement in ps._SCHEMA:
+            connection.execute(statement)
+        connection.execute("INSERT INTO schema_metadata VALUES (1, 1)")
+        for record in (current, history):
+            connection.execute("INSERT INTO crossref_records VALUES (?, ?, ?, ?, ?)", (
+                record.doi, ps._time_text(record.indexed_at), ps._time_text(record.provenance.retrieved_at),
+                ps._crossref_semantic_hash_v1(record),
+                json.dumps(json.loads(ps.serialize_crossref_record(record)), indent=2),
+            ))
+        connection.execute("INSERT INTO openalex_versions VALUES (?, ?, ?, ?)", (
+            "https://openalex.org/W999", ps._time_text(NOW), ps._time_text(NOW), ps.serialize_openalex_versions(()),
+        ))
+    connection.close()
+    return durable_state(e.path)
+
+
+@pytest.mark.parametrize("work_type", ["journal-article", "journal-issue"])
+def test_v1_is_immediately_reused_with_stored_eligibility_before_production_migration(execution, monkeypatch, work_type):
+    e = execution
+    before = seed_v1(e, work_type)
+    cache = e.path.with_name("provider-cache.json")
+    cache.write_bytes(b"invalid legacy cache remains inert")
+    cache_stat = cache.stat()
+    original = monitor.update_provider_state
+    writes = []
+
+    def persist(output, pending):
+        assert durable_state(e.path) == before
+        if work_type == "journal-article":
+            assert list((output / "Papers").glob("*.md"))
+            assert list((output / "Authors").glob("*.md"))
+        writes.append(pending)
+        original(output, pending)
+
+    monkeypatch.setattr(monitor, "update_provider_state", persist)
+    result = e.run()
+    assert len(writes) == 1
+    assert result.state_usage.crossref_reused == 1
+    assert result.state_usage.crossref_new == result.state_usage.crossref_refreshed == 0
+    assert not e.full_requests
+    assert result.canonical_paper_count == int(work_type == "journal-article")
+    assert result.outcome is monitor.RunOutcome.COMPLETED
+    assert not result.warnings and not result.errors
+    assert all(unit.status is CoverageStatus.COMPLETE for unit in result.coverage)
+    metadata, rows, oa = durable_state(e.path)
+    assert metadata == [(1, 2)]
+    for prior, current in zip(before[1], rows, strict=True):
+        assert prior[:3] == current[:3] and prior[4] == current[4]
+        assert current[3] == ps.crossref_semantic_hash(ps.deserialize_crossref_record(current[4]))
+    assert before[2][0] in oa
+    assert cache.stat() == cache_stat and cache.read_bytes() == b"invalid legacy cache remains inert"
+
+
+def test_production_migration_retains_history_and_applies_current_pending(execution):
+    e = execution
+    before = seed_v1(e)
+    e.records["10.5555/b"] = cr_record("10.5555/b", title="statistics peer")
+    e.members.append("10.5555/b")
+    result = e.run()
+    assert result.outcome is monitor.RunOutcome.COMPLETED
+    assert result.canonical_paper_count == 2
+    assert result.state_usage.crossref_reused == result.state_usage.crossref_new == 1
+    assert len(e.full_requests) == 1 and e.full_requests[0].url.params["filter"] == "doi:10.5555/b"
+    metadata, rows, oa = durable_state(e.path)
+    assert metadata == [(1, 2)]
+    assert {row[0] for row in rows} == {"10.5555/a", "10.5555/b", "10.5555/history"}
+    for prior in before[1]:
+        current = next(row for row in rows if row[0] == prior[0])
+        assert current[:3] == prior[:3] and current[4] == prior[4]
+    assert before[2][0] in oa and {row[0] for row in oa} == {"https://openalex.org/W1", "https://openalex.org/W999"}
+    assert ps.read_provider_state(e.output).status is ps.ProviderStateStatus.AVAILABLE
+
+
+def nonclean_run(e, issue):
+    if issue == "warning":
+        e.fail_versions = True
+    elif issue == "error":
+        e.records["10.5555/b"] = cr_record("10.5555/b", title="statistics peer")
+        e.members.append("10.5555/b")
+        e.failed_dois.add("10.5555/b")
+
+
+@pytest.mark.parametrize("issue", ["warning", "error"])
+def test_nonclean_production_run_still_migrates_v1(execution, issue):
+    e = execution
+    seed_v1(e)
+    nonclean_run(e, issue)
+    result = e.run()
+    expected = monitor.RunOutcome.COMPLETED_WITH_WARNINGS if issue == "warning" else monitor.RunOutcome.COMPLETED_WITH_ERRORS
+    assert result.outcome is expected
+    assert bool(result.errors) is (issue == "error")
+    assert result.canonical_paper_count == 1 and not state_warnings(result)
+    assert durable_state(e.path)[0] == [(1, 2)]
+    assert ps.read_provider_state(e.output).status is ps.ProviderStateStatus.AVAILABLE
+
+
+@pytest.mark.parametrize("issue", [None, "warning", "error"])
+def test_production_migration_failure_preserves_materialization_v1_and_issue_precedence(execution, monkeypatch, issue):
+    e = execution
+    before = seed_v1(e)
+    nonclean_run(e, issue)
+    original = ps._upsert_changes
+    materialized = {}
+
+    def fail_after_pending(connection, pending):
+        assert connection.execute("SELECT schema_version FROM schema_metadata").fetchone() == (2,)
+        original(connection, pending)
+        for folder in ("Papers", "Authors"):
+            paths = list((e.output / folder).glob("*.md"))
+            assert paths
+            materialized.update({path: path.read_bytes() for path in paths})
+        raise sqlite3.IntegrityError("simulated migration failure after pending upsert")
+
+    monkeypatch.setattr(ps, "_upsert_changes", fail_after_pending)
+    result = e.run()
+    warning, = state_warnings(result)
+    assert warning.severity is monitor.MonitorIssueSeverity.WARNING
+    assert warning.stage == "persistence" and warning.path == e.path
+    assert bool(result.errors) is (issue == "error")
+    expected = monitor.RunOutcome.COMPLETED_WITH_ERRORS if issue == "error" else monitor.RunOutcome.COMPLETED_WITH_WARNINGS
+    assert result.outcome is expected
+    assert result.created_papers == result.created_authors == 1
+    assert all(path.read_bytes() == content for path, content in materialized.items())
+    assert durable_state(e.path) == before
+    assert ps.read_provider_state(e.output).status is ps.ProviderStateStatus.AVAILABLE
+    snapshot = json.loads(e.path.with_name("last-run.json").read_text())
+    assert snapshot["schema_version"] == 2 and snapshot["outcome"] == expected.value
+    assert snapshot["reused_units"] == []
 
 
 @pytest.mark.parametrize("raw_doi", [None, 42])
@@ -286,12 +431,13 @@ def test_doi_only_crossref_success_becomes_searchable_and_canonical(execution, p
 
 @pytest.mark.parametrize("failure", ["unavailable", "remote"])
 @pytest.mark.parametrize("expression", ["NOT statistics", "statistics OR NOT astronomy"])
-def test_doi_only_failed_supplement_remains_evidence_but_never_matches(
+def test_doi_only_disputed_supplement_remains_evidence_but_never_matches(
     execution, production_boundaries, failure, expression,
 ):
     e, seen = execution, production_boundaries
     e.members = []
     e.works[0].update(title=None, authorships=None)
+    e.works[0]["primary_location"]["is_published"] = None
     e.config.write_text(e.config.read_text().replace("keyword_expression: statistics",
                                                   f"keyword_expression: {expression}"))
     if failure == "unavailable":
@@ -308,16 +454,16 @@ def test_doi_only_failed_supplement_remains_evidence_but_never_matches(
     assert not evidence.authors
     assert seen["projections"] == seen["matches"] == ()
     assert not seen["canonical_evidence"] and not seen["hydration_records"] and not e.version_requests
-    warning, = [issue for issue in result.warnings if issue.stage == "unsearchable"]
-    assert warning.component is monitor.MonitorIssueComponent.SEARCH
-    assert warning.severity is monitor.MonitorIssueSeverity.WARNING
-    assert warning.record_ids == (evidence.provenance.record_id,)
+    assert not result.warnings
+    diagnostic, = result.diagnostics
+    assert diagnostic.kind.value == "scope_dispute"
+    assert diagnostic.record_ids == (evidence.provenance.record_id,)
     assert not any(issue.stage in {"missing_doi", "insufficient_metadata"} for issue in result.warnings)
     supplement, = [unit for unit in result.coverage if unit.component is CoverageComponent.CROSSREF_SUPPLEMENT]
     assert supplement.status is (CoverageStatus.UNAVAILABLE if failure == "unavailable" else CoverageStatus.FAILED)
     assert bool(result.errors) is (failure == "remote")
     assert all(issue.component is monitor.MonitorIssueComponent.CROSSREF_SUPPLEMENT for issue in result.errors)
-    assert result.outcome is (monitor.RunOutcome.COMPLETED_WITH_WARNINGS if failure == "unavailable"
+    assert result.outcome is (monitor.RunOutcome.COMPLETED if failure == "unavailable"
                               else monitor.RunOutcome.COMPLETED_WITH_ERRORS)
     assert result.statistics.evidence_clusters == result.statistics.openalex_records == 1
     assert result.statistics.retained_clusters == result.statistics.canonicalization_issues == 0
@@ -777,13 +923,21 @@ def test_shared_version_hints_cannot_merge_selected_research_work_partition(exec
     assert len(list((e.output / "Papers").glob("*.md"))) == 2
 
 
-@pytest.mark.parametrize("kind", ["corrupt", "schema"])
+@pytest.mark.parametrize("kind", ["corrupt", "schema", "v1_digest", "v2_digest"])
 def test_invalid_regular_db_runs_live_and_is_safely_replaced(execution, kind, monkeypatch):
     e = execution
-    e.path.parent.mkdir(parents=True)
+    if kind in {"v1_digest", "v2_digest"}:
+        seed_v1(e)
+        with sqlite3.connect(e.path) as connection:
+            connection.execute("UPDATE crossref_records SET semantic_hash='bad'")
+            if kind == "v2_digest":
+                connection.execute("UPDATE schema_metadata SET schema_version=2")
+        connection.close()
+    else:
+        e.path.parent.mkdir(parents=True)
     if kind == "corrupt":
         e.path.write_bytes(b"invalid DB")
-    else:
+    elif kind == "schema":
         with sqlite3.connect(e.path) as connection:
             connection.execute("CREATE TABLE incompatible (x TEXT)")
     before = e.path.read_bytes()
@@ -797,6 +951,7 @@ def test_invalid_regular_db_runs_live_and_is_safely_replaced(execution, kind, mo
     assert [(issue.stage, issue.path) for issue in state_warnings(result)] == [("read", e.path)]
     assert result.state_usage.crossref_new == 1 and e.full_requests
     assert ps.read_provider_state(e.output).status is ps.ProviderStateStatus.AVAILABLE
+    assert durable_state(e.path)[0] == [(1, 2)]
     assert not list(e.path.parent.glob(".provider-state-*"))
 
 
@@ -892,9 +1047,13 @@ def test_partial_retrieval_persists_successful_rows_without_overwriting_failed_r
 
 
 @pytest.mark.parametrize("failure", ["preflight", "expression", "backend"])
-def test_invalid_configuration_never_persists_state_or_touches_cache(execution, failure, monkeypatch):
+@pytest.mark.parametrize("version", [1, 2])
+def test_invalid_configuration_never_persists_state_or_touches_cache(execution, failure, monkeypatch, version):
     e = execution
-    ps.update_provider_state(e.output, ps.ProviderState((cr_state("10.5555/history"),)))
+    if version == 1:
+        seed_v1(e)
+    else:
+        ps.update_provider_state(e.output, ps.ProviderState((cr_state("10.5555/history"),)))
     before = e.path.read_bytes()
     cache = e.path.with_name("provider-cache.json")
     cache.write_bytes(b"invalid legacy bytes")
@@ -918,9 +1077,13 @@ def test_invalid_configuration_never_persists_state_or_touches_cache(execution, 
 
 
 @pytest.mark.parametrize("command", ["canonicalize", "materialize", "validate"])
-def test_diagnostics_are_all_live_and_have_no_state_access(execution, command, monkeypatch, capsys):
+@pytest.mark.parametrize("version", [1, 2])
+def test_diagnostics_are_all_live_and_have_no_state_access(execution, command, monkeypatch, capsys, version):
     e = execution
-    ps.update_provider_state(e.output, ps.ProviderState((cr_state(),)))
+    if version == 1:
+        seed_v1(e)
+    else:
+        ps.update_provider_state(e.output, ps.ProviderState((cr_state(),)))
     before = e.path.read_bytes()
     def forbidden(*args, **kwargs):
         pytest.fail("diagnostic must not access Provider state")

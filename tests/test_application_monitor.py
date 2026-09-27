@@ -340,6 +340,15 @@ def install_core_mocks(
     monkeypatch.setattr(monitor, "discover_journals_batched", discover_openalex)
     monkeypatch.setattr(monitor, "CrossrefRetrieval", CrossrefExecution)
     monkeypatch.setattr(monitor, "assemble_live_provider_evidence", lambda oa, cr, supplied: supplied)
+    # These orchestration tests use opaque records; scope decisions have dedicated tests.
+    from literature_monitor.application.candidate_eligibility import ClusterEligibility
+    monkeypatch.setattr(monitor, "filter_candidate_evidence", lambda oa, cr, supplied, journals: SimpleNamespace(
+        openalex_records=oa.records,
+        crossref_records=cr.records,
+        supplement_evidence=supplied.evidence,
+        diagnostics=(),
+        cluster_eligibility=lambda evidence: ClusterEligibility(True, False, False),
+    ))
     monkeypatch.setattr(monitor, "hydrate_retained_openalex_versions", hydrate)
     monkeypatch.setattr(monitor, "consolidate_evidence", consolidate)
     monkeypatch.setattr(monitor, "build_searchable_projection", build_projection)
@@ -1058,8 +1067,8 @@ def test_canonicalization_warning_is_nonfatal(
         monkeypatch,
         canonicalization_issues=(
             CanonicalizationIssue(
-                stage="blocked_match",
-                message="insufficient evidence",
+                stage="metadata_conflict",
+                message="conflicting author metadata",
                 record_ids=("W1", "W2"),
             ),
         ),
