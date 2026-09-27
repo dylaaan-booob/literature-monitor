@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from html.parser import HTMLParser
+from time import monotonic
 from typing import Annotated, Any
 from urllib.parse import quote, unquote, urlencode, urljoin, urlsplit
 
@@ -314,6 +315,12 @@ def _progress_total(value: Any) -> int | None:
     )
 
 
+@dataclass
+class _CrossrefPacingState:
+    minimum_interval: float = 0.0
+    next_allowed_at: float = 0.0
+
+
 class CrossrefClient:
     """Own one pooled HTTP client; close it after each execution, usually with `with`."""
 
@@ -345,7 +352,10 @@ class CrossrefClient:
                 trust_env=False,
             )
         self._sleep = sleep
-        self._rate_limit_delay: float | None = None
+        self._pacing_states = {
+            "singleton_doi": _CrossrefPacingState(),
+            "list_filter": _CrossrefPacingState(),
+        }
 
     def close(self) -> None:
         self._http_client.close()
@@ -356,7 +366,9 @@ class CrossrefClient:
     def __exit__(self, *args: object) -> None:
         self.close()
 
-    def _update_rate_limit(self, headers: Any) -> None:
+    def _update_rate_limit(
+        self, headers: Any, pacing: _CrossrefPacingState, request_started_at: float,
+    ) -> None:
         if headers is None or not hasattr(headers, "get"):
             return
         raw_limit = headers.get("X-Rate-Limit-Limit")
@@ -376,38 +388,44 @@ class CrossrefClient:
         delay = interval / limit
         if not math.isfinite(delay) or delay <= 0:
             return
-        self._rate_limit_delay = delay
+        pacing.minimum_interval = delay
+        pacing.next_allowed_at = request_started_at + delay
 
-    def _wait_for_rate_limit(
+    def _wait_for_request(
         self,
+        pacing: _CrossrefPacingState,
         *,
+        retry_at: float | None,
+        retry_reason: str,
         progress_callback: ProgressCallback | None,
         activity: ActivityUpdate | None,
     ) -> None:
-        delay = self._rate_limit_delay
-        if delay is None:
+        deadline = max(pacing.next_allowed_at, retry_at or 0.0)
+        delay = max(0.0, deadline - monotonic())
+        retrying = retry_at is not None
+        if delay <= 0 and not retrying:
             return
         if activity is not None:
+            detail = (
+                f"{retry_reason} · backoff {delay:g}s"
+                if retrying else f"provider pacing {delay:g}s"
+            )
             _report_activity(
                 progress_callback,
                 replace(
                     activity,
-                    kind=ActivityKind.WAITING,
-                    label="Waiting for Crossref rate limit",
+                    kind=ActivityKind.RETRYING if retrying else ActivityKind.WAITING,
+                    label=("Retrying Crossref request" if retrying
+                           else "Waiting for Crossref rate limit"),
                     detail=(
-                        f"{activity.detail} · provider pacing {delay:g}s"
-                        if activity.detail
-                        else f"provider pacing {delay:g}s"
+                        f"{activity.detail} · {detail}" if activity.detail else detail
                     ),
                 ),
             )
-        self._sleep(delay)
-
-    def _retry_delay(self, attempt: int) -> float:
-        fallback = 2**attempt
-        if self._rate_limit_delay is None:
-            return fallback
-        return max(fallback, self._rate_limit_delay)
+        # Activity reporting and response handling also consume deadline time.
+        remaining = max(0.0, deadline - monotonic())
+        if remaining > 0:
+            self._sleep(remaining)
 
     def get_work_by_doi(
         self,
@@ -652,11 +670,16 @@ class CrossrefClient:
             "User-Agent": "literature-monitor/0.4.3",
         }
 
-        self._wait_for_rate_limit(
-            progress_callback=progress_callback,
-            activity=activity,
-        )
+        # Classify HTTP shape, independently of the caller's Activity operation.
+        request_class = "singleton_doi" if path.startswith("/v1/works/") else "list_filter"
+        pacing = self._pacing_states[request_class]
+        retry_at = None
+        retry_reason = ""
         for attempt in range(3):
+            self._wait_for_request(
+                pacing, retry_at=retry_at, retry_reason=retry_reason,
+                progress_callback=progress_callback, activity=activity,
+            )
             attempt_number = attempt + 1
             if activity is not None:
                 _report_activity(
@@ -672,19 +695,19 @@ class CrossrefClient:
                         ),
                     ),
                 )
+            request_started_at = monotonic()
+            pacing.next_allowed_at = request_started_at + pacing.minimum_interval
             try:
                 response = self._http_client.get(url, headers=headers, timeout=self.timeout)
+                self._update_rate_limit(response.headers, pacing, request_started_at)
                 if observe_alias and response.status_code in (301, 308):
-                    self._update_rate_limit(response.headers)
                     raise _PrimeRedirect(_redirect_prime_doi(response))
                 response.raise_for_status()
                 payload = json.loads(response.content)
-                response_headers = response.headers
                 if not isinstance(payload, dict):
                     raise CrossrefRequestError(
                         "Crossref returned a non-object JSON response"
                     )
-                self._update_rate_limit(response_headers)
                 if activity is not None:
                     _report_activity(
                         progress_callback,
@@ -705,47 +728,16 @@ class CrossrefClient:
                 if status_code == 404 and not_found_message is not None:
                     raise CrossrefNotFoundError(not_found_message) from error
                 if (status_code == 429 or status_code >= 500) and attempt < 2:
-                    delay = self._retry_delay(attempt)
-                    if activity is not None:
-                        # retry 事件先于 backoff，且沿用所属 ISSN/DOI activity identity。
-                        _report_activity(
-                            progress_callback,
-                            replace(
-                                activity,
-                                kind=ActivityKind.RETRYING,
-                                label="Retrying Crossref request",
-                                detail=(
-                                    f"{activity.detail} · HTTP {status_code} · "
-                                    f"backoff {delay}s"
-                                    if activity.detail
-                                    else f"HTTP {status_code} · backoff {delay}s"
-                                ),
-                            ),
-                        )
-                    self._sleep(delay)
+                    retry_at = request_started_at + 2**attempt
+                    retry_reason = f"HTTP {status_code}"
                     continue
                 raise CrossrefRequestError(
                     f"Crossref request failed with HTTP {status_code}"
                 ) from error
             except httpx.RequestError as error:
                 if attempt < 2:
-                    delay = self._retry_delay(attempt)
-                    if activity is not None:
-                        _report_activity(
-                            progress_callback,
-                            replace(
-                                activity,
-                                kind=ActivityKind.RETRYING,
-                                label="Retrying Crossref request",
-                                detail=(
-                                    f"{activity.detail} · transport failure · "
-                                    f"backoff {delay}s"
-                                    if activity.detail
-                                    else f"transport failure · backoff {delay}s"
-                                ),
-                            ),
-                        )
-                    self._sleep(delay)
+                    retry_at = request_started_at + 2**attempt
+                    retry_reason = "transport failure"
                     continue
                 raise CrossrefRequestError(
                     f"Crossref request failed: {error}"

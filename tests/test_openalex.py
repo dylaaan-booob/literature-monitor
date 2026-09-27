@@ -148,7 +148,7 @@ def test_no_successful_issn_is_an_error() -> None:
 
 
 def test_remote_failure_is_not_treated_as_an_unresolved_issn() -> None:
-    client, _ = make_client(
+    client, transport = make_client(
         fixture("source_cybernetics.json"),
         httpx.ReadTimeout("timed out"),
         httpx.ReadTimeout("timed out"),
@@ -161,13 +161,13 @@ def test_remote_failure_is_not_treated_as_an_unresolved_issn() -> None:
 
     source, issues = resolve_journal_source(client, journal)
 
-    assert source is not None
-    assert source.openalex_id == "https://openalex.org/S4210191041"
+    assert source is None
     assert len(issues) == 1
     assert issues[0].issn == "2168-2275"
-    assert issues[0].severity is IssueSeverity.WARNING
+    assert issues[0].severity is IssueSeverity.ERROR
     assert "incomplete ISSN verification" in issues[0].message
     assert "timed out" in issues[0].message
+    assert len(transport.requests) == 4
 
 
 def test_success_plus_source_semantic_failure_rejects_the_journal() -> None:
@@ -819,7 +819,7 @@ def test_model_validation_failure_skips_only_the_bad_record(
 def test_bad_record_in_one_journal_does_not_stop_later_journals() -> None:
     bad_page = deepcopy(fixture("works_page_1.json"))
     bad_page["meta"]["next_cursor"] = None
-    bad_page["results"][0]["title"] = None
+    bad_page["results"][0]["id"] = "invalid Work identity"
     later_page = deepcopy(fixture("works_page_1.json"))
     later_page["meta"]["next_cursor"] = None
     later_page["results"][0]["id"] = "https://openalex.org/W200"
@@ -864,7 +864,7 @@ def test_bad_record_in_one_journal_does_not_stop_later_journals() -> None:
     )
 
 
-def test_partial_records_preserve_usable_result_and_report_issues() -> None:
+def test_partial_records_preserve_usable_result_without_ingestion_issues() -> None:
     client, _ = make_client(
         fixture("source_biometrics.json"), fixture("works_partial.json")
     )
@@ -876,14 +876,15 @@ def test_partial_records_preserve_usable_result_and_report_issues() -> None:
         date(2026, 1, 31),
     )
 
-    assert len(result.records) == 1
-    record = result.records[0]
+    assert len(result.records) == 2
+    records = {record.external_ids.openalex: record for record in result.records}
+    record = records["https://openalex.org/W100"]
     assert record.metadata.publication_date is None
     assert record.metadata.abstract is None
     assert record.external_ids.doi is None
-    assert result.has_errors
-    assert sum(issue.severity is IssueSeverity.WARNING for issue in result.issues) == 3
-    assert any("no usable authors" in issue.message for issue in result.issues)
+    assert records["https://openalex.org/W101"].authors == ()
+    assert not result.issues
+    assert result.coverage[0].status is CoverageStatus.COMPLETE
 
 
 def test_failed_later_page_keeps_successful_earlier_records() -> None:
@@ -1072,7 +1073,7 @@ def test_work_revision_is_optional_timezone_safe_and_not_evidence(revision: str 
     record, warnings = openalex_module._normalize_work(payload, source, plain.provenance.retrieved_at)
     assert record.updated_at == expected
     assert record.to_evidence() == plain.to_evidence()
-    assert bool(warnings) == (revision is not None and expected is None)
+    assert not warnings
 
 
 @pytest.mark.parametrize("revision", [None, datetime(2026, 9, 26, tzinfo=timezone.utc)])
@@ -1231,14 +1232,14 @@ def test_a4_thin_discovery_fields_mapping_and_searchable_metadata():
 
 
 @pytest.mark.parametrize("revision", [None, "bad", "2026-02-30T00:00:00", "2026-01-31", 123, {}])
-def test_a4_missing_or_invalid_revision_preserves_candidate_with_warning(revision):
+def test_a4_missing_or_invalid_revision_preserves_candidate_without_issue(revision):
     client, _ = make_client(a4_sources(fixture("source_biometrics.json")), a4_page(a4_work(updated_date=revision)))
     with client:
         result = a4_discover(client, a4_journals()[:1])
     assert len(result.records) == 1
     assert result.records[0].updated_at is None
     assert result.coverage[0].status is CoverageStatus.COMPLETE
-    assert any("updated_date" in issue.message for issue in result.issues)
+    assert not result.issues
 
 
 def test_a4_same_source_preserves_both_journal_reporting_units():
@@ -1253,20 +1254,16 @@ def test_a4_same_source_preserves_both_journal_reporting_units():
     assert len(transport.requests) == 2
 
 
-@pytest.mark.parametrize("damage", ["unknown_source", "missing_source", "bad_title", "bad_id"])
+@pytest.mark.parametrize("damage", ["missing_source", "bad_id"])
 def test_a4_bad_work_recovers_safely_without_optimization_issue(damage):
     bad = a4_work()
-    if damage == "unknown_source":
-        bad["primary_location"]["source"]["id"] = "S999"
-    elif damage == "missing_source":
+    if damage == "missing_source":
         bad["primary_location"] = None
-    elif damage == "bad_title":
-        bad["title"] = None
     else:
         bad["id"] = "bad"
     # Unassignable evidence affects every Source; known malformed works only their Source.
     outcomes = [a4_sources(fixture("source_biometrics.json"), fixture("source_cybernetics.json")), a4_page(bad, a4_work("W2", "S4210191041")), a4_page(a4_work())]
-    if damage in {"unknown_source", "missing_source"}:
+    if damage == "missing_source":
         outcomes.append(a4_page(a4_work("W2", "S4210191041")))
     client, transport = make_client(*outcomes)
     with client:
@@ -1274,11 +1271,11 @@ def test_a4_bad_work_recovers_safely_without_optimization_issue(damage):
     assert all(unit.coverage.status is CoverageStatus.COMPLETE for unit in result.units)
     assert not result.issues
     assert len(result.records) == 2
-    assert len(transport.requests) == (4 if damage in {"unknown_source", "missing_source"} else 3)
+    assert len(transport.requests) == (4 if damage == "missing_source" else 3)
 
 
 def test_a4_unrecovered_malformed_work_is_partial_only_in_affected_unit():
-    bad = a4_work("W3", title=None)
+    bad = a4_work("W3", id="invalid Work identity")
     client, _ = make_client(a4_sources(fixture("source_biometrics.json"), fixture("source_cybernetics.json")),
                             a4_page(a4_work(), bad, a4_work("W2", "S4210191041")), a4_page(a4_work(), bad))
     with client:
@@ -1332,19 +1329,90 @@ def test_a4_duplicate_work_traversal_is_conservative_and_keeps_one_record():
     assert result.coverage[0].status is CoverageStatus.PARTIAL
 
 
-@pytest.mark.parametrize("outcome", [httpx.Response(404), httpx.Response(400)])
-def test_a4_unresolved_issn_preserves_existing_warning_semantics(outcome):
+def test_a4_unresolved_issn_preserves_existing_warning_semantics():
     source = fixture("source_biometrics.json")
     source["issn"] = ["0006-341X"]
     journal = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"))
-    client, transport = make_client(a4_sources(source), outcome)
+    client, transport = make_client(a4_sources(source), http_error(404))
     with client:
         unit, = openalex_module.resolve_journal_sources_batched(client, (journal,))
     assert unit.source.resolved_issns == ("0006-341X",)
+    assert unit.status is None
     assert len(unit.issues) == 1
     assert unit.issues[0].severity is IssueSeverity.WARNING
     assert unit.issues[0].issn == "1541-0420"
     assert len(transport.requests) == 2
+
+
+@pytest.mark.parametrize("failure", ["timeout", "server", "api"])
+def test_batched_mixed_source_success_and_remote_failure_is_failed(failure):
+    source = fixture("source_biometrics.json")
+    source["issn"] = ["0006-341X"]
+    journal = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"))
+    failures = ([httpx.ReadTimeout("timed out")] * 3 if failure == "timeout" else
+                [http_error(500)] * 3 if failure == "server" else [http_error(400)])
+    client, transport = make_client(a4_sources(source), *failures)
+    with client:
+        unit, = openalex_module.resolve_journal_sources_batched(client, (journal,))
+    assert unit.source is None
+    assert unit.status is CoverageStatus.FAILED
+    assert [(issue.severity, issue.issn) for issue in unit.issues] == [
+        (IssueSeverity.ERROR, "1541-0420")
+    ]
+    assert "remote/API failure" in unit.issues[0].message
+    assert len(transport.requests) == 1 + len(failures)
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("alternate", ["remote", "absent"])
+def test_mixed_source_resolution_controls_works_retrieval(batched, alternate):
+    source = fixture("source_biometrics.json")
+    source["issn"] = ["0006-341X"]
+    journal = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"))
+    outcomes = [a4_sources(source) if batched else source]
+    outcomes += [http_error(500)] * 3 if alternate == "remote" else [http_error(404), a4_page()]
+    client, transport = make_client(*outcomes)
+    with client:
+        result = (a4_discover(client, (journal,)) if batched else discover_journals(
+            client, (journal,), date(2026, 1, 1), date(2026, 1, 31),
+            retrieved_at=datetime(2026, 1, 31, tzinfo=timezone.utc)))
+    assert not result.records
+    assert result.coverage[0].status is (
+        CoverageStatus.FAILED if alternate == "remote" else CoverageStatus.COMPLETE
+    )
+    assert bool(result.sources) is (alternate == "absent")
+    assert (result.units[0].source is None) is (alternate == "remote")
+    assert [(issue.severity, issue.issn) for issue in result.issues] == [
+        (IssueSeverity.ERROR if alternate == "remote" else IssueSeverity.WARNING, "1541-0420")
+    ]
+    works_requests = [request for request in transport.requests if request.url.path == "/works"]
+    assert len(works_requests) == (0 if alternate == "remote" else 1)
+    assert not transport.outcomes
+
+
+@pytest.mark.parametrize("discovery", [False, True])
+def test_source_batch_remote_failure_recovered_by_singletons_remains_usable(discovery):
+    source = fixture("source_biometrics.json")
+    journal = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"))
+    outcomes = [http_error(500)] * 3 + [source, source]
+    if discovery:
+        outcomes.append(a4_page())
+    client, transport = make_client(*outcomes)
+    with client:
+        if discovery:
+            result = a4_discover(client, (journal,))
+            unit, = result.units
+            assert unit.coverage.status is CoverageStatus.COMPLETE
+        else:
+            unit, = openalex_module.resolve_journal_sources_batched(client, (journal,))
+            assert unit.status is None
+        assert unit.source is not None
+        assert unit.source.resolved_issns == journal.issn
+        assert not unit.issues
+    assert [request.url.path for request in transport.requests] == [
+        "/sources", "/sources", "/sources",
+        "/sources/issn:0006-341X", "/sources/issn:1541-0420",
+    ] + (["/works"] if discovery else [])
 
 
 def test_a4_works_batches_are_bounded_and_same_client_is_reused():
@@ -1371,13 +1439,15 @@ def test_a4_terminal_failure_after_usable_page_remains_partial_without_fallback(
     assert len(transport.requests) == 3
 
 
-def test_a4_complete_traversal_with_only_dropped_records_retains_legacy_partial_semantics():
-    client, _ = make_client(a4_sources(fixture("source_biometrics.json")), a4_page(a4_work(title=None)))
+def test_a4_complete_traversal_excludes_below_floor_records_without_coverage_loss():
+    client, _ = make_client(a4_sources(fixture("source_biometrics.json")), a4_page(a4_work(title=None, doi=None)))
     with client:
         result = a4_discover(client, a4_journals()[:1])
     assert not result.records
-    assert result.coverage[0].status is CoverageStatus.PARTIAL
-    assert result.issues
+    assert result.coverage[0].status is CoverageStatus.COMPLETE
+    assert len(result.issues) == 1
+    assert result.issues[0].severity is IssueSeverity.WARNING
+    assert not result.has_errors
 
 
 @pytest.mark.parametrize("raw,expected", [
@@ -1432,7 +1502,7 @@ def test_raw_updated_at_is_ignored_and_legacy_select_remains_unchanged():
     with client:
         result = a4_discover(client, a4_journals()[:1])
     assert result.records[0].updated_at is None
-    assert any("missing updated_date" in issue.message for issue in result.issues)
+    assert not result.issues
     assert "updated_date" not in openalex_module.WORK_FIELDS.split(",")
     assert "updated_at" not in openalex_module.WORK_FIELDS.split(",")
     legacy, warnings = openalex_module._normalize_work(raw, result.sources[0], result.records[0].provenance.retrieved_at)
@@ -1440,8 +1510,9 @@ def test_raw_updated_at_is_ignored_and_legacy_select_remains_unchanged():
     assert not warnings
 
 
-@pytest.mark.parametrize("mode", ["matching", "changed", "missing"])
-def test_provider_updated_date_drives_internal_version_state_binding(mode):
+@pytest.mark.parametrize("mode", ["matching", "changed", "missing", "malformed"])
+@pytest.mark.parametrize("partial", [False, True])
+def test_provider_updated_date_drives_internal_version_state_binding(mode, partial):
     from literature_monitor.application.openalex_retrieval import hydrate_retained_openalex_versions
     from literature_monitor.application.provider_state import OpenAlexVersionState
     from literature_monitor.openalex import OpenAlexVersionHint
@@ -1449,8 +1520,12 @@ def test_provider_updated_date_drives_internal_version_state_binding(mode):
     revision = datetime(2026, 9, 26, 8, 19, 3, 415552, tzinfo=timezone.utc)
     old_hints = (OpenAlexVersionHint(source="doi", identifier="10.5555/old", version=OpenAlexVersion.ACCEPTED),)
     state = OpenAlexVersionState("https://openalex.org/W1", revision, revision, old_hints)
-    raw_revision = {"matching": "2026-09-26T08:19:03.415552", "changed": "2026-09-27T08:19:03.415552", "missing": None}[mode]
-    outcomes = [a4_sources(fixture("source_biometrics.json")), a4_page(a4_work(updated_date=raw_revision))]
+    raw_revision = {"matching": "2026-09-26T08:19:03.415552", "changed": "2026-09-27T08:19:03.415552",
+                    "missing": None, "malformed": "bad"}[mode]
+    raw = a4_work(updated_date=raw_revision)
+    if partial:
+        raw.update(title=None, authorships=None)
+    outcomes = [a4_sources(fixture("source_biometrics.json")), a4_page(raw)]
     if mode != "matching":
         outcomes.append(a4_page({"id": "W1", "locations": []}))
     client, transport = make_client(*outcomes)
@@ -1469,3 +1544,205 @@ def test_provider_updated_date_drives_internal_version_state_binding(mode):
         if mode == "changed":
             assert result.pending_changes[0].hydrated_against_updated_at == discovery.records[0].updated_at
     assert discovery.coverage[0].status is CoverageStatus.COMPLETE
+    assert not discovery.issues and not result.issues
+
+
+def partial_discovery(raws, *, batched):
+    if batched:
+        client, transport = make_client(a4_sources(fixture("source_biometrics.json")), a4_page(*raws))
+    else:
+        client, transport = make_client(fixture("source_biometrics.json"), a4_page(*raws))
+    with client:
+        result = (a4_discover(client, a4_journals()[:1]) if batched else discover_journals(
+            client, a4_journals()[:1], date(2026, 1, 1), date(2026, 1, 31),
+            retrieved_at=datetime(2026, 1, 31, tzinfo=timezone.utc)))
+    assert len(transport.requests) == 2
+    assert transport.closed
+    return result
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize(("title", "doi", "expected_title", "expected_doi"), [
+    ("Study", " HTTPS://DOI.ORG/10.5555/STUDY ", "Study", "10.5555/study"),
+    (None, "10.5555/study", None, "10.5555/study"),
+    (" \t ", "10.5555/study", None, "10.5555/study"),
+    (42, "10.5555/study", None, "10.5555/study"),
+    ("Study", None, "Study", None),
+    ("Study", "invalid DOI", "Study", None),
+    ("Study", "not-a-doi", "Study", None),
+    ("Study", "10.5555/", "Study", None),
+    ("Study", 42, "Study", None),
+])
+def test_partial_admission_requires_doi_or_title_not_canonical_metadata(
+    batched, title, doi, expected_title, expected_doi,
+):
+    result = partial_discovery([a4_work(title=title, doi=doi)], batched=batched)
+    record, = result.records
+    assert not isinstance(record.metadata, CanonicalMetadata)
+    evidence = record.to_evidence()
+    assert evidence.title == expected_title
+    assert evidence.external_ids.doi == expected_doi
+    assert evidence.external_ids.openalex == evidence.provenance.record_id == "https://openalex.org/W1"
+    assert evidence.journal == "Biometrics"
+    assert evidence.provenance.retrieved_at == datetime(2026, 1, 31, tzinfo=timezone.utc)
+    assert not result.issues
+    assert result.coverage[0].status is CoverageStatus.COMPLETE
+    if expected_title is None:
+        canonical = canonicalize_records((evidence,))
+        assert not canonical.papers
+        assert any(issue.stage == "insufficient_metadata" for issue in canonical.issues)
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize(("title", "doi"), [(None, None), (" ", "bad"), ([], 42)])
+def test_below_floor_records_are_excluded_without_execution_error(batched, title, doi):
+    result = partial_discovery([a4_work(title=title, doi=doi)], batched=batched)
+    assert not result.records
+    assert result.coverage[0].status is CoverageStatus.COMPLETE
+    assert len(result.issues) == 1
+    assert result.issues[0].severity is IssueSeverity.WARNING
+    assert not result.has_errors
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("authorships", [None, {}, "bad", [], [None, {}, {"author": []}],
+    [{"author": {"display_name": " "}, "raw_author_name": 42}],
+])
+def test_unusable_authorships_retain_empty_authors_without_issue(batched, authorships):
+    result = partial_discovery([a4_work(authorships=authorships)], batched=batched)
+    record, = result.records
+    assert record.authors == record.to_evidence().authors == ()
+    assert not result.issues
+    assert result.coverage[0].status is CoverageStatus.COMPLETE
+    canonical = canonicalize_records((record.to_evidence(),))
+    assert not canonical.papers
+    assert any(issue.stage == "insufficient_metadata" for issue in canonical.issues)
+
+
+def test_partial_author_information_preserves_provider_order_and_safe_fields():
+    authorships = [
+        {"author": {"display_name": "First", "id": "bad", "orcid": "bad"}},
+        {"author": None, "raw_author_name": "Second"},
+        {"author": {"display_name": "Third", "id": "A123", "orcid": "0000-0001-2345-6789"}},
+        {"author": {}},
+    ]
+    result = partial_discovery([a4_work(authorships=authorships)], batched=True)
+    assert [(a.name, a.openalex_id, a.orcid) for a in result.records[0].authors] == [
+        ("First", None, None), ("Second", None, None),
+        ("Third", "https://openalex.org/A123", "0000-0001-2345-6789"),
+    ]
+    assert not result.issues
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("abstract", [None, [], "bad", {"word": "bad"},
+    {"word": [-1]}, {"word": [True]}, {"word": [0], "other": [0]}, {" ": [0]},
+])
+def test_missing_or_malformed_abstract_retains_evidence_without_issue(batched, abstract):
+    result = partial_discovery([a4_work(abstract_inverted_index=abstract)], batched=batched)
+    assert result.records[0].to_evidence().abstract is None
+    assert not result.issues
+    assert result.coverage[0].status is CoverageStatus.COMPLETE
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("publication_date", [None, "bad", "2026-02-30", 42, {}])
+def test_missing_or_invalid_publication_date_does_not_discard_evidence(batched, publication_date):
+    result = partial_discovery([a4_work(publication_date=publication_date)], batched=batched)
+    assert result.records[0].to_evidence().publication_date is None
+    assert not result.issues
+    assert result.coverage[0].status is CoverageStatus.COMPLETE
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("work_id", [None, "", "bad", "A123", 42])
+def test_missing_or_invalid_work_id_remains_structural_failure(batched, work_id):
+    result = partial_discovery([a4_work(id=work_id)], batched=batched)
+    assert not result.records
+    assert result.has_errors
+    assert result.coverage[0].status is CoverageStatus.PARTIAL
+    assert all(issue.severity is IssueSeverity.ERROR for issue in result.issues)
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("primary_location", [None, {}, {"source": None},
+    {"source": {}}, {"source": {"id": None}},
+])
+def test_single_source_missing_nested_identity_uses_verified_request_scope(batched, primary_location):
+    result = partial_discovery([a4_work(primary_location=primary_location)], batched=batched)
+    record, = result.records
+    assert record.source_id == result.sources[0].openalex_id == "https://openalex.org/S8265502"
+    assert record.to_evidence().journal == result.sources[0].display_name
+    assert not result.issues
+    assert result.coverage[0].status is CoverageStatus.COMPLETE
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("source_id", ["S999", "invalid Source identity"])
+def test_single_source_explicit_conflict_or_invalid_identity_is_never_overridden(batched, source_id):
+    raw = a4_work()
+    raw["primary_location"]["source"]["id"] = source_id
+    result = partial_discovery([raw], batched=batched)
+    assert not result.records
+    assert result.has_errors
+    assert result.coverage[0].status is CoverageStatus.PARTIAL
+
+
+def test_multi_source_missing_nested_identity_splits_before_scope_fallback():
+    first = a4_work(primary_location=None)
+    second = a4_work("W2", "S4210191041", primary_location=None)
+    client, transport = make_client(
+        a4_sources(fixture("source_biometrics.json"), fixture("source_cybernetics.json")),
+        a4_page(first, second), a4_page(first), a4_page(second))
+    with client:
+        result = a4_discover(client)
+    assert [r.source_id for r in result.records] == [u.source.openalex_id for u in result.units]
+    assert [r.external_ids.openalex for r in result.records] == ["https://openalex.org/W1", "https://openalex.org/W2"]
+    filters = [request.url.params["filter"].split(",")[0] for request in transport.requests[1:]]
+    assert filters == ["primary_location.source.id:S8265502|S4210191041",
+                       "primary_location.source.id:S8265502", "primary_location.source.id:S4210191041"]
+    assert all(unit.coverage.status is CoverageStatus.COMPLETE for unit in result.units)
+    assert not result.issues
+
+
+def test_multi_source_explicit_conflict_remains_error_even_after_successful_split():
+    bad = a4_work(source_id="S999")
+    client, transport = make_client(
+        a4_sources(fixture("source_biometrics.json"), fixture("source_cybernetics.json")),
+        a4_page(bad, a4_work("W2", "S4210191041")),
+        a4_page(a4_work()), a4_page(a4_work("W2", "S4210191041")))
+    with client:
+        result = a4_discover(client)
+    assert len(result.records) == 2
+    assert all(r.source_id != "https://openalex.org/S999" for r in result.records)
+    assert result.has_errors
+    assert all(unit.coverage.status is CoverageStatus.PARTIAL for unit in result.units)
+    assert any("outside requested Sources" in issue.message for issue in result.issues)
+    assert len(transport.requests) == 4
+
+
+@pytest.mark.parametrize("batched", [False, True])
+def test_complete_traversal_coverage_is_independent_of_field_completeness(batched):
+    records = [a4_work("W1", title=None), a4_work("W2", doi=None),
+        a4_work("W3", authorships=None), a4_work("W4", abstract_inverted_index=None),
+        a4_work("W5", updated_date=None, publication_date=None), a4_work("W6", title=None, doi=None)]
+    result = partial_discovery(records, batched=batched)
+    assert len(result.records) == 5
+    assert not result.has_errors
+    assert result.coverage[0].status is CoverageStatus.COMPLETE
+    assert len(result.issues) == 1
+    assert "neither a valid DOI nor a usable title" in result.issues[0].message
+
+
+@pytest.mark.parametrize("batched", [False, True])
+def test_normal_source_absence_is_unavailable_with_warning(batched):
+    outcomes = [a4_sources()] if batched else []
+    client, transport = make_client(*outcomes, http_error(404), http_error(404))
+    journal = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"))
+    with client:
+        result = (a4_discover(client, (journal,)) if batched else discover_journals(
+            client, (journal,), date(2026, 1, 1), date(2026, 1, 31)))
+    assert result.coverage[0].status is CoverageStatus.UNAVAILABLE
+    assert not result.sources and not result.records and not result.has_errors
+    assert all(issue.severity is IssueSeverity.WARNING for issue in result.issues)
+    assert len(transport.requests) == (3 if batched else 2)

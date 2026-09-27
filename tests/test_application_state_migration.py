@@ -145,7 +145,7 @@ def state_warnings(result):
 
 @pytest.mark.parametrize("raw_doi", [None, 42])
 @pytest.mark.parametrize("diagnostic", [False, True])
-def test_missing_doi_warns_without_supplement_requests_or_state(execution, monkeypatch, raw_doi, diagnostic):
+def test_title_only_has_no_supplement_warning_requests_or_state(execution, monkeypatch, raw_doi, diagnostic):
     e = execution
     e.works[0]["doi"] = raw_doi
     e.members = []
@@ -165,17 +165,10 @@ def test_missing_doi_warns_without_supplement_requests_or_state(execution, monke
         assert len(list((e.output / "Papers").glob("*.md"))) == 1
         assert ps.read_provider_state(e.output).state.crossref_records == ()
 
-    assert result.outcome is monitor.RunOutcome.COMPLETED_WITH_WARNINGS
+    assert result.outcome is monitor.RunOutcome.COMPLETED
     assert not result.errors
-    warning, = [issue for issue in result.warnings if issue.stage == "missing_doi"]
-    assert warning.severity is monitor.MonitorIssueSeverity.WARNING
-    assert warning.component is monitor.MonitorIssueComponent.CROSSREF_SUPPLEMENT
-    assert warning.record_id == "https://openalex.org/W1"
-    assert warning.message == "record has no DOI; Crossref lookup was skipped"
-    assert result.statistics.provider_issues == 1 + int(raw_doi is not None)
-    if raw_doi is not None:
-        assert any(issue.component is monitor.MonitorIssueComponent.OPENALEX
-                   and issue.stage == "record_normalization" for issue in result.warnings)
+    assert not result.warnings
+    assert result.statistics.provider_issues == 0
     assert result.statistics.openalex_records == result.statistics.retained_clusters == 1
     assert result.statistics.crossref_supplement_records == 0
     assert not any(unit.component is CoverageComponent.CROSSREF_SUPPLEMENT for unit in result.coverage)
@@ -198,6 +191,211 @@ def test_openalex_only_doi_still_supplements_and_persists_current_evidence(execu
     assert unit.status is CoverageStatus.COMPLETE
     assert len(e.full_requests) == 1
     assert [row.doi for row in ps.read_provider_state(e.output).state.crossref_records] == ["10.5555/a"]
+
+
+@pytest.fixture
+def production_boundaries(monkeypatch):
+    """Observe the real consolidation, matcher, hydration and canonicalization calls."""
+    seen = {}
+    original_consolidate = monitor.consolidate_evidence
+    original_match = monitor.match_searchable_projections
+    original_hydrate = monitor.hydrate_retained_openalex_versions
+    original_canonicalize = monitor.canonicalize_records
+
+    def consolidate(evidence):
+        result = original_consolidate(evidence)
+        seen["clusters"] = result.clusters
+        return result
+
+    def match(expression, projections):
+        result = original_match(expression, projections)
+        seen["projections"], seen["matches"] = projections, result
+        return result
+
+    def hydrate(client, records, **kwargs):
+        seen["hydration_records"] = records
+        return original_hydrate(client, records, **kwargs)
+
+    def canonicalize(evidence):
+        seen["canonical_evidence"] = evidence
+        return original_canonicalize(evidence)
+
+    monkeypatch.setattr(monitor, "consolidate_evidence", consolidate)
+    monkeypatch.setattr(monitor, "match_searchable_projections", match)
+    monkeypatch.setattr(monitor, "hydrate_retained_openalex_versions", hydrate)
+    monkeypatch.setattr(monitor, "canonicalize_records", canonicalize)
+    return seen
+
+
+@pytest.mark.parametrize(("expression", "matched"), [("statistics", True), ("astronomy", False)])
+def test_title_only_without_authors_warns_only_after_matching(execution, production_boundaries, expression, matched):
+    e, seen = execution, production_boundaries
+    e.members = []
+    e.works[0].update(doi=None, authorships=None)
+    e.locations["W1"] = []
+    e.config.write_text(e.config.read_text().replace("keyword_expression: statistics",
+                                                  f"keyword_expression: {expression}"))
+    result = e.run()
+
+    evidence, = seen["clusters"][0].evidence
+    assert evidence.title == "statistics study" and not evidence.authors and evidence.external_ids.doi is None
+    assert seen["projections"][0].titles == ("statistics study",)
+    assert seen["matches"] == (matched,)
+    assert bool(seen["canonical_evidence"]) is matched
+    assert bool(seen["hydration_records"]) is matched
+    assert bool(e.version_requests) is matched
+    assert result.canonical_paper_count == 0
+    assert not result.errors
+    assert [issue.stage for issue in result.warnings] == (["insufficient_metadata"] if matched else [])
+    assert result.outcome is (monitor.RunOutcome.COMPLETED_WITH_WARNINGS if matched else monitor.RunOutcome.COMPLETED)
+    assert result.statistics.evidence_clusters == result.statistics.openalex_records == 1
+    assert result.statistics.retained_clusters == result.statistics.canonicalization_issues == int(matched)
+    assert result.statistics.provider_issues == result.statistics.crossref_supplement_records == 0
+    assert not any(unit.component is CoverageComponent.CROSSREF_SUPPLEMENT for unit in result.coverage)
+    assert len(e.cr_transports[-1].requests) == 1 and not e.full_requests
+
+
+def test_doi_only_crossref_success_becomes_searchable_and_canonical(execution, production_boundaries):
+    e, seen = execution, production_boundaries
+    e.members = []
+    e.works[0].update(title=None, authorships=None)
+    e.locations["W1"] = []
+    result = e.run()
+
+    cluster, = seen["clusters"]
+    oa, = [record for record in cluster.evidence if record.provenance.provider == "openalex"]
+    cr, = [record for record in cluster.evidence if record.provenance.provider == "crossref"]
+    assert oa.title is None and not oa.authors
+    assert oa.external_ids.doi == cr.external_ids.doi == "10.5555/a"
+    assert [(ref.provider, ref.record_id) for ref in cr.supplements] == [("openalex", oa.provenance.record_id)]
+    assert seen["projections"][0].titles == ("statistics study",)
+    assert seen["matches"] == (True,)
+    assert {record.provenance.provider for record in seen["canonical_evidence"]} == {"openalex", "crossref"}
+    assert [record.provenance.record_id for record in seen["hydration_records"]] == [oa.provenance.record_id]
+    assert len(e.full_requests) == len(e.version_requests) == 1
+    assert result.outcome is monitor.RunOutcome.COMPLETED
+    assert not result.warnings and not result.errors
+    assert result.statistics.provider_issues == result.statistics.canonicalization_issues == 0
+    assert result.statistics.evidence_clusters == result.statistics.retained_clusters == 1
+    assert result.canonical_paper_count == result.statistics.crossref_supplement_records == 1
+    supplement, = [unit for unit in result.coverage if unit.component is CoverageComponent.CROSSREF_SUPPLEMENT]
+    assert supplement.status is CoverageStatus.COMPLETE
+    paper, = (e.output / "Papers").glob("*.md")
+    assert "statistics study" in paper.read_text() and "Ada Author" in paper.read_text()
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "remote"])
+@pytest.mark.parametrize("expression", ["NOT statistics", "statistics OR NOT astronomy"])
+def test_doi_only_failed_supplement_remains_evidence_but_never_matches(
+    execution, production_boundaries, failure, expression,
+):
+    e, seen = execution, production_boundaries
+    e.members = []
+    e.works[0].update(title=None, authorships=None)
+    e.config.write_text(e.config.read_text().replace("keyword_expression: statistics",
+                                                  f"keyword_expression: {expression}"))
+    if failure == "unavailable":
+        e.records = {}
+    else:
+        e.failed_dois.add("10.5555/a")
+    result = e.run()
+
+    cluster, = seen["clusters"]
+    evidence, = cluster.evidence
+    assert evidence.provenance.record_id == "https://openalex.org/W1"
+    assert evidence.external_ids.doi == "10.5555/a"
+    assert evidence.title is None and not evidence.author_keywords and evidence.abstract is None
+    assert not evidence.authors
+    assert seen["projections"] == seen["matches"] == ()
+    assert not seen["canonical_evidence"] and not seen["hydration_records"] and not e.version_requests
+    warning, = [issue for issue in result.warnings if issue.stage == "unsearchable"]
+    assert warning.component is monitor.MonitorIssueComponent.SEARCH
+    assert warning.severity is monitor.MonitorIssueSeverity.WARNING
+    assert warning.record_ids == (evidence.provenance.record_id,)
+    assert not any(issue.stage in {"missing_doi", "insufficient_metadata"} for issue in result.warnings)
+    supplement, = [unit for unit in result.coverage if unit.component is CoverageComponent.CROSSREF_SUPPLEMENT]
+    assert supplement.status is (CoverageStatus.UNAVAILABLE if failure == "unavailable" else CoverageStatus.FAILED)
+    assert bool(result.errors) is (failure == "remote")
+    assert all(issue.component is monitor.MonitorIssueComponent.CROSSREF_SUPPLEMENT for issue in result.errors)
+    assert result.outcome is (monitor.RunOutcome.COMPLETED_WITH_WARNINGS if failure == "unavailable"
+                              else monitor.RunOutcome.COMPLETED_WITH_ERRORS)
+    assert result.statistics.evidence_clusters == result.statistics.openalex_records == 1
+    assert result.statistics.retained_clusters == result.statistics.canonicalization_issues == 0
+    assert result.statistics.provider_issues == len(result.errors)
+    assert result.statistics.crossref_supplement_records == result.canonical_paper_count == 0
+    assert not list((e.output / "Papers").glob("*.md"))
+
+
+@pytest.mark.parametrize("expression", ["NOT statistics", "astronomy OR NOT statistics"])
+def test_mixed_searchable_clusters_map_matches_and_hydration_to_original_evidence(
+    execution, production_boundaries, expression,
+):
+    e, seen = execution, production_boundaries
+    e.members = []
+    e.records = {}
+    e.works = [oa_work(1, "10.5555/empty", title=None),
+               oa_work(2, title="astronomy study"), oa_work(3, title="statistics study")]
+    for work in e.works[1:]:
+        work["doi"] = None
+    e.locations["W2"] = []
+    e.config.write_text(e.config.read_text().replace("keyword_expression: statistics",
+                                                  f"keyword_expression: {expression}"))
+    result = e.run()
+
+    assert len(seen["clusters"]) == 3
+    assert [projection.titles for projection in seen["projections"]] == [("astronomy study",), ("statistics study",)]
+    assert seen["matches"] == (True, False)
+    assert [record.provenance.record_id for record in seen["canonical_evidence"]] == ["https://openalex.org/W2"]
+    assert [record.provenance.record_id for record in seen["hydration_records"]] == ["https://openalex.org/W2"]
+    request, = e.version_requests
+    assert request.url.params["filter"] == "ids.openalex:W2"
+    warning, = result.warnings
+    assert warning.stage == "unsearchable" and warning.record_ids == ("https://openalex.org/W1",)
+    assert not result.errors
+    assert result.outcome is monitor.RunOutcome.COMPLETED_WITH_WARNINGS
+    assert result.statistics.evidence_clusters == result.statistics.openalex_records == 3
+    assert result.statistics.retained_clusters == result.canonical_paper_count == 1
+    assert result.statistics.provider_issues == result.statistics.canonicalization_issues == 0
+    paper, = (e.output / "Papers").glob("*.md")
+    assert "astronomy study" in paper.read_text()
+
+
+def test_all_unsearchable_clusters_each_have_a_warning_and_no_match_candidates(execution, production_boundaries):
+    e, seen = execution, production_boundaries
+    e.members = []
+    e.records = {}
+    e.works = [oa_work(1, "10.5555/a", title=None), oa_work(2, "10.5555/b", title=None)]
+    e.config.write_text(e.config.read_text().replace("keyword_expression: statistics", "keyword_expression: NOT statistics"))
+    result = e.run()
+
+    assert len(seen["clusters"]) == 2
+    assert seen["projections"] == seen["matches"] == ()
+    assert not seen["canonical_evidence"] and not seen["hydration_records"] and not e.version_requests
+    assert {(issue.stage, issue.record_ids) for issue in result.warnings} == {
+        ("unsearchable", ("https://openalex.org/W1",)),
+        ("unsearchable", ("https://openalex.org/W2",)),
+    }
+    assert len(result.warnings) == 2 and not result.errors
+    assert result.statistics.evidence_clusters == 2
+    assert result.statistics.retained_clusters == result.statistics.provider_issues == result.canonical_paper_count == 0
+
+
+def test_abstract_only_projection_is_searchable_after_unavailable_supplement(execution, production_boundaries):
+    e, seen = execution, production_boundaries
+    e.members = []
+    e.records = {}
+    e.works[0].update(title=None, authorships=None, abstract_inverted_index={"statistics": [0]})
+    e.locations["W1"] = []
+    result = e.run()
+
+    projection, = seen["projections"]
+    assert not projection.titles and not projection.author_keywords
+    assert projection.abstracts == ("statistics",)
+    assert seen["matches"] == (True,)
+    assert len(seen["canonical_evidence"]) == len(seen["hydration_records"]) == 1
+    assert [issue.stage for issue in result.warnings] == ["insufficient_metadata"]
+    assert result.statistics.retained_clusters == 1
+    assert result.statistics.provider_issues == result.canonical_paper_count == 0
 
 
 def run_parallel_discovery_case(e, first, unexpected=None, retained_ids=("https://openalex.org/W1",)):

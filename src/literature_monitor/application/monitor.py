@@ -574,19 +574,6 @@ def _execute_canonical_core(
         crossref = discovery.discovery
         _emit_progress(progress_callback, ProgressStage.COMBINING_METADATA)
         retrieval = crossref_execution.supplement(openalex.records)
-        supplement_issues = (
-            *retrieval.issues,
-            *(
-                EnrichmentIssue(
-                    severity=EnrichmentIssueSeverity.WARNING,
-                    stage="missing_doi",
-                    record_id=record.provenance.record_id,
-                    message="record has no DOI; Crossref lookup was skipped",
-                )
-                for record in openalex.records
-                if record.external_ids.doi is None
-            ),
-        )
         evidence = assemble_live_provider_evidence(openalex.records, crossref.records, retrieval.evidence)
         coverage = (*openalex.coverage, *crossref.coverage, *retrieval.coverage)
         _emit_activity(
@@ -615,7 +602,7 @@ def _execute_canonical_core(
             *state_issues,
             *(_openalex_issue(issue) for issue in openalex.issues),
             *(_crossref_discovery_issue(issue) for issue in crossref.issues),
-            *(_enrichment_issue(issue) for issue in supplement_issues),
+            *(_enrichment_issue(issue) for issue in retrieval.issues),
             *(
                 _canonicalization_issue(
                     issue,
@@ -626,9 +613,25 @@ def _execute_canonical_core(
         ]
 
         _emit_progress(progress_callback, ProgressStage.MATCHING_LITERATURE)
+        searchable_clusters = []
+        for cluster in consolidation.clusters:
+            projection = build_searchable_projection(cluster.evidence)
+            if projection.titles or projection.author_keywords or projection.abstracts:
+                searchable_clusters.append((cluster, projection))
+            else:
+                issues.append(
+                    MonitorIssue(
+                        severity=MonitorIssueSeverity.WARNING,
+                        component=MonitorIssueComponent.SEARCH,
+                        stage="unsearchable",
+                        message="consolidated evidence has no searchable title, author keywords, or abstract",
+                        record_ids=tuple(sorted({
+                            record.provenance.record_id for record in cluster.evidence
+                        })),
+                    )
+                )
         projections = tuple(
-            build_searchable_projection(cluster.evidence)
-            for cluster in consolidation.clusters
+            projection for _cluster, projection in searchable_clusters
         )
         _emit_activity(
             progress_callback,
@@ -666,7 +669,7 @@ def _execute_canonical_core(
                     provider_issues=(
                         len(openalex.issues)
                         + len(crossref.issues)
-                        + len(supplement_issues)
+                        + len(retrieval.issues)
                     ),
                 ),
                 coverage=coverage,
@@ -695,7 +698,7 @@ def _execute_canonical_core(
                     provider_issues=(
                         len(openalex.issues)
                         + len(crossref.issues)
-                        + len(supplement_issues)
+                        + len(retrieval.issues)
                     ),
                 ),
                 coverage=coverage,
@@ -713,7 +716,7 @@ def _execute_canonical_core(
         )
         retained_clusters = tuple(
             cluster
-            for cluster, matched in zip(consolidation.clusters, matches, strict=True)
+            for (cluster, _projection), matched in zip(searchable_clusters, matches, strict=True)
             if matched
         )
         retained_evidence = tuple(
@@ -788,7 +791,7 @@ def _execute_canonical_core(
             provider_issues=(
                 len(openalex.issues)
                 + len(crossref.issues)
-                + len(supplement_issues)
+                + len(retrieval.issues)
                 + len(versions.issues)
             ),
         )

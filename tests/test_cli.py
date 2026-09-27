@@ -65,10 +65,14 @@ from literature_monitor.openalex import (
     DiscoveryResult,
     IssueSeverity,
     OpenAlexClient,
+    OpenAlexMetadata,
     OpenAlexWorkRecord,
     ResolvedSource,
 )
-from literature_monitor.search import SearchBackendError, SearchableProjection
+from literature_monitor.search import (
+    SearchBackendError, SearchableProjection,
+    build_searchable_projection, match_searchable_projections,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -508,6 +512,29 @@ def enrichment_diagnostic_result(
         ),
         issues=diagnostic_result(with_error=with_error).issues,
     )
+
+
+def partial_diagnostic_result() -> DiscoveryResult:
+    base = diagnostic_result()
+
+    def record(number, title=None, doi=None, abstract=None, keywords=()):
+        work_id = f"https://openalex.org/W{number}"
+        return OpenAlexWorkRecord(
+            metadata=OpenAlexMetadata(title=title, journal="Biometrics", abstract=abstract,
+                                      author_keywords=keywords),
+            external_ids=ExternalIds(openalex=work_id, doi=doi),
+            authors=(), source_id=base.sources[0].openalex_id,
+            provenance=MetadataSource(provider="openalex", record_id=work_id,
+                                      retrieved_at=base.records[0].provenance.retrieved_at),
+        )
+
+    return DiscoveryResult(sources=base.sources, issues=(), records=(
+        record(20, doi="10.5555/empty"),
+        record(21, title="statistics study"),
+        record(22, doi="10.5555/abstract", abstract="statistics result"),
+        record(23, doi="10.5555/keywords", keywords=("statistics",)),
+        record(24, title="astronomy study", doi="10.5555/astronomy"),
+    ))
 
 
 def crossref_record(doi: str) -> CrossrefWorkRecord:
@@ -1833,6 +1860,135 @@ def test_openalex_filter_uses_config_expression_and_reports_counts(
     assert "3 discovered, 1 retained, 2 filtered out" in captured.err
 
 
+@pytest.mark.parametrize("command", ["openalex-filter", "crossref-enrich"])
+@pytest.mark.parametrize(("expression", "retained_ids"), [
+    ("statistics", (21, 22, 23)),
+    ('"statistics study"', (21,)),
+    ("statist*", (21, 22, 23)),
+    ('"study statistics"~0', (21,)),
+    ("NOT statistics", (24,)),
+    ("statistics OR NOT astronomy", (21, 22, 23)),
+])
+def test_partial_diagnostics_filter_provider_evidence_before_enrichment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    command: str, expression: str, retained_ids: tuple[int, ...],
+) -> None:
+    import literature_monitor.cli as cli
+
+    config_path = config_with_keyword_expression(tmp_path, expression)
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()}
+    discovery = partial_diagnostic_result()
+    expected = tuple(record for record in discovery.records
+                     if int(record.provenance.record_id.rsplit("W", 1)[1]) in retained_ids)
+    events, projected_evidence, requests = [], [], []
+
+    def discover(*args):
+        events.append("discovery")
+        return discovery
+
+    def project(evidence):
+        projected_evidence.append(evidence)
+        return build_searchable_projection(evidence)
+
+    def match(expression, projections):
+        events.append("filter")
+        assert len(projections) == 4
+        assert all(p.titles or p.author_keywords or p.abstracts for p in projections)
+        return match_searchable_projections(expression, projections)
+
+    def respond(request):
+        requests.append(request)
+        assert events[-1] == "enrichment"
+        doi = request.url.path.removeprefix("/v1/works/")
+        payload = json.loads((Path(__file__).parent / "fixtures/crossref/work_complete.json").read_text())
+        payload["message"]["DOI"] = doi
+        return httpx.Response(200, json=payload)
+
+    original_enrich = cli.enrich_records
+
+    def enrich(client, records):
+        events.append("enrichment")
+        assert records == expected
+        return original_enrich(client, records)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("historical diagnostics must not enter production or persistence")
+
+    monkeypatch.setattr(cli, "discover_journals", discover)
+    monkeypatch.setattr(cli, "build_searchable_projection", project)
+    monkeypatch.setattr(cli, "match_searchable_projections", match)
+    monkeypatch.setattr(cli, "enrich_records", enrich)
+    monkeypatch.setattr(cli, "CrossrefClient", lambda **kwargs: CrossrefClient(
+        transport=httpx.MockTransport(respond), sleep=lambda _: None, **kwargs))
+    for name in ("_run_canonical_core", "_materialize_canonical_result", "run_monitor", "read_last_run_snapshot"):
+        monkeypatch.setattr(cli, name, forbidden)
+
+    result = main((command, "--config", str(config_path), "--from-date", "2026-01-01", "--to-date", "2026-01-31"))
+    captured = capsys.readouterr()
+    rows = [json.loads(line) for line in captured.out.splitlines()]
+    assert result == 0
+    assert projected_evidence == [(record.to_evidence(),) for record in discovery.records]
+    assert events == ["discovery", "filter"] + (["enrichment"] if command == "crossref-enrich" else [])
+    assert f"5 discovered, {len(expected)} retained, {5 - len(expected)} filtered out" in captured.err
+    assert "Traceback" not in captured.err
+    expected_json = [json.loads(record.model_dump_json()) for record in expected]
+    if command == "openalex-filter":
+        assert rows == expected_json and not requests
+    else:
+        assert [row["openalex"] for row in rows] == expected_json
+        assert [request.url.path for request in requests] == [
+            f"/v1/works/{record.external_ids.doi}" for record in expected if record.external_ids.doi is not None
+        ]
+        for row, record in zip(rows, expected, strict=True):
+            if record.external_ids.doi is None:
+                assert row["crossref"] is None
+                assert "record has no DOI; Crossref lookup was skipped" in captured.err
+            else:
+                assert row["crossref"]["doi"] == record.external_ids.doi
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()} == before
+    assert not (tmp_path / "workspace").exists()
+
+
+@pytest.mark.parametrize("command", ["openalex-filter", "crossref-enrich"])
+def test_doi_only_empty_diagnostic_projection_cannot_match_pure_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, command: str,
+) -> None:
+    discovery = partial_diagnostic_result()
+    empty = DiscoveryResult(sources=discovery.sources, records=discovery.records[:1], issues=())
+    monkeypatch.setattr("literature_monitor.cli.discover_journals", lambda *args: empty)
+    config_path = config_with_keyword_expression(tmp_path, "NOT statistics")
+    result = main((command, "--config", str(config_path), "--from-date", "2026-01-01", "--to-date", "2026-01-31"))
+    captured = capsys.readouterr()
+    assert result == 0 and not captured.out
+    assert "1 discovered, 0 retained, 1 filtered out" in captured.err
+    assert "0 issues" in captured.err or "0 Crossref issues" in captured.err
+
+
+def test_partial_crossref_enrich_preserves_hard_failure_exit_and_original_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    discovery = partial_diagnostic_result()
+    records = (discovery.records[0], discovery.records[2])
+    monkeypatch.setattr("literature_monitor.cli.discover_journals", lambda *args: DiscoveryResult(
+        sources=discovery.sources, records=records, issues=()))
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(403)
+
+    monkeypatch.setattr("literature_monitor.cli.CrossrefClient", lambda **kwargs: CrossrefClient(
+        transport=httpx.MockTransport(respond), sleep=lambda _: None, **kwargs))
+    config_path = config_with_keyword_expression(tmp_path, "NOT astronomy")
+    result = main(("crossref-enrich", "--config", str(config_path), "--from-date", "2026-01-01", "--to-date", "2026-01-31"))
+    captured = capsys.readouterr()
+    assert result == 1
+    row = json.loads(captured.out)
+    assert row["openalex"] == json.loads(records[1].model_dump_json()) and row["crossref"] is None
+    assert [request.url.path for request in requests] == ["/v1/works/10.5555/abstract"]
+    assert "2 discovered, 1 retained, 1 filtered out" in captured.err and "1 failed" in captured.err
+
+
 @pytest.mark.parametrize(
     ("expression", "expected_openalex_id"),
     [
@@ -2489,7 +2645,7 @@ def test_crossref_enrich_uses_config_filter_before_enrichment(
     assert rows[0]["crossref"]["doi"] == "10.5555/one"
     assert rows[1]["crossref"] is None
     assert (
-        "3 discovered, 2 retained, 1 enriched, 1 without DOI, "
+        "3 discovered, 2 retained, 1 filtered out, 1 enriched, 1 without DOI, "
         "0 unavailable, 0 failed" in captured.err
     )
 

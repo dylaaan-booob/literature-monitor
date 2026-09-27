@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.4.3 is the current/latest released and completed baseline
+**Status:** Active; v0.4.3 is the current/latest released and completed baseline; v0.4.4 is in development and unreleased
 
-**Stage:** v0.4.3 released / closeout complete
+**Stage:** v0.4.4 contract established / development; v0.4.3 released / closeout complete
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
@@ -183,7 +183,7 @@ MVP does **not** include:
 - Paper Markdown schema changes in v0.3.3;
 - Track B workflow/state expansion beyond the current Markdown lifecycle;
 
-SQLite FTS5 remains transient, reconstructible runtime state. The separate Provider-state SQLite DB is limited to §30.4; neither is durable workflow state or a mandatory second source of truth. Additional v0.4.3 exclusions are defined in §30.11.
+SQLite FTS5 remains transient, reconstructible runtime state. The separate Provider-state SQLite DB is limited to §30.4; neither is durable workflow state or a mandatory second source of truth. Additional v0.4.3 exclusions are defined in §30.11; v0.4.4 exclusions are defined in §31.8.
 
 ---
 
@@ -282,15 +282,19 @@ The v0.4.3 batched Source/Works, Crossref manifest planner, and DOI probe/hydrat
 
 Provider requests use at most three attempts by default. Retryable transient failures are limited to HTTP 429, HTTP 5xx, and supported transport or timeout failures. Endpoint-specific HTTP 404 handling retains its existing not-found semantics. Other HTTP 4xx responses fail the request immediately and are not automatically retried. When no provider pacing information is available, retry delays retain the existing exponential fallback of 1 second and then 2 seconds.
 
-Crossref request pacing uses rate metadata already present on normal API responses. When both `X-Rate-Limit-Limit` and `X-Rate-Limit-Interval` are valid, subsequent requests made by the same Crossref client must respect the returned rate. Missing or malformed pacing headers do not invalidate an otherwise successful response and do not trigger a separate probe, count-only request, or other pacing-only provider request. The implementation must not freeze current public, polite, or plus pool limits into long-lived product constants.
+Crossref request pacing uses process-local monotonic time, never wall clock or persisted timing state. State is separated by actual request class, at least singleton DOI requests and list/filter requests. Each class retains its own latest valid `minimum_interval` and `next_allowed_at`; one class's response must not overwrite another class's state. Before each request, proactive pacing waits only `max(0, next_allowed_at - monotonic_now)`. The next deadline is based on the preceding request's start time and the applicable minimum interval, so normal response/network latency counts toward request spacing rather than being followed by a full interval sleep.
 
-Provider pacing remains serial and transient. If a pacing delay actually occurs and a progress callback is present, the wait is reported with the existing transient Activity model so liveness and inactivity reporting reflect the worker state. Retry Activity is reported before its corresponding sleep and preserves the request's source, operation, unit, current, and total identity. Provider pagination, pacing, and retry state do not add or change any of the five `ProgressStage` values.
+Rate metadata already present on normal API responses updates only the corresponding request class. When both `X-Rate-Limit-Limit` and `X-Rate-Limit-Interval` are valid, `interval_seconds / limit` defines that class's minimum interval and updates its deadline against the request start time. Missing or malformed headers preserve that class's latest valid state, do not invalidate an otherwise successful response, and do not trigger a separate probe, count-only request, or other pacing-only provider request. The implementation must not freeze current public, polite, or plus pool limits into long-lived product constants.
+
+Retry backoff must satisfy any known pacing requirement for the same request class. The retry may start only after both the retry-backoff deadline and the class's `next_allowed_at`; elapsed latency and elapsed waiting count toward those deadlines. Do not add a full pacing sleep to a retry sleep that already satisfies the same spacing requirement. The retry range, attempt bound, and 1-second/2-second fallback above remain unchanged.
+
+Provider pacing remains serial and transient, without a new worker pool, async limiter, token bucket, or generic rate-limit framework. If a proactive pacing delay actually occurs and a progress callback is present, it is reported as `WAITING` with the existing transient Activity model. `RETRYING` remains reserved for retry after a real failure and is reported before its corresponding sleep, preserving the request's source, operation, unit, current, and total identity. These Activities keep liveness and inactivity reporting tied to the worker state. Provider pagination, pacing, and retry state do not add or change any of the five `ProgressStage` values.
 
 A failed provider request remains isolated according to the existing retrieval rules. Evidence already obtained successfully from another provider, journal, page, or request remains usable and must not be discarded because a later request fails.
 
 ### 6.5 Run coverage state
 
-Each production run records transient, process-local retrieval coverage for the provider work units it actually executes. Coverage describes execution completeness for this run; it does not claim that a provider or the bibliographic universe is globally complete. A provider may successfully return zero records and still have `COMPLETE` coverage.
+Each production run records transient, process-local retrieval coverage for the provider work units it actually executes. Coverage describes retrieval execution completeness for this run, not bibliographic field completeness; it does not claim that a provider or the bibliographic universe is globally complete. A provider may successfully return zero records and still have `COMPLETE` coverage.
 
 Coverage is separate from provider issues. Coverage states whether a retrieval work unit completed reliably, while issues continue to carry concrete warnings, errors, and diagnostics. Coverage must not change `RunOutcome`, CLI exit codes, provider failure isolation, canonicalization, or materialization behavior.
 
@@ -311,10 +315,10 @@ A coverage unit identifies work performed by one run. OpenAlex discovery is iden
 
 OpenAlex discovery coverage is:
 
-- `COMPLETE` when a journal Source is established, Works pagination reaches its natural end, and no returned work item is lost to normalization or validation failure. Zero works is valid `COMPLETE`. An unresolved alternate configured ISSN does not by itself lower coverage when another ISSN reliably resolves to the same usable Source and Works retrieval completes.
-- `PARTIAL` when at least one Works page completes and a later pagination/request failure occurs, or when any returned work item is dropped because normalization or validation fails.
-- `UNAVAILABLE` when OpenAlex normally cannot establish a usable Source for the journal, such as when all relevant Source lookups are not found.
-- `FAILED` when a transient request failure, provider response validation failure, conflicting Source identity, journal identity mismatch, or another provider error prevents trustworthy Source coverage, or when Works retrieval fails before any page completes.
+- `COMPLETE` when a journal Source is established and Works traversal reaches its natural end without unresolved structural or traversal failure. Zero works is valid `COMPLETE`. Tolerable sparsity in title, authors, abstract, DOI, publication date, author IDs, ORCID, or `updated_date` does not lower successful traversal coverage. A record with neither valid DOI nor usable title falls below the usable evidence floor (§31.3), but excluding it for that reason alone is not an execution `ERROR` and does not lower coverage. An unresolved alternate configured ISSN does not by itself lower coverage when another ISSN reliably resolves to the same usable Source and Works retrieval completes.
+- `PARTIAL` when some trustworthy Works retrieval succeeds but pagination, request, count, cursor, structural Work identity, or unrecoverable Source-attribution failure leaves retrieval incomplete or untrustworthy in part. Duplicate traversal and other existing conservative checks that genuinely indicate traversal incompleteness remain applicable; ordinary bibliographic sparsity is not such a failure.
+- `UNAVAILABLE` with `WARNING` for genuine normal Source absence, such as when all relevant Source lookups are not found. `validate` encountering only normal Source absence produces `VALID_WITH_WARNINGS`, not `SOURCE_ERRORS`.
+- `FAILED` with `ERROR` when remote request failure, provider response validation failure, conflicting Source identity, journal identity validation failure, or another provider error prevents trustworthy Source coverage, or when Works retrieval fails before any page completes. Structural/traversal failures without usable retrieval remain failures; tolerable missing fields must not be promoted to this category.
 
 Crossref discovery coverage is one work unit per configured journal plus queried ISSN:
 
@@ -369,7 +373,7 @@ V2 also stores `reused_units` reporting identities, never records. The identity 
 
 ### 6.7 Current Provider retrieval and state contract
 
-§30 is the authoritative v0.4.3 Retrieval Efficiency & Revision-Validated Provider Evidence contract. It governs live membership, revision checks, normalized state, transport, concurrency, progress, and compatibility. It supersedes conflicting released v0.4.2 retrieval/cache behavior while preserving publication-date discovery, local filtering, canonical identity, and Markdown ownership.
+§31 is the authoritative v0.4.4 development contract for Crossref Elapsed-Aware Pacing & Partial Provider Evidence Semantics. §30 remains the historical v0.4.3 release contract and continues to govern live membership, revision checks, normalized state, transport, concurrency, progress, and compatibility except for the conflicting Crossref pacing, OpenAlex normalization/partial evidence admission, and OpenAlex coverage/issue-severity clauses superseded by §31. Publication-date discovery, local filtering, canonical identity, and Markdown ownership remain preserved.
 
 ### 6.8 Released v0.4.2 cache history
 
@@ -1796,7 +1800,7 @@ The v0.4.0 implementation is accepted only when all of the following hold:
 
 ### 23.16 v0.4.3 retrieval efficiency and revision-validated evidence
 
-v0.4.3 is accepted only when §30 is implemented and the following observable scenarios are demonstrated. A1–A8 implementation and independent stage reviews are complete; these scenarios have been demonstrated and passed the final independent audit. These acceptance requirements remain in force:
+v0.4.3 is accepted only when §30 is implemented and the following observable scenarios are demonstrated. A1–A8 implementation and independent stage reviews are complete; these scenarios have been demonstrated and passed the final independent audit. These acceptance requirements remain in force except for the narrowly superseded behavior identified in §31.1; v0.4.4 acceptance is defined in §23.17:
 
 - With equivalent current Provider evidence, all-live and revision-validated reuse Runs produce equivalent retained FTS5 clusters and canonical results, preserving UUIDs, publication-date membership, Markdown ownership, decisions, and Zotero behavior. Term, Phrase, Prefix, Proximity, and Boolean expressions remain local; inspected OpenAlex/Crossref requests contain no `keyword_expression` or keyword projection.
 - Production Run and `validate` resolve the same Source identities through batches of at most 100 ISSNs. Partial resolution exercises singleton recovery, strict journal/title/ISSN consistency, and conflicting-Source rejection. Terminal auth/quota/circuit failures do not trigger fallback storms.
@@ -1815,6 +1819,20 @@ v0.4.3 is accepted only when §30 is implemented and the following observable sc
 - Existing `provider-cache.json` bytes remain identical across normal Runs, compatibility-flag Runs, failure paths, and diagnostics, including malformed legacy files. Production performs no read, write, deletion, or migration of it.
 - New last-run files remain schema v2 with `reused_units=[]`. Valid v1 and historical v2 with non-empty reuse remain readable. CLI/Web completion separately display the typed transient usage summary; it is absent from Paper Markdown and last-run JSON. Record statistics count evidence used, including reused records.
 - Diagnostics, `validate`, `canonicalize`, and legacy/diagnostic `materialize` neither read nor write Provider state; existing state bytes remain unchanged and an absent DB remains absent. State validation/persistence issues use `MonitorIssueComponent.PROVIDER_STATE`.
+
+### 23.17 v0.4.4 elapsed-aware pacing and partial Provider evidence
+
+v0.4.4 is accepted only when §31 is implemented and the following observable scenarios are demonstrated. These are development acceptance requirements, not a claim of completed implementation or review:
+
+- Deterministic monotonic-clock checks show that Crossref response latency shorter than the known interval leaves only the remainder to wait, while latency equal to or longer than that interval leaves no proactive wait. Wall-clock changes have no effect. Interleaved singleton DOI and list/filter requests retain independent header-derived intervals/deadlines; missing or malformed headers preserve the corresponding last valid state without a pacing-only probe or successful-response failure.
+- Retry checks cover the existing maximum of three attempts, HTTP 429/5xx and supported transport/timeout failures, immediate failure for other HTTP 4xx, endpoint-specific 404 behavior, and the 1-second/2-second fallback. A known class interval is satisfied without adding redundant full pacing and retry sleeps. Actual proactive waits report `WAITING`; retries after real failures report `RETRYING` with unchanged Activity identity and stage values.
+- OpenAlex normalization retains DOI-only and title-only records, empty/unusable authors as empty authors, malformed/missing abstract as missing, and invalid DOI with usable title as DOI-less evidence. Sparse publication date, author IDs, ORCID, and `updated_date` do not independently discard otherwise usable evidence or create ingestion-time missing-field RunIssues. Missing revision disables the corresponding version-state reuse without a Run error; invalid/missing Work ID remains a structural failure without synthetic identity.
+- Complete OpenAlex traversal remains `COMPLETE` despite bibliographic sparsity, including exclusion of a validly attributed Work with neither DOI nor title. Structural identity, unrecovered attribution, request/pagination/count/cursor, and genuine duplicate-traversal failures retain conservative `PARTIAL`/`FAILED` behavior. Normal Source absence produces `UNAVAILABLE` plus `WARNING` and warning-only `validate`; remote failure, conflicting Source identity, and journal identity validation failure remain `FAILED` plus `ERROR`.
+- Ambiguous multi-Source Works batches split/fall back; after narrowing to one Source, absent nested Source uses the explicit request scope. An explicit conflicting Source identity still produces a scope-integrity `ERROR` and is never overwritten by request context.
+- A retained DOI-anchored OpenAlex record lacking title/authors reaches Crossref supplementation. Successful supplementation can produce normal searchable/canonical evidence without warnings merely describing the original OpenAlex title/author gaps. A usable title-only record reaches local matching without an unconditional production `missing_doi` warning.
+- After consolidation, clusters with no usable title, author keywords, or abstract produce an unsearchable warning and are absent from the normal matcher candidate set, including for pure `NOT`/complement expressions. Searchable documents retain existing Term/Phrase/Prefix/Proximity/Boolean/NOT behavior. Matched clusters that still lack canonical title, journal, or an author produce the existing `insufficient_metadata` warning.
+- Tolerable ingestion-time sparsity alone emits no missing-field RunIssues; genuine warnings/errors, including the post-consolidation unsearchable and `insufficient_metadata` warnings above, follow the existing `RunOutcome` precedence without Provider-specific exceptions. Historical `openalex-filter` and `crossref-enrich` diagnostics accept partial OpenAlex evidence/search projections while preserving their historical stage order and diagnostic role.
+- Compatibility checks preserve Provider-state schema and persistence, Crossref revision reuse/manifest/alias/semantic-hash behavior, Paper/Author Markdown and monitor YAML schemas, the five ProgressStages, and inert `provider-cache.json` bytes. New last-run files remain schema v2; historical v1/v2 snapshots display their recorded outcomes without reinterpretation under the new issue-severity policy. Existing workflow preservation and unaffected §23.16 acceptance remain applicable.
 
 ---
 
@@ -2506,7 +2524,9 @@ Obsidian remains a supported presentation of the same Markdown workspace; it is 
 
 v0.4.1 is released and complete. Its feature implementation, final independent audit, release preparation, and release transaction are complete, and the runtime progress/activity contract and acceptance criteria in §29 were implemented and verified without changing the durable workflow model or canonical production path.
 
-v0.4.3 is released and complete. Its A1–A8 implementation, independent stage reviews, final independent audit, release preparation, release transaction, and closeout are complete (§24.11). The §30 contract and §23.16 acceptance requirements remain in force along with the preserved workflow acceptance criteria.
+v0.4.3 is released and complete. Its A1–A8 implementation, independent stage reviews, final independent audit, release preparation, release transaction, and closeout are complete (§24.11). The §30 contract and §23.16 acceptance requirements remain in force along with the preserved workflow acceptance criteria, subject only to the v0.4.4 supersede boundary in §31.1.
+
+v0.4.4 is in development and unreleased. Completion requires implementation of §31 and demonstration of §23.17 acceptance; establishing this contract alone does not establish implementation, acceptance, or release completion.
 
 ---
 
@@ -2514,7 +2534,7 @@ v0.4.3 is released and complete. Its A1–A8 implementation, independent stage r
 
 R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback, v0.4.2 Provider Reliability, Coverage, and Explicit Cache Reuse, and v0.4.3 Retrieval Efficiency & Revision-Validated Provider Evidence are completed release history. v0.4.3 is the current released and completed baseline.
 
-The v0.4.3 release and closeout are complete, following §24.11. No subsequent product-development stage is established by this closeout.
+The v0.4.3 release and closeout are complete, following §24.11. v0.4.4 Crossref Elapsed-Aware Pacing & Partial Provider Evidence Semantics is now the development stage under §31, with acceptance defined once in §23.17. v0.4.4 has not been released; v0.4.3 remains the latest released baseline.
 
 OpenAlex remains the primary discovery provider, Crossref the secondary discovery/bibliographic provider, and Semantic Scholar remains excluded. Automatic revision-validated Provider-state reuse is in scope for v0.4.3. Checkpoint resume, provider cursors/watermarks, late-index recovery, run history, scheduling/notification, and persistent execution databases remain excluded; the reconstructible Provider-state DB is not execution state.
 
@@ -2957,3 +2977,118 @@ The scope exclusions in §4.2 remain in force. v0.4.3 additionally makes these b
 - Zotero behavior changes;
 - run history or Provider change history;
 - workspace-wide inter-process locking.
+
+---
+
+## 31. v0.4.4 Crossref Elapsed-Aware Pacing & Partial Provider Evidence Semantics Contract
+
+This is the authoritative v0.4.4 development contract. v0.4.4 is unreleased; v0.4.3 remains the latest released and completed baseline. Acceptance is defined once in §23.17. Contract establishment does not claim implementation, review, acceptance, or release completion.
+
+### 31.1 Authority and preserved release contracts
+
+§30 is retained unchanged as the historical v0.4.3 release contract. v0.4.4 supersedes only older clauses that conflict with the following behavior:
+
+- Crossref pacing (§6.4 and the reliability policy referenced by §30.9);
+- OpenAlex normalization and partial Provider evidence admission, including missing-field diagnostics and the missing-revision warning clause in §30.2;
+- OpenAlex retrieval coverage and issue severity (§6.5 and conflicting OpenAlex interpretations of §30.7 and §23.16).
+
+All other v0.4.3 Provider-state, revision reuse, manifest planner, alias handling, semantic hash, transport/concurrency, progress, and persistence contracts continue to apply. In particular, §§30.3–30.6 and §§30.8–30.10 remain effective except for the pacing change above. The existing Source batching, thin Works selection, OpenAlex UTC revision normalization, retained version hydration, and version-state binding rules in §30.2 remain effective; missing/unusable revision only disables the corresponding version-state reuse as specified in §31.3. The structural and traversal integrity rules in §30.7 remain effective under the metadata-versus-execution distinction in §6.5.
+
+Publication-date discovery membership, live membership on every Run, local keyword filtering, conservative evidence grouping, internal UUID identity, Markdown ownership, human decisions/notes, and Zotero behavior remain unchanged. Provider evidence eligibility is distinct from `CanonicalPaper` eligibility; §9.2 still requires canonical title, journal, and at least one author.
+
+### 31.2 Crossref elapsed-aware pacing
+
+§6.4 defines the current elapsed-aware, per-request-class monotonic pacing and bounded retry policy. This policy applies to the actual Crossref requests issued by the existing manifest, probe, hydration, singleton fallback, and alias paths; operation names do not substitute for actual request class. Header updates and deadline calculation remain inside the synchronous Crossref Provider client, without persisted timing state or a new limiter framework.
+
+`WAITING` represents actual proactive pacing; `RETRYING` represents retry after a real failure. Existing per-source Activity reporting and the five top-level stages remain unchanged. Revision-reuse progress redesign is outside v0.4.4.
+
+### 31.3 OpenAlex partial Provider evidence envelope
+
+The minimum usable OpenAlex Provider evidence envelope consists of all three:
+
+- a valid OpenAlex Work identity;
+- trustworthy attribution to a configured/resolved monitor Source under §31.4;
+- at least one valid DOI or usable title.
+
+Provider evidence may be incomplete and must not require strict `CanonicalMetadata` before supplementation, consolidation, or projection. Admission is separate from the canonical title + journal + at least one author invariant; retaining partial evidence does not manufacture canonical fields or relax candidate creation.
+
+Normalization follows these rules:
+
+| OpenAlex evidence | Required behavior |
+| --- | --- |
+| Valid DOI, missing/unusable title | Retain and allow DOI-anchored Crossref supplementation. |
+| Missing DOI, usable title | Retain and allow local keyword matching; production Run emits no unconditional `missing_doi` warning. |
+| Neither valid DOI nor usable title | Exclude from the usable evidence pipeline; a `WARNING` is permitted, but this fact alone is not an `ERROR` and does not lower successful traversal coverage. |
+| Missing/unusable authors | Retain otherwise usable evidence with empty authors. |
+| Missing/malformed abstract | Retain otherwise usable evidence with missing abstract. |
+| Invalid DOI, usable title | Treat as DOI-less evidence and continue; do not delete the record. |
+| Missing/unusable publication date, author IDs, ORCID, or `updated_date` | Degrade the affected field safely without independently discarding otherwise usable evidence. |
+| Invalid/missing Work ID | Structural Provider-record failure; do not generate a synthetic ID. |
+
+No metadata may be invented. Safe field degradation preserves available trustworthy fields, author order, identifiers, and provenance. Sparse publication-date metadata does not authorize any change to the existing publication-date request window or membership policy.
+
+Missing or malformed `updated_date` leaves no reusable revision binding and disables reuse of the corresponding OpenAlex version state. Existing live retained-version hydration and non-persistence of unbound hydration remain in force. Revision absence alone must not produce a user-visible Run error or an ingestion-time missing-field RunIssue; genuine hydration failure retains its existing warning semantics.
+
+Ordinary tolerable missing-field diagnostics must not first create RunIssues at ingestion and then depend on later supplementation to delete them. Genuine structural, scope-integrity, traversal, and request failures remain reportable. Coverage follows retrieval execution completeness in §6.5, independently of bibliographic completeness and canonical eligibility.
+
+### 31.4 Source attribution and integrity
+
+Multi-Source Works batch evidence must be assigned reliably to a configured/resolved Source. If attribution cannot be determined, continue the existing split/fallback behavior rather than guessing a Source or claiming complete per-journal coverage.
+
+After narrowing to an explicit single-Source request scope, missing nested Source metadata may use that queried/resolved Source as the attribution fallback. This is a bounded attribution rule for absent nested identity, not authority to overwrite conflicting Provider evidence. If the Provider explicitly returns an identity that conflicts with the queried/resolved Source, request context must not override it; the conflict remains a scope-integrity `ERROR` with conservative coverage.
+
+Source-resolution identity validation remains mandatory. Genuine normal Source absence is `UNAVAILABLE` plus `WARNING`; pure normal absence yields `VALID_WITH_WARNINGS` from `validate`, not `SOURCE_ERRORS`. Remote request failure, conflicting Source identity, and journal identity validation failure remain `FAILED` plus `ERROR` under §6.5.
+
+### 31.5 Production supplementation, matching, and outcomes
+
+Crossref supplementation continues to be driven by retained current OpenAlex provenance plus a DOI anchor, following §30.3. Partial OpenAlex title/authors must not block DOI supplementation. Successful supplementation must not leave warnings that merely describe the original OpenAlex missing title/author fields. Title-only usable OpenAlex evidence can proceed to local matching without an unconditional production missing-DOI warning.
+
+After evidence consolidation and before keyword matching, identify any cluster whose projection has no usable title, author keywords, or abstract across its available evidence. Such a cluster is unsearchable: emit a warning and omit it from the normal matcher candidate set. In particular, an empty projection must not become a false-positive match through `NOT` or complement semantics. Existing Boolean/NOT semantics for normal searchable documents in §7 remain unchanged.
+
+Search projection may use existing eligible fields across consolidated evidence. v0.4.4 does not introduce generic cross-provider field-level synthetic merging. A matched cluster that still cannot satisfy `CanonicalPaper` eligibility continues to produce the existing `insufficient_metadata` warning rather than an invented title, journal, or author.
+
+`RunOutcome` and its existing completion precedence remain unchanged:
+
+```text
+ERROR present   → COMPLETED_WITH_ERRORS
+else WARNING    → COMPLETED_WITH_WARNINGS
+else            → COMPLETED
+```
+
+`INVALID_CONFIGURATION` retains its preflight/configuration meaning. No OpenAlex-specific or Crossref-specific outcome exception is introduced; coverage status itself remains separate from outcome. The intended change is to report genuine failures/warnings at the correct boundary, not to suppress them by special-casing final outcomes.
+
+### 31.6 Compatibility and state
+
+The v0.4.3 state and persistence contracts remain in force:
+
+- `provider-state.sqlite3` retains the §30.4 schema; no partial-evidence/completion tables or durable records are added.
+- Crossref revision-state, manifest planner, alias handling, semantic hash, Provider-state failure isolation, and persistence follow §§30.3–30.8.
+- `last-run.json` remains schema v2 under §6.6, with `reused_units=[]` on new Runs. Historical v1/v2 snapshots are read using their recorded values, including recorded outcomes; new severity rules must not retroactively reinterpret historical outcomes or rewrite snapshots.
+- Paper Markdown, Author Markdown, and monitor YAML schemas remain unchanged, preserving unknown frontmatter, human-controlled status, and human-authored content.
+- `provider-cache.json` remains inert and untouched: no read, write, deletion, migration, or byte modification.
+- The five existing `ProgressStage` values and their order remain unchanged: `CHECKING_MONITOR`, `DISCOVERING_PAPERS`, `COMBINING_METADATA`, `MATCHING_LITERATURE`, and `UPDATING_WORKSPACE`. Per-source progress remains governed by §30.10; revision-reuse progress redesign is excluded.
+
+Partial evidence remains transient Provider/pipeline data, not a new persistent completion authority or second source of truth. Existing diagnostic/validation state-access restrictions and production persistence boundaries remain unchanged.
+
+### 31.7 Historical diagnostic compatibility
+
+Historical commands such as `openalex-filter` and `crossref-enrich` must accept the partial OpenAlex representation. Diagnostic filtering depends on eligible Provider evidence and its searchable projection, without requiring every OpenAlex record to hold strict `CanonicalMetadata`.
+
+Adapt representation consumers while retaining these diagnostics' historical stage order and product role. They do not become alternative production pipelines, add a completion stage, or acquire persistent Provider-state access. Production issue policy in §31.5 does not authorize an unrelated redesign of Crossref optional-field diagnostics.
+
+### 31.8 Explicit v0.4.4 exclusions
+
+The existing §4.2 and §30.11 scope exclusions remain in force. v0.4.4 additionally excludes:
+
+- a new metadata-completion Provider or completion Stage;
+- generic cross-provider field synthesis;
+- new persistent partial-evidence/completion state;
+- research-work identity redesign;
+- revision-reuse progress redesign or any new `ProgressStage`;
+- scheduler, notification, or background sync;
+- watermarks, checkpoints, or late-index recovery;
+- Crossref optional-field warning redesign unrelated to this contract;
+- Zotero behavior changes;
+- last-run schema or Provider-state schema upgrades;
+- release transaction, tag creation, or push as part of this development contract;
+- release version or User-Agent bumps during implementation.

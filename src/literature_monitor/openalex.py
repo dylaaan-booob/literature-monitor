@@ -59,6 +59,9 @@ WORK_FIELDS = (
 _OPENALEX_ID_PATTERN = re.compile(
     r"^(?:https://openalex\.org/)?([SAW]\d+)$", re.IGNORECASE
 )
+_ORCID_PATTERN = re.compile(
+    r"^(?:https?://orcid\.org/)?\d{4}-\d{4}-\d{4}-\d{3}[\dX]/?$", re.IGNORECASE,
+)
 _ARXIV_LOCATION_ID = re.compile(
     r"^pmh:oai:arxiv\.org:(.+)$",
     re.IGNORECASE,
@@ -105,16 +108,32 @@ class OpenAlexVersionHint(DomainModel):
     url: NonEmptyStr | None = None
 
 
+class OpenAlexMetadata(DomainModel):
+    """Partial bibliographic fields; journal comes from verified Source resolution."""
+
+    title: NonEmptyStr | None = None
+    journal: NonEmptyStr
+    publication_date: date | None = None
+    abstract: str | None = None
+    author_keywords: tuple[NonEmptyStr, ...] = ()
+
+
 class OpenAlexWorkRecord(DomainModel):
     """Provider record that deliberately has no canonical UUID or workflow state."""
 
-    metadata: CanonicalMetadata
+    metadata: OpenAlexMetadata
     external_ids: ExternalIds
-    authors: tuple[Author, ...]
+    authors: tuple[Author, ...] = ()
     source_id: NonEmptyStr
     provenance: MetadataSource
     version_hints: tuple[OpenAlexVersionHint, ...] = ()
     updated_at: datetime | None = Field(default=None, exclude=True)
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def accept_complete_metadata(cls, value: object) -> object:
+        # Existing complete-record callers retain their input shape; ingestion is partial.
+        return value.model_dump() if isinstance(value, CanonicalMetadata) else value
 
     @field_validator("updated_at", mode="before")
     @classmethod
@@ -735,9 +754,17 @@ def _finish_journal_source(
                 f"{issn}: {message}" for issn, message in source_validation_failures
             )
             details.append(f"Source validation failures: {failures}")
+        status = (
+            CoverageStatus.UNAVAILABLE
+            if unresolved
+            and not request_failures
+            and not source_validation_failures
+            else CoverageStatus.FAILED
+        )
         issues.append(
             DiscoveryIssue(
-                severity=IssueSeverity.ERROR,
+                severity=(IssueSeverity.WARNING if status is CoverageStatus.UNAVAILABLE
+                          else IssueSeverity.ERROR),
                 stage="source_resolution",
                 journal=journal.name,
                 message=(
@@ -745,13 +772,6 @@ def _finish_journal_source(
                     + (f" ({'; '.join(details)})" if details else "")
                 ),
             )
-        )
-        status = (
-            CoverageStatus.UNAVAILABLE
-            if unresolved
-            and not request_failures
-            and not source_validation_failures
-            else CoverageStatus.FAILED
         )
         return None, tuple(issues), status
 
@@ -768,7 +788,7 @@ def _finish_journal_source(
     for issn, message in request_failures:
         issues.append(
             DiscoveryIssue(
-                severity=IssueSeverity.WARNING,
+                severity=IssueSeverity.ERROR,
                 stage="source_resolution",
                 journal=journal.name,
                 issn=issn,
@@ -802,7 +822,7 @@ def _finish_journal_source(
         )
         return None, tuple(issues), CoverageStatus.FAILED
 
-    if source_validation_failures:
+    if request_failures or source_validation_failures:
         return None, tuple(issues), CoverageStatus.FAILED
 
     source = hits[0]
@@ -879,10 +899,10 @@ def _reconstruct_abstract(value: Any) -> str | None:
     positioned_words: list[tuple[int, str]] = []
     positions: set[int] = set()
     for word, indexes in value.items():
-        if not isinstance(word, str) or not isinstance(indexes, list):
+        if not isinstance(word, str) or not word.strip() or not isinstance(indexes, list):
             raise ValueError("invalid abstract_inverted_index")
         for index in indexes:
-            if not isinstance(index, int) or index < 0 or index in positions:
+            if not isinstance(index, int) or isinstance(index, bool) or index < 0 or index in positions:
                 raise ValueError("invalid abstract_inverted_index positions")
             positions.add(index)
             positioned_words.append((index, word))
@@ -972,25 +992,39 @@ def _normalize_version_hints(
     return tuple(hints[key] for key in sorted(hints)), tuple(warnings)
 
 
+def _work_source_id(payload: Any) -> str | None:
+    """Absent nested identity is distinct from explicit invalid/conflicting identity."""
+    if not isinstance(payload, dict):
+        raise OpenAlexRecordError("work response entry is not an object")
+    primary_location = payload.get("primary_location")
+    if primary_location is None:
+        return None
+    if not isinstance(primary_location, dict):
+        raise OpenAlexRecordError("invalid work primary_location")
+    source_payload = primary_location.get("source")
+    if source_payload is None:
+        return None
+    if not isinstance(source_payload, dict):
+        raise OpenAlexRecordError("invalid work primary_location.source")
+    if source_payload.get("id") is None:
+        return None
+    return _canonical_openalex_id(source_payload["id"], "S")
+
+
 def _normalize_work(
     payload: Any,
     source: ResolvedSource,
     retrieved_at: datetime,
     *, thin: bool = False,
-) -> tuple[OpenAlexWorkRecord, tuple[str, ...]]:
+) -> tuple[OpenAlexWorkRecord | None, tuple[str, ...]]:
     if not isinstance(payload, dict):
         raise OpenAlexRecordError("work response entry is not an object")
     work_id = _canonical_openalex_id(payload.get("id"), "W")
-    title = _nonempty_string(payload.get("title"), "work title")
+    raw_title = payload.get("title")
+    title = raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else None
 
-    primary_location = payload.get("primary_location")
-    if not isinstance(primary_location, dict):
-        raise OpenAlexRecordError("work lacks primary_location")
-    source_payload = primary_location.get("source")
-    if not isinstance(source_payload, dict):
-        raise OpenAlexRecordError("work lacks primary_location.source")
-    work_source_id = _canonical_openalex_id(source_payload.get("id"), "S")
-    if work_source_id != source.openalex_id:
+    work_source_id = _work_source_id(payload)
+    if work_source_id is not None and work_source_id != source.openalex_id:
         raise OpenAlexRecordError(
             f"work venue {work_source_id} does not match resolved Source {source.openalex_id}"
         )
@@ -1000,34 +1034,31 @@ def _normalize_work(
         updated_at = parse_openalex_updated_date(payload.get("updated_date"))
     except ValueError:
         updated_at = None
-        warnings.append("invalid updated_date was treated as missing")
     try:
         publication_date = _parse_publication_date(payload.get("publication_date"))
     except (TypeError, ValueError):
         publication_date = None
-        warnings.append("invalid publication_date was treated as missing")
     try:
         doi = normalize_doi(payload.get("doi"))
     except ValueError:
         doi = None
-        warnings.append("invalid DOI was treated as missing")
+    if doi is not None and re.fullmatch(r"10\.\d{4,9}/\S+", doi) is None:
+        doi = None
+    if doi is None and title is None:
+        return None, ("work has neither a valid DOI nor a usable title",)
     try:
         abstract = _reconstruct_abstract(payload.get("abstract_inverted_index"))
     except ValueError:
         abstract = None
-        warnings.append("invalid abstract_inverted_index was treated as missing")
     version_hints, location_warnings = ((), ()) if thin else _normalize_version_hints(payload.get("locations"))
-    if thin and updated_at is None and payload.get("updated_date") is None:
-        warnings.append("missing updated_date prevents version-state reuse")
     warnings.extend(location_warnings)
 
     authorships = payload.get("authorships")
     if not isinstance(authorships, list):
-        raise OpenAlexRecordError("work lacks an authorships list")
+        authorships = []
     authors: list[Author] = []
     for authorship in authorships:
         if not isinstance(authorship, dict):
-            warnings.append("ignored malformed authorship")
             continue
         author_payload = authorship.get("author")
         author_payload = author_payload if isinstance(author_payload, dict) else {}
@@ -1035,22 +1066,20 @@ def _normalize_work(
         raw_name = authorship.get("raw_author_name")
         name = display_name if isinstance(display_name, str) and display_name.strip() else raw_name
         if not isinstance(name, str) or not name.strip():
-            warnings.append("ignored authorship without a usable name")
             continue
         try:
             author_id = _optional_openalex_id(author_payload.get("id"), "A")
         except OpenAlexRecordError:
             author_id = None
-            warnings.append(f"ignored invalid author ID for {name.strip()!r}")
         orcid_raw = author_payload.get("orcid")
         orcid = orcid_raw.strip() if isinstance(orcid_raw, str) and orcid_raw.strip() else None
+        if orcid is not None and _ORCID_PATTERN.fullmatch(orcid) is None:
+            orcid = None
         authors.append(Author(name=name, openalex_id=author_id, orcid=orcid))
-    if not authors:
-        raise OpenAlexRecordError("work has no usable authors")
 
     return (
         OpenAlexWorkRecord(
-            metadata=CanonicalMetadata(
+            metadata=OpenAlexMetadata(
                 title=title,
                 journal=source.display_name,
                 publication_date=publication_date,
@@ -1158,14 +1187,15 @@ def discover_openalex_journal(
                         )
                     )
                     continue
-                unit_records.append(record)
+                if record is not None:
+                    unit_records.append(record)
                 for warning in warnings:
                     issues.append(
                         DiscoveryIssue(
                             severity=IssueSeverity.WARNING,
                             stage="record_normalization",
                             journal=journal.name,
-                            record_id=record.external_ids.openalex,
+                            record_id=_canonical_openalex_id(record_id, "W"),
                             message=warning,
                         )
                     )
@@ -1335,6 +1365,7 @@ def _fetch_thin_sources(
     records: dict[str, dict[str, OpenAlexWorkRecord]] = {key: {} for key in sources}
     issues: dict[str, list[DiscoveryIssue]] = {key: [] for key in sources}
     affected: set[str] = set()
+    scope_conflicts: set[str] = set()
     seen: set[str] = set()
     obtained = 0
     expected: int | None = None
@@ -1348,13 +1379,18 @@ def _fetch_thin_sources(
             for raw in page["results"]:
                 obtained += 1
                 try:
-                    source_id = _canonical_openalex_id(raw["primary_location"]["source"]["id"], "S")
+                    source_id = _work_source_id(raw)
+                    if source_id is None and len(sources) == 1:
+                        source_id = next(iter(sources))
                     if source_id not in sources:
+                        if source_id is not None:
+                            scope_conflicts.update(sources)
+                            raise OpenAlexRecordError(f"work venue {source_id} is outside requested Sources")
                         raise OpenAlexRecordError("unassignable primary Source")
-                except (KeyError, TypeError, OpenAlexRecordError):
+                except OpenAlexRecordError as error:
                     affected.update(sources)
                     for key, source in sources.items():
-                        issues[key].append(DiscoveryIssue(IssueSeverity.ERROR, "record_normalization", source.journal, "unassignable primary Source"))
+                        issues[key].append(DiscoveryIssue(IssueSeverity.ERROR, "record_normalization", source.journal, str(error)))
                     continue
                 record_id = raw.get("id")
                 try:
@@ -1369,8 +1405,9 @@ def _fetch_thin_sources(
                     affected.add(source_id)
                     issues[source_id].append(DiscoveryIssue(IssueSeverity.ERROR, "record_normalization", sources[source_id].journal, str(error), record_id=record_id if isinstance(record_id, str) else None))
                     continue
-                records[source_id][record.external_ids.openalex] = record
-                issues[source_id].extend(DiscoveryIssue(IssueSeverity.WARNING, "record_normalization", sources[source_id].journal, warning, record_id=record.external_ids.openalex) for warning in warnings)
+                if record is not None:
+                    records[source_id][record.external_ids.openalex] = record
+                issues[source_id].extend(DiscoveryIssue(IssueSeverity.WARNING, "record_normalization", sources[source_id].journal, warning, record_id=work_id) for warning in warnings)
             if invalid_count:
                 raise OpenAlexRequestError("invalid or changing OpenAlex Works count")
         if expected != obtained:
@@ -1395,7 +1432,8 @@ def _fetch_thin_sources(
                 continue
             recovered = _fetch_thin_sources(client, {key: sources[key] for key in subset}, from_date, to_date, timestamp, progress_callback)
             for key, (new_records, new_issues, status) in recovered.items():
-                if status is CoverageStatus.COMPLETE:
+                # Recovery can restore absent attribution, but cannot erase explicit scope conflicts.
+                if status is CoverageStatus.COMPLETE and key not in scope_conflicts:
                     result[key] = new_records, new_issues, status
                 else:
                     merged = {record.external_ids.openalex: record for record in (*result[key][0], *new_records)}

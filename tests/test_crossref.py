@@ -70,6 +70,45 @@ class SequenceTransport(httpx.MockTransport):
         self.closed = True
         super().close()
 
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.advance(seconds)
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
+    clock = FakeClock()
+    monkeypatch.setattr("literature_monitor.crossref.monotonic", clock.monotonic)
+    return clock
+
+
+class TimedTransport(SequenceTransport):
+    def __init__(
+        self, clock: FakeClock, *outcomes: object, latencies: tuple[float, ...],
+    ) -> None:
+        self.clock = clock
+        self.latencies = iter(latencies)
+        self.starts: list[float] = []
+        super().__init__(*outcomes)
+
+    def _respond(self, request: httpx.Request) -> httpx.Response:
+        self.starts.append(self.clock.now)
+        self.clock.advance(next(self.latencies))
+        return super()._respond(request)
+
+
 def http_error(code: int) -> httpx.Response:
     return httpx.Response(code)
 
@@ -210,8 +249,7 @@ def test_journal_client_traverses_multiple_default_size_cursor_pages() -> None:
     assert second_query["cursor"] == ["second-page"]
 
 
-def test_client_uses_response_rate_headers_to_pace_later_requests() -> None:
-    delays: list[float] = []
+def test_client_uses_response_rate_headers_to_pace_later_requests(clock: FakeClock) -> None:
     transport = SequenceTransport(
         make_response(
             payload_for("10.5555/first"),
@@ -229,28 +267,28 @@ def test_client_uses_response_rate_headers_to_pace_later_requests() -> None:
         ),
         payload_for("10.5555/third"),
     )
-    client = CrossrefClient(transport=transport, sleep=delays.append)
+    client = CrossrefClient(transport=transport, sleep=clock.sleep)
 
     client.get_work_by_doi("10.5555/first")
     client.get_work_by_doi("10.5555/second")
     client.get_work_by_doi("10.5555/third")
 
-    assert delays == [0.5, 1.5]
+    assert clock.sleeps == [0.5, 1.5]
     assert len(transport.requests) == 3
 
 
-def test_client_missing_rate_headers_do_not_add_pacing_or_break_requests() -> None:
-    delays: list[float] = []
+def test_client_missing_rate_headers_do_not_add_pacing_or_break_requests(clock: FakeClock) -> None:
     transport = SequenceTransport(
         payload_for("10.5555/first"),
         payload_for("10.5555/second"),
     )
-    client = CrossrefClient(transport=transport, sleep=delays.append)
+    client = CrossrefClient(transport=transport, sleep=clock.sleep)
 
     assert client.get_work_by_doi("10.5555/first")["status"] == "ok"
     assert client.get_work_by_doi("10.5555/second")["status"] == "ok"
 
-    assert delays == []
+    assert clock.sleeps == []
+    assert len(transport.requests) == 2
 
 
 @pytest.mark.parametrize(
@@ -268,8 +306,8 @@ def test_client_missing_rate_headers_do_not_add_pacing_or_break_requests() -> No
 def test_client_malformed_rate_headers_do_not_break_requests_or_enable_pacing(
     limit: str,
     interval: str,
+    clock: FakeClock,
 ) -> None:
-    delays: list[float] = []
     transport = SequenceTransport(
         make_response(
             payload_for("10.5555/first"),
@@ -280,15 +318,16 @@ def test_client_malformed_rate_headers_do_not_break_requests_or_enable_pacing(
         ),
         payload_for("10.5555/second"),
     )
-    client = CrossrefClient(transport=transport, sleep=delays.append)
+    client = CrossrefClient(transport=transport, sleep=clock.sleep)
 
     assert client.get_work_by_doi("10.5555/first")["status"] == "ok"
     assert client.get_work_by_doi("10.5555/second")["status"] == "ok"
 
-    assert delays == []
+    assert clock.sleeps == []
+    assert len(transport.requests) == 2
 
 
-def test_client_rate_pacing_reports_waiting_activity_with_request_identity() -> None:
+def test_client_rate_pacing_reports_waiting_activity_with_request_identity(clock: FakeClock) -> None:
     trace: list[tuple[str, object]] = []
     transport = SequenceTransport(
         make_response(
@@ -307,6 +346,7 @@ def test_client_rate_pacing_reports_waiting_activity_with_request_identity() -> 
 
     def sleep(delay: float) -> None:
         trace.append(("sleep", delay))
+        clock.sleep(delay)
 
     client = CrossrefClient(transport=transport, sleep=sleep)
     client.get_work_by_doi("10.5555/first")
@@ -347,8 +387,7 @@ def test_client_rate_pacing_reports_waiting_activity_with_request_identity() -> 
     assert identities == {("crossref", "doi_supplement", "doi", 2, 5)}
 
 
-def test_client_retry_wait_respects_slower_known_provider_pacing() -> None:
-    delays: list[float] = []
+def test_client_retry_wait_respects_slower_known_provider_pacing(clock: FakeClock) -> None:
     transport = SequenceTransport(
         make_response(
             payload_for("10.5555/first"),
@@ -360,12 +399,233 @@ def test_client_retry_wait_respects_slower_known_provider_pacing() -> None:
         http_error(429),
         payload_for("10.5555/second"),
     )
-    client = CrossrefClient(transport=transport, sleep=delays.append)
+    client = CrossrefClient(transport=transport, sleep=clock.sleep)
 
     client.get_work_by_doi("10.5555/first")
     assert client.get_work_by_doi("10.5555/second")["status"] == "ok"
 
-    assert delays == [5, 5]
+    assert clock.sleeps == [5, 5]
+    assert len(transport.requests) == 3
+
+
+def pacing_response(interval: float, *, status: int = 200) -> httpx.Response:
+    return httpx.Response(
+        status,
+        json=list_payload([], total_results=0),
+        headers={"X-Rate-Limit-Limit": "1", "X-Rate-Limit-Interval": f"{interval:g}s"},
+    )
+
+
+def pacing_request(client: CrossrefClient, shape: str, **kwargs: Any) -> None:
+    if shape == "singleton":
+        client.get_work_by_doi("10.5555/pacing", **kwargs)
+    elif shape == "alias":
+        client.get_doi_outcome("10.5555/pacing", **kwargs)
+    elif shape == "manifest":
+        client.get_manifest_page(("0006-341X",), date(2026, 1, 1), date(2026, 1, 1), **kwargs)
+    elif shape == "journal":
+        list(client.iter_journal_work_pages("0006-341X", date(2026, 1, 1), date(2026, 1, 1), **kwargs))
+    else:
+        assert shape in ("probe", "hydration")
+        client.get_doi_batch(("10.5555/pacing",), thin=shape == "probe", **kwargs)
+
+
+@pytest.mark.parametrize("shape", ["singleton", "manifest"])
+@pytest.mark.parametrize(("latency", "wait"), [(0.5, 1.5), (2, 0), (3, 0)])
+def test_same_class_pacing_counts_response_latency(
+    clock: FakeClock, monkeypatch: pytest.MonkeyPatch, shape: str, latency: float, wait: float,
+) -> None:
+    transport = TimedTransport(clock, pacing_response(2), list_payload([]), latencies=(latency, 0))
+    events: list[ProgressEvent] = []
+    with CrossrefClient(transport=transport, sleep=clock.sleep) as client:
+        monkeypatch.setattr("time.time", lambda: 1000000)
+        pacing_request(client, shape, progress_callback=events.append)
+        assert clock.sleeps == []  # The first request needs neither a probe nor a wait.
+        monkeypatch.setattr("time.time", lambda: -1000000)
+        pacing_request(client, shape, progress_callback=events.append)
+
+    assert clock.sleeps == ([wait] if wait else [])
+    assert transport.starts == [0, max(2, latency)]
+    assert len(transport.requests) == 2
+    waiting = [e.activity for e in events if e.activity.kind is ActivityKind.WAITING]
+    assert len(waiting) == (1 if wait else 0)
+
+
+@pytest.mark.parametrize("list_shape", ["manifest", "journal", "probe", "hydration"])
+@pytest.mark.parametrize("singleton_shape", ["singleton", "alias"])
+@pytest.mark.parametrize("singleton_first", [True, False])
+@pytest.mark.parametrize(("first_interval", "second_interval", "starts", "sleeps"), [
+    (5, 1, [0, 0, 5, 5, 10], [5, 5]),
+    (1, 5, [0, 0, 1, 5, 5], [1, 4]),
+])
+def test_request_classes_retain_independent_interleaved_deadlines(
+    clock: FakeClock, list_shape: str, singleton_shape: str, singleton_first: bool,
+    first_interval: float, second_interval: float, starts: list[float], sleeps: list[float],
+) -> None:
+    first, second = (
+        (singleton_shape, list_shape) if singleton_first else (list_shape, singleton_shape)
+    )
+    transport = TimedTransport(clock, pacing_response(first_interval), pacing_response(second_interval),
+        list_payload([]), list_payload([]), list_payload([]), latencies=(0, 0, 0, 0, 0))
+    with CrossrefClient(transport=transport, sleep=clock.sleep) as client:
+        for shape in (first, second, first, second, first):
+            pacing_request(client, shape)
+
+    assert transport.starts == starts
+    assert clock.sleeps == sleeps
+    assert len(transport.requests) == 5
+
+
+@pytest.mark.parametrize("headers", [
+    {}, {"X-Rate-Limit-Limit": "bad", "X-Rate-Limit-Interval": "1s"},
+    {"X-Rate-Limit-Limit": "1"}, {"X-Rate-Limit-Interval": "1s"},
+])
+@pytest.mark.parametrize(("slow_shape", "fast_shape"), [
+    ("manifest", "singleton"), ("singleton", "manifest"),
+])
+def test_unusable_headers_preserve_both_classes_latest_valid_rates(
+    clock: FakeClock, headers: dict[str, str], slow_shape: str, fast_shape: str,
+) -> None:
+    transport = TimedTransport(clock,
+        pacing_response(5), pacing_response(1), pacing_response(3),
+        make_response(list_payload([]), headers=headers),
+        list_payload([]), list_payload([]), list_payload([]),
+        latencies=(0, 0, 0, 0, 0, 0, 0))
+    with CrossrefClient(transport=transport, sleep=clock.sleep) as client:
+        for shape in (slow_shape, fast_shape, slow_shape, slow_shape,
+                      fast_shape, fast_shape, slow_shape):
+            pacing_request(client, shape)
+
+    assert transport.starts == [0, 0, 5, 8, 8, 9, 11]
+    assert clock.sleeps == [5, 3, 1, 2]
+    assert len(transport.requests) == 7  # No pacing-only request on malformed/missing headers.
+
+
+@pytest.mark.parametrize("failure", [
+    http_error(429), http_error(503), httpx.ReadTimeout("slow"), httpx.ConnectError("down"),
+])
+@pytest.mark.parametrize(("interval", "latency", "retry_wait", "next_wait"), [
+    (5, 2, 3, 5), (5, 5, 0, 5), (5, 6, 0, 5),
+    (0.5, 0, 1, 0.5), (0.5, 0.75, 0.25, 0.5), (0.5, 2, 0, 0.5),
+])
+def test_retry_waits_for_longest_remaining_deadline_and_resets_request_spacing(
+    clock: FakeClock, failure: httpx.Response | Exception,
+    interval: float, latency: float, retry_wait: float, next_wait: float,
+) -> None:
+    transport = TimedTransport(clock, pacing_response(interval), failure,
+        list_payload([]), list_payload([]), latencies=(0, latency, 0, 0))
+    trace: list[tuple[str, object]] = []
+
+    def report(event: ProgressEvent) -> None:
+        trace.append(("activity", event.activity))
+
+    def sleep(seconds: float) -> None:
+        trace.append(("sleep", seconds))
+        clock.sleep(seconds)
+
+    activity = ActivityUpdate(kind=ActivityKind.WORKING, source="crossref",
+        operation="caller_label_is_not_request_class", label="Supplementing DOI",
+        unit="doi", current=2, total=5)
+    with CrossrefClient(transport=transport, sleep=sleep) as client:
+        client.get_work_by_doi("10.5555/pacing")
+        client.get_work_by_doi("10.5555/pacing", activity=activity, progress_callback=report)
+        # Retry alone satisfies pacing; it must not emit a second WAITING.
+        activities = [value for kind, value in trace if kind == "activity"]
+        assert [a.kind for a in activities].count(ActivityKind.WAITING) == 1
+        assert [a.kind for a in activities].count(ActivityKind.RETRYING) == 1
+        assert {(a.source, a.operation, a.unit, a.current, a.total) for a in activities} == {
+            ("crossref", "caller_label_is_not_request_class", "doi", 2, 5)}
+        if retry_wait:
+            retry_index = next(i for i, (kind, value) in enumerate(trace)
+                               if kind == "activity" and value.kind is ActivityKind.RETRYING)
+            assert trace[retry_index + 1] == ("sleep", retry_wait)
+        client.get_work_by_doi("10.5555/pacing")
+
+    expected_waits = [interval] + ([retry_wait] if retry_wait else []) + [next_wait]
+    assert clock.sleeps == expected_waits
+    retried_at = interval + max(latency, interval, 1)
+    assert transport.starts == [0, interval, retried_at, retried_at + interval]
+    assert len(transport.requests) == 4
+
+
+def test_retry_uses_rate_headers_on_failed_response_and_counts_activity_handling(clock: FakeClock) -> None:
+    transport = TimedTransport(clock, pacing_response(5, status=429), list_payload([]),
+        list_payload([]), latencies=(2, 0, 0))
+    events: list[ProgressEvent] = []
+
+    def report(event: ProgressEvent) -> None:
+        events.append(event)
+        if event.activity.kind is ActivityKind.RETRYING:
+            clock.advance(1)
+
+    with CrossrefClient(transport=transport, sleep=clock.sleep) as client:
+        pacing_request(client, "manifest", progress_callback=report)
+        pacing_request(client, "manifest", progress_callback=events.append)
+
+    assert transport.starts == [0, 5, 10]
+    assert clock.sleeps == [2, 5]  # Response latency and retry reporting consumed 3 seconds.
+    assert [e.activity.kind for e in events].count(ActivityKind.RETRYING) == 1
+    assert [e.activity.kind for e in events].count(ActivityKind.WAITING) == 1
+
+
+@pytest.mark.parametrize(("shape", "other_shape"), [
+    ("singleton", "manifest"), ("manifest", "singleton"),
+])
+@pytest.mark.parametrize(("interval", "other_interval", "starts", "sleeps"), [
+    (5, 0.5, [0, 0, 5, 10], [5, 5]),
+    (0.5, 5, [0, 0, 0.5, 1.5], [0.5, 1]),
+])
+def test_retry_uses_its_own_class_even_after_another_class_updates_headers(
+    clock: FakeClock, shape: str, other_shape: str, interval: float, other_interval: float,
+    starts: list[float], sleeps: list[float],
+) -> None:
+    transport = TimedTransport(clock, pacing_response(interval), pacing_response(other_interval),
+        http_error(503), list_payload([]), latencies=(0, 0, 0, 0))
+    with CrossrefClient(transport=transport, sleep=clock.sleep) as client:
+        pacing_request(client, shape)
+        pacing_request(client, other_shape)
+        pacing_request(client, shape)
+
+    assert transport.starts == starts
+    assert clock.sleeps == sleeps
+    assert len(transport.requests) == 4
+
+
+@pytest.mark.parametrize(("latencies", "starts", "sleeps"), [
+    ((0.25, 0.75, 0), [0, 1, 3], [0.75, 1.25]),
+    ((1, 3, 0), [0, 1, 4], []),
+])
+def test_both_retry_fallback_deadlines_count_elapsed_latency_without_headers(
+    clock: FakeClock, latencies: tuple[float, ...], starts: list[float], sleeps: list[float],
+) -> None:
+    transport = TimedTransport(clock, http_error(429), httpx.ReadTimeout("slow"),
+        payload_for("10.5555/pacing"), latencies=latencies)
+    events: list[ProgressEvent] = []
+    with CrossrefClient(transport=transport, sleep=clock.sleep) as client:
+        pacing_request(client, "singleton", progress_callback=events.append)
+
+    assert transport.starts == starts
+    assert clock.sleeps == sleeps
+    assert len(transport.requests) == 3
+    assert [e.activity.kind for e in events].count(ActivityKind.RETRYING) == 2
+    assert not any(e.activity.kind is ActivityKind.WAITING for e in events)
+
+
+def test_alias_response_headers_pace_followup_singleton_not_list_requests(clock: FakeClock) -> None:
+    redirect = httpx.Response(308, headers={
+        "Location": "/v1/works/10.5555/prime",
+        "X-Rate-Limit-Limit": "1", "X-Rate-Limit-Interval": "3s"})
+    transport = TimedTransport(clock, redirect, list_payload([]), payload_for("10.5555/prime"),
+        latencies=(1, 0, 0))
+    with CrossrefClient(transport=transport, sleep=clock.sleep) as client:
+        outcome = client.get_doi_outcome("10.5555/alias")
+        assert outcome.kind is CrossrefDOIOutcomeKind.PRIME_REDIRECT
+        assert outcome.prime_doi == "10.5555/prime"
+        pacing_request(client, "probe")
+        client.get_work_by_doi(outcome.prime_doi)
+
+    assert transport.starts == [0, 1, 3]
+    assert clock.sleeps == [2]
     assert len(transport.requests) == 3
 
 
@@ -431,13 +691,12 @@ def test_journal_client_rejects_repeated_cursor() -> None:
     "outcome",
     [http_error(429), http_error(500), httpx.ReadTimeout("timed out"), httpx.ConnectError("down"), httpx.ConnectError("dns")],
 )
-def test_client_retries_transient_failures(outcome: httpx.Response | Exception) -> None:
-    delays: list[float] = []
+def test_client_retries_transient_failures(outcome: httpx.Response | Exception, clock: FakeClock) -> None:
     transport = SequenceTransport(outcome, outcome, payload_for("10.5555/retry"))
-    client = CrossrefClient(transport=transport, sleep=delays.append)
+    client = CrossrefClient(transport=transport, sleep=clock.sleep)
 
     assert client.get_work_by_doi("10.5555/retry")["status"] == "ok"
-    assert delays == [1, 2]
+    assert clock.sleeps == [1, 2]
     assert len(transport.requests) == 3
 
 
@@ -447,6 +706,7 @@ def test_client_retries_transient_failures(outcome: httpx.Response | Exception) 
 )
 def test_client_progress_reports_retry_before_backoff_and_success(
     transient_failure: httpx.Response | Exception,
+    clock: FakeClock,
 ) -> None:
     trace: list[tuple[str, object]] = []
     transport = SequenceTransport(
@@ -460,6 +720,7 @@ def test_client_progress_reports_retry_before_backoff_and_success(
 
     def sleep(delay: float) -> None:
         trace.append(("sleep", delay))
+        clock.sleep(delay)
 
     client = CrossrefClient(transport=transport, sleep=sleep)
     activity = ActivityUpdate(
@@ -1668,13 +1929,14 @@ def test_a5_manifest_uses_shared_canonical_revision_parser() -> None:
     assert set(member.__dataclass_fields__) == {"doi", "issns", "indexed_at"}
 
 
-def test_a5_requests_preserve_retry_pacing_and_activity_before_sleep() -> None:
+def test_a5_requests_preserve_retry_pacing_and_activity_before_sleep(clock: FakeClock) -> None:
     events, sleeps = [], []
     transport = SequenceTransport(httpx.Response(500), make_response(list_payload([], total_results=0),
         headers={"X-Rate-Limit-Limit": "2", "X-Rate-Limit-Interval": "1s"}),
         list_payload([], total_results=0))
     def sleep(delay):
         sleeps.append((delay, events[-1].activity.kind))
+        clock.sleep(delay)
     with CrossrefClient(transport=transport, sleep=sleep) as client:
         client.get_manifest_page(("0006-341X",), date(2026, 1, 1), date(2026, 1, 1), progress_callback=events.append)
         client.get_doi_batch(("10.1234/a",), progress_callback=events.append)

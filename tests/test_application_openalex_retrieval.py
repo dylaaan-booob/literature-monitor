@@ -8,18 +8,18 @@ import pytest
 
 from literature_monitor.application import provider_state as ps
 from literature_monitor.application.openalex_retrieval import hydrate_retained_openalex_versions
-from literature_monitor.models import Author, CanonicalMetadata, ExternalIds, MetadataSource
+from literature_monitor.models import Author, ExternalIds, MetadataSource
 from literature_monitor.openalex import (
-    OpenAlexClient, OpenAlexVersion, OpenAlexVersionHint, OpenAlexWorkRecord,
+    OpenAlexClient, OpenAlexMetadata, OpenAlexVersion, OpenAlexVersionHint, OpenAlexWorkRecord,
 )
 
 NOW = datetime(2026, 1, 31, tzinfo=timezone.utc)
 
 
-def record(work="W1", revision=NOW):
+def record(work="W1", revision=NOW, *, title="Study", authors=(Author(name="Ada"),)):
     return OpenAlexWorkRecord(
-        metadata=CanonicalMetadata(title="Study", journal="Biometrics", publication_date=date(2026, 1, 1)),
-        authors=(Author(name="Ada"),), external_ids=ExternalIds(openalex=f"https://openalex.org/{work}", doi="10.5555/study"),
+        metadata=OpenAlexMetadata(title=title, journal="Biometrics", publication_date=date(2026, 1, 1)),
+        authors=authors, external_ids=ExternalIds(openalex=f"https://openalex.org/{work}", doi="10.5555/study"),
         source_id="https://openalex.org/S1",
         provenance=MetadataSource(provider="openalex", record_id=f"https://openalex.org/{work}", retrieved_at=NOW),
         updated_at=revision,
@@ -255,3 +255,33 @@ def test_version_batches_are_bounded_and_do_not_fetch_full_metadata():
     assert len(transport.requests) == 2
     assert [len(request.url.params["filter"].split("|")) for request in transport.requests] == [100, 1]
     assert all(request.url.params["select"] == "id,locations" for request in transport.requests)
+
+
+@pytest.mark.parametrize("revision", [NOW, NOW + timedelta(days=1), None])
+def test_partial_records_preserve_revision_reuse_and_live_hydration_rules(revision):
+    live = record(revision=revision, title=None, authors=())
+    old = state()
+    matching = revision == NOW
+    client, transport = client_for(*([] if matching else [payload(hydrated())]))
+    with client:
+        result = hydrate_retained_openalex_versions(client, (live,), version_state=(old,), retrieved_at=NOW)
+    assert result.records[0].metadata.title is None
+    assert result.records[0].authors == ()
+    assert result.records[0].to_evidence().provenance == live.provenance
+    assert len(transport.requests) == (0 if matching else 1)
+    assert bool(result.reused_work_ids) is matching
+    assert bool(result.hydrated_work_ids) is not matching
+    assert len(result.pending_changes) == (1 if revision is not None and not matching else 0)
+    assert not result.issues
+
+
+def test_partial_record_hydration_failure_keeps_true_warning_with_verified_journal():
+    live = record(revision=None, title=None, authors=())
+    client, transport = client_for(httpx.Response(404))
+    with client:
+        result = hydrate_retained_openalex_versions(client, (live,), version_state=(state(),), retrieved_at=NOW)
+    assert len(transport.requests) == 1
+    assert not result.reused_work_ids and not result.pending_changes
+    assert result.records[0].to_evidence() == live.to_evidence()
+    assert result.issues
+    assert all(issue.stage == "version_hydration" and issue.journal == "Biometrics" for issue in result.issues)

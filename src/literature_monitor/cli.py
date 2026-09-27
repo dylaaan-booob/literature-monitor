@@ -63,7 +63,7 @@ from literature_monitor.search import (
     SearchBackendError,
     SearchExpressionError,
     SearchableProjection,
-    build_metadata_searchable_projection,
+    build_searchable_projection,
     match_searchable_projections,
     validate_search_expression,
 )
@@ -757,17 +757,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 1 if openalex.has_errors else 0
 
             if args.command in {"openalex-filter", "crossref-enrich"}:
-                records = openalex.records
+                searchable_records = []
+                for record in openalex.records:
+                    projection = build_searchable_projection((record.to_evidence(),))
+                    if projection.titles or projection.author_keywords or projection.abstracts:
+                        searchable_records.append((record, projection))
                 projections = tuple(
-                    build_metadata_searchable_projection(record.metadata)
-                    for record in records
+                    projection for _record, projection in searchable_records
                 )
                 matches = _match_local_search(logger, keyword_ast, projections)
                 if matches is None:
                     return 2
                 filtered = tuple(
                     record
-                    for record, matched in zip(records, matches, strict=True)
+                    for (record, _projection), matched in zip(searchable_records, matches, strict=True)
                     if matched
                 )
                 if args.command == "openalex-filter":
@@ -793,10 +796,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 logger.info(
                     "Crossref enrichment diagnostic completed: %d discovered, "
-                    "%d retained, %d enriched, %d without DOI, %d unavailable, "
+                    "%d retained, %d filtered out, %d enriched, %d without DOI, %d unavailable, "
                     "%d failed, %d OpenAlex issues, %d Crossref issues",
                     len(openalex.records),
                     len(filtered),
+                    len(openalex.records) - len(filtered),
                     enriched_count,
                     sum(issue.stage == "missing_doi" for issue in enrichment.issues),
                     sum(issue.stage == "not_found" for issue in enrichment.issues),

@@ -1295,6 +1295,87 @@ def test_validate_monitor_source_issue_classification(
     assert all(issue.component is MonitorIssueComponent.OPENALEX for issue in target)
 
 
+@pytest.mark.parametrize(("failure", "expected"), [
+    ("absent", ValidationOutcome.VALID_WITH_WARNINGS),
+    ("remote", ValidationOutcome.SOURCE_ERRORS),
+    ("identity", ValidationOutcome.SOURCE_ERRORS),
+])
+def test_validate_uses_real_shared_source_resolution_severity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, expected: ValidationOutcome,
+) -> None:
+    config_path = write_monitor(tmp_path)
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.path.startswith("/sources")  # Validation must not request Works.
+        if failure == "remote":
+            return httpx.Response(500)
+        if request.url.path == "/sources":
+            return httpx.Response(200, json={"meta": {"count": 0}, "results": []})
+        if failure == "identity":
+            source = json.loads((Path(__file__).parent / "fixtures/openalex/source_biometrics.json").read_text())
+            source["type"] = "repository"
+            return httpx.Response(200, json=source)
+        return httpx.Response(404)
+
+    client = OpenAlexClient(transport=httpx.MockTransport(respond), sleep=lambda _: None)
+    monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kwargs: client)
+    result = validate_monitor(config_path)
+    assert result.outcome is expected
+    assert not result.resolved_sources
+    assert bool(result.errors) is (failure != "absent")
+    assert bool(result.warnings) is (failure == "absent")
+    assert requests and client._http_client.is_closed
+    assert not (tmp_path / "workspace").exists()
+
+
+@pytest.mark.parametrize(("alternate", "expected"), [
+    ("remote", ValidationOutcome.SOURCE_ERRORS),
+    ("absent", ValidationOutcome.VALID_WITH_WARNINGS),
+    ("recovered", ValidationOutcome.VALID),
+])
+def test_validate_mixed_source_success_uses_final_remote_failure_severity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    alternate: str, expected: ValidationOutcome,
+) -> None:
+    config_path = write_monitor(tmp_path)
+    source = json.loads((Path(__file__).parent / "fixtures/openalex/source_biometrics.json").read_text())
+    annals = dict(source, id="https://openalex.org/S999", display_name="Annals of Statistics",
+                  issn_l="0090-5364", issn=["0090-5364"])
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.path.startswith("/sources")
+        if request.url.path == "/sources":
+            if alternate == "recovered":
+                return httpx.Response(500)
+            primary = dict(source, issn=["0006-341X"])
+            return httpx.Response(200, json={"meta": {"count": 2}, "results": [primary, annals]})
+        if request.url.path == "/sources/issn:1541-0420" and alternate != "recovered":
+            return httpx.Response(500 if alternate == "remote" else 404)
+        assert alternate == "recovered"
+        return httpx.Response(200, json=annals if request.url.path.endswith("0090-5364") else source)
+
+    client = OpenAlexClient(transport=httpx.MockTransport(respond), sleep=lambda _: None)
+    monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kwargs: client)
+    result = validate_monitor(config_path)
+
+    assert result.outcome is expected
+    assert [source.journal for source in result.resolved_sources] == (
+        ["Annals of Statistics"] if alternate == "remote" else ["Biometrics", "Annals of Statistics"]
+    )
+    assert bool(result.errors) is (alternate == "remote")
+    assert bool(result.warnings) is (alternate == "absent")
+    if alternate == "remote":
+        assert all(issue.component is MonitorIssueComponent.OPENALEX for issue in result.errors)
+        assert any("remote/API failure" in issue.message for issue in result.errors)
+    assert len(requests) == {"remote": 4, "absent": 2, "recovered": 6}[alternate]
+    assert client._http_client.is_closed
+    assert not (tmp_path / "workspace").exists()
+
+
 @pytest.mark.parametrize("failure", ("config", "lexical", "fts5", "date"))
 def test_validate_monitor_local_failures_are_invalid_before_source_resolution(
     failure: str,

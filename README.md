@@ -11,6 +11,10 @@ Revision-Validated Provider Evidence work while preserving the existing durable
 workflow model. Its A1–A8 implementation, independent stage reviews, final
 independent audit, release transaction, and closeout are complete.
 
+The current main/source tree implements the v0.4.4 behavior described below:
+elapsed-aware Crossref pacing and partial Provider evidence. v0.4.4 remains
+unreleased; v0.4.3 remains the latest released version.
+
 The workflow automatically reuses revision-validated Provider
 state while establishing live candidate membership on every Run. It batches
 OpenAlex Source/Works retrieval, hydrates locations/version hints only for
@@ -100,20 +104,47 @@ marker only. Discovery does not download `locations` for every Work; only
 retained W IDs hydrate locations/version hints, once per distinct ID. Those
 hints may be reused when the current live revision matches Provider state.
 
+In the v0.4.4 source tree, OpenAlex Provider evidence eligibility is separate
+from `CanonicalPaper` eligibility. A valid Work identity, trustworthy Source,
+and usable DOI or title allow evidence to continue even with empty authors,
+missing abstract, or missing publication date. Ordinary sparsity does not
+create ingestion-time missing-field warnings. A missing or unusable revision
+disables version reuse; a retained Work then hydrates its locations live.
+Normal Source absence is `UNAVAILABLE` with a warning, while unrecovered remote
+request failures and Source/journal identity failures remain `FAILED` with an
+error.
+
 Crossref establishes current DOI membership through live manifests. Matching
 current `indexed` revisions permit normalized metadata reuse; changed or new
 records obtain current full metadata. DOI supplementation fills only Crossref
 gaps anchored by current OpenAlex evidence. Alias lookups preserve requested-DOI
 coverage while evidence and state use the resolved prime DOI.
 
+DOI-anchored partial OpenAlex evidence can receive Crossref supplementation
+even without an OpenAlex title or authors. Title-only evidence without a DOI
+can proceed directly to local matching without a production `missing_doi`
+warning or a DOI-supplement request/coverage unit. After consolidation, a
+cluster with no usable title, author keywords, or abstract receives an
+`unsearchable` warning and is excluded from matcher candidates, including for
+pure `NOT` and complement expressions. This is a search-boundary warning,
+not a Provider retrieval issue. Matched evidence still needs a title, journal,
+and at least one author for `CanonicalPaper`; unmet eligibility produces the
+existing `insufficient_metadata` warning. Evidence grouping and representative
+selection remain in use without generic field-by-field Provider synthesis.
+
 OpenAlex Works discovery keeps cursor pagination at `per_page=100`. Crossref
 uses bounded manifest retrieval, splitting ISSNs and date intervals as needed,
 then traversing cursors for oversized single days, with `rows=1000`. A Crossref
-client uses valid
-`X-Rate-Limit-Limit` and `X-Rate-Limit-Interval` response metadata to pace later
-requests without rate-limit probes or count-only requests. HTTP 429, HTTP 5xx,
-and supported timeout/transport failures receive at most three attempts; when no
-provider pacing is known, retry waits remain 1 second and then 2 seconds.
+client uses valid `X-Rate-Limit-Limit` and `X-Rate-Limit-Interval` response
+metadata to pace later requests without rate-limit probes or count-only
+requests. In the v0.4.4 source tree, pacing uses elapsed-aware, process-local
+monotonic timing, with independent Provider-derived state for singleton DOI
+and list/filter request classes. Network and processing time count toward the
+interval; retry and pacing deadlines share the remaining wait instead of
+adding duplicate full waits. Rate state is not persisted. HTTP 429, HTTP 5xx,
+and supported timeout/transport failures receive at most three attempts. The
+1-second/2-second retry fallback remains; elapsed time counts toward those
+deadlines too, so actual waits can be shorter.
 Endpoint-specific 404 handling is unchanged, and other HTTP 4xx responses are
 not retried. Retry and pacing state remain process-local and transient.
 
@@ -175,7 +206,8 @@ where possible and does not roll back workspace files. Provider failures remain
 isolated so successful evidence from other requests or Providers stays usable.
 
 For v0.4.2 compatibility, an old `provider-cache.json` may remain on disk
-untouched. v0.4.3 never reads, writes, deletes, migrates, or modifies it. It has
+untouched. Neither v0.4.3 nor the current source tree reads, writes, deletes,
+migrates, or modifies it. It has
 no authority over current execution and needs no migration. The deprecated
 `run --reuse-provider-cache` flag remains accepted until v0.5.0, but is ignored
 and emits this notice on stderr without changing the Run outcome:
@@ -186,7 +218,8 @@ Provider-state reuse is now automatic.
 
 New last-run snapshots remain schema v2 and write `reused_units: []`. Valid
 historical v1/v2 snapshots remain readable, and `last-run` may still display
-historical v2 cache-reuse identities. Current Provider-state usage counts are
+historical v2 cache-reuse identities and recorded outcomes without
+reinterpretation under the current warning/error policy. Current Provider-state usage counts are
 not persisted into last-run.
 
 Paper Markdown remains the durable workflow state: UUIDs, review status, human
@@ -325,6 +358,9 @@ Source-resolution
 errors exit with status `1`; warning-only and fully valid validation exit with
 status `0`.
 
+Normal Source absence yields `VALID_WITH_WARNINGS`; an unrecovered remote
+Source request failure or identity-validation failure yields `SOURCE_ERRORS`.
+
 TTY `validate` shows validation-specific progress, including reliable journal
 Source-resolution counts, without presenting the five-stage Run model. Non-TTY
 validation progress uses the same plain `stderr` event-line convention.
@@ -451,6 +487,13 @@ The local keyword filtering diagnostic does not perform Crossref enrichment,
 canonicalization, Markdown materialization, Zotero integration, conference
 monitoring, or persistence.
 
+In the v0.4.4 source tree, filtering uses `record.to_evidence()` and its Provider
+searchable projection. Partial title-only or DOI-only records, empty authors,
+and missing abstract/publication date are supported. Records with no title,
+author keywords, or abstract are filtered out before the matcher, so an empty
+projection cannot be retained through `NOT`. Searchable records keep the normal
+FTS5 semantics and discovery order; output remains the original OpenAlex records.
+
 ## Keyword matching semantics
 
 Local filtering searches only Title, true author- or publisher-supplied Author
@@ -515,6 +558,15 @@ performs Crossref DOI lookups only for retained records.
 It preserves each original OpenAlex record and attaches normalized Crossref
 provider evidence when available. Records without a DOI, and records that are
 not present in Crossref, remain in the output with `crossref: null`.
+
+Filtering uses the same Provider evidence projections and excludes empty
+projections before matching, including for pure `NOT`. The historical order
+remains discovery → local filtering → enrichment: a DOI-only record with no
+searchable fields is filtered out before any Crossref lookup. Retained DOI-less
+records may still produce the historical diagnostic `missing_doi` warning.
+That warning belongs to this enrichment diagnostic; production Run does not
+emit an unconditional missing-DOI warning. Counts include records filtered out
+for lacking searchable fields.
 
 ```bash
 uv run literature-monitor crossref-enrich \
