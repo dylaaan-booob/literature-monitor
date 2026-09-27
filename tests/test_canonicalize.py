@@ -20,6 +20,8 @@ from literature_monitor.crossref import (
 from literature_monitor.models import (
     Author,
     CanonicalMetadata,
+    EvidenceVersionHint,
+    EvidenceVersionRole,
     ExternalIds,
     MetadataSource,
     ProviderTopic,
@@ -153,6 +155,51 @@ def paper_projection(paper: object) -> dict[str, Any]:
     payload.pop("id")
     payload.pop("workflow")
     return payload
+
+
+@pytest.mark.parametrize("same_provider", [False, True])
+def test_version_hints_do_not_rank_canonical_metadata(same_provider: bool) -> None:
+    openalex_evidence = ProviderWorkEvidence(
+        provenance=MetadataSource(
+            provider="openalex", record_id="https://openalex.org/W1", retrieved_at=NOW,
+        ),
+        title="OpenAlex title",
+        journal="Biometrics",
+        publication_date=date(2026, 9, 1),
+        authors=(author(),),
+        external_ids=ExternalIds(doi="10.5555/a", openalex="https://openalex.org/W1"),
+    )
+    other_evidence = openalex_evidence.model_copy(update={
+        "title": "Crossref title",
+        "provenance": openalex_evidence.provenance if same_provider else MetadataSource(
+            provider="crossref", record_id="10.5555/a", retrieved_at=NOW,
+        ),
+    })
+    hint = EvidenceVersionHint(
+        source="arxiv", identifier="2601.01234", role=EvidenceVersionRole.PREPRINT,
+        url="https://arxiv.org/abs/2601.01234",
+    )
+    baseline = canonicalize_records((openalex_evidence, other_evidence)).papers[0]
+    hydrated = canonicalize_records((
+        openalex_evidence.model_copy(update={"version_hints": (hint,)}), other_evidence,
+    )).papers[0]
+
+    assert baseline.metadata.title == "Crossref title"
+    assert hydrated.metadata == baseline.metadata
+    assert hydrated.authors == baseline.authors
+    assert hydrated.external_ids == baseline.external_ids
+    assert hydrated.preferred_version == baseline.preferred_version
+    assert baseline.preferred_version.source == "doi"
+    assert baseline.preferred_version.identifier == "10.5555/a"
+    if same_provider:
+        # Duplicate snapshots retain the metadata-selected snapshot's hints.
+        assert hydrated.versions == baseline.versions
+        return
+    assert set(baseline.versions) < set(hydrated.versions)
+    version, = [item for item in hydrated.versions if item.source == "arxiv"]
+    assert version.identifier == hint.identifier
+    assert version.kind is VersionKind.PREPRINT
+    assert str(version.url) == hint.url
 
 
 def test_non_openalex_evidence_can_create_a_canonical_paper() -> None:

@@ -21,8 +21,7 @@
           hx-target="#run-panel"
           hx-swap="outerHTML">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit" name="reuse_provider_cache" value="false">Run</button>
-      <button type="submit" name="reuse_provider_cache" value="true">Run with cache reuse</button>
+      <button type="submit">Run</button>
     </form>
   {% elif run_snapshot.status.value == "RUNNING" %}
     {% if not run_snapshot.worker_alive %}
@@ -45,45 +44,46 @@
             {% endfor %}
           </div>
           <span class="stage-label">{{ run_progress.stage_label }}</span>
-        {% elif not run_progress.activity %}
+        {% elif not run_progress.activities %}
           <span>Starting…</span>
         {% endif %}
 
-        {% if run_progress.activity %}
-          {% set activity = run_progress.activity %}
+        {% for row in run_progress.activities %}
+          {% set activity = row.activity %}
           <div class="activity-card">
             <div class="activity-heading">
-              {% if run_progress.activity_source %}
-                <span class="activity-source">{{ run_progress.activity_source }}</span>
+              {% if row.activity_source %}
+                <span class="activity-source">{{ row.activity_source }}</span>
               {% endif %}
-              {% if run_progress.activity_state %}
-                <span class="activity-state">{{ run_progress.activity_state }}</span>
+              {% if row.activity_state %}
+                <span class="activity-state">{{ row.activity_state }}</span>
               {% endif %}
             </div>
             <strong>{{ activity.label }}</strong>
             {% if activity.detail %}
               <span class="muted">{{ activity.detail }}</span>
             {% endif %}
-            {% if run_progress.activity_counter %}
-              <span class="activity-counter">{{ run_progress.activity_counter }}</span>
+            {% if row.activity_counter %}
+              <span class="activity-counter">{{ row.activity_counter }}</span>
             {% endif %}
-            {% if run_progress.activity_determinate %}
+            {% if row.activity_determinate %}
               <progress class="activity-progress"
                         value="{{ activity.current }}"
                         max="{{ activity.total }}"
-                        aria-label="Activity progress: {{ run_progress.activity_counter }}"></progress>
+                        aria-label="Activity progress: {{ row.activity_counter }}"></progress>
+            {% endif %}
+            <span class="activity-age">Updated {{ row.age_text }} ago</span>
+            {% if row.eta_text %}
+              <span>ETA {{ row.eta_text }}</span>
+            {% elif row.estimating %}
+              <span>Estimating…</span>
             {% endif %}
           </div>
-        {% endif %}
+        {% endfor %}
 
         <div class="run-timing">
           {% if run_progress.elapsed_text %}
             <span>Elapsed {{ run_progress.elapsed_text }}</span>
-          {% endif %}
-          {% if run_progress.eta_text %}
-            <span>ETA {{ run_progress.eta_text }}</span>
-          {% elif run_progress.estimating %}
-            <span>Estimating…</span>
           {% endif %}
           {% if run_progress.last_activity_text %}
             <span>Last activity {{ run_progress.last_activity_text }} ago</span>
@@ -111,12 +111,9 @@
             <span>Live {{ coverage_label }} coverage: {{ coverage.complete }}/{{ coverage.total_units }} complete{% if coverage.partial %} · {{ coverage.partial }} partial{% endif %}{% if coverage.unavailable %} · {{ coverage.unavailable }} unavailable{% endif %}{% if coverage.failed %} · {{ coverage.failed }} failed{% endif %}</span>
           {% endif %}
         {% endfor %}
-        {% for reuse in result.reuse_summary %}
-          {% if reuse.reused_units %}
-            {% set reuse_label = "OpenAlex" if reuse.component.value == "openalex_discovery" else ("Crossref discovery" if reuse.component.value == "crossref_discovery" else "Crossref supplement") %}
-            <span>Cache reuse: {{ reuse_label }} {{ reuse.reused_units }}</span>
-          {% endif %}
-        {% endfor %}
+        {% set usage = result.state_usage %}
+        <span>Provider state: Crossref metadata {{ usage.crossref_reused }} reused · {{ usage.crossref_refreshed }} refreshed · {{ usage.crossref_new }} new</span>
+        <span>Provider state: OpenAlex versions {{ usage.openalex_versions_reused }} reused · {{ usage.openalex_versions_hydrated }} hydrated</span>
         {% if result.warnings %}
           <span>{{ result.warnings|length }} warning{{ "" if result.warnings|length == 1 else "s" }}</span>
         {% endif %}
@@ -153,8 +150,7 @@
           hx-target="#run-panel"
           hx-swap="outerHTML">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit" name="reuse_provider_cache" value="false">Run again</button>
-      <button type="submit" name="reuse_provider_cache" value="true">Run again with cache reuse</button>
+      <button type="submit">Run again</button>
     </form>
   {% endif %}
 </section>

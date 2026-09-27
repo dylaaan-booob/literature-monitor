@@ -63,11 +63,15 @@ class CoordinatorSnapshot:
     unexpected_error: UnexpectedRunError | None
     stage_index: int | None = None
     stage_total: int = len(PROGRESS_STAGES)
-    current_activity: ActivitySnapshot | None = None
+    activities: tuple[ActivitySnapshot, ...] = ()
     stage_started_at: datetime | None = None
     last_activity_at: datetime | None = None
     worker_alive: bool = False
     inactivity_warning: bool = False
+
+    @property
+    def current_activity(self) -> ActivitySnapshot | None:
+        return max(self.activities, key=lambda activity: activity.updated_at, default=None)
 
 
 class RunCoordinator:
@@ -84,7 +88,7 @@ class RunCoordinator:
         self._unexpected_error: UnexpectedRunError | None = None
         self._worker: threading.Thread | None = None
 
-    def start(self, *, reuse_provider_cache: bool = False) -> StartResult:
+    def start(self) -> StartResult:
         """Start a production run on a dedicated worker if none is active."""
 
         with self._lock:
@@ -99,7 +103,6 @@ class RunCoordinator:
             self._unexpected_error = None
             worker = threading.Thread(
                 target=self._run_worker,
-                args=(reuse_provider_cache,),
                 name="literature-monitor-run",
             )
             self._worker = worker
@@ -154,7 +157,7 @@ class RunCoordinator:
                 unexpected_error=self._unexpected_error,
                 stage_index=progress.stage_index,
                 stage_total=progress.stage_total,
-                current_activity=progress.current_activity,
+                activities=progress.activities,
                 stage_started_at=progress.stage_started_at,
                 last_activity_at=progress.last_activity_at,
                 worker_alive=worker_alive,
@@ -169,14 +172,13 @@ class RunCoordinator:
                     at=datetime.now(timezone.utc),
                 )
 
-    def _run_worker(self, reuse_provider_cache: bool) -> None:
+    def _run_worker(self) -> None:
         result: RunResult | None = None
         unexpected_error: UnexpectedRunError | None = None
         try:
             result = run_monitor(
                 self._config_path,
                 progress_callback=self._update_progress,
-                reuse_provider_cache=reuse_provider_cache,
             )
         except BaseException as error:
             LOGGER.exception("Unexpected exception during monitor run")

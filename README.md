@@ -6,15 +6,20 @@ secondary discovery and bibliographic evidence, consolidates provider evidence
 before local keyword filtering, canonicalizes retained papers and versions,
 safely updates durable Paper and Author Markdown, and exports kept papers.
 
-v0.4.2 is the latest released baseline. It completes the A1–A6 provider
-reliability, coverage, and explicit cache-reuse work while preserving the existing
-durable workflow model. Semantic Scholar is retired from supported production
-retrieval while historical identifiers and provenance remain readable. Additions
-include bounded OpenAlex/Crossref retries, Crossref rate-aware pacing, transient
-per-work-unit retrieval coverage, a durable latest-run diagnostic snapshot, a
-normalized provider-result cache, and explicit exact-range cache reuse for CLI
-and Web. Default runs remain live; explicit reuse is not checkpoint resume or
-freshness authority.
+v0.4.2 remains the latest released version. The v0.4.3 Retrieval Efficiency &
+Revision-Validated Provider Evidence implementation (A1–A8) and independent
+stage reviews are complete. v0.4.3 remains unreleased; release preparation has
+not yet been performed and is a separate subsequent step.
+
+The development workflow automatically reuses revision-validated Provider
+state while establishing live candidate membership on every Run. It batches
+OpenAlex Source/Works retrieval, hydrates locations/version hints only for
+retained Works, and uses live Crossref manifests and revisions to reuse or
+refresh metadata. OpenAlex and Crossref discovery can run concurrently, with
+independent per-source Activity/ETA. The old explicit provider-cache reuse mode
+is retired. No checkpoint resume, watermark, scheduler, or run history is added.
+Semantic Scholar remains excluded from supported production retrieval;
+historical identifiers and provenance remain readable.
 
 ## Setup
 
@@ -44,12 +49,15 @@ serving mode. Missing or invalid monitor/journal configuration does not block
 startup, so it can be repaired through Settings. GUI Run always uses the
 persisted Monitor date policy and exposes no temporary date override.
 
-During an active run, the GUI Run panel shows the humanized `Stage N of 5`,
-current Activity, reliable `current / total` counters when available, elapsed
-time, current-Activity ETA when enough reliable samples exist, and last-activity
-age. `No recent activity` is an advisory rather than a failure, and retrying,
-waiting, or stopped-worker states remain distinct. Runtime state stays
-process-local in the existing coordinator and is presented through HTMX polling.
+During an active run, the GUI Run panel shows `Stage N of 5`, elapsed time,
+and per-source Activities. OpenAlex and Crossref Activities may coexist, each
+with independent counters, rate/ETA when enough reliable samples exist, and
+activity age; one Provider's progress does not overwrite the other's. Run-level
+inactivity follows real activity from any source, so a quiet Provider alone
+does not trigger `No recent activity`. That warning remains advisory, and
+retrying, waiting, and stopped-worker states remain distinct. Runtime progress
+is process-local, with snapshot-only HTMX polling every 750 ms and no durable
+progress or heartbeat. Web offers only normal **Run** / **Run again** actions.
 
 Paper Markdown remains the durable workflow state. The GUI does not add a
 workflow/execution database, persistent run history, heartbeat, SSE, WebSocket,
@@ -69,18 +77,39 @@ path: OpenAlex primary discovery, Crossref secondary discovery and DOI
 supplementation, evidence consolidation, local FTS5 filtering, canonicalization,
 and Paper / Author / Inbox materialization.
 
-On a TTY, `run` renders the workflow stage, current Activity, reliable counters,
-elapsed time, and current-Activity ETA when available. On a non-TTY, progress is
-plain event lines on `stderr`; existing machine/data output on `stdout` and the
-existing exit-code contract are unchanged.
+On a TTY, `run` renders the five workflow stages, per-source Activities,
+reliable counters, elapsed time, and each source's ETA when available. CLI
+serializes concurrent progress callbacks; non-TTY progress remains intact plain
+event lines on `stderr`. Machine/data output on `stdout` and exit codes are
+unchanged.
 
-Discovery windows are publication-date-only. The monitor does not use Crossref
-update-date, created-date, index-date, provider update timestamps, or persisted
-cursor/watermark/checkpoint state to recover late-indexed records.
+Candidate membership remains based on the inclusive publication-date window.
+OpenAlex `updated_date` and Crossref `indexed` timestamps validate revisions
+only; they do not change candidate membership to an update-date window, recover
+late-indexed records, provide watermark synchronization, or resume checkpoints.
 
-Provider clients remain synchronous and serial. OpenAlex Works discovery keeps
-cursor pagination at `per_page=100`; Crossref journal discovery keeps cursor
-pagination and defaults to `rows=1000`. A Crossref client uses valid
+Transport remains synchronous and pooled, with one client per Provider
+execution. One OpenAlex and one Crossref discovery branch may run concurrently;
+there is no async rewrite or journal/ISSN/DOI worker pool. Dependent Crossref DOI
+supplementation waits for both discovery branches, and OpenAlex version
+hydration waits for local FTS5 retention.
+
+OpenAlex batches Source resolution with at most 100 ISSNs per batch, then uses
+multi-Source thin Works discovery. The normalized `updated_date` is a revision
+marker only. Discovery does not download `locations` for every Work; only
+retained W IDs hydrate locations/version hints, once per distinct ID. Those
+hints may be reused when the current live revision matches Provider state.
+
+Crossref establishes current DOI membership through live manifests. Matching
+current `indexed` revisions permit normalized metadata reuse; changed or new
+records obtain current full metadata. DOI supplementation fills only Crossref
+gaps anchored by current OpenAlex evidence. Alias lookups preserve requested-DOI
+coverage while evidence and state use the resolved prime DOI.
+
+OpenAlex Works discovery keeps cursor pagination at `per_page=100`. Crossref
+uses bounded manifest retrieval, splitting ISSNs and date intervals as needed,
+then traversing cursors for oversized single days, with `rows=1000`. A Crossref
+client uses valid
 `X-Rate-Limit-Limit` and `X-Rate-Limit-Interval` response metadata to pace later
 requests without rate-limit probes or count-only requests. HTTP 429, HTTP 5xx,
 and supported timeout/transport failures receive at most three attempts; when no
@@ -94,7 +123,11 @@ per journal/queried ISSN, and Crossref DOI supplementation per lookup that
 entered the pending set. Coverage distinguishes complete, partial, unavailable,
 and failed execution without claiming that the bibliographic universe itself is
 complete. CLI completion summaries and the GUI finished-run panel show compact
-per-component counts.
+per-component counts. Completion reporting separately shows Provider-state
+usage: Crossref metadata reused/refreshed/new and OpenAlex versions
+reused/hydrated. Reuse does not remove live coverage units or reduce evidence
+statistics. Usage counts are transient completion information, not durable
+telemetry.
 
 After a normal production `run` completes, the application attempts to
 atomically replace one last-run snapshot. When replacement succeeds, that file
@@ -115,7 +148,7 @@ The selected output directory contains:
 ├── Authors/
 └── .literature-monitor/
     ├── last-run.json
-    └── provider-cache.json
+    └── provider-state.sqlite3
 ```
 
 `.literature-monitor/last-run.json` is application-owned metadata for the latest
@@ -124,51 +157,37 @@ not run history. Deleting it does not remove Papers, Authors, decisions, or
 notes, and the next normal run remains valid. Materialization scanners do not
 treat this hidden metadata directory as Paper data.
 
-`.literature-monitor/provider-cache.json` contains normalized reusable provider
-results, including record-level provenance, rather than raw API responses. Only
-COMPLETE work units with no warning/error issues enter the cache; clean
-zero-result discovery units are included. Units retain their configured journal,
-queried ISSN or normalized DOI identity, in provider execution order. The cache
-is application-owned metadata, not Paper workflow state, and is safe to delete.
-Only one successfully persisted cache is retained, with no historical files.
+`.literature-monitor/provider-state.sqlite3` is application-owned,
+reconstructible optimization state. It stores normalized Crossref metadata and
+its revision, plus retained OpenAlex version hints bound to their live revision.
+It is not Paper/Author workflow state, candidate membership, run history, or
+checkpoint/cursor state. Normal production Run automatically uses it, but live
+Provider evidence always determines current membership. Matching revisions may
+reuse metadata/version hints; changed revisions refresh live. Missing state
+causes an ordinary all-live Run.
 
-Normal production `run` attempts cache replacement after Paper materialization,
-including replacement with an empty cache, and before writing `last-run.json`.
-A cache-write failure preserves the previous complete cache when possible and
-adds a warning reflected in the subsequent snapshot outcome; it does not roll
-back Papers/Authors. Snapshot-write failure does not roll back a successful
-cache write. The strict application reader distinguishes valid, missing, and
-invalid caches without rewriting them or contacting providers.
+Corrupt or incompatible regular state causes an all-live Run with a warning;
+a successfully constructed fresh DB can safely replace that invalid regular
+file. Unsafe objects such as symlinks or directories at the state path or its
+metadata directory remain untouched. Provider-state persistence follows
+Paper/Author materialization; a persistence failure preserves previous state
+where possible and does not roll back workspace files. Provider failures remain
+isolated so successful evidence from other requests or Providers stays usable.
 
-A5 originally produced an inert cache. A6 offers explicit reuse:
+For v0.4.2 compatibility, an old `provider-cache.json` may remain on disk
+untouched. v0.4.3 never reads, writes, deletes, migrates, or modifies it. It has
+no authority over current execution and needs no migration. The deprecated
+`run --reuse-provider-cache` flag remains accepted until v0.5.0, but is ignored
+and emits this notice on stderr without changing the Run outcome:
 
-```bash
-uv run literature-monitor run \
-  --config monitor.yaml \
-  --reuse-provider-cache
+```text
+Provider-state reuse is now automatic.
 ```
 
-A normal `run` still executes all provider work live without reading the cache.
-The explicit reuse action requires exactly the same resolved date range; missing
-cache or a different range falls back to live execution without a warning. An
-invalid/unreadable cache emits a warning and also runs live. Matching current
-journal/ISSN/DOI work units skip provider requests, including cached empty
-discovery results; missing units run live. CLI and Web report cache reuse
-separately from live provider coverage. The Web offers “Run with cache reuse”
-alongside normal Run, without saving the choice as a setting.
-
-Reused records retain their original provider `retrieved_at`. After
-materialization, the next cache retains reused current units plus new clean
-live units, in current execution order, and drops stale unrelated units. The
-cache remains safe to delete. The latest-run snapshot now uses schema v2 and
-records separate reused identities; valid v1 snapshots remain readable without
-migration.
-
-Provider cache exists does not mean freshness, synchronization, or checkpoint
-resume is enabled. Explicit reuse cannot continue an interrupted provider
-cursor or partial page, discover late-indexed changes, or provide a watermark,
-TTL, automatic reuse policy, or retry queue. The cache can predate the latest
-run if a later write failed.
+New last-run snapshots remain schema v2 and write `reused_units: []`. Valid
+historical v1/v2 snapshots remain readable, and `last-run` may still display
+historical v2 cache-reuse identities. Current Provider-state usage counts are
+not persisted into last-run.
 
 Paper Markdown remains the durable workflow state: UUIDs, review status, human
 notes, unknown human-owned frontmatter, and unmanaged sections survive reruns
@@ -185,12 +204,11 @@ A valid snapshot prints its resolved date range, recorded outcome, and the same
 compact per-component coverage counts used by run summaries. Missing or invalid
 snapshot data exits `1`; invalid monitor configuration exits `2`.
 
-**last-run snapshot ≠ provider cache ≠ checkpoint resume.** `last-run.json`
-alone never authorizes request skipping, changes the discovery window, restores
-a cursor, or alters canonicalization/materialization. A6 may explicitly reuse
-matching A5 `provider-cache.json` units only when `--reuse-provider-cache` is
-requested and the resolved date range and durable work-unit identity match.
-This is not automatic resume, checkpoint recovery, or freshness authority.
+**last-run snapshot ≠ Provider state ≠ checkpoint.** `last-run.json` alone
+never authorizes request skipping, changes the discovery window, restores a
+cursor, or alters canonicalization/materialization. Automatic state reuse
+requires current live membership and matching revisions; it is not resume or
+synchronization state.
 
 The supported decision model is one monitor to one decision workspace. Paper
 UUID stability, `candidate` / `rejected` / `kept` / `in_zotero`
@@ -277,9 +295,9 @@ The workflow does not add monitor/workspace UUIDs, workspace ownership
 markers, a global research-work or decision registry, last-successful-run
 synchronization state, provider cursors/watermarks/checkpoints, incremental
 delta / “What's New” state, scheduler or daemon durable state, notifications,
-run history, or a workflow/execution database. The A4 last-run snapshot is
-observational metadata; A6 adds only explicit exact-range consumption of A5
-results and leaves default execution fully live.
+run history, or a workflow/execution database. The last-run snapshot is
+observational metadata; Provider state is a reconstructible revision-validated
+optimization, and every Run still establishes live membership.
 The local GUI does not write directly to the Zotero API.
 
 ## Validate configuration
@@ -298,9 +316,12 @@ uv run literature-monitor validate --config config.example.yaml
 ```
 
 After local preflight succeeds, the command contacts OpenAlex only to resolve
-every configured journal Source. OpenAlex supports anonymous Source lookups; set
-`OPENALEX_API_KEY` in the environment to use an API key. Local configuration
-or runtime-preflight failures exit with status `2`; OpenAlex Source-resolution
+every configured journal Source through the same batched resolver as production,
+with up to 100 ISSNs per batch. Strict journal/title/ISSN consistency and
+conflicting-Source validation still apply. OpenAlex supports anonymous Source
+lookups; set `OPENALEX_API_KEY` in the environment to use an API key. Local
+configuration or runtime-preflight failures exit with status `2`; OpenAlex
+Source-resolution
 errors exit with status `1`; warning-only and fully valid validation exit with
 status `0`.
 
@@ -309,9 +330,9 @@ Source-resolution counts, without presenting the five-stage Run model. Non-TTY
 validation progress uses the same plain `stderr` event-line convention.
 
 `validate` does not request OpenAlex Works, contact Crossref or Semantic
-Scholar, check whether `output_dir` is writable, create a workspace, or
-materialize Paper, Author, or Inbox files. OpenAlex Source resolution is its
-only network/provider validation.
+Scholar, read/write Provider state, check whether `output_dir` is writable,
+create a workspace, or materialize Paper, Author, or Inbox files. OpenAlex Source
+resolution is its only network/provider validation.
 
 ## Run tests
 
@@ -523,10 +544,13 @@ creation, Markdown materialization, Zotero integration, or persistence.
 
 ## Diagnose canonicalization and versions
 
-The canonicalization diagnostic retrieves journal/date evidence from OpenAlex
-and Crossref and performs Crossref DOI supplementation. All available evidence
-is consolidated before the local FTS5 filter evaluates the searchable
-projection using the rules above. Retained clusters become canonical papers.
+The canonicalization diagnostic uses current live retrieval algorithms:
+batched OpenAlex discovery, Crossref manifest/full retrieval and DOI
+supplementation, and retained-only OpenAlex version hydration. It neither reads
+nor writes Provider state, modifies `last-run.json`, nor touches old
+`provider-cache.json`. Persistent revision reuse does not apply to diagnostics.
+All available evidence is consolidated before the local FTS5 filter evaluates
+the searchable projection using the rules above. Retained clusters become canonical papers.
 Matching is conservative and evidence-based:
 exact identifiers and explicit version relations take priority, while the
 title-and-author fallback requires compatible ordered author identities.
@@ -577,9 +601,11 @@ The command writes to:
 └── Authors/
 ```
 
-This legacy / diagnostic `materialize` command does not create or replace
-`.literature-monitor/last-run.json` or `provider-cache.json`; only the normal
-production `run` path owns those metadata writes.
+This legacy / diagnostic `materialize` command uses the current live retrieval
+algorithms, including retained-only version hydration, without persistent
+revision reuse. It neither reads nor writes Provider state, modifies
+`.literature-monitor/last-run.json`, nor touches old `provider-cache.json`.
+Only normal production `run` writes Provider state and last-run metadata.
 
 Incremental materialization scans existing Markdown and recovers Paper identity
 from UUIDs, external identifiers, version keys, and source keys before using the

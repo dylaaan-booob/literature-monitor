@@ -7,11 +7,12 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import UUID
 
+import httpx
 import pytest
 import yaml
 
 from literature_monitor.cli import main
-from literature_monitor.application.provider_cache import ProviderCacheReadStatus, read_provider_cache
+from literature_monitor.application.provider_state import ProviderStateStatus, read_provider_state
 from literature_monitor.crossref import CrossrefClient
 from literature_monitor.inbox import render_default_inbox_base
 from literature_monitor.naming import paper_filename
@@ -27,40 +28,42 @@ def fixture(provider: str, name: str) -> dict[str, Any]:
     )
 
 
-class FakeResponse:
-    def __init__(self, payload: object) -> None:
-        self.payload = payload
+class SequenceTransport(httpx.MockTransport):
+    def __init__(self, *outcomes: object) -> None:
+        self.outcomes = list(outcomes)
+        self.requests: list[httpx.Request] = []
+        self.closed = False
+        super().__init__(self._respond)
 
-    def __enter__(self) -> FakeResponse:
-        return self
+    def _respond(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if not self.outcomes:
+            raise AssertionError(f"unexpected HTTP request: {request.url}")
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        if isinstance(outcome, httpx.Response):
+            return outcome
+        return httpx.Response(200, json=outcome)
 
-    def __exit__(self, *args: object) -> None:
-        return None
+    def close(self) -> None:
+        self.closed = True
+        super().close()
 
-    def read(self) -> bytes:
-        return json.dumps(self.payload).encode()
-
-
-class SequenceOpener:
-    def __init__(self, *payloads: object) -> None:
-        self.payloads = list(payloads)
-        self.requests: list[tuple[Any, float]] = []
-
-    def __call__(self, request: Any, *, timeout: float) -> FakeResponse:
-        self.requests.append((request, timeout))
-        if not self.payloads:
-            raise AssertionError(f"unexpected HTTP request: {request.full_url}")
-        return FakeResponse(self.payloads.pop(0))
-
-
-class RoutingOpener:
-    def __init__(self, route: Callable[[Any], object]) -> None:
+class RoutingTransport(httpx.MockTransport):
+    def __init__(self, route: Callable[[httpx.Request], object]) -> None:
         self.route = route
-        self.requests: list[tuple[Any, float]] = []
+        self.closed = False
+        self.requests: list[httpx.Request] = []
+        super().__init__(self._respond)
 
-    def __call__(self, request: Any, *, timeout: float) -> FakeResponse:
-        self.requests.append((request, timeout))
-        return FakeResponse(self.route(request))
+    def _respond(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return httpx.Response(200, json=self.route(request))
+
+    def close(self):
+        self.closed = True
+        super().close()
 
 
 def frontmatter(path: Path) -> dict[str, Any]:
@@ -175,6 +178,7 @@ def crossref_list_payload(messages: list[dict[str, object]]) -> dict[str, object
         "message-version": "1.0.0",
         "message": {
             "items": messages,
+            "total-results": len(messages),
             "next-cursor": "unused",
         },
     }
@@ -204,8 +208,8 @@ def test_run_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
         encoding="utf-8",
     )
     output_dir = tmp_path / "workspace"
-    openalex_openers: list[SequenceOpener] = []
-    crossref_openers: list[SequenceOpener] = []
+    openalex_transports: list[RoutingTransport] = []
+    crossref_transports: list[RoutingTransport] = []
     matching_payload = fixture("crossref", "work_complete.json")["message"]
     matching_payload["author"] = [{"given": "Thomas", "family": "Ding"}]
     matching_payload["ISSN"] = ["0006-341X"]
@@ -220,29 +224,36 @@ def test_run_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
         "relation": {},
         "type": "journal-article",
     }
+    matching_payload["indexed"] = {"date-time": "2026-02-01T00:00:00Z"}
+    crossref_only_payload["indexed"] = {"date-time": "2026-02-01T00:00:00Z"}
     discovery_payload = crossref_list_payload(
         [matching_payload, crossref_only_payload]
     )
 
     def openalex_client(**kwargs: object) -> OpenAlexClient:
-        opener = SequenceOpener(
-            fixture("openalex", "source_biometrics.json"),
-            fixture("openalex", "works_page_1.json"),
-            fixture("openalex", "works_page_2.json"),
-        )
-        openalex_openers.append(opener)
+        def route(request):
+            if request.url.path == "/sources":
+                return {"meta": {"count": 1}, "results": [fixture("openalex", "source_biometrics.json")]}
+            if request.url.params.get("select") == "id,locations":
+                return {"results": [{"id": "https://openalex.org/W4389363697", "locations": []}]}
+            page = fixture("openalex", "works_page_2.json" if request.url.params.get("cursor") == "next-page" else "works_page_1.json")
+            for record in page["results"]:
+                record["updated_date"] = "2026-02-01T00:00:00Z"
+            return page
+        transport = RoutingTransport(route)
+        openalex_transports.append(transport)
         return OpenAlexClient(
             api_key=kwargs.get("api_key"),  # type: ignore[arg-type]
-            opener=opener,
+            transport=transport,
             sleep=lambda _delay: None,
         )
 
     def crossref_client(**kwargs: object) -> CrossrefClient:
-        opener = SequenceOpener(discovery_payload)
-        crossref_openers.append(opener)
+        transport = RoutingTransport(lambda request: discovery_payload)
+        crossref_transports.append(transport)
         return CrossrefClient(
             mailto=kwargs.get("mailto"),  # type: ignore[arg-type]
-            opener=opener,
+            transport=transport,
             sleep=lambda _delay: None,
         )
 
@@ -256,9 +267,8 @@ def test_run_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     assert main(run_args) == 0
     first_cli = capsys.readouterr()
     assert first_cli.out == ""
-    cache_result = read_provider_cache(output_dir)
-    assert cache_result.status is ProviderCacheReadStatus.AVAILABLE
-    assert cache_result.cache.units
+    state_result = read_provider_state(output_dir)
+    assert state_result.status is ProviderStateStatus.AVAILABLE
 
     paper_paths = tuple(sorted((output_dir / "Papers").glob("*.md")))
     author_paths = tuple(sorted((output_dir / "Authors").glob("*.md")))
@@ -336,9 +346,11 @@ def test_run_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     before_reuse = snapshot_files(output_dir)
     assert main((*run_args, "--reuse-provider-cache")) == 0
     reuse_cli = capsys.readouterr()
-    assert "Cache reuse:" in reuse_cli.err
-    assert not openalex_openers[-1].requests and not crossref_openers[-1].requests
-    assert snapshot_files(output_dir) == before_reuse
+    assert "Provider-state reuse is now automatic." in reuse_cli.err
+    assert openalex_transports[-1].requests and crossref_transports[-1].requests
+    assert set(snapshot_files(output_dir)) == set(before_reuse)
+    assert "Human kept note." in doi_path.read_text()
+    assert "Human rejected note." in crossref_only_path.read_text()
 
     assert main(run_args) == 0
     second_cli = capsys.readouterr()
@@ -363,37 +375,26 @@ def test_run_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     assert inbox_path.read_bytes() == custom_inbox
     assert list(output_dir.glob("*.base")) == [inbox_path]
 
-    assert len(openalex_openers) == 3
-    assert len(crossref_openers) == 3
-    assert not openalex_openers[1].requests and not crossref_openers[1].requests
-    for opener in (openalex_openers[0], openalex_openers[2]):
-        assert opener.payloads == []
-        parsed_requests = [urlparse(request.full_url) for request, _ in opener.requests]
-        assert [request.path for request in parsed_requests] == [
-            "/sources/issn:0006-341X",
-            "/works",
-            "/works",
-        ]
-        for request in parsed_requests[1:]:
-            query = parse_qs(request.query)
-            assert "search" not in query
-            assert "q" not in query
-            assert query["filter"] == [
-                "primary_location.source.id:S8265502,"
-                "from_publication_date:2026-01-01,"
-                "to_publication_date:2026-01-31"
-            ]
-    for opener in (crossref_openers[0], crossref_openers[2]):
-        assert opener.payloads == []
-        assert len(opener.requests) == 1
-        request, _timeout = opener.requests[0]
-        parsed = urlparse(request.full_url)
-        assert parsed.path == "/v1/journals/0006-341X/works"
-        query = parse_qs(parsed.query)
-        assert query["filter"] == [
-            "from-pub-date:2026-01-01,until-pub-date:2026-01-31"
-        ]
-        assert query["cursor"] == ["*"]
+    assert len(openalex_transports) == 3
+    assert len(crossref_transports) == 3
+    for index, transport in enumerate(openalex_transports):
+        assert transport.closed
+        assert [request.url.path for request in transport.requests] == ["/sources", "/works", "/works"] + (["/works"] if index == 0 else [])
+        thin = [r for r in transport.requests if r.url.params.get("select") != "id,locations" and r.url.path == "/works"]
+        for request in thin:
+            assert "primary_location.source.id:S8265502" in request.url.params["filter"]
+            assert "locations" not in request.url.params["select"]
+            assert "search" not in request.url.params and "q" not in request.url.params
+    for index, transport in enumerate(crossref_transports):
+        assert transport.closed
+        assert len(transport.requests) == (2 if index == 0 else 1)
+        manifest = transport.requests[0]
+        assert manifest.url.path == "/v1/works"
+        assert manifest.url.params["select"] == "DOI,ISSN,indexed"
+        assert "issn:0006-341X" in manifest.url.params["filter"]
+    assert state_result.state is not None
+    assert read_provider_state(output_dir).state.crossref_records
+    assert read_provider_state(output_dir).state.openalex_versions
 
     before_export = snapshot_files(output_dir)
     assert main(("export-kept", "--output-dir", str(output_dir))) == 0
@@ -515,44 +516,39 @@ def test_representative_multi_journal_cycle_handles_overlapping_rerun(
     }
 
     def route_openalex(request: Any) -> object:
-        parsed = urlparse(request.full_url)
-        if parsed.path.startswith("/sources/issn:"):
-            return sources[parsed.path.removeprefix("/sources/issn:")]
-        assert parsed.path == "/works"
-        query = parse_qs(parsed.query)
-        filters = query["filter"][0].split(",")
-        source_id = filters[0].removeprefix("primary_location.source.id:")
-        assert filters[1] in {
-            "from_publication_date:2026-01-01",
-            "from_publication_date:2026-01-15",
-        }
-        assert filters[2] in {
-            "to_publication_date:2026-01-20",
-            "to_publication_date:2026-01-31",
-        }
-        return works_payload(works[source_id])
+        assert request.url.path in {"/sources", "/works"}
+        if request.url.path == "/sources":
+            unique = {source["id"]: source for source in sources.values()}
+            return {"meta": {"count": len(unique)}, "results": list(unique.values())}
+        filters = request.url.params["filter"]
+        if request.url.params.get("select") == "id,locations":
+            return {"results": [{"id": work["id"], "locations": []} for work in works.values()]}
+        assert filters.startswith("primary_location.source.id:")
+        assert "from_publication_date:" in filters and "to_publication_date:" in filters
+        return {"meta": {"count": 3, "next_cursor": None}, "results": list(works.values())}
 
     def route_crossref(request: Any) -> object:
-        parsed = urlparse(request.full_url)
-        if parsed.path.startswith("/v1/journals/"):
+        assert request.url.path == "/v1/works"
+        filters = request.url.params["filter"].split(",")
+        if any(value.startswith("issn:") for value in filters):
             return crossref_list_payload([])
-        doi = unquote(parsed.path.removeprefix("/v1/works/")).casefold()
-        return crossref_works[doi]
+        dois = [value.removeprefix("doi:") for value in filters]
+        return crossref_list_payload([crossref_works[doi]["message"] for doi in dois])
 
-    openalex_opener = RoutingOpener(route_openalex)
-    crossref_opener = RoutingOpener(route_crossref)
+    openalex_transport = RoutingTransport(route_openalex)
+    crossref_transport = RoutingTransport(route_crossref)
 
     def openalex_client(**kwargs: object) -> OpenAlexClient:
         return OpenAlexClient(
             api_key=kwargs.get("api_key"),  # type: ignore[arg-type]
-            opener=openalex_opener,
+            transport=openalex_transport,
             sleep=lambda _delay: None,
         )
 
     def crossref_client(**kwargs: object) -> CrossrefClient:
         return CrossrefClient(
             mailto=kwargs.get("mailto"),  # type: ignore[arg-type]
-            opener=crossref_opener,
+            transport=crossref_transport,
             sleep=lambda _delay: None,
         )
 
@@ -642,73 +638,24 @@ def test_representative_multi_journal_cycle_handles_overlapping_rerun(
     assert "Human rejected note." in rejected_path.read_text(encoding="utf-8")
 
     openalex_requests = [
-        urlparse(request.full_url) for request, _timeout in openalex_opener.requests
+        urlparse(str(request.url)) for request in openalex_transport.requests
     ]
-    source_requests = [
-        request for request in openalex_requests if request.path.startswith("/sources/")
-    ]
-    assert [request.path for request in source_requests] == [
-        "/sources/issn:0006-341X",
-        "/sources/issn:0162-8828",
-        "/sources/issn:1548-7091",
-        "/sources/issn:1548-7105",
-    ] * 2
-    works_requests = [
-        request for request in openalex_requests if request.path == "/works"
-    ]
-    assert len(works_requests) == 6
-    expected_filters = [
-        (
-            f"primary_location.source.id:{source_id},"
-            "from_publication_date:2026-01-01,"
-            "to_publication_date:2026-01-20"
-        )
-        for source_id in ("S8265502", "S199944782", "S127827428")
-    ] + [
-        (
-            f"primary_location.source.id:{source_id},"
-            "from_publication_date:2026-01-15,"
-            "to_publication_date:2026-01-31"
-        )
-        for source_id in ("S8265502", "S199944782", "S127827428")
-    ]
-    for request, expected_filter in zip(works_requests, expected_filters):
-        query = parse_qs(request.query)
-        assert "search" not in query
-        assert "q" not in query
-        assert query["filter"] == [expected_filter]
-
-    crossref_urls = [
-        urlparse(request.full_url)
-        for request, _timeout in crossref_opener.requests
-    ]
-    journal_requests = [
-        request for request in crossref_urls if request.path.startswith("/v1/journals/")
-    ]
-    assert [request.path for request in journal_requests] == [
-        "/v1/journals/0006-341X/works",
-        "/v1/journals/0162-8828/works",
-        "/v1/journals/1548-7091/works",
-        "/v1/journals/1548-7105/works",
-    ] * 2
-    for request in journal_requests[:4]:
-        assert parse_qs(request.query)["filter"] == [
-            "from-pub-date:2026-01-01,until-pub-date:2026-01-20"
-        ]
-    for request in journal_requests[4:]:
-        assert parse_qs(request.query)["filter"] == [
-            "from-pub-date:2026-01-15,until-pub-date:2026-01-31"
-        ]
-    crossref_requests = [
-        unquote(urlparse(request.full_url).path.removeprefix("/v1/works/"))
-        for request, _timeout in crossref_opener.requests
-        if urlparse(request.full_url).path.startswith("/v1/works/")
-    ]
-    assert crossref_requests == [
-        "10.1000/biometrics-overlap",
-        "10.1000/nature-methods-overlap",
-        "10.1000/tpami-overlap",
-    ] * 2
+    source_requests = [request for request in openalex_requests if request.path == "/sources"]
+    assert len(source_requests) == 2
+    works_requests = [request for request in openalex_transport.requests
+                      if request.url.path == "/works" and request.url.params.get("select") != "id,locations"]
+    assert len(works_requests) == 2
+    for request, start, end in zip(works_requests, ("2026-01-01", "2026-01-15"), ("2026-01-20", "2026-01-31"), strict=True):
+        filters = request.url.params["filter"]
+        assert "S8265502|S199944782|S127827428" in filters
+        assert f"from_publication_date:{start}" in filters and f"to_publication_date:{end}" in filters
+        assert "search" not in request.url.params and "q" not in request.url.params
+    assert len([r for r in openalex_transport.requests if r.url.params.get("select") == "id,locations"]) == 2
+    assert all(r.url.path == "/v1/works" for r in crossref_transport.requests)
+    manifests = [r for r in crossref_transport.requests if "issn:" in r.url.params["filter"]]
+    assert len(manifests) == 2
+    assert all(r.url.params["select"] == "DOI,ISSN,indexed" for r in manifests)
+    assert len([r for r in crossref_transport.requests if "doi:" in r.url.params["filter"]]) == 4
 
     before_export = snapshot_files(output_dir)
     assert main(("export-kept", "--output-dir", str(output_dir))) == 0

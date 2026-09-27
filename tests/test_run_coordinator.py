@@ -52,27 +52,24 @@ def join_worker(worker: threading.Thread) -> None:
     assert not worker.is_alive()
 
 
-@pytest.mark.parametrize("reuse", [False, True])
-def test_started_worker_binds_mode_opposite_request_does_not_change_it(tmp_path, monkeypatch, reuse):
-    started = threading.Event()
-    finish = threading.Event()
-    modes = []
-    def run(path, *, reuse_provider_cache, progress_callback):
-        modes.append(reuse_provider_cache)
-        started.set()
-        assert finish.wait(2)
+def test_start_has_one_automatic_mode_and_preserves_active_lock(tmp_path, monkeypatch):
+    import inspect
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+    def run(path, *, progress_callback):
+        calls.append((path, callable(progress_callback)))
+        entered.set()
+        assert release.wait(5)
         return make_run_result()
     monkeypatch.setattr(coordinator_module, "run_monitor", run)
     coordinator = RunCoordinator(tmp_path / "monitor.yaml")
-    assert coordinator.start(reuse_provider_cache=reuse).outcome is StartOutcome.STARTED
-    assert started.wait(2)
-    assert coordinator.start(reuse_provider_cache=not reuse).outcome is StartOutcome.ALREADY_RUNNING
-    finish.set()
+    assert tuple(inspect.signature(coordinator.start).parameters) == ()
+    assert coordinator.start().outcome is StartOutcome.STARTED
+    assert entered.wait(5)
+    assert coordinator.start().outcome is StartOutcome.ALREADY_RUNNING
+    release.set()
     join_worker(coordinator._worker)
-    assert modes == [reuse]
-    assert coordinator.start(reuse_provider_cache=not reuse).outcome is StartOutcome.STARTED
-    join_worker(coordinator._worker)
-    assert modes == [reuse, not reuse]
+    assert calls == [(tmp_path / "monitor.yaml", True)]
 
 
 def test_fresh_snapshot_is_idle_empty_and_immutable(tmp_path: Path) -> None:
@@ -97,6 +94,50 @@ def test_fresh_snapshot_is_idle_empty_and_immutable(tmp_path: Path) -> None:
         snapshot.status = CoordinatorStatus.RUNNING  # type: ignore[misc]
 
 
+def test_concurrent_provider_callbacks_use_coordinator_serialization(tmp_path, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    def run(path, *, progress_callback):
+        progress_callback(ProgressEvent(stage=ProgressStage.DISCOVERING_PAPERS))
+        entered.set()
+        assert release.wait(5)
+        return make_run_result()
+    monkeypatch.setattr(coordinator_module, "run_monitor", run)
+    coordinator = RunCoordinator(tmp_path / "monitor.yaml")
+    coordinator.start()
+    assert entered.wait(5)
+    barrier = threading.Barrier(2)
+    errors = []
+    def report(source):
+        try:
+            barrier.wait(timeout=5)
+            for current in range(3):
+                coordinator._update_progress(ProgressEvent(activity=ActivityUpdate(
+                    kind=ActivityKind.WORKING, source=source, operation="works",
+                    label=f"{source} records", current=current, total=20, unit="work",
+                )))
+        except BaseException as error:
+            errors.append(error)
+    threads = [threading.Thread(target=report, args=(source,)) for source in ("crossref", "openalex")]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            join_worker(thread)
+        assert not errors
+        first = coordinator.snapshot()
+        assert tuple(item.source for item in first.activities) == ("openalex", "crossref")
+        assert all(item.current == 2 for item in first.activities)
+        assert first.last_activity_at == max(item.updated_at for item in first.activities)
+        second = coordinator.snapshot()
+        assert second.activities == first.activities
+        assert second.last_activity_at == first.last_activity_at
+        with pytest.raises(FrozenInstanceError):
+            first.activities[0].current = 999
+    finally:
+        release.set()
+        join_worker(coordinator._worker)
+
+
 def test_start_is_non_blocking_runs_off_caller_thread_and_exposes_progress(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -115,7 +156,6 @@ def test_start_is_non_blocking_runs_off_caller_thread_and_exposes_progress(
         path: Path,
         *,
         progress_callback: ProgressCallback,
-        reuse_provider_cache: bool = False,
     ) -> RunResult:
         assert path == config_path
         worker_threads.append(threading.current_thread())
@@ -193,7 +233,6 @@ def test_activity_event_updates_snapshot_without_read_side_effects(
         path: Path,
         *,
         progress_callback: ProgressCallback,
-        reuse_provider_cache: bool = False,
     ) -> RunResult:
         worker_threads.append(threading.current_thread())
         progress_callback(
@@ -254,7 +293,6 @@ def test_repeated_start_while_running_does_not_create_second_worker(
         path: Path,
         *,
         progress_callback: ProgressCallback,
-        reuse_provider_cache: bool = False,
     ) -> RunResult:
         nonlocal invocation_count
         invocation_count += 1
@@ -293,7 +331,6 @@ def test_two_simultaneous_callers_start_exactly_one_run(
         path: Path,
         *,
         progress_callback: ProgressCallback,
-        reuse_provider_cache: bool = False,
     ) -> RunResult:
         nonlocal invocation_count
         invocation_count += 1
@@ -348,7 +385,6 @@ def test_structured_non_success_run_results_are_normal_completions(
         path: Path,
         *,
         progress_callback: ProgressCallback,
-        reuse_provider_cache: bool = False,
     ) -> RunResult:
         worker_threads.append(threading.current_thread())
         worker_entered.set()
@@ -388,7 +424,6 @@ def test_unexpected_exception_is_logged_finishes_safely_and_restart_clears_error
         path: Path,
         *,
         progress_callback: ProgressCallback,
-        reuse_provider_cache: bool = False,
     ) -> RunResult:
         nonlocal calls
         calls += 1
@@ -455,7 +490,6 @@ def test_restart_clears_old_result_and_second_completion_replaces_it(
         path: Path,
         *,
         progress_callback: ProgressCallback,
-        reuse_provider_cache: bool = False,
     ) -> RunResult:
         nonlocal calls
         index = calls
@@ -534,7 +568,6 @@ def test_base_exception_cannot_leave_dead_worker_running(
         path: Path,
         *,
         progress_callback: ProgressCallback,
-        reuse_provider_cache: bool = False,
     ) -> RunResult:
         worker_threads.append(threading.current_thread())
         worker_entered.set()

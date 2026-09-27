@@ -1,11 +1,11 @@
 import json
-import socket
+import os
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
@@ -22,6 +22,8 @@ from literature_monitor.crossref import (
     enrich_records,
     normalize_crossref_discovered_work,
     normalize_crossref_work,
+    CrossrefDOIOutcomeKind,
+    normalize_crossref_manifest_member,
 )
 from literature_monitor.config import JournalConfig
 from literature_monitor.coverage import CoverageComponent, CoverageStatus
@@ -44,45 +46,37 @@ def fixture(name: str) -> dict[str, Any]:
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 
-class FakeResponse:
-    def __init__(
-        self,
-        payload: object,
-        *,
-        headers: dict[str, str] | None = None,
-    ) -> None:
-        self.payload = payload
-        self.headers = headers or {}
-
-    def __enter__(self) -> "FakeResponse":
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        return None
-
-    def read(self) -> bytes:
-        if isinstance(self.payload, bytes):
-            return self.payload
-        return json.dumps(self.payload).encode()
-
-
-class SequenceOpener:
+class SequenceTransport(httpx.MockTransport):
     def __init__(self, *outcomes: object) -> None:
         self.outcomes = list(outcomes)
-        self.requests: list[tuple[Any, float]] = []
+        self.requests: list[httpx.Request] = []
+        self.closed = False
+        super().__init__(self._respond)
 
-    def __call__(self, request: Any, *, timeout: float) -> FakeResponse:
-        self.requests.append((request, timeout))
+    def _respond(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if not self.outcomes:
+            raise AssertionError(f"unexpected HTTP request: {request.url}")
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
-        if isinstance(outcome, FakeResponse):
+        if isinstance(outcome, httpx.Response):
             return outcome
-        return FakeResponse(outcome)
+        if isinstance(outcome, bytes):
+            return httpx.Response(200, content=outcome)
+        return httpx.Response(200, json=outcome)
 
+    def close(self) -> None:
+        self.closed = True
+        super().close()
 
-def http_error(code: int) -> HTTPError:
-    return HTTPError("https://api.crossref.org/test", code, "failure", {}, None)
+def http_error(code: int) -> httpx.Response:
+    return httpx.Response(code)
+
+def make_response(payload: object, *, headers: dict[str, str] | None = None) -> httpx.Response:
+    if isinstance(payload, bytes):
+        return httpx.Response(200, content=payload, headers=headers)
+    return httpx.Response(200, json=payload, headers=headers)
 
 
 def openalex_record(identifier: str, doi: str | None) -> OpenAlexWorkRecord:
@@ -126,32 +120,32 @@ def list_payload(
 
 
 def test_client_uses_versioned_encoded_doi_endpoint_and_polite_headers() -> None:
-    opener = SequenceOpener(payload_for("10.1002/(abc)/x"))
+    transport = SequenceTransport(payload_for("10.1002/(abc)/x"))
     client = CrossrefClient(
         mailto=" monitor@example.com ",
         timeout=17,
-        opener=opener,
+        transport=transport,
         sleep=lambda _: None,
     )
 
     response = client.get_work_by_doi(" HTTPS://DOI.ORG/10.1002/(ABC)/X ")
 
     assert response["message"]["DOI"] == "10.1002/(abc)/x"
-    request, timeout = opener.requests[0]
-    parsed = urlparse(request.full_url)
+    request = transport.requests[0]
+    parsed = urlparse(str(request.url))
     assert parsed.path == "/v1/works/10.1002%2F%28abc%29%2Fx"
     assert parse_qs(parsed.query) == {"mailto": ["monitor@example.com"]}
-    assert request.get_header("Accept") == "application/json"
-    assert request.get_header("User-agent") == "literature-monitor/0.4.2"
-    assert timeout == 17
+    assert request.headers["Accept"] == "application/json"
+    assert request.headers["User-Agent"] == "literature-monitor/0.4.2"
+    assert request.extensions["timeout"]["read"] == 17
 
 
 def test_journal_client_uses_publication_filters_and_encoded_cursor_pages() -> None:
-    opener = SequenceOpener(
+    transport = SequenceTransport(
         list_payload([{}, {}], "next / cursor"),
         list_payload([{}], "unused"),
     )
-    client = CrossrefClient(opener=opener, sleep=lambda _: None)
+    client = CrossrefClient(transport=transport, sleep=lambda _: None)
 
     pages = list(
         client.iter_journal_work_pages(
@@ -163,8 +157,8 @@ def test_journal_client_uses_publication_filters_and_encoded_cursor_pages() -> N
     )
 
     assert len(pages) == 2
-    first = urlparse(opener.requests[0][0].full_url)
-    second = urlparse(opener.requests[1][0].full_url)
+    first = urlparse(str(transport.requests[0].url))
+    second = urlparse(str(transport.requests[1].url))
     assert first.path == "/v1/journals/0006-341X/works"
     assert parse_qs(first.query) == {
         "filter": ["from-pub-date:2026-01-01,until-pub-date:2026-01-31"],
@@ -176,8 +170,8 @@ def test_journal_client_uses_publication_filters_and_encoded_cursor_pages() -> N
 
 
 def test_journal_client_defaults_to_rows_1000() -> None:
-    opener = SequenceOpener(list_payload([{}]))
-    client = CrossrefClient(opener=opener, sleep=lambda _: None)
+    transport = SequenceTransport(list_payload([{}]))
+    client = CrossrefClient(transport=transport, sleep=lambda _: None)
 
     pages = list(
         client.iter_journal_work_pages(
@@ -188,16 +182,16 @@ def test_journal_client_defaults_to_rows_1000() -> None:
     )
 
     assert len(pages) == 1
-    query = parse_qs(urlparse(opener.requests[0][0].full_url).query)
+    query = parse_qs(urlparse(str(transport.requests[0].url)).query)
     assert query["rows"] == ["1000"]
 
 
 def test_journal_client_traverses_multiple_default_size_cursor_pages() -> None:
-    opener = SequenceOpener(
+    transport = SequenceTransport(
         list_payload([{}] * 1000, "second-page"),
         list_payload([{}], "unused"),
     )
-    client = CrossrefClient(opener=opener, sleep=lambda _: None)
+    client = CrossrefClient(transport=transport, sleep=lambda _: None)
 
     pages = list(
         client.iter_journal_work_pages(
@@ -208,8 +202,8 @@ def test_journal_client_traverses_multiple_default_size_cursor_pages() -> None:
     )
 
     assert len(pages) == 2
-    first_query = parse_qs(urlparse(opener.requests[0][0].full_url).query)
-    second_query = parse_qs(urlparse(opener.requests[1][0].full_url).query)
+    first_query = parse_qs(urlparse(str(transport.requests[0].url)).query)
+    second_query = parse_qs(urlparse(str(transport.requests[1].url)).query)
     assert first_query["rows"] == ["1000"]
     assert first_query["cursor"] == ["*"]
     assert second_query["rows"] == ["1000"]
@@ -218,15 +212,15 @@ def test_journal_client_traverses_multiple_default_size_cursor_pages() -> None:
 
 def test_client_uses_response_rate_headers_to_pace_later_requests() -> None:
     delays: list[float] = []
-    opener = SequenceOpener(
-        FakeResponse(
+    transport = SequenceTransport(
+        make_response(
             payload_for("10.5555/first"),
             headers={
                 "X-Rate-Limit-Limit": "4",
                 "X-Rate-Limit-Interval": "2s",
             },
         ),
-        FakeResponse(
+        make_response(
             payload_for("10.5555/second"),
             headers={
                 "X-Rate-Limit-Limit": "2",
@@ -235,23 +229,23 @@ def test_client_uses_response_rate_headers_to_pace_later_requests() -> None:
         ),
         payload_for("10.5555/third"),
     )
-    client = CrossrefClient(opener=opener, sleep=delays.append)
+    client = CrossrefClient(transport=transport, sleep=delays.append)
 
     client.get_work_by_doi("10.5555/first")
     client.get_work_by_doi("10.5555/second")
     client.get_work_by_doi("10.5555/third")
 
     assert delays == [0.5, 1.5]
-    assert len(opener.requests) == 3
+    assert len(transport.requests) == 3
 
 
 def test_client_missing_rate_headers_do_not_add_pacing_or_break_requests() -> None:
     delays: list[float] = []
-    opener = SequenceOpener(
+    transport = SequenceTransport(
         payload_for("10.5555/first"),
         payload_for("10.5555/second"),
     )
-    client = CrossrefClient(opener=opener, sleep=delays.append)
+    client = CrossrefClient(transport=transport, sleep=delays.append)
 
     assert client.get_work_by_doi("10.5555/first")["status"] == "ok"
     assert client.get_work_by_doi("10.5555/second")["status"] == "ok"
@@ -276,8 +270,8 @@ def test_client_malformed_rate_headers_do_not_break_requests_or_enable_pacing(
     interval: str,
 ) -> None:
     delays: list[float] = []
-    opener = SequenceOpener(
-        FakeResponse(
+    transport = SequenceTransport(
+        make_response(
             payload_for("10.5555/first"),
             headers={
                 "X-Rate-Limit-Limit": limit,
@@ -286,7 +280,7 @@ def test_client_malformed_rate_headers_do_not_break_requests_or_enable_pacing(
         ),
         payload_for("10.5555/second"),
     )
-    client = CrossrefClient(opener=opener, sleep=delays.append)
+    client = CrossrefClient(transport=transport, sleep=delays.append)
 
     assert client.get_work_by_doi("10.5555/first")["status"] == "ok"
     assert client.get_work_by_doi("10.5555/second")["status"] == "ok"
@@ -296,8 +290,8 @@ def test_client_malformed_rate_headers_do_not_break_requests_or_enable_pacing(
 
 def test_client_rate_pacing_reports_waiting_activity_with_request_identity() -> None:
     trace: list[tuple[str, object]] = []
-    opener = SequenceOpener(
-        FakeResponse(
+    transport = SequenceTransport(
+        make_response(
             payload_for("10.5555/first"),
             headers={
                 "X-Rate-Limit-Limit": "5",
@@ -314,7 +308,7 @@ def test_client_rate_pacing_reports_waiting_activity_with_request_identity() -> 
     def sleep(delay: float) -> None:
         trace.append(("sleep", delay))
 
-    client = CrossrefClient(opener=opener, sleep=sleep)
+    client = CrossrefClient(transport=transport, sleep=sleep)
     client.get_work_by_doi("10.5555/first")
     activity = ActivityUpdate(
         kind=ActivityKind.WORKING,
@@ -355,8 +349,8 @@ def test_client_rate_pacing_reports_waiting_activity_with_request_identity() -> 
 
 def test_client_retry_wait_respects_slower_known_provider_pacing() -> None:
     delays: list[float] = []
-    opener = SequenceOpener(
-        FakeResponse(
+    transport = SequenceTransport(
+        make_response(
             payload_for("10.5555/first"),
             headers={
                 "X-Rate-Limit-Limit": "1",
@@ -366,13 +360,13 @@ def test_client_retry_wait_respects_slower_known_provider_pacing() -> None:
         http_error(429),
         payload_for("10.5555/second"),
     )
-    client = CrossrefClient(opener=opener, sleep=delays.append)
+    client = CrossrefClient(transport=transport, sleep=delays.append)
 
     client.get_work_by_doi("10.5555/first")
     assert client.get_work_by_doi("10.5555/second")["status"] == "ok"
 
     assert delays == [5, 5]
-    assert len(opener.requests) == 3
+    assert len(transport.requests) == 3
 
 
 @pytest.mark.parametrize(
@@ -384,7 +378,7 @@ def test_client_retry_wait_respects_slower_known_provider_pacing() -> None:
     ],
 )
 def test_journal_client_rejects_malformed_list_envelopes(payload: object) -> None:
-    client = CrossrefClient(opener=SequenceOpener(payload), sleep=lambda _: None)
+    client = CrossrefClient(transport=SequenceTransport(payload), sleep=lambda _: None)
 
     with pytest.raises(CrossrefRequestError):
         list(
@@ -401,7 +395,7 @@ def test_journal_client_rejects_missing_or_invalid_cursor_on_full_page(
     cursor: object,
 ) -> None:
     client = CrossrefClient(
-        opener=SequenceOpener(list_payload([{}], cursor)),
+        transport=SequenceTransport(list_payload([{}], cursor)),
         sleep=lambda _: None,
     )
 
@@ -418,7 +412,7 @@ def test_journal_client_rejects_missing_or_invalid_cursor_on_full_page(
 
 def test_journal_client_rejects_repeated_cursor() -> None:
     client = CrossrefClient(
-        opener=SequenceOpener(list_payload([{}], "*")),
+        transport=SequenceTransport(list_payload([{}], "*")),
         sleep=lambda _: None,
     )
 
@@ -435,27 +429,27 @@ def test_journal_client_rejects_repeated_cursor() -> None:
 
 @pytest.mark.parametrize(
     "outcome",
-    [http_error(429), http_error(500), TimeoutError("timed out"), URLError("down"), socket.gaierror("dns")],
+    [http_error(429), http_error(500), httpx.ReadTimeout("timed out"), httpx.ConnectError("down"), httpx.ConnectError("dns")],
 )
-def test_client_retries_transient_failures(outcome: Exception) -> None:
+def test_client_retries_transient_failures(outcome: httpx.Response | Exception) -> None:
     delays: list[float] = []
-    opener = SequenceOpener(outcome, outcome, payload_for("10.5555/retry"))
-    client = CrossrefClient(opener=opener, sleep=delays.append)
+    transport = SequenceTransport(outcome, outcome, payload_for("10.5555/retry"))
+    client = CrossrefClient(transport=transport, sleep=delays.append)
 
     assert client.get_work_by_doi("10.5555/retry")["status"] == "ok"
     assert delays == [1, 2]
-    assert len(opener.requests) == 3
+    assert len(transport.requests) == 3
 
 
 @pytest.mark.parametrize(
     "transient_failure",
-    (http_error(429), http_error(500), TimeoutError("timed out")),
+    (http_error(429), http_error(500), httpx.ReadTimeout("timed out")),
 )
 def test_client_progress_reports_retry_before_backoff_and_success(
-    transient_failure: Exception,
+    transient_failure: httpx.Response | Exception,
 ) -> None:
     trace: list[tuple[str, object]] = []
-    opener = SequenceOpener(
+    transport = SequenceTransport(
         transient_failure,
         payload_for("10.5555/retry-progress"),
     )
@@ -467,7 +461,7 @@ def test_client_progress_reports_retry_before_backoff_and_success(
     def sleep(delay: float) -> None:
         trace.append(("sleep", delay))
 
-    client = CrossrefClient(opener=opener, sleep=sleep)
+    client = CrossrefClient(transport=transport, sleep=sleep)
     activity = ActivityUpdate(
         kind=ActivityKind.WORKING,
         source="crossref",
@@ -486,7 +480,7 @@ def test_client_progress_reports_retry_before_backoff_and_success(
     )
 
     assert response["status"] == "ok"
-    assert len(opener.requests) == 2
+    assert len(transport.requests) == 2
     assert [kind for kind, _ in trace] == [
         "activity",
         "activity",
@@ -510,10 +504,10 @@ def test_client_progress_reports_retry_before_backoff_and_success(
 
 def test_client_distinguishes_not_found_from_request_failure() -> None:
     missing_client = CrossrefClient(
-        opener=SequenceOpener(http_error(404)), sleep=lambda _: None
+        transport=SequenceTransport(http_error(404)), sleep=lambda _: None
     )
     bad_client = CrossrefClient(
-        opener=SequenceOpener(http_error(400)), sleep=lambda _: None
+        transport=SequenceTransport(http_error(400)), sleep=lambda _: None
     )
 
     with pytest.raises(CrossrefNotFoundError):
@@ -523,18 +517,18 @@ def test_client_distinguishes_not_found_from_request_failure() -> None:
 
 
 def test_client_reports_exhausted_transient_failure() -> None:
-    opener = SequenceOpener(*(TimeoutError("timed out") for _ in range(3)))
-    client = CrossrefClient(opener=opener, sleep=lambda _: None)
+    transport = SequenceTransport(*(httpx.ReadTimeout("timed out") for _ in range(3)))
+    client = CrossrefClient(transport=transport, sleep=lambda _: None)
 
     with pytest.raises(CrossrefRequestError, match="timed out"):
         client.get_work_by_doi("10.5555/timeout")
 
-    assert len(opener.requests) == 3
+    assert len(transport.requests) == 3
 
 
 @pytest.mark.parametrize("payload", [b"not json", ["not", "an", "object"]])
 def test_client_rejects_invalid_json_transport(payload: object) -> None:
-    client = CrossrefClient(opener=SequenceOpener(payload), sleep=lambda _: None)
+    client = CrossrefClient(transport=SequenceTransport(payload), sleep=lambda _: None)
 
     with pytest.raises(CrossrefRequestError):
         client.get_work_by_doi("10.5555/bad-json")
@@ -836,8 +830,8 @@ def test_discovery_field_warning_keeps_complete_coverage() -> None:
 def test_discovery_progress_uses_total_results_without_extra_request() -> None:
     first = discovered_message("10.5555/first", issns=["0006-341X"])
     second = discovered_message("10.5555/second", issns=["0006-341X"])
-    opener = SequenceOpener(list_payload([first, second], total_results=2))
-    client = CrossrefClient(opener=opener, sleep=lambda _: None)
+    transport = SequenceTransport(list_payload([first, second], total_results=2))
+    client = CrossrefClient(transport=transport, sleep=lambda _: None)
     events: list[ProgressEvent] = []
 
     result = discover_crossref_journals(
@@ -852,7 +846,7 @@ def test_discovery_progress_uses_total_results_without_extra_request() -> None:
         "10.5555/first",
         "10.5555/second",
     ]
-    assert len(opener.requests) == 1
+    assert len(transport.requests) == 1
     activities = [event.activity for event in events if event.activity is not None]
     issn_activity = [
         item
@@ -879,10 +873,10 @@ def test_discovery_unusable_total_results_stays_indeterminate(
     total_results: object,
 ) -> None:
     item = discovered_message("10.5555/indeterminate", issns=["0006-341X"])
-    opener = SequenceOpener(
+    transport = SequenceTransport(
         list_payload([item], total_results=total_results)
     )
-    client = CrossrefClient(opener=opener, sleep=lambda _: None)
+    client = CrossrefClient(transport=transport, sleep=lambda _: None)
     events: list[ProgressEvent] = []
 
     result = discover_crossref_journals(
@@ -894,7 +888,7 @@ def test_discovery_unusable_total_results_stays_indeterminate(
     )
 
     assert not result.has_errors
-    assert len(opener.requests) == 1
+    assert len(transport.requests) == 1
     issn_activity = [
         event.activity
         for event in events
@@ -1004,8 +998,8 @@ def test_discovered_crossref_record_attaches_all_openalex_doi_anchors() -> None:
 
 
 def test_doi_gap_supplementation_fetches_shared_doi_once() -> None:
-    opener = SequenceOpener(payload_for("10.5555/shared"))
-    client = CrossrefClient(opener=opener, sleep=lambda _: None)
+    transport = SequenceTransport(payload_for("10.5555/shared"))
+    client = CrossrefClient(transport=transport, sleep=lambda _: None)
 
     result = assemble_provider_evidence(
         client,
@@ -1017,7 +1011,7 @@ def test_doi_gap_supplementation_fetches_shared_doi_once() -> None:
         retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
     )
 
-    assert len(opener.requests) == 1
+    assert len(transport.requests) == 1
     assert len(result.supplement_records) == 1
     assert result.units[0].doi == "10.5555/shared"
     assert result.units[0].record == result.supplement_records[0]
@@ -1034,7 +1028,7 @@ def test_doi_gap_supplementation_fetches_shared_doi_once() -> None:
 
 
 def test_doi_supplement_progress_has_exact_total_and_completes_every_work_unit() -> None:
-    opener = SequenceOpener(
+    transport = SequenceTransport(
         payload_for("10.5555/a"),
         http_error(404),
         http_error(500),
@@ -1042,7 +1036,7 @@ def test_doi_supplement_progress_has_exact_total_and_completes_every_work_unit()
         http_error(400),
         payload_for("10.5555/not-e"),
     )
-    client = CrossrefClient(opener=opener, sleep=lambda _: None)
+    client = CrossrefClient(transport=transport, sleep=lambda _: None)
     events: list[ProgressEvent] = []
 
     result = assemble_provider_evidence(
@@ -1059,7 +1053,7 @@ def test_doi_supplement_progress_has_exact_total_and_completes_every_work_unit()
         progress_callback=events.append,
     )
 
-    assert len(opener.requests) == 6
+    assert len(transport.requests) == 6
     assert tuple(unit.coverage for unit in result.units) == result.coverage
     assert tuple(unit.record for unit in result.units if unit.record is not None) == result.supplement_records
     assert tuple(issue for unit in result.units for issue in unit.issues) == result.issues
@@ -1385,3 +1379,306 @@ def test_batch_does_not_swallow_unexpected_programming_errors() -> None:
             client,
             (openalex_record("W1", "10.5555/a"),),
         )
+
+
+@pytest.mark.parametrize("unexpected_failure", [False, True])
+def test_discovery_and_doi_requests_share_one_http_session_and_close_it(
+    monkeypatch: pytest.MonkeyPatch,
+    unexpected_failure: bool,
+) -> None:
+    transport = SequenceTransport(
+        list_payload([], total_results=0), payload_for("10.5555/shared-session"),
+    )
+    sessions: list[httpx.Client] = []
+    real_client = httpx.Client
+
+    def create_session(**kwargs: Any) -> httpx.Client:
+        session = real_client(**kwargs)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(httpx, "Client", create_session)
+
+    def execute() -> None:
+        with CrossrefClient(transport=transport) as client:
+            pages = list(client.iter_journal_work_pages(
+                "0006-341X", date(2026, 1, 1), date(2026, 1, 31),
+            ))
+            assert pages[0]["message"]["items"] == []
+            client.get_work_by_doi("10.5555/shared-session")
+            if unexpected_failure:
+                raise RuntimeError("downstream failure")
+
+    if unexpected_failure:
+        with pytest.raises(RuntimeError, match="downstream failure"):
+            execute()
+    else:
+        execute()
+
+    assert len(sessions) == 1
+    assert sessions[0].is_closed
+    assert transport.closed
+    assert len(transport.requests) == 2
+    assert all(request.method == "GET" for request in transport.requests)
+
+
+@pytest.mark.parametrize("status_code", [301, 308])
+def test_alias_redirect_is_observable_without_following_it(status_code: int) -> None:
+    transport = SequenceTransport(httpx.Response(
+        status_code, headers={"Location": "https://api.crossref.org/v1/works/10.5555/prime"},
+    ))
+    with CrossrefClient(transport=transport) as client:
+        with pytest.raises(CrossrefRequestError, match=f"HTTP {status_code}") as raised:
+            client.get_work_by_doi("10.5555/alias")
+
+    assert isinstance(raised.value.__cause__, httpx.HTTPStatusError)
+    assert raised.value.__cause__.response.status_code == status_code
+    assert len(transport.requests) == 1
+    assert transport.closed
+
+
+@pytest.mark.parametrize("status_code", [400, 401, 403, 422])
+def test_nonretryable_http_status_fails_without_backoff(status_code: int) -> None:
+    delays: list[float] = []
+    transport = SequenceTransport(http_error(status_code))
+    with CrossrefClient(transport=transport, sleep=delays.append) as client:
+        with pytest.raises(CrossrefRequestError, match=f"HTTP {status_code}"):
+            client.get_work_by_doi("10.5555/rejected")
+
+    assert len(transport.requests) == 1
+    assert delays == []
+    assert transport.closed
+
+
+def set_proxy_environment(monkeypatch: pytest.MonkeyPatch, no_proxy: str) -> None:
+    for name in tuple(os.environ):
+        if name.lower().endswith("_proxy"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9999")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9999")
+    monkeypatch.setenv("NO_PROXY", no_proxy)
+
+
+def test_client_constructs_and_closes_with_unparseable_proxy_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_proxy_environment(monkeypatch, "fc00::/7,fe80::/10")
+    requests: list[httpx.Request] = []
+
+    def unexpected_request(self: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise AssertionError("construction must not send a request")
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", unexpected_request)
+    with CrossrefClient() as client:
+        assert not client._http_client.trust_env
+        assert not client._http_client.is_closed
+
+    assert client._http_client.is_closed
+    assert requests == []
+    assert os.environ["NO_PROXY"] == "fc00::/7,fe80::/10"
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_default_client_uses_valid_environment_proxy(
+    monkeypatch: pytest.MonkeyPatch, scheme: str,
+) -> None:
+    set_proxy_environment(monkeypatch, "localhost,127.0.0.1")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9998")
+    proxies: dict[httpx.HTTPTransport, httpx.Proxy | None] = {}
+    used_proxies: list[httpx.Proxy | None] = []
+    real_init = httpx.HTTPTransport.__init__
+    payload = payload_for("10.5555/proxy")
+
+    def record_transport(self: httpx.HTTPTransport, **kwargs: Any) -> None:
+        proxies[self] = kwargs.get("proxy")
+        real_init(self, **kwargs)
+
+    def respond(self: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+        used_proxies.append(proxies[self])
+        return httpx.Response(200, json=payload)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "__init__", record_transport)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
+    with CrossrefClient(base_url=f"{scheme}://provider.example") as client:
+        assert client._http_client.trust_env
+        assert client.get_work_by_doi("10.5555/proxy") == payload
+
+    assert len(used_proxies) == 1
+    assert used_proxies[0] is not None
+    assert used_proxies[0].url == httpx.URL(os.environ[f"{scheme.upper()}_PROXY"])
+    assert client._http_client.is_closed
+
+
+def test_mock_transport_works_with_unparseable_proxy_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_proxy_environment(monkeypatch, "fc00::/7,fe80::/10")
+    payload = payload_for("10.5555/proxy")
+    transport = SequenceTransport(payload)
+    with CrossrefClient(transport=transport) as client:
+        assert client.get_work_by_doi("10.5555/proxy") == payload
+
+    assert len(transport.requests) == 1
+    assert transport.closed
+    assert client._http_client.is_closed
+
+
+@pytest.mark.parametrize("error, explicit_transport", [
+    (ValueError("invalid configuration"), False),
+    (RuntimeError("programming error"), False),
+    (httpx.InvalidURL("explicit transport error"), True),
+])
+def test_client_does_not_fallback_for_unrelated_construction_errors(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, explicit_transport: bool,
+) -> None:
+    set_proxy_environment(monkeypatch, "localhost")
+    calls: list[dict[str, Any]] = []
+
+    def fail_construction(**kwargs: Any) -> httpx.Client:
+        calls.append(kwargs)
+        raise error
+
+    monkeypatch.setattr(httpx, "Client", fail_construction)
+    with pytest.raises(type(error)) as raised:
+        CrossrefClient(transport=SequenceTransport() if explicit_transport else None)
+
+    assert raised.value is error
+    assert len(calls) == 1
+
+
+def test_full_and_manifest_style_indexed_share_canonical_parser() -> None:
+    from literature_monitor.crossref import parse_crossref_indexed_at
+
+    indexed = {"date-time": "2026-09-26T10:30:00+08:00", "timestamp": 0}
+    payload = payload_for("10.5555/revision")
+    payload["message"]["indexed"] = indexed
+    record, warnings = normalize_crossref_work(payload, "10.5555/revision", datetime(2026, 9, 26, tzinfo=timezone.utc))
+    assert not warnings
+    assert record.indexed_at == parse_crossref_indexed_at(indexed)
+    assert record.indexed_at == parse_crossref_indexed_at("2026-09-26T02:30:00Z")
+    assert record.indexed_at.utcoffset() == timedelta(0)
+    discovered, _ = normalize_crossref_discovered_work(payload["message"], record.provenance.retrieved_at)
+    assert discovered.indexed_at == record.indexed_at
+    assert "indexed_at" not in record.to_evidence().model_dump()
+
+
+@pytest.mark.parametrize("revision", ["bad", "2026-09-26T00:00:00", 123, {}, {"date-time": None}, "2026-09-26T00:00:00+00:99"])
+def test_malformed_crossref_revision_is_rejected_by_parser_but_not_record(revision: object) -> None:
+    from literature_monitor.crossref import parse_crossref_indexed_at
+
+    with pytest.raises(ValueError):
+        parse_crossref_indexed_at(revision)
+    payload = payload_for("10.5555/revision")
+    payload["message"]["indexed"] = revision
+    record, warnings = normalize_crossref_work(payload, "10.5555/revision", datetime(2026, 9, 26, tzinfo=timezone.utc))
+    assert record.indexed_at is None
+    assert "invalid indexed was treated as missing" in warnings
+
+
+@pytest.mark.parametrize("revision", [None, datetime(2026, 9, 26, tzinfo=timezone.utc)])
+def test_default_record_serialization_preserves_released_shape(revision: datetime | None) -> None:
+    plain, _ = normalize_crossref_work(
+        payload_for("10.5555/shape"), "10.5555/shape",
+        datetime(2026, 9, 26, tzinfo=timezone.utc),
+    )
+    record = plain.model_copy(update={"indexed_at": revision})
+    assert record.indexed_at == revision
+    expected_fields = {"doi", "title", "journal", "abstract", "authors", "issns", "dates", "relations", "work_type", "provenance"}
+    assert set(record.model_dump()) == expected_fields
+    assert set(json.loads(record.model_dump_json())) == expected_fields
+    assert record.model_dump() == plain.model_dump()
+    assert record.model_dump_json() == plain.model_dump_json()
+
+
+def test_a5_manifest_and_doi_batches_use_repeated_filters_and_same_pool() -> None:
+    transport = SequenceTransport(*(list_payload([], total_results=0) for _ in range(3)))
+    with CrossrefClient(transport=transport, mailto="a@example.com", sleep=lambda _: None) as client:
+        pool = client._http_client
+        client.get_manifest_page(("0006-341X", "2168-2267"), date(2026, 1, 1), date(2026, 1, 31))
+        client.get_doi_batch(("10.1234/a", "10.1234/b"), thin=True)
+        client.get_doi_batch(("10.1234/a", "10.1234/b"))
+        assert client._http_client is pool and not pool.is_closed
+    assert pool.is_closed and transport.closed
+    queries = [dict(request.url.params) for request in transport.requests]
+    assert queries[0]["filter"] == "issn:0006-341X,issn:2168-2267,from-pub-date:2026-01-01,until-pub-date:2026-01-31"
+    assert queries[1]["filter"] == queries[2]["filter"] == "doi:10.1234/a,doi:10.1234/b"
+    assert queries[0]["select"] == queries[1]["select"] == "DOI,ISSN,indexed"
+    assert "select" not in queries[2]
+    for request, query in zip(transport.requests, queries, strict=True):
+        assert request.url.path == "/v1/works"
+        assert query["mailto"] == "a@example.com"
+        assert "|" not in query["filter"]
+        assert not {"query", "keyword_expression", "abstract"}.intersection(query)
+        assert request.headers["User-Agent"] == "literature-monitor/0.4.2"
+
+
+@pytest.mark.parametrize("code", [301, 308])
+@pytest.mark.parametrize("location", ["https://api.crossref.org/works/10.1234%2FPRIME", "/v1/works/10.1234/prime"])
+def test_a5_singleton_exposes_prime_redirect_without_following(code, location) -> None:
+    transport = SequenceTransport(httpx.Response(code, headers={"Location": location}))
+    with CrossrefClient(transport=transport) as client:
+        result = client.get_doi_outcome("10.1234/alias")
+        assert client._http_client.follow_redirects is False
+    assert result.kind is CrossrefDOIOutcomeKind.PRIME_REDIRECT
+    assert result.prime_doi == "10.1234/prime" and result.payload is None
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize("location", [
+    "https://evil.example/works/10.1234/prime", "https://api.crossref.org.evil/works/10.1234/prime",
+    "https://user@api.crossref.org/works/10.1234/prime", "http://api.crossref.org/works/10.1234/prime",
+    "https://api.crossref.org:9999/works/10.1234/prime", "/journals/10.1234/prime",
+    "/works/not-a-doi", "/works/10.1234/prime?x=1", "/works/10.1234/prime#fragment", "",
+    "/works/10.1234/prime%ZZ", "/works/10.1234/prime%20suffix",
+])
+def test_a5_redirect_rejects_unsafe_location(location) -> None:
+    transport = SequenceTransport(httpx.Response(301, headers={"Location": location}))
+    with CrossrefClient(transport=transport) as client:
+        with pytest.raises(CrossrefRequestError):
+            client.get_doi_outcome("10.1234/alias")
+    assert len(transport.requests) == 1
+
+
+def test_a5_redirect_rejects_multiple_location_headers() -> None:
+    transport = SequenceTransport(httpx.Response(308, headers=[
+        ("Location", "/works/10.1234/a"), ("Location", "/works/10.1234/b")]))
+    with CrossrefClient(transport=transport) as client:
+        with pytest.raises(CrossrefRequestError, match="unambiguous"):
+            client.get_doi_outcome("10.1234/alias")
+
+
+@pytest.mark.parametrize("code", [200, 404])
+def test_a5_singleton_typed_record_or_not_found(code) -> None:
+    transport = SequenceTransport(httpx.Response(code, json=payload_for("10.1234/a")))
+    with CrossrefClient(transport=transport) as client:
+        outcome = client.get_doi_outcome("10.1234/a")
+    assert outcome.kind is (CrossrefDOIOutcomeKind.RECORD if code == 200 else CrossrefDOIOutcomeKind.NOT_FOUND)
+
+
+def test_a5_manifest_uses_shared_canonical_revision_parser() -> None:
+    member, warnings = normalize_crossref_manifest_member({"DOI": " HTTPS://DOI.ORG/10.1234/A ",
+        "ISSN": ["2168-2267", "0006-341x", "0006-341X"],
+        "indexed": {"date-time": "2026-01-02T01:00:00+01:00"}})
+    record, _ = normalize_crossref_discovered_work({"DOI": "10.1234/a",
+        "indexed": {"date-time": "2026-01-02T00:00:00Z"}}, datetime.now(timezone.utc))
+    assert member.doi == "10.1234/a" and member.issns == ("0006-341X", "2168-2267")
+    assert member.indexed_at == record.indexed_at == datetime(2026, 1, 2, tzinfo=timezone.utc)
+    assert not warnings
+    assert set(member.__dataclass_fields__) == {"doi", "issns", "indexed_at"}
+
+
+def test_a5_requests_preserve_retry_pacing_and_activity_before_sleep() -> None:
+    events, sleeps = [], []
+    transport = SequenceTransport(httpx.Response(500), make_response(list_payload([], total_results=0),
+        headers={"X-Rate-Limit-Limit": "2", "X-Rate-Limit-Interval": "1s"}),
+        list_payload([], total_results=0))
+    def sleep(delay):
+        sleeps.append((delay, events[-1].activity.kind))
+    with CrossrefClient(transport=transport, sleep=sleep) as client:
+        client.get_manifest_page(("0006-341X",), date(2026, 1, 1), date(2026, 1, 1), progress_callback=events.append)
+        client.get_doi_batch(("10.1234/a",), progress_callback=events.append)
+    assert sleeps == [(1, ActivityKind.RETRYING), (0.5, ActivityKind.WAITING)]
+    assert len(transport.requests) == 3
+    assert any(e.activity.operation == "manifest" for e in events)
+    assert any(e.activity.operation == "full_hydration" for e in events)

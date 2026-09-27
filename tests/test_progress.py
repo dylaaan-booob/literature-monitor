@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
@@ -309,3 +310,134 @@ def test_total_change_or_current_rollback_invalidates_old_estimator() -> None:
     assert rollback is not None
     assert rollback.rate is None
     assert rollback.eta_seconds is None
+
+
+def source_activities(state, seconds):
+    return {item.source: item for item in state.snapshot(at=moment(seconds), active=True).activities}
+
+
+def paired_state():
+    state = ProgressState()
+    state.apply(ProgressEvent(stage=ProgressStage.DISCOVERING_PAPERS), at=moment(0))
+    for seconds in range(3):
+        for source in ("crossref", "openalex"):
+            state.apply(working(seconds, source=source, total=20), at=moment(seconds))
+    return state
+
+
+@pytest.mark.parametrize("source", ["openalex", "crossref"])
+@pytest.mark.parametrize("change", ["advance", "operation", "unit", "total", "rollback", "retry"])
+def test_each_source_update_preserves_peer_activity_and_samples(source, change):
+    state = paired_state()
+    peer = "crossref" if source == "openalex" else "openalex"
+    before = source_activities(state, 2)
+    assert before[peer].eta_seconds is not None
+    update = working(3, source=source, total=20).activity
+    if change == "operation":
+        update = replace(update, operation="next_operation")
+    elif change == "unit":
+        update = replace(update, unit="journal")
+    elif change == "total":
+        update = replace(update, total=30)
+    elif change == "rollback":
+        update = replace(update, current=1)
+    elif change == "retry":
+        update = replace(update, kind=ActivityKind.RETRYING)
+    state.apply(ProgressEvent(activity=update), at=moment(3))
+    after = source_activities(state, 3)
+    assert after[peer] == before[peer]
+    if change != "advance":
+        assert after[source].eta_seconds is None
+    else:
+        assert after[source].eta_seconds is not None
+    state.apply(working(3, source=peer, total=20), at=moment(4))
+    assert source_activities(state, 4)[peer].eta_seconds is not None
+
+
+def test_per_source_order_immutable_snapshots_and_stage_reset():
+    state = ProgressState()
+    sources = ("z-custom", None, "workspace", "crossref", "openalex", "application", "a-custom")
+    for source in sources:
+        state.apply(working(0, source=source), at=moment(0))
+    first = state.snapshot(at=moment(0), active=True)
+    assert tuple(item.source for item in first.activities) == (
+        "application", "openalex", "crossref", "workspace", None, "a-custom", "z-custom",
+    )
+    assert first.current_activity.source == "application"  # deterministic equal-time tie
+    with pytest.raises(FrozenInstanceError):
+        first.activities[0].current = 1
+    state.apply(ProgressEvent(stage=ProgressStage.MATCHING_LITERATURE), at=moment(5))
+    cleared = state.snapshot(at=moment(6), active=True)
+    assert cleared.activities == () and cleared.current_activity is None
+    assert cleared.stage_started_at == cleared.last_activity_at == moment(5)
+    assert not state.apply(ProgressEvent(stage=ProgressStage.MATCHING_LITERATURE), at=moment(7))
+    assert state.snapshot(at=moment(8), active=True) == cleared
+    assert len(first.activities) == len(sources)
+
+
+def test_peer_activity_prevents_inactivity_and_recovery_invalidates_all_sources():
+    state = paired_state()
+    quiet = source_activities(state, 2)["openalex"]
+    for seconds in (20, 40, 60, 67):
+        state.apply(working(3, source="crossref", total=20), at=moment(seconds))
+    active = state.snapshot(at=moment(72), active=True)
+    assert not active.inactivity_warning
+    assert active.last_activity_at == moment(67)
+    assert source_activities(state, 72)["openalex"] == quiet
+    inactive = state.snapshot(at=moment(127), active=True)
+    assert inactive.inactivity_warning and len(inactive.activities) == 2
+    assert all(item.eta_seconds is None and item.rate is None for item in inactive.activities)
+    assert state.snapshot(at=moment(140), active=True).last_activity_at == moment(67)
+    state.apply(working(3, source="openalex", total=20), at=moment(141))
+    resumed = state.snapshot(at=moment(141), active=True)
+    assert not resumed.inactivity_warning
+    assert source_activities(state, 141)["openalex"].eta_seconds is None
+    assert source_activities(state, 141)["crossref"].updated_at == moment(67)
+    assert source_activities(state, 141)["crossref"].eta_seconds is None
+    assert source_activities(state, 141)["crossref"].rate is None
+    state.apply(working(4, source="openalex", total=20), at=moment(142))
+    assert source_activities(state, 142)["openalex"].eta_seconds is None
+    state.apply(working(5, source="openalex", total=20), at=moment(143))
+    assert source_activities(state, 143)["openalex"].eta_seconds is not None
+    state.apply(working(4, source="crossref", total=20), at=moment(140))
+    assert state.last_activity_at == moment(143)
+
+
+def test_whole_run_recovery_never_resurrects_quiet_source_eta():
+    state = ProgressState()
+    state.apply(ProgressEvent(stage=ProgressStage.DISCOVERING_PAPERS), at=moment(0))
+    for current in range(3):
+        for source in ("openalex", "crossref"):
+            state.apply(working(current, source=source, total=10, detail="current batch"), at=moment(current + 1))
+    before = state.snapshot(at=moment(3), active=True)
+    assert all(activity.eta_seconds == pytest.approx(8) for activity in before.activities)
+    stored_before = {source: vars(source_state).copy() for source, source_state in state._sources.items()}
+    for _ in range(2):
+        inactive = state.snapshot(at=moment(63), active=True)
+        assert inactive.inactivity_warning
+        assert all(activity.rate is None and activity.eta_seconds is None for activity in inactive.activities)
+        assert inactive.last_activity_at == moment(3)
+    assert {source: vars(source_state) for source, source_state in state._sources.items()} == stored_before
+    assert state.snapshot(at=moment(3), active=True) == before
+
+    state.apply(working(3, source="openalex", total=10), at=moment(64))
+    recovered = state.snapshot(at=moment(64), active=True)
+    assert not recovered.inactivity_warning and recovered.last_activity_at == moment(64)
+    assert recovered.stage_started_at == before.stage_started_at
+    assert all(activity.rate is None and activity.eta_seconds is None for activity in recovered.activities)
+    quiet_before = next(activity for activity in before.activities if activity.source == "crossref")
+    quiet_after = source_activities(state, 64)["crossref"]
+    assert quiet_after == replace(quiet_before, rate=None, eta_seconds=None)
+
+    state.apply(working(4, source="openalex", total=10), at=moment(65))
+    assert source_activities(state, 65)["openalex"].eta_seconds is None
+    state.apply(working(5, source="openalex", total=10), at=moment(66))
+    assert source_activities(state, 66)["openalex"].eta_seconds is not None
+    assert source_activities(state, 66)["crossref"] == quiet_after
+    for current, seconds in ((3, 67), (4, 68)):
+        state.apply(working(current, source="crossref", total=10), at=moment(seconds))
+        assert source_activities(state, seconds)["crossref"].eta_seconds is None
+    state.apply(working(5, source="crossref", total=10), at=moment(69))
+    fresh = source_activities(state, 69)["crossref"]
+    assert fresh.rate == pytest.approx(1) and fresh.eta_seconds == pytest.approx(5)
+    assert fresh.started_at == quiet_before.started_at

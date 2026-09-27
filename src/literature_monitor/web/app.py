@@ -289,11 +289,7 @@ def create_app(config_path: Path) -> FastAPI:
                 '<p class="notice error">Invalid or missing CSRF token.</p>',
                 status_code=403,
             )
-        choices = (await request.form()).getlist("reuse_provider_cache")
-        if len(choices) > 1 or any(choice not in {"false", "true"} for choice in choices):
-            return HTMLResponse('<p class="notice error">Invalid cache reuse choice.</p>', status_code=422)
-        reuse_provider_cache = choices[0] if choices else "false"
-        start_result = app.state.run_coordinator.start(reuse_provider_cache=reuse_provider_cache == "true")
+        start_result = app.state.run_coordinator.start()
         snapshot = app.state.run_coordinator.snapshot()
         response = templates.TemplateResponse(
             request,

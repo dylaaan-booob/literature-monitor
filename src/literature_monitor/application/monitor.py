@@ -3,21 +3,21 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import date
 from enum import Enum
 from pathlib import Path
 
-from literature_monitor.application.provider_cache import (
-    ProviderCacheReadStatus,
-    ProviderCacheWriteError,
-    ProviderResultCache,
-    build_provider_cache,
-    read_provider_cache,
-    write_provider_cache,
+from literature_monitor.application.crossref_retrieval import CrossrefRetrieval
+from literature_monitor.application.openalex_retrieval import hydrate_retained_openalex_versions
+from literature_monitor.application.provider_state import (
+    STATE_FILENAME, ProviderState, ProviderStateStatus,
+    read_provider_state, replace_invalid_provider_state, update_provider_state,
 )
-from literature_monitor.application.provider_reuse import retrieve_with_reuse
+from literature_monitor.application.runtime_metadata import METADATA_DIRECTORY_NAME
 from literature_monitor.application.run_state import (
     LAST_RUN_SCHEMA_VERSION,
     LastRunSnapshot,
@@ -40,10 +40,6 @@ from literature_monitor.config import (
     validate_runtime_keyword,
 )
 from literature_monitor.coverage import (
-    CoverageComponent,
-    ProviderReuseUnit,
-    ProviderReuseSummary,
-    summarize_reuse,
     CoverageSummary,
     CoverageUnit,
     summarize_coverage,
@@ -53,7 +49,6 @@ from literature_monitor.crossref import (
     CrossrefDiscoveryIssue,
     EnrichmentIssue,
     EnrichmentIssueSeverity,
-    discover_crossref_journals,
 )
 from literature_monitor.date_range import (
     DateRangeError,
@@ -83,10 +78,10 @@ from literature_monitor.openalex import (
     IssueSeverity,
     OpenAlexClient,
     ResolvedSource,
-    discover_journals,
-    resolve_journal_source,
+    discover_journals_batched,
+    resolve_journal_sources_batched,
 )
-from literature_monitor.retrieval import assemble_provider_evidence
+from literature_monitor.retrieval import assemble_live_provider_evidence
 from literature_monitor.search import (
     SearchBackendError,
     SearchExpressionError,
@@ -112,7 +107,7 @@ class MonitorIssueComponent(str, Enum):
     CANONICALIZATION = "canonicalization"
     MATERIALIZATION = "materialization"
     COVERAGE_SNAPSHOT = "coverage_snapshot"
-    PROVIDER_CACHE = "provider_cache"
+    PROVIDER_STATE = "provider_state"
 
 
 @dataclass(frozen=True)
@@ -159,6 +154,15 @@ class MonitorStatistics:
 
 
 @dataclass(frozen=True)
+class ProviderStateUsage:
+    crossref_reused: int = 0
+    crossref_refreshed: int = 0
+    crossref_new: int = 0
+    openalex_versions_reused: int = 0
+    openalex_versions_hydrated: int = 0
+
+
+@dataclass(frozen=True)
 class RunResult:
     resolved_date_range: ResolvedDateRange | None
     canonical_paper_count: int
@@ -174,11 +178,7 @@ class RunResult:
     coverage: tuple[CoverageUnit, ...] = ()
     resolved_sources: tuple[ResolvedSource, ...] = ()
     log_level: LogLevel | None = None
-    reused_units: tuple[ProviderReuseUnit, ...] = ()
-
-    @property
-    def reuse_summary(self) -> tuple[ProviderReuseSummary, ...]:
-        return summarize_reuse(self.reused_units)
+    state_usage: ProviderStateUsage = ProviderStateUsage()
 
     @property
     def coverage_summary(self) -> tuple[CoverageSummary, ...]:
@@ -216,12 +216,8 @@ class _CanonicalCoreResult:
     outcome: RunOutcome
     statistics: MonitorStatistics
     coverage: tuple[CoverageUnit, ...] = ()
-    provider_cache: ProviderResultCache | None = None
-    reused_units: tuple[ProviderReuseUnit, ...] = ()
-
-    @property
-    def reuse_summary(self) -> tuple[ProviderReuseSummary, ...]:
-        return summarize_reuse(self.reused_units)
+    pending_state: ProviderState = ProviderState()
+    state_usage: ProviderStateUsage = ProviderStateUsage()
 
     @property
     def coverage_summary(self) -> tuple[CoverageSummary, ...]:
@@ -527,7 +523,6 @@ def _run_canonical_core(
     journal_name: str | None = None,
     keyword_expression: str | None = None,
     progress_callback: ProgressCallback | None = None,
-    reuse_provider_cache: bool = False,
 ) -> _CanonicalCoreResult:
     _emit_progress(progress_callback, ProgressStage.CHECKING_MONITOR)
     prepared, config, preflight_issue = _prepare_invocation(
@@ -540,255 +535,276 @@ def _run_canonical_core(
         return _invalid_core_result(config, preflight_issue)
     assert prepared is not None
 
-    cache_issues: list[MonitorIssue] = []
-    cached_units = ()
-    if reuse_provider_cache:
-        read_result = read_provider_cache(prepared.config.output_dir)
-        if read_result.status is ProviderCacheReadStatus.INVALID:
-            cache_issues.append(MonitorIssue(
-                severity=MonitorIssueSeverity.WARNING, component=MonitorIssueComponent.PROVIDER_CACHE,
-                stage="cache_read", message=f"invalid provider cache; running live: {read_result.error}",
-                path=read_result.path,
-            ))
-        elif read_result.cache is not None and read_result.cache.resolved_date_range == prepared.resolved_date_range:
-            cached_units = read_result.cache.units
+    return _execute_canonical_core(prepared, config_path, progress_callback=progress_callback)
 
+
+def _execute_canonical_core(
+    prepared: _PreparedInvocation,
+    config_path: Path,
+    *,
+    historical_state: ProviderState = ProviderState(),
+    state_issues: tuple[MonitorIssue, ...] = (),
+    progress_callback: ProgressCallback | None = None,
+) -> _CanonicalCoreResult:
     _emit_progress(progress_callback, ProgressStage.DISCOVERING_PAPERS)
-    crossref_client = CrossrefClient(mailto=os.environ.get("CROSSREF_MAILTO"))
-    openalex_client = OpenAlexClient(api_key=os.environ.get("OPENALEX_API_KEY"))
-    reused_cached_units = ()
-    if cached_units:
-        openalex, crossref, retrieval, reused_cached_units = retrieve_with_reuse(
-            openalex_client, crossref_client, prepared.journals,
-            prepared.resolved_date_range, cached_units, progress_callback=progress_callback,
-        )
-    else:
-        openalex = discover_journals(
-            openalex_client,
-            prepared.journals,
-            prepared.resolved_date_range.from_date,
-            prepared.resolved_date_range.to_date,
+    with (
+        CrossrefClient(mailto=os.environ.get("CROSSREF_MAILTO")) as crossref_client,
+        OpenAlexClient(api_key=os.environ.get("OPENALEX_API_KEY")) as openalex_client,
+    ):
+        crossref_execution = CrossrefRetrieval(
+            crossref_client, record_state=historical_state.crossref_records,
             progress_callback=progress_callback,
         )
-        crossref = discover_crossref_journals(
-            crossref_client,
-            prepared.journals,
-            prepared.resolved_date_range.from_date,
-            prepared.resolved_date_range.to_date,
-            progress_callback=progress_callback,
-        )
-
+        # Join inside client ownership so even a future exception drains workers first.
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            openalex_future = executor.submit(
+                discover_journals_batched,
+                openalex_client, prepared.journals,
+                prepared.resolved_date_range.from_date,
+                prepared.resolved_date_range.to_date,
+                progress_callback=progress_callback,
+            )
+            crossref_future = executor.submit(
+                crossref_execution.discover,
+                prepared.journals, prepared.resolved_date_range.from_date,
+                prepared.resolved_date_range.to_date,
+            )
+            openalex = openalex_future.result()
+            discovery = crossref_future.result()
+        crossref = discovery.discovery
         _emit_progress(progress_callback, ProgressStage.COMBINING_METADATA)
-        retrieval = assemble_provider_evidence(
-            crossref_client,
-            openalex.records,
-            crossref.records,
-            progress_callback=progress_callback,
+        retrieval = crossref_execution.supplement(openalex.records)
+        supplement_issues = (
+            *retrieval.issues,
+            *(
+                EnrichmentIssue(
+                    severity=EnrichmentIssueSeverity.WARNING,
+                    stage="missing_doi",
+                    record_id=record.provenance.record_id,
+                    message="record has no DOI; Crossref lookup was skipped",
+                )
+                for record in openalex.records
+                if record.external_ids.doi is None
+            ),
+        )
+        evidence = assemble_live_provider_evidence(openalex.records, crossref.records, retrieval.evidence)
+        coverage = (*openalex.coverage, *crossref.coverage, *retrieval.coverage)
+        _emit_activity(
+            progress_callback,
+            ActivityUpdate(
+                kind=ActivityKind.WORKING,
+                source="application",
+                operation="consolidate_evidence",
+                label="Consolidating provider evidence",
+                detail=f"{len(evidence)} evidence records",
+            ),
+        )
+        consolidation = consolidate_evidence(evidence)
+        _emit_activity(
+            progress_callback,
+            ActivityUpdate(
+                kind=ActivityKind.WORKING,
+                source="application",
+                operation="consolidate_evidence",
+                label="Completed provider evidence consolidation",
+                detail=f"{len(consolidation.clusters)} candidate works",
+            ),
         )
 
-    reused_units = (
-        *(ProviderReuseUnit("openalex", CoverageComponent.OPENALEX_DISCOVERY, journal=unit.journal.name)
-          for unit in openalex.units if unit.coverage is None),
-        *(ProviderReuseUnit("crossref", CoverageComponent.CROSSREF_DISCOVERY, journal=unit.journal.name, issn=unit.issn)
-          for unit in crossref.units if unit.coverage is None),
-        *(ProviderReuseUnit("crossref", CoverageComponent.CROSSREF_SUPPLEMENT, doi=unit.doi)
-          for unit in retrieval.units if unit.coverage is None),
-    )
-    coverage = (*openalex.coverage, *crossref.coverage, *retrieval.coverage)
-    provider_cache = build_provider_cache(
-        prepared.resolved_date_range, openalex, crossref, retrieval,
-        reused_units=reused_cached_units,
-    )
-    _emit_activity(
-        progress_callback,
-        ActivityUpdate(
-            kind=ActivityKind.WORKING,
-            source="application",
-            operation="consolidate_evidence",
-            label="Consolidating provider evidence",
-            detail=f"{len(retrieval.evidence)} evidence records",
-        ),
-    )
-    consolidation = consolidate_evidence(retrieval.evidence)
-    _emit_activity(
-        progress_callback,
-        ActivityUpdate(
-            kind=ActivityKind.WORKING,
-            source="application",
-            operation="consolidate_evidence",
-            label="Completed provider evidence consolidation",
-            detail=f"{len(consolidation.clusters)} candidate works",
-        ),
-    )
+        issues: list[MonitorIssue] = [
+            *state_issues,
+            *(_openalex_issue(issue) for issue in openalex.issues),
+            *(_crossref_discovery_issue(issue) for issue in crossref.issues),
+            *(_enrichment_issue(issue) for issue in supplement_issues),
+            *(
+                _canonicalization_issue(
+                    issue,
+                    component=MonitorIssueComponent.CONSOLIDATION,
+                )
+                for issue in consolidation.issues
+            ),
+        ]
 
-    issues: list[MonitorIssue] = [
-        *cache_issues,
-        *(_openalex_issue(issue) for issue in openalex.issues),
-        *(_crossref_discovery_issue(issue) for issue in crossref.issues),
-        *(_enrichment_issue(issue) for issue in retrieval.issues),
-        *(
+        _emit_progress(progress_callback, ProgressStage.MATCHING_LITERATURE)
+        projections = tuple(
+            build_searchable_projection(cluster.evidence)
+            for cluster in consolidation.clusters
+        )
+        _emit_activity(
+            progress_callback,
+            ActivityUpdate(
+                kind=ActivityKind.WORKING,
+                source="application",
+                operation="matching_literature",
+                label="Matching literature",
+                detail=f"{len(projections)} candidate works",
+            ),
+        )
+        try:
+            matches = match_searchable_projections(prepared.keyword_ast, projections)
+        except SearchExpressionError as error:
+            issue = _search_issue(
+                error,
+                config_path=config_path,
+                stage="matching",
+            )
+            warnings, errors = _split_issues((*issues, issue))
+            return _CanonicalCoreResult(
+                config=prepared.config,
+                resolved_date_range=prepared.resolved_date_range,
+                papers=(),
+                resolved_sources=openalex.sources,
+                warnings=warnings,
+                errors=errors,
+                outcome=RunOutcome.INVALID_CONFIGURATION,
+                statistics=MonitorStatistics(
+                    openalex_records=len(openalex.records),
+                    crossref_discovery_records=len(crossref.records),
+                    crossref_supplement_records=len(retrieval.records),
+                    evidence_clusters=len(consolidation.clusters),
+                    consolidation_issues=len(consolidation.issues),
+                    provider_issues=(
+                        len(openalex.issues)
+                        + len(crossref.issues)
+                        + len(supplement_issues)
+                    ),
+                ),
+                coverage=coverage,
+            )
+        except SearchBackendError as error:
+            issue = _search_issue(
+                error,
+                config_path=config_path,
+                stage="fts5_backend",
+            )
+            warnings, errors = _split_issues((*issues, issue))
+            return _CanonicalCoreResult(
+                config=prepared.config,
+                resolved_date_range=prepared.resolved_date_range,
+                papers=(),
+                resolved_sources=openalex.sources,
+                warnings=warnings,
+                errors=errors,
+                outcome=RunOutcome.INVALID_CONFIGURATION,
+                statistics=MonitorStatistics(
+                    openalex_records=len(openalex.records),
+                    crossref_discovery_records=len(crossref.records),
+                    crossref_supplement_records=len(retrieval.records),
+                    evidence_clusters=len(consolidation.clusters),
+                    consolidation_issues=len(consolidation.issues),
+                    provider_issues=(
+                        len(openalex.issues)
+                        + len(crossref.issues)
+                        + len(supplement_issues)
+                    ),
+                ),
+                coverage=coverage,
+            )
+
+        _emit_activity(
+            progress_callback,
+            ActivityUpdate(
+                kind=ActivityKind.WORKING,
+                source="application",
+                operation="matching_literature",
+                label="Completed literature matching",
+                detail=f"{sum(matches)} matched clusters",
+            ),
+        )
+        retained_clusters = tuple(
+            cluster
+            for cluster, matched in zip(consolidation.clusters, matches, strict=True)
+            if matched
+        )
+        retained_evidence = tuple(
+            evidence
+            for cluster in retained_clusters
+            for evidence in cluster.evidence
+        )
+        _emit_activity(
+            progress_callback,
+            ActivityUpdate(
+                kind=ActivityKind.WORKING,
+                source="application",
+                operation="canonicalize_literature",
+                label="Canonicalizing literature",
+                detail=f"{len(retained_clusters)} matched clusters",
+            ),
+        )
+        retained_refs = {item.provenance for item in retained_evidence if item.provenance.provider == "openalex"}
+        versions = hydrate_retained_openalex_versions(
+            openalex_client,
+            tuple(record for record in openalex.records if record.provenance in retained_refs),
+            version_state=historical_state.openalex_versions,
+            progress_callback=progress_callback,
+        )
+        hints = {record.provenance: record.to_evidence().version_hints for record in versions.records}
+        retained_evidence = tuple(
+            item.model_copy(update={"version_hints": hints[item.provenance]})
+            if item.provenance in hints else item for item in retained_evidence
+        )
+        issues.extend(_openalex_issue(issue) for issue in versions.issues)
+        crossref_kinds = {
+            doi: kind
+            for result in (discovery, retrieval)
+            for kind, dois in (("reused", result.reused_dois),
+                               ("refreshed", result.refreshed_dois), ("new", result.new_dois))
+            for doi in dois
+        }
+        usage = ProviderStateUsage(
+            crossref_reused=sum(kind == "reused" for kind in crossref_kinds.values()),
+            crossref_refreshed=sum(kind == "refreshed" for kind in crossref_kinds.values()),
+            crossref_new=sum(kind == "new" for kind in crossref_kinds.values()),
+            openalex_versions_reused=len(set(versions.reused_work_ids)),
+            openalex_versions_hydrated=len(set(versions.hydrated_work_ids)),
+        )
+        canonicalization = canonicalize_records(retained_evidence)
+        _emit_activity(
+            progress_callback,
+            ActivityUpdate(
+                kind=ActivityKind.WORKING,
+                source="application",
+                operation="canonicalize_literature",
+                label="Completed literature canonicalization",
+                detail=f"{len(canonicalization.papers)} canonical papers",
+            ),
+        )
+        issues.extend(
             _canonicalization_issue(
                 issue,
-                component=MonitorIssueComponent.CONSOLIDATION,
+                component=MonitorIssueComponent.CANONICALIZATION,
             )
-            for issue in consolidation.issues
-        ),
-    ]
-
-    _emit_progress(progress_callback, ProgressStage.MATCHING_LITERATURE)
-    projections = tuple(
-        build_searchable_projection(cluster.evidence)
-        for cluster in consolidation.clusters
-    )
-    _emit_activity(
-        progress_callback,
-        ActivityUpdate(
-            kind=ActivityKind.WORKING,
-            source="application",
-            operation="matching_literature",
-            label="Matching literature",
-            detail=f"{len(projections)} candidate works",
-        ),
-    )
-    try:
-        matches = match_searchable_projections(prepared.keyword_ast, projections)
-    except SearchExpressionError as error:
-        issue = _search_issue(
-            error,
-            config_path=config_path,
-            stage="matching",
+            for issue in canonicalization.issues
         )
-        warnings, errors = _split_issues((*issues, issue))
+        warnings, errors = _split_issues(issues)
+        statistics = MonitorStatistics(
+            openalex_records=len(openalex.records),
+            crossref_discovery_records=len(crossref.records),
+            crossref_supplement_records=len(retrieval.records),
+            evidence_clusters=len(consolidation.clusters),
+            retained_clusters=len(retained_clusters),
+            consolidation_issues=len(consolidation.issues),
+            canonicalization_issues=len(canonicalization.issues),
+            provider_issues=(
+                len(openalex.issues)
+                + len(crossref.issues)
+                + len(supplement_issues)
+                + len(versions.issues)
+            ),
+        )
         return _CanonicalCoreResult(
             config=prepared.config,
             resolved_date_range=prepared.resolved_date_range,
-            papers=(),
+            papers=canonicalization.papers,
             resolved_sources=openalex.sources,
             warnings=warnings,
             errors=errors,
-            outcome=RunOutcome.INVALID_CONFIGURATION,
-            statistics=MonitorStatistics(
-                openalex_records=len(openalex.records),
-                crossref_discovery_records=len(crossref.records),
-                crossref_supplement_records=len(retrieval.supplement_records),
-                evidence_clusters=len(consolidation.clusters),
-                consolidation_issues=len(consolidation.issues),
-                provider_issues=(
-                    len(openalex.issues)
-                    + len(crossref.issues)
-                    + len(retrieval.issues)
-                ),
-            ),
+            outcome=_run_outcome(warnings, errors),
+            statistics=statistics,
             coverage=coverage,
-            reused_units=reused_units,
+            pending_state=ProviderState(crossref_execution.pending_changes, versions.pending_changes),
+            state_usage=usage,
         )
-    except SearchBackendError as error:
-        issue = _search_issue(
-            error,
-            config_path=config_path,
-            stage="fts5_backend",
-        )
-        warnings, errors = _split_issues((*issues, issue))
-        return _CanonicalCoreResult(
-            config=prepared.config,
-            resolved_date_range=prepared.resolved_date_range,
-            papers=(),
-            resolved_sources=openalex.sources,
-            warnings=warnings,
-            errors=errors,
-            outcome=RunOutcome.INVALID_CONFIGURATION,
-            statistics=MonitorStatistics(
-                openalex_records=len(openalex.records),
-                crossref_discovery_records=len(crossref.records),
-                crossref_supplement_records=len(retrieval.supplement_records),
-                evidence_clusters=len(consolidation.clusters),
-                consolidation_issues=len(consolidation.issues),
-                provider_issues=(
-                    len(openalex.issues)
-                    + len(crossref.issues)
-                    + len(retrieval.issues)
-                ),
-            ),
-            coverage=coverage,
-            reused_units=reused_units,
-        )
-
-    _emit_activity(
-        progress_callback,
-        ActivityUpdate(
-            kind=ActivityKind.WORKING,
-            source="application",
-            operation="matching_literature",
-            label="Completed literature matching",
-            detail=f"{sum(matches)} matched clusters",
-        ),
-    )
-    retained_clusters = tuple(
-        cluster
-        for cluster, matched in zip(consolidation.clusters, matches, strict=True)
-        if matched
-    )
-    retained_evidence = tuple(
-        evidence
-        for cluster in retained_clusters
-        for evidence in cluster.evidence
-    )
-    _emit_activity(
-        progress_callback,
-        ActivityUpdate(
-            kind=ActivityKind.WORKING,
-            source="application",
-            operation="canonicalize_literature",
-            label="Canonicalizing literature",
-            detail=f"{len(retained_clusters)} matched clusters",
-        ),
-    )
-    canonicalization = canonicalize_records(retained_evidence)
-    _emit_activity(
-        progress_callback,
-        ActivityUpdate(
-            kind=ActivityKind.WORKING,
-            source="application",
-            operation="canonicalize_literature",
-            label="Completed literature canonicalization",
-            detail=f"{len(canonicalization.papers)} canonical papers",
-        ),
-    )
-    issues.extend(
-        _canonicalization_issue(
-            issue,
-            component=MonitorIssueComponent.CANONICALIZATION,
-        )
-        for issue in canonicalization.issues
-    )
-    warnings, errors = _split_issues(issues)
-    statistics = MonitorStatistics(
-        openalex_records=len(openalex.records),
-        crossref_discovery_records=len(crossref.records),
-        crossref_supplement_records=len(retrieval.supplement_records),
-        evidence_clusters=len(consolidation.clusters),
-        retained_clusters=len(retained_clusters),
-        consolidation_issues=len(consolidation.issues),
-        canonicalization_issues=len(canonicalization.issues),
-        provider_issues=(
-            len(openalex.issues)
-            + len(crossref.issues)
-            + len(retrieval.issues)
-        ),
-    )
-    return _CanonicalCoreResult(
-        config=prepared.config,
-        resolved_date_range=prepared.resolved_date_range,
-        papers=canonicalization.papers,
-        resolved_sources=openalex.sources,
-        warnings=warnings,
-        errors=errors,
-        outcome=_run_outcome(warnings, errors),
-        statistics=statistics,
-        coverage=coverage,
-        provider_cache=provider_cache,
-        reused_units=reused_units,
-    )
 
 
 def _materialize_canonical_result(
@@ -811,7 +827,7 @@ def _materialize_canonical_result(
             outcome=RunOutcome.INVALID_CONFIGURATION,
             statistics=core.statistics,
             coverage=core.coverage,
-            reused_units=core.reused_units,
+            state_usage=core.state_usage,
             resolved_sources=core.resolved_sources,
             log_level=core.log_level,
         )
@@ -845,7 +861,7 @@ def _materialize_canonical_result(
             materialization_issues=len(materialization.issues),
         ),
         coverage=core.coverage,
-        reused_units=core.reused_units,
+        state_usage=core.state_usage,
         resolved_sources=core.resolved_sources,
         log_level=core.log_level,
     )
@@ -856,13 +872,26 @@ def run_monitor(
     *,
     date_override: DateRangeSpec | None = None,
     progress_callback: ProgressCallback | None = None,
-    reuse_provider_cache: bool = False,
 ) -> RunResult:
-    core = _run_canonical_core(
-        config_path,
-        date_override=date_override,
-        progress_callback=progress_callback,
-        reuse_provider_cache=reuse_provider_cache,
+    _emit_progress(progress_callback, ProgressStage.CHECKING_MONITOR)
+    prepared, config, preflight_issue = _prepare_invocation(
+        config_path, date_override=date_override, journal_name=None, keyword_expression=None,
+    )
+    if preflight_issue is not None:
+        core = _invalid_core_result(config, preflight_issue)
+        return _materialize_canonical_result(core, None)
+    assert prepared is not None
+    state_read = read_provider_state(prepared.config.output_dir)
+    state_path = prepared.config.output_dir / METADATA_DIRECTORY_NAME / STATE_FILENAME
+    state_issues = ()
+    if state_read.status is ProviderStateStatus.INVALID:
+        state_issues = (MonitorIssue(
+            MonitorIssueSeverity.WARNING, MonitorIssueComponent.PROVIDER_STATE,
+            "read", f"invalid Provider state; running live: {state_read.error}", path=state_path,
+        ),)
+    core = _execute_canonical_core(
+        prepared, config_path, historical_state=state_read.state or ProviderState(),
+        state_issues=state_issues, progress_callback=progress_callback,
     )
     output_dir = core.config.output_dir if core.config is not None else None
     result = _materialize_canonical_result(
@@ -875,16 +904,20 @@ def run_monitor(
 
     assert output_dir is not None
     assert result.resolved_date_range is not None
-    assert core.provider_cache is not None
     try:
-        write_provider_cache(output_dir, core.provider_cache)
-    except ProviderCacheWriteError as error:
+        if state_read.status is ProviderStateStatus.INVALID:
+            if not state_read.replaceable:
+                raise OSError("Provider-state path cannot be safely replaced")
+            replace_invalid_provider_state(output_dir, core.pending_state)
+        else:
+            update_provider_state(output_dir, core.pending_state)
+    except (OSError, sqlite3.DatabaseError, ValueError, TypeError) as error:
         warning = MonitorIssue(
             severity=MonitorIssueSeverity.WARNING,
-            component=MonitorIssueComponent.PROVIDER_CACHE,
+            component=MonitorIssueComponent.PROVIDER_STATE,
             stage="persistence",
-            message=f"failed to persist reusable provider result cache: {error}",
-            path=error.path,
+            message=f"failed to persist Provider state: {error}",
+            path=state_path,
         )
         warnings = (*result.warnings, warning)
         result = replace(
@@ -897,7 +930,7 @@ def run_monitor(
         resolved_date_range=result.resolved_date_range,
         outcome=RecordedRunOutcome(result.outcome.value),
         coverage=result.coverage,
-        reused_units=result.reused_units,
+        reused_units=(),
     )
     try:
         write_last_run_snapshot(output_dir, snapshot)
@@ -958,42 +991,21 @@ def validate_monitor(
             label="Completed monitor configuration check",
         ),
     )
-    client = OpenAlexClient(api_key=os.environ.get("OPENALEX_API_KEY"))
-    sources: list[ResolvedSource] = []
-    issues: list[MonitorIssue] = []
-    journal_total = len(prepared.journals)
-    journal_activity = ActivityUpdate(
-        kind=ActivityKind.WORKING,
-        source="application",
-        operation="validation_journals",
-        label="Resolving journal sources",
-        current=0,
-        total=journal_total,
-        unit="journal",
-    )
-    _emit_activity(progress_callback, journal_activity)
-    for journal_index, journal in enumerate(prepared.journals):
-        if progress_callback is None:
-            source, source_issues = resolve_journal_source(client, journal)
-        else:
-            source, source_issues = resolve_journal_source(
-                client,
-                journal,
-                progress_callback=progress_callback,
-                operation=f"validation_source_resolution:{journal_index}",
-            )
-        if source is not None:
-            sources.append(source)
-        issues.extend(_openalex_issue(issue) for issue in source_issues)
-        _emit_activity(
-            progress_callback,
-            replace(
-                journal_activity,
-                detail=journal.name,
-                current=journal_index + 1,
-            ),
+    with OpenAlexClient(api_key=os.environ.get("OPENALEX_API_KEY")) as client:
+        sources: list[ResolvedSource] = []
+        issues: list[MonitorIssue] = []
+        journal_activity = ActivityUpdate(
+            kind=ActivityKind.WORKING, source="application", operation="validation_journals",
+            label="Resolving journal sources", current=0, total=len(prepared.journals), unit="journal",
         )
-
+        _emit_activity(progress_callback, journal_activity)
+        for index, unit in enumerate(resolve_journal_sources_batched(
+            client, prepared.journals, progress_callback=progress_callback,
+        )):
+            if unit.source is not None:
+                sources.append(unit.source)
+            issues.extend(_openalex_issue(issue) for issue in unit.issues)
+            _emit_activity(progress_callback, replace(journal_activity, detail=unit.journal.name, current=index + 1))
     warnings, errors = _split_issues(issues)
     outcome = (
         ValidationOutcome.SOURCE_ERRORS

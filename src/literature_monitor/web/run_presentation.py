@@ -86,7 +86,7 @@ def _announcement(
     snapshot: CoordinatorSnapshot,
     *,
     stage_label: str | None,
-    activity: ActivitySnapshot | None,
+    activities: tuple[ActivitySnapshot, ...],
 ) -> tuple[str, str]:
     if snapshot.status is CoordinatorStatus.IDLE:
         return _semantic_key("idle"), "Monitor ready."
@@ -125,7 +125,7 @@ def _announcement(
         parts.append("starting")
         message_parts.append("Starting.")
 
-    if activity is not None:
+    for activity in activities:
         parts.extend(
             (
                 activity.kind.value,
@@ -152,6 +152,47 @@ def _announcement(
     return _semantic_key(*parts), " ".join(message_parts)
 
 
+def _activity_presentation(
+    activity: ActivitySnapshot, *, now: datetime, inactivity_warning: bool,
+) -> dict[str, object]:
+    activity_counter, activity_determinate = _activity_counter(activity)
+    activity_source = _source_label(activity.source)
+    activity_state = (
+        activity.kind.value.title()
+        if activity.kind is not ActivityKind.WORKING
+        else None
+    )
+
+    eta_text: str | None = None
+    estimating = False
+    if (
+        activity.kind is ActivityKind.WORKING
+        and not inactivity_warning
+    ):
+        if activity.eta_seconds is not None:
+            eta_text = _duration_text(activity.eta_seconds)
+        elif (
+            activity.current is not None
+            and activity.total is not None
+            and activity.current >= 0
+            and activity.total >= 0
+            and activity.current <= activity.total
+            and activity.total > activity.current
+        ):
+            estimating = True
+
+    return {
+        "activity": activity,
+        "activity_source": activity_source,
+        "activity_state": activity_state,
+        "activity_counter": activity_counter,
+        "activity_determinate": activity_determinate,
+        "eta_text": eta_text,
+        "estimating": estimating,
+        "age_text": _duration_text((now - activity.updated_at).total_seconds()),
+    }
+
+
 def build_run_presentation(
     snapshot: CoordinatorSnapshot,
     *,
@@ -176,55 +217,20 @@ def build_run_presentation(
         else None
     )
 
-    activity = snapshot.current_activity
-    activity_counter, activity_determinate = (
-        _activity_counter(activity) if activity is not None else (None, False)
-    )
-    activity_source = (
-        _source_label(activity.source) if activity is not None else None
-    )
-    activity_state = (
-        activity.kind.value.title()
-        if activity is not None and activity.kind is not ActivityKind.WORKING
-        else None
-    )
-
-    eta_text: str | None = None
-    estimating = False
-    if (
-        activity is not None
-        and activity.kind is ActivityKind.WORKING
-        and not snapshot.inactivity_warning
-    ):
-        if activity.eta_seconds is not None:
-            eta_text = _duration_text(activity.eta_seconds)
-        elif (
-            activity.current is not None
-            and activity.total is not None
-            and activity.current >= 0
-            and activity.total >= 0
-            and activity.current <= activity.total
-            and activity.total > activity.current
-        ):
-            estimating = True
-
     announcement_key, announcement_message = _announcement(
         snapshot,
         stage_label=stage_label,
-        activity=activity,
+        activities=snapshot.activities,
     )
 
     return {
         "stage_label": stage_label,
         "elapsed_text": elapsed_text,
         "last_activity_text": last_activity_text,
-        "activity": activity,
-        "activity_source": activity_source,
-        "activity_state": activity_state,
-        "activity_counter": activity_counter,
-        "activity_determinate": activity_determinate,
-        "eta_text": eta_text,
-        "estimating": estimating,
+        "activities": tuple(
+            _activity_presentation(activity, now=now, inactivity_warning=snapshot.inactivity_warning)
+            for activity in snapshot.activities
+        ),
         "announcement_key": announcement_key,
         "announcement_message": announcement_message,
     }

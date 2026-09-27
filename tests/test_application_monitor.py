@@ -2,19 +2,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime, timezone
+from types import SimpleNamespace
+from contextlib import nullcontext
 from pathlib import Path
 
+import httpx
 import pytest
 
 from literature_monitor.application import monitor
-from literature_monitor.application.provider_cache import (
-    ProviderCacheReadStatus,
-    build_provider_cache,
-    provider_cache_path,
-    read_provider_cache,
-    write_provider_cache,
-)
 from literature_monitor.application.monitor import (
     MonitorIssueComponent,
     MonitorStatistics,
@@ -45,6 +41,7 @@ from literature_monitor.canonicalize import (
 from literature_monitor.config import JournalConfig, load_config
 from literature_monitor.coverage import CoverageComponent, CoverageStatus, CoverageUnit
 from literature_monitor.crossref import (
+    CrossrefClient,
     CrossrefDiscoveryIssue,
     CrossrefDiscoveryResult,
     CrossrefDiscoveryUnitResult,
@@ -62,6 +59,8 @@ from literature_monitor.models import (
     CanonicalMetadata,
     CanonicalPaper,
     ExternalIds,
+    MetadataSource,
+    ProviderWorkEvidence,
     PaperVersion,
     VersionKind,
     VersionRef,
@@ -73,6 +72,7 @@ from literature_monitor.openalex import (
     IssueSeverity,
     OpenAlexClient,
     ResolvedSource,
+    SourceResolutionUnit,
 )
 from literature_monitor.progress import (
     ActivityKind,
@@ -168,14 +168,20 @@ def install_core_mocks(
     progress_callbacks: list[ProgressCallback | None] | None = None,
     emit_provider_activity: bool = False,
 ) -> CanonicalPaper:
-    oa_record = object()
+    openalex_evidence = ProviderWorkEvidence(provenance=MetadataSource(
+        provider="openalex", record_id="https://openalex.org/W1", retrieved_at=datetime.now(timezone.utc),
+    ), title="statistics", external_ids=ExternalIds(doi="10.5555/test"))
+    crossref_evidence = ProviderWorkEvidence(provenance=MetadataSource(
+        provider="crossref", record_id="10.5555/test", retrieved_at=datetime.now(timezone.utc),
+    ), title="different")
+    oa_record = SimpleNamespace(provenance=openalex_evidence.provenance,
+                                external_ids=openalex_evidence.external_ids,
+                                to_evidence=lambda: openalex_evidence)
     cr_record = object()
-    openalex_evidence = object()
-    crossref_evidence = object()
     paper = canonical_paper()
 
-    monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kwargs: object())
-    monkeypatch.setattr(monitor, "CrossrefClient", lambda **kwargs: object())
+    monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kwargs: nullcontext(object()))
+    monkeypatch.setattr(monitor, "CrossrefClient", lambda **kwargs: nullcontext(object()))
 
     def discover_openalex(
         client: object,
@@ -308,9 +314,33 @@ def install_core_mocks(
             issues=canonicalization_issues,
         )
 
-    monkeypatch.setattr(monitor, "discover_journals", discover_openalex)
-    monkeypatch.setattr(monitor, "discover_crossref_journals", discover_crossref)
-    monkeypatch.setattr(monitor, "assemble_provider_evidence", assemble)
+    class CrossrefExecution:
+        pending_changes = ()
+
+        def __init__(self, client, *, record_state=(), progress_callback=None):
+            self.client = client
+            self.callback = progress_callback
+
+        def discover(self, journals, from_date, to_date):
+            return SimpleNamespace(discovery=discover_crossref(
+                self.client, journals, from_date, to_date, progress_callback=self.callback,
+            ), reused_dois=(), refreshed_dois=(), new_dois=())
+
+        def supplement(self, records):
+            result = assemble(self.client, records, (cr_record,), progress_callback=self.callback)
+            return SimpleNamespace(evidence=result.evidence, records=result.supplement_records,
+                                   issues=result.issues, coverage=result.coverage,
+                                   reused_dois=(), refreshed_dois=(), new_dois=())
+
+    def hydrate(client, records, **kwargs):
+        assert records == (oa_record,)
+        return SimpleNamespace(records=records, reused_work_ids=(), hydrated_work_ids=(),
+                               issues=(), pending_changes=())
+
+    monkeypatch.setattr(monitor, "discover_journals_batched", discover_openalex)
+    monkeypatch.setattr(monitor, "CrossrefRetrieval", CrossrefExecution)
+    monkeypatch.setattr(monitor, "assemble_live_provider_evidence", lambda oa, cr, supplied: supplied)
+    monkeypatch.setattr(monitor, "hydrate_retained_openalex_versions", hydrate)
     monkeypatch.setattr(monitor, "consolidate_evidence", consolidate)
     monkeypatch.setattr(monitor, "build_searchable_projection", build_projection)
     monkeypatch.setattr(monitor, "match_searchable_projections", match)
@@ -333,178 +363,15 @@ def materialization_result(
     )
 
 
-def clean_openalex_unit() -> OpenAlexDiscoveryUnitResult:
-    journal = JournalConfig(name="Biometrics", issn=("0006-341X",))
-    return OpenAlexDiscoveryUnitResult(
-        journal=journal,
-        coverage=CoverageUnit("openalex", CoverageComponent.OPENALEX_DISCOVERY,
-                              CoverageStatus.COMPLETE, journal=journal.name),
-        source=replace(resolved_source(journal), openalex_id="https://openalex.org/S8265502"),
-        records=(), issues=(),
-    )
-
-
-def seed_provider_cache(output_dir: Path) -> bytes:
-    unit = clean_openalex_unit()
-    write_provider_cache(output_dir, build_provider_cache(
-        ResolvedDateRange(date(2025, 1, 1), date(2025, 1, 31)),
-        DiscoveryResult((), (), (), units=(unit,)),
-        CrossrefDiscoveryResult((), ()), EvidenceRetrievalResult((), (), ()),
-    ))
-    return provider_cache_path(output_dir).read_bytes()
-
-
-def test_production_replaces_cache_including_empty_results_without_reading_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import literature_monitor.application.provider_cache as cache_module
-
-    config_path = write_monitor(tmp_path)
-    output_dir = tmp_path / "workspace"
-    seed_provider_cache(output_dir)
-    events = []
-    unit = clean_openalex_unit()
-    install_core_mocks(monkeypatch, events=events, openalex_units=(unit,))
-
-    def unexpected_read(*args, **kwargs):
-        raise AssertionError("production must not consume the cache")
-
-    monkeypatch.setattr(cache_module, "read_provider_cache", unexpected_read)
-    assert run_monitor(config_path).outcome is RunOutcome.COMPLETED
-    first = read_provider_cache(output_dir)
-    assert first.status is ProviderCacheReadStatus.AVAILABLE
-    assert len(first.cache.units) == 1
-    assert first.cache.resolved_date_range.from_date == date(2026, 1, 1)
-    install_core_mocks(monkeypatch, events=events)
-    assert run_monitor(config_path).outcome is RunOutcome.COMPLETED
-    second = read_provider_cache(output_dir)
-    assert second.cache.units == ()
-    assert events.count("openalex") == events.count("crossref") == events.count("supplement") == 2
-    assert {path.name for path in provider_cache_path(output_dir).parent.iterdir()} == {
-        "provider-cache.json", "last-run.json",
-    }
-
-
-def test_completed_with_errors_still_caches_clean_units(tmp_path, monkeypatch):
-    config_path = write_monitor(tmp_path)
-    unit = clean_openalex_unit()
-    install_core_mocks(monkeypatch, openalex_units=(unit,), crossref_issues=(
-        CrossrefDiscoveryIssue(EnrichmentIssueSeverity.ERROR, "work_retrieval",
-                              "Biometrics", "0006-341X", "provider failure"),
-    ))
-    result = run_monitor(config_path)
-    assert result.outcome is RunOutcome.COMPLETED_WITH_ERRORS
-    assert len(read_provider_cache(tmp_path / "workspace").cache.units) == 1
-
-
-@pytest.mark.parametrize("snapshot_failure", [False, True])
-def test_cache_failure_preserves_materialization_and_prior_cache_before_snapshot(
-    tmp_path, monkeypatch, snapshot_failure,
-):
-    import literature_monitor.safe_write as safe_write
-
-    config_path = write_monitor(tmp_path)
-    output_dir = tmp_path / "workspace"
-    previous = seed_provider_cache(output_dir)
-    install_core_mocks(monkeypatch)
-    original_replace = safe_write.os.replace
-
-    def fail_cache_replace(source, destination):
-        if Path(destination) == provider_cache_path(output_dir):
-            # This boundary must occur after actual Paper/Author materialization.
-            assert list((output_dir / "Papers").glob("*.md"))
-            assert list((output_dir / "Authors").glob("*.md"))
-            raise OSError("cache disk failure")
-        original_replace(source, destination)
-
-    monkeypatch.setattr(safe_write.os, "replace", fail_cache_replace)
-    if snapshot_failure:
-        def fail_snapshot(*args):
-            raise LastRunSnapshotWriteError(last_run_snapshot_path(output_dir), "snapshot failure")
-        monkeypatch.setattr(monitor, "write_last_run_snapshot", fail_snapshot)
-    result = run_monitor(config_path)
-    assert result.outcome is RunOutcome.COMPLETED_WITH_WARNINGS
-    assert result.created_papers == 1 and result.created_authors == 1
-    assert provider_cache_path(output_dir).read_bytes() == previous
-    assert [issue.component for issue in result.warnings] == (
-        [MonitorIssueComponent.PROVIDER_CACHE, MonitorIssueComponent.COVERAGE_SNAPSHOT]
-        if snapshot_failure else [MonitorIssueComponent.PROVIDER_CACHE]
-    )
-    if not snapshot_failure:
-        assert read_last_run_snapshot(output_dir).snapshot.outcome is RecordedRunOutcome.COMPLETED_WITH_WARNINGS
-
-
-def test_snapshot_failure_does_not_roll_back_successful_cache(tmp_path, monkeypatch):
-    config_path = write_monitor(tmp_path)
-    output_dir = tmp_path / "workspace"
-    previous = seed_provider_cache(output_dir)
-    install_core_mocks(monkeypatch)
-
-    def fail_snapshot(*args):
-        assert read_provider_cache(output_dir).cache.units == ()
-        raise LastRunSnapshotWriteError(last_run_snapshot_path(output_dir), "snapshot failure")
-
-    monkeypatch.setattr(monitor, "write_last_run_snapshot", fail_snapshot)
-    result = run_monitor(config_path)
-    assert result.outcome is RunOutcome.COMPLETED_WITH_WARNINGS
-    assert result.warnings[0].component is MonitorIssueComponent.COVERAGE_SNAPSHOT
-    assert provider_cache_path(output_dir).read_bytes() != previous
-
-
-def test_cache_schema_failure_is_warning_after_materialization(tmp_path, monkeypatch):
-    config_path = write_monitor(tmp_path)
-    output_dir = tmp_path / "workspace"
-    previous = seed_provider_cache(output_dir)
-    unit = clean_openalex_unit()
-    # Source normalization accepts an optional empty ISSN-L without an issue;
-    # the independent cache schema rejects that field, after materialization.
-    unit = replace(unit, source=replace(unit.source, issn_l=""))
-    install_core_mocks(monkeypatch, openalex_units=(unit,))
-    result = run_monitor(config_path)
-    assert result.outcome is RunOutcome.COMPLETED_WITH_WARNINGS
-    assert result.warnings[0].component is MonitorIssueComponent.PROVIDER_CACHE
-    assert list((output_dir / "Papers").glob("*.md"))
-    assert list((output_dir / "Authors").glob("*.md"))
-    assert provider_cache_path(output_dir).read_bytes() == previous
-    assert read_last_run_snapshot(output_dir).snapshot.outcome is RecordedRunOutcome.COMPLETED_WITH_WARNINGS
-
-
-@pytest.mark.parametrize("failure", ["invalid_config", "preflight", "canonicalization", "materialization"])
-def test_non_normal_completion_preserves_cache(tmp_path, monkeypatch, failure):
-    config_path = write_monitor(tmp_path)
-    output_dir = tmp_path / "workspace"
-    previous = seed_provider_cache(output_dir)
-    install_core_mocks(monkeypatch)
-    if failure == "invalid_config":
-        config_path.write_text("unknown: invalid\n")
-    elif failure == "preflight":
-        def fail_preflight(*args):
-            raise SearchBackendError("FTS unavailable")
-        monkeypatch.setattr(monitor, "validate_runtime_keyword", fail_preflight)
-    else:
-        def explode(*args, **kwargs):
-            raise RuntimeError("unexpected exception")
-        monkeypatch.setattr(monitor, "canonicalize_records" if failure == "canonicalization" else "materialize_papers", explode)
-    if failure in {"invalid_config", "preflight"}:
-        assert run_monitor(config_path).outcome is RunOutcome.INVALID_CONFIGURATION
-    else:
-        with pytest.raises(RuntimeError, match="unexpected exception"):
-            run_monitor(config_path)
-    assert provider_cache_path(output_dir).read_bytes() == previous
-
-
-def test_validate_and_diagnostic_core_materialization_leave_cache_unchanged(tmp_path, monkeypatch):
-    config_path = write_monitor(tmp_path)
-    output_dir = tmp_path / "workspace"
-    previous = seed_provider_cache(output_dir)
-    install_core_mocks(monkeypatch, openalex_units=(clean_openalex_unit(),))
-    monkeypatch.setattr(monitor, "resolve_journal_source", lambda client, journal, **kwargs: (resolved_source(journal), ()))
-    assert validate_monitor(config_path).outcome is ValidationOutcome.VALID
-    core = _run_canonical_core(config_path)
-    assert core.provider_cache.units
-    assert provider_cache_path(output_dir).read_bytes() == previous
-    assert _materialize_canonical_result(core, output_dir).outcome is RunOutcome.COMPLETED
-    assert provider_cache_path(output_dir).read_bytes() == previous
+def install_source_resolution_mock(monkeypatch, resolve):
+    def batch(client, journals, *, progress_callback=None):
+        units = []
+        for index, journal in enumerate(journals):
+            source, issues = resolve(client, journal, progress_callback=progress_callback,
+                                     operation=f"validation_source_resolution:{index}")
+            units.append(SourceResolutionUnit(journal, source, issues, None))
+        return tuple(units)
+    monkeypatch.setattr(monitor, "resolve_journal_sources_batched", batch)
 
 
 def test_runtime_contract_has_no_semantic_scholar_specific_issue_or_statistics_surface() -> None:
@@ -531,9 +398,8 @@ def test_canonical_core_preserves_real_orchestration_order_and_stops_before_mate
 
     assert result.outcome is RunOutcome.COMPLETED
     assert result.papers == (paper,)
-    assert events == [
-        "openalex",
-        "crossref",
+    assert set(events[:2]) == {"openalex", "crossref"}
+    assert events[2:] == [
         "supplement",
         "consolidate",
         "match",
@@ -950,7 +816,7 @@ def test_second_production_run_replaces_single_latest_snapshot(
         to_date=date(2026, 2, 28),
     )
     assert {path.name for path in (output_dir / ".literature-monitor").iterdir()} == {
-        "last-run.json", "provider-cache.json",
+        "last-run.json", "provider-state.sqlite3",
     }
 
 
@@ -1253,7 +1119,7 @@ def test_validate_monitor_success_and_only_resolves_sources(
     progress_events: list[ProgressEvent] = []
     source_callbacks: list[ProgressCallback | None] = []
 
-    monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kwargs: object())
+    monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kwargs: nullcontext(object()))
 
     def resolve(
         client: object,
@@ -1277,15 +1143,15 @@ def test_validate_monitor_success_and_only_resolves_sources(
             )
         return resolved_source(journal), ()
 
-    monkeypatch.setattr(monitor, "resolve_journal_source", resolve)
+    install_source_resolution_mock(monkeypatch, resolve)
 
     def unexpected(*args: object, **kwargs: object) -> object:
         raise AssertionError("validation must not enter Works or materialization paths")
 
     for name in (
-        "discover_journals",
+        "discover_journals_batched",
         "CrossrefClient",
-        "discover_crossref_journals",
+        "CrossrefRetrieval",
         "materialize_papers",
     ):
         monkeypatch.setattr(monitor, name, unexpected)
@@ -1335,60 +1201,30 @@ def test_validate_monitor_reuses_openalex_request_retry_progress(
     calls: list[str] = []
     request_count = 0
 
-    class Response:
-        def __init__(self, payload: dict[str, object]) -> None:
-            self._payload = json.dumps(payload).encode()
-
-        def __enter__(self) -> Response:
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-        def read(self) -> bytes:
-            return self._payload
-
-    def opener(request: object, *, timeout: float) -> Response:
+    def respond(request: httpx.Request) -> httpx.Response:
         nonlocal request_count
         request_count += 1
-        url = getattr(request, "full_url")
+        url = str(request.url)
         calls.append(url)
         if request_count == 1:
-            raise TimeoutError("simulated transient timeout")
-        if "0090-5364" in url:
-            return Response(
-                {
-                    "id": "https://openalex.org/S1234567",
-                    "display_name": "Annals of Statistics",
-                    "issn_l": "0090-5364",
-                    "issn": ["0090-5364"],
-                    "type": "journal",
-                    "alternate_titles": [],
-                    "abbreviated_title": None,
-                }
-            )
-        return Response(
-            {
-                "id": "https://openalex.org/S8265502",
-                "display_name": "Biometrics",
-                "issn_l": "0006-341X",
-                "issn": ["0006-341X", "1541-0420"],
-                "type": "journal",
-                "alternate_titles": [],
-                "abbreviated_title": None,
-            }
-        )
+            raise httpx.ReadTimeout("simulated transient timeout")
+        return httpx.Response(200, json={"meta": {"count": 2}, "results": [
+            {"id": "https://openalex.org/S1234567", "display_name": "Annals of Statistics",
+             "issn_l": "0090-5364", "issn": ["0090-5364"], "type": "journal"},
+            {"id": "https://openalex.org/S8265502", "display_name": "Biometrics",
+             "issn_l": "0006-341X", "issn": ["0006-341X", "1541-0420"], "type": "journal"},
+        ]})
 
-    client = OpenAlexClient(opener=opener, sleep=lambda _delay: None)
+    client = OpenAlexClient(transport=httpx.MockTransport(respond), sleep=lambda _delay: None)
     monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kwargs: client)
 
     def unexpected(*args: object, **kwargs: object) -> object:
         raise AssertionError("validation must not expand beyond Source resolution")
 
     for name in (
-        "discover_journals",
+        "discover_journals_batched",
         "CrossrefClient",
-        "discover_crossref_journals",
+        "CrossrefRetrieval",
         "materialize_papers",
     ):
         monkeypatch.setattr(monitor, name, unexpected)
@@ -1400,7 +1236,7 @@ def test_validate_monitor_reuses_openalex_request_retry_progress(
     )
 
     assert result.outcome is ValidationOutcome.VALID
-    assert request_count == 4
+    assert request_count == 2
     assert not any("/works" in url for url in calls)
     openalex_activity = [
         event.activity
@@ -1409,7 +1245,7 @@ def test_validate_monitor_reuses_openalex_request_retry_progress(
     ]
     assert any(
         activity.kind is ActivityKind.RETRYING
-        and activity.operation == "validation_source_resolution:0"
+        and activity.operation == "source_resolution:batch"
         for activity in openalex_activity
     )
     assert any(
@@ -1436,9 +1272,9 @@ def test_validate_monitor_source_issue_classification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_path = write_monitor(tmp_path)
-    monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kwargs: object())
+    monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kwargs: nullcontext(object()))
 
-    def resolve(client: object, journal: JournalConfig) -> tuple[ResolvedSource | None, tuple[DiscoveryIssue, ...]]:
+    def resolve(client: object, journal: JournalConfig, **kwargs) -> tuple[ResolvedSource | None, tuple[DiscoveryIssue, ...]]:
         source = resolved_source(journal) if severity is IssueSeverity.WARNING else None
         return source, (
             DiscoveryIssue(
@@ -1449,7 +1285,7 @@ def test_validate_monitor_source_issue_classification(
             ),
         )
 
-    monkeypatch.setattr(monitor, "resolve_journal_source", resolve)
+    install_source_resolution_mock(monkeypatch, resolve)
 
     result = validate_monitor(config_path)
 
@@ -1497,7 +1333,7 @@ def test_validate_monitor_local_failures_are_invalid_before_source_resolution(
         raise AssertionError("source resolution must not start")
 
     monkeypatch.setattr(monitor, "OpenAlexClient", unexpected)
-    monkeypatch.setattr(monitor, "resolve_journal_source", unexpected)
+    monkeypatch.setattr(monitor, "resolve_journal_sources_batched", unexpected)
     progress_events: list[ProgressEvent] = []
 
     result = validate_monitor(
@@ -1516,3 +1352,119 @@ def test_validate_monitor_local_failures_are_invalid_before_source_resolution(
         event.activity is None or event.activity.source != "openalex"
         for event in progress_events
     )
+
+
+class LifecycleTransport(httpx.MockTransport):
+    closed = False
+
+    def close(self) -> None:
+        self.closed = True
+        super().close()
+
+
+def install_owned_clients(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[tuple[object, LifecycleTransport]]]:
+    owned: dict[str, list[tuple[object, LifecycleTransport]]] = {"OpenAlexClient": [], "CrossrefClient": []}
+
+    def unexpected_request(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected HTTP request: {request.url}")
+
+    def factory(name: str, provider: type):
+        def create(**kwargs: object):
+            transport = LifecycleTransport(unexpected_request)
+            client = provider(transport=transport, **kwargs)
+            owned[name].append((client, transport))
+            return client
+        return create
+
+    monkeypatch.setattr(monitor, "OpenAlexClient", factory("OpenAlexClient", OpenAlexClient))
+    monkeypatch.setattr(monitor, "CrossrefClient", factory("CrossrefClient", CrossrefClient))
+    return owned
+
+
+@pytest.mark.parametrize("entrypoint", [run_monitor, _run_canonical_core])
+@pytest.mark.parametrize("failure_at", [None, "discover_journals_batched", "CrossrefRetrieval", "crossref_supplement", "assemble_live_provider_evidence", "match_searchable_projections", "hydrate_retained_openalex_versions", "canonicalize_records"])
+def test_canonical_execution_closes_owned_clients_on_all_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint,
+    failure_at: str | None,
+) -> None:
+    config_path = write_monitor(tmp_path)
+    install_core_mocks(monkeypatch, openalex_issues=(DiscoveryIssue(
+        severity=IssueSeverity.ERROR, stage="discovery", journal="Biometrics", message="provider failure",
+    ),))
+    owned = install_owned_clients(monkeypatch)
+    crossref_uses: list[object] = []
+
+    def track(original):
+        def call(execution, *args, **kwargs):
+            crossref_uses.append(execution.client)
+            return original(execution, *args, **kwargs)
+        return call
+
+    monkeypatch.setattr(monitor.CrossrefRetrieval, "discover", track(monitor.CrossrefRetrieval.discover))
+    monkeypatch.setattr(monitor.CrossrefRetrieval, "supplement", track(monitor.CrossrefRetrieval.supplement))
+    if failure_at is not None:
+        def fail(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("unexpected pipeline failure")
+        if failure_at == "crossref_supplement":
+            monkeypatch.setattr(monitor.CrossrefRetrieval, "supplement", fail)
+        else:
+            monkeypatch.setattr(monitor, failure_at, fail)
+        with pytest.raises(RuntimeError, match="unexpected pipeline failure"):
+            entrypoint(config_path)
+    else:
+        result = entrypoint(config_path)
+        assert result.outcome is RunOutcome.COMPLETED_WITH_ERRORS
+        assert crossref_uses == [owned["CrossrefClient"][0][0]] * 2
+
+    assert all(len(clients) == 1 for clients in owned.values())
+    assert all(transport.closed for clients in owned.values() for _, transport in clients)
+
+
+@pytest.mark.parametrize("unexpected_failure", [False, True])
+def test_validate_closes_owned_openalex_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unexpected_failure: bool,
+) -> None:
+    config_path = write_monitor(tmp_path)
+    owned = install_owned_clients(monkeypatch)
+
+    def resolve(client: object, journal: JournalConfig, **kwargs):
+        if unexpected_failure:
+            raise RuntimeError("unexpected resolution failure")
+        return None, (DiscoveryIssue(
+            severity=IssueSeverity.ERROR, stage="source_resolution", journal=journal.name, message="source failure",
+        ),)
+
+    install_source_resolution_mock(monkeypatch, resolve)
+    if unexpected_failure:
+        with pytest.raises(RuntimeError, match="unexpected resolution failure"):
+            validate_monitor(config_path)
+    else:
+        assert validate_monitor(config_path).outcome is ValidationOutcome.SOURCE_ERRORS
+
+    assert len(owned["OpenAlexClient"]) == 1
+    assert owned["OpenAlexClient"][0][1].closed
+    assert not owned["CrossrefClient"]
+
+
+def test_first_client_closes_when_second_client_construction_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = write_monitor(tmp_path)
+    install_core_mocks(monkeypatch)
+    owned = install_owned_clients(monkeypatch)
+
+    def fail(**kwargs: object):
+        raise RuntimeError("client construction failure")
+
+    monkeypatch.setattr(monitor, "OpenAlexClient", fail)
+    with pytest.raises(RuntimeError, match="client construction failure"):
+        _run_canonical_core(config_path)
+
+    assert not owned["OpenAlexClient"]
+    assert len(owned["CrossrefClient"]) == 1
+    assert owned["CrossrefClient"][0][1].closed

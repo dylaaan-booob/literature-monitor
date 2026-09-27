@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timezone
+from threading import Lock
 from typing import TextIO
 
 from literature_monitor.progress import (
@@ -119,27 +120,31 @@ class _CliProgressRenderer:
         self._tty = bool(stream.isatty())
         self._line_active = False
         self._closed = False
+        self._lock = Lock()
 
     def __call__(self, event: ProgressEvent) -> None:
-        if self._closed:
-            return
-        now = self._clock()
-        self._state.apply(event, at=now)
-        snapshot = self._state.snapshot(at=now, active=True)
-        if self._tty:
-            self._write_tty(snapshot, now=now)
-        else:
-            self._write_event_line(event, snapshot)
+        with self._lock:
+            if self._closed:
+                return
+            now = self._clock()
+            if not self._state.apply(event, at=now):
+                return
+            snapshot = self._state.snapshot(at=now, active=True)
+            if self._tty:
+                self._write_tty(snapshot, now=now)
+            else:
+                self._write_event_line(event, snapshot)
 
     def close(self) -> None:
-        if self._closed:
-            return
-        if self._tty and self._line_active:
-            # 先清掉临时动态行，再让既有 summary/error logging 接管 stderr。
-            self._stream.write("\r\x1b[2K\n")
-            self._stream.flush()
-            self._line_active = False
-        self._closed = True
+        with self._lock:
+            if self._closed:
+                return
+            if self._tty and self._line_active:
+                # 先清掉临时动态行，再让既有 summary/error logging 接管 stderr。
+                self._stream.write("\r\x1b[2K\n")
+                self._stream.flush()
+                self._line_active = False
+            self._closed = True
 
     def _write_tty(
         self,
@@ -158,17 +163,17 @@ class _CliProgressRenderer:
             )
             parts.append(_STAGE_LABELS[snapshot.progress_stage])
 
-        activity = snapshot.current_activity
-        if activity is not None:
-            parts.extend(_activity_parts(activity))
+        for activity in snapshot.activities:
+            activity_parts = _activity_parts(activity)
+            if activity.eta_seconds is not None:
+                activity_parts.append(f"ETA {_format_duration(activity.eta_seconds)}")
+            parts.append(" · ".join(activity_parts))
 
         if not parts:
             return
 
         elapsed = (now - self._started_at).total_seconds()
         parts.append(f"elapsed {_format_duration(elapsed)}")
-        if activity is not None and activity.eta_seconds is not None:
-            parts.append(f"ETA {_format_duration(activity.eta_seconds)}")
         if snapshot.inactivity_warning:
             parts.append("No recent activity")
 
@@ -192,10 +197,11 @@ class _CliProgressRenderer:
                 f"{_STAGE_LABELS[event.stage]}\n"
             )
 
-        if event.activity is not None and snapshot.current_activity is not None:
+        if event.activity is not None:
+            activity = next(item for item in snapshot.activities if item.source == event.activity.source)
             self._stream.write(
                 "[progress] "
-                + " · ".join(_activity_parts(snapshot.current_activity))
+                + " · ".join(_activity_parts(activity))
                 + "\n"
             )
 

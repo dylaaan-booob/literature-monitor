@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 from collections.abc import Sequence
+from contextlib import ExitStack
 from datetime import date
 from pathlib import Path
 
@@ -113,7 +114,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_monitor_date_arguments(run_parser)
     run_parser.add_argument("--reuse-provider-cache", action="store_true",
-                            help="explicitly reuse matching provider units from an exact-range cache")
+                            help="deprecated and ignored through v0.5.0; Provider-state reuse is automatic")
     last_run_parser = subparsers.add_parser(
         "last-run",
         help="show the latest successfully persisted production-run coverage snapshot",
@@ -361,10 +362,19 @@ def _log_coverage_summary(
             labels[summary.component.value],
             " · ".join(parts),
         )
-    reused = [f"{labels[summary.component.value]} {summary.reused_units}"
-              for summary in result.reuse_summary if summary.reused_units]
-    if reused:
-        logger.info("Cache reuse: %s", " · ".join(reused))
+    if isinstance(result, LastRunSnapshot):
+        reused = [f"{labels[summary.component.value]} {summary.reused_units}"
+                  for summary in result.reuse_summary if summary.reused_units]
+        if reused:
+            logger.info("Cache reuse: %s", " · ".join(reused))
+    elif isinstance(result, RunResult):
+        usage = result.state_usage
+        logger.info(
+            "Provider state: Crossref metadata %s reused · %s refreshed · %s new; "
+            "OpenAlex versions %s reused · %s hydrated",
+            usage.crossref_reused, usage.crossref_refreshed, usage.crossref_new,
+            usage.openalex_versions_reused, usage.openalex_versions_hydrated,
+        )
 
 
 def _log_canonicalization_summary(
@@ -558,6 +568,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1 if validation.outcome is ValidationOutcome.SOURCE_ERRORS else 0
 
     if args.command == "run":
+        if args.reuse_provider_cache:
+            print("Provider-state reuse is now automatic.", file=sys.stderr)
         progress = _CliProgressRenderer(
             sys.stderr,
             show_run_stages=True,
@@ -567,7 +579,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.config,
                 date_override=_date_override_from_args(args),
                 progress_callback=progress,
-                reuse_provider_cache=args.reuse_provider_cache,
             )
         finally:
             progress.close()
@@ -695,105 +706,106 @@ def main(argv: Sequence[str] | None = None) -> int:
                 logger.error("unknown configured journal %r", args.journal)
                 return 2
 
-        crossref_client = None
-        if args.command in {
-            "crossref-discover",
-            "crossref-enrich",
-        }:
-            crossref_client = CrossrefClient(
-                mailto=os.environ.get("CROSSREF_MAILTO")
-            )
+        with ExitStack() as clients:
+            crossref_client = None
+            if args.command in {
+                "crossref-discover",
+                "crossref-enrich",
+            }:
+                crossref_client = clients.enter_context(
+                    CrossrefClient(mailto=os.environ.get("CROSSREF_MAILTO"))
+                )
 
-        if args.command == "crossref-discover":
-            assert crossref_client is not None
-            discovery = discover_crossref_journals(
-                crossref_client,
+            if args.command == "crossref-discover":
+                assert crossref_client is not None
+                discovery = discover_crossref_journals(
+                    crossref_client,
+                    journals,
+                    resolved_date_range.from_date,
+                    resolved_date_range.to_date,
+                )
+                _log_crossref_discovery_issues(logger, discovery.issues)
+                for record in discovery.records:
+                    print(record.model_dump_json())
+                logger.info(
+                    "Crossref diagnostic completed: %d records, %d issues",
+                    len(discovery.records),
+                    len(discovery.issues),
+                )
+                return 1 if discovery.has_errors else 0
+
+            openalex_client = clients.enter_context(
+                OpenAlexClient(api_key=os.environ.get("OPENALEX_API_KEY"))
+            )
+            openalex = discover_journals(
+                openalex_client,
                 journals,
                 resolved_date_range.from_date,
                 resolved_date_range.to_date,
             )
-            _log_crossref_discovery_issues(logger, discovery.issues)
-            for record in discovery.records:
-                print(record.model_dump_json())
-            logger.info(
-                "Crossref diagnostic completed: %d records, %d issues",
-                len(discovery.records),
-                len(discovery.issues),
-            )
-            return 1 if discovery.has_errors else 0
+            _log_openalex_discovery(logger, openalex)
 
-        openalex_client = OpenAlexClient(
-            api_key=os.environ.get("OPENALEX_API_KEY")
-        )
-        openalex = discover_journals(
-            openalex_client,
-            journals,
-            resolved_date_range.from_date,
-            resolved_date_range.to_date,
-        )
-        _log_openalex_discovery(logger, openalex)
-
-        if args.command == "openalex-discover":
-            for record in openalex.records:
-                print(record.model_dump_json())
-            logger.info(
-                "OpenAlex diagnostic completed: %d sources, %d records, %d issues",
-                len(openalex.sources),
-                len(openalex.records),
-                len(openalex.issues),
-            )
-            return 1 if openalex.has_errors else 0
-
-        if args.command in {"openalex-filter", "crossref-enrich"}:
-            records = openalex.records
-            projections = tuple(
-                build_metadata_searchable_projection(record.metadata)
-                for record in records
-            )
-            matches = _match_local_search(logger, keyword_ast, projections)
-            if matches is None:
-                return 2
-            filtered = tuple(
-                record
-                for record, matched in zip(records, matches, strict=True)
-                if matched
-            )
-            if args.command == "openalex-filter":
-                for record in filtered:
+            if args.command == "openalex-discover":
+                for record in openalex.records:
                     print(record.model_dump_json())
                 logger.info(
-                    "OpenAlex filter diagnostic completed: %d discovered, "
-                    "%d retained, %d filtered out, %d issues",
+                    "OpenAlex diagnostic completed: %d sources, %d records, %d issues",
+                    len(openalex.sources),
                     len(openalex.records),
-                    len(filtered),
-                    len(openalex.records) - len(filtered),
                     len(openalex.issues),
                 )
                 return 1 if openalex.has_errors else 0
 
-            assert crossref_client is not None
-            enrichment = enrich_records(crossref_client, filtered)
-            _log_enrichment_issues(logger, enrichment.issues)
-            for record in enrichment.records:
-                print(record.model_dump_json())
-            enriched_count = sum(
-                record.crossref is not None for record in enrichment.records
-            )
-            logger.info(
-                "Crossref enrichment diagnostic completed: %d discovered, "
-                "%d retained, %d enriched, %d without DOI, %d unavailable, "
-                "%d failed, %d OpenAlex issues, %d Crossref issues",
-                len(openalex.records),
-                len(filtered),
-                enriched_count,
-                sum(issue.stage == "missing_doi" for issue in enrichment.issues),
-                sum(issue.stage == "not_found" for issue in enrichment.issues),
-                sum(
-                    issue.severity is EnrichmentIssueSeverity.ERROR
-                    for issue in enrichment.issues
-                ),
-                len(openalex.issues),
-                len(enrichment.issues),
-            )
-            return 1 if openalex.has_errors or enrichment.has_errors else 0
+            if args.command in {"openalex-filter", "crossref-enrich"}:
+                records = openalex.records
+                projections = tuple(
+                    build_metadata_searchable_projection(record.metadata)
+                    for record in records
+                )
+                matches = _match_local_search(logger, keyword_ast, projections)
+                if matches is None:
+                    return 2
+                filtered = tuple(
+                    record
+                    for record, matched in zip(records, matches, strict=True)
+                    if matched
+                )
+                if args.command == "openalex-filter":
+                    for record in filtered:
+                        print(record.model_dump_json())
+                    logger.info(
+                        "OpenAlex filter diagnostic completed: %d discovered, "
+                        "%d retained, %d filtered out, %d issues",
+                        len(openalex.records),
+                        len(filtered),
+                        len(openalex.records) - len(filtered),
+                        len(openalex.issues),
+                    )
+                    return 1 if openalex.has_errors else 0
+
+                assert crossref_client is not None
+                enrichment = enrich_records(crossref_client, filtered)
+                _log_enrichment_issues(logger, enrichment.issues)
+                for record in enrichment.records:
+                    print(record.model_dump_json())
+                enriched_count = sum(
+                    record.crossref is not None for record in enrichment.records
+                )
+                logger.info(
+                    "Crossref enrichment diagnostic completed: %d discovered, "
+                    "%d retained, %d enriched, %d without DOI, %d unavailable, "
+                    "%d failed, %d OpenAlex issues, %d Crossref issues",
+                    len(openalex.records),
+                    len(filtered),
+                    enriched_count,
+                    sum(issue.stage == "missing_doi" for issue in enrichment.issues),
+                    sum(issue.stage == "not_found" for issue in enrichment.issues),
+                    sum(
+                        issue.severity is EnrichmentIssueSeverity.ERROR
+                        for issue in enrichment.issues
+                    ),
+                    len(openalex.issues),
+                    len(enrichment.issues),
+                )
+                return 1 if openalex.has_errors or enrichment.has_errors else 0
     return 2

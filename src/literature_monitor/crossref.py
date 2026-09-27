@@ -5,20 +5,18 @@ from __future__ import annotations
 import json
 import math
 import re
-import socket
 import time
 import unicodedata
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from html.parser import HTMLParser
 from typing import Annotated, Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import quote, unquote, urlencode, urljoin, urlsplit
 
-from pydantic import Field, ValidationError, model_validator
+import httpx
+from pydantic import Field, ValidationError, field_validator, model_validator
 
 from literature_monitor.config import JournalConfig
 from literature_monitor.coverage import (
@@ -40,6 +38,7 @@ from literature_monitor.models import (
     ProviderWorkEvidence,
 )
 from literature_monitor.openalex import OpenAlexWorkRecord
+from literature_monitor.provider_revision import parse_revision_timestamp
 from literature_monitor.progress import (
     ActivityKind,
     ActivityUpdate,
@@ -49,6 +48,9 @@ from literature_monitor.progress import (
 
 CROSSREF_BASE_URL = "https://api.crossref.org"
 CROSSREF_PAGE_SIZE = 1000
+# Internal URL/filter bound for manifests, DOI probes and full hydration (§30.3).
+_CROSSREF_MANIFEST_BATCH_SIZE = 20
+_CROSSREF_MANIFEST_FIELDS = "DOI,ISSN,indexed"
 _ISSN_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{3}[0-9X]$")
 _RATE_LIMIT_INTERVAL_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)?)s\s*$", re.IGNORECASE)
 _ORCID_PATTERN = re.compile(
@@ -94,6 +96,15 @@ class CrossrefRelation(DomainModel):
     asserted_by: NonEmptyStr | None = None
 
 
+def parse_crossref_indexed_at(value: object) -> datetime | None:
+    """Shared by full records, manifest members, and durable revision validation."""
+    if isinstance(value, dict):
+        if "date-time" not in value or value["date-time"] is None:
+            raise ValueError("Crossref indexed requires date-time")
+        value = value["date-time"]
+    return parse_revision_timestamp(value)
+
+
 class CrossrefWorkRecord(DomainModel):
     doi: NonEmptyStr
     title: NonEmptyStr | None = None
@@ -105,6 +116,12 @@ class CrossrefWorkRecord(DomainModel):
     relations: tuple[CrossrefRelation, ...] = ()
     work_type: NonEmptyStr | None = None
     provenance: MetadataSource
+    indexed_at: datetime | None = Field(default=None, exclude=True)
+
+    @field_validator("indexed_at", mode="before")
+    @classmethod
+    def normalize_revision(cls, value: object) -> datetime | None:
+        return parse_crossref_indexed_at(value)
 
     def to_evidence(
         self,
@@ -237,6 +254,50 @@ class CrossrefRecordError(CrossrefError):
     """A Crossref record cannot be normalized safely."""
 
 
+class CrossrefDOIOutcomeKind(str, Enum):
+    RECORD = "record"
+    PRIME_REDIRECT = "prime_redirect"
+    NOT_FOUND = "not_found"
+
+
+@dataclass(frozen=True)
+class CrossrefDOIOutcome:
+    kind: CrossrefDOIOutcomeKind
+    payload: dict[str, Any] | None = None
+    prime_doi: str | None = None
+
+
+class _PrimeRedirect(CrossrefError):
+    def __init__(self, doi: str) -> None:
+        self.doi = doi
+
+
+def _redirect_prime_doi(response: httpx.Response) -> str:
+    locations = response.headers.get_list("location")
+    if len(locations) != 1 or not locations[0].strip():
+        raise CrossrefRequestError("Crossref redirect lacks an unambiguous Location")
+    try:
+        if any(c.isspace() or ord(c) < 32 for c in locations[0]):
+            raise ValueError("malformed Location")
+        target = urlsplit(urljoin(str(response.request.url), locations[0]))
+        if (target.scheme != "https" or target.hostname != "api.crossref.org"
+                or target.port not in (None, 443) or target.username is not None
+                or target.password is not None or target.query or target.fragment):
+            raise ValueError("unsafe target")
+        prefix = next((p for p in ("/v1/works/", "/works/") if target.path.startswith(p)), None)
+        if prefix is None:
+            raise ValueError("not a work target")
+        if re.search(r"%(?![0-9a-fA-F]{2})", target.path):
+            raise ValueError("malformed percent encoding")
+        raw = unquote(target.path[len(prefix):], errors="strict")
+        doi = normalize_doi(raw)
+        if doi is None or not re.fullmatch(r"10\.\d{4,9}/\S+", doi):
+            raise ValueError("invalid prime DOI")
+        return doi
+    except (ValueError, UnicodeError) as error:
+        raise CrossrefRequestError("Crossref redirect has an invalid prime DOI target") from error
+
+
 def _report_activity(
     callback: ProgressCallback | None,
     activity: ActivityUpdate | None,
@@ -254,21 +315,46 @@ def _progress_total(value: Any) -> int | None:
 
 
 class CrossrefClient:
+    """Own one pooled HTTP client; close it after each execution, usually with `with`."""
+
     def __init__(
         self,
         *,
         mailto: str | None = None,
         base_url: str = CROSSREF_BASE_URL,
         timeout: float = 30,
-        opener: Callable[..., Any] = urlopen,
+        transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.mailto = mailto.strip() if mailto and mailto.strip() else None
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self._opener = opener
+        try:
+            self._http_client = httpx.Client(
+                transport=transport,
+                timeout=timeout,
+                follow_redirects=False,
+            )
+        except httpx.InvalidURL:
+            if transport is not None:
+                raise
+            # No URL configuration is passed here; InvalidURL comes from env proxies.
+            self._http_client = httpx.Client(
+                timeout=timeout,
+                follow_redirects=False,
+                trust_env=False,
+            )
         self._sleep = sleep
         self._rate_limit_delay: float | None = None
+
+    def close(self) -> None:
+        self._http_client.close()
+
+    def __enter__(self) -> CrossrefClient:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
 
     def _update_rate_limit(self, headers: Any) -> None:
         if headers is None or not hasattr(headers, "get"):
@@ -355,6 +441,69 @@ class CrossrefClient:
             progress_callback=progress_callback,
             activity=activity,
         )
+
+    def get_doi_outcome(
+        self, doi: str, *, progress_callback: ProgressCallback | None = None,
+    ) -> CrossrefDOIOutcome:
+        """Observe singleton alias/404 outcomes without changing the legacy lookup."""
+        try:
+            normalized = normalize_doi(doi)
+        except ValueError as error:
+            raise CrossrefRecordError("invalid requested DOI") from error
+        if normalized is None:
+            raise CrossrefRecordError("missing requested DOI")
+        activity = ActivityUpdate(kind=ActivityKind.WORKING, source="crossref",
+                                  operation="doi_lookup", label="Looking up Crossref DOI",
+                                  detail=f"DOI {normalized}", unit="doi")
+        try:
+            payload = self._request_json(
+                f"/v1/works/{quote(normalized, safe='')}", {},
+                not_found_message=f"DOI {normalized} is not present in Crossref",
+                progress_callback=progress_callback, activity=activity, observe_alias=True,
+            )
+        except CrossrefNotFoundError:
+            return CrossrefDOIOutcome(CrossrefDOIOutcomeKind.NOT_FOUND)
+        except _PrimeRedirect as outcome:
+            return CrossrefDOIOutcome(CrossrefDOIOutcomeKind.PRIME_REDIRECT, prime_doi=outcome.doi)
+        return CrossrefDOIOutcome(CrossrefDOIOutcomeKind.RECORD, payload=payload)
+
+    def get_manifest_page(
+        self, issns: Sequence[str], from_date: date, to_date: date, *,
+        cursor: str | None = None, progress_callback: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        if not issns or len(issns) > _CROSSREF_MANIFEST_BATCH_SIZE:
+            raise ValueError("manifest ISSN batch must be nonempty and internally bounded")
+        if from_date > to_date:
+            raise ValueError("from_date must not be after to_date")
+        if any(not _valid_issn(issn) for issn in issns):
+            raise ValueError("manifest requires normalized valid ISSNs")
+        filters = [f"issn:{issn}" for issn in issns]
+        filters += [f"from-pub-date:{from_date.isoformat()}", f"until-pub-date:{to_date.isoformat()}"]
+        params = {"filter": ",".join(filters), "select": _CROSSREF_MANIFEST_FIELDS,
+                  "rows": str(CROSSREF_PAGE_SIZE)}
+        if cursor is not None:
+            params["cursor"] = cursor
+        return self._request_json("/v1/works", params, progress_callback=progress_callback,
+                                  activity=ActivityUpdate(kind=ActivityKind.WORKING, source="crossref",
+                                      operation="manifest", label="Retrieving Crossref manifest",
+                                      detail=f"{', '.join(issns)} · {from_date} .. {to_date}", unit="work"))
+
+    def get_doi_batch(
+        self, dois: Sequence[str], *, thin: bool = False,
+        progress_callback: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        if not dois or len(dois) > _CROSSREF_MANIFEST_BATCH_SIZE:
+            raise ValueError("DOI batch must be nonempty and internally bounded")
+        if any(normalize_doi(doi) != doi for doi in dois):
+            raise ValueError("DOI batch requires normalized identities")
+        params = {"filter": ",".join(f"doi:{doi}" for doi in dois), "rows": str(CROSSREF_PAGE_SIZE)}
+        if thin:
+            params["select"] = _CROSSREF_MANIFEST_FIELDS
+        return self._request_json("/v1/works", params, progress_callback=progress_callback,
+                                  activity=ActivityUpdate(kind=ActivityKind.WORKING, source="crossref",
+                                      operation="doi_probe" if thin else "full_hydration",
+                                      label="Probing Crossref revisions" if thin else "Hydrating Crossref records",
+                                      detail=", ".join(dois), unit="doi"))
 
     def iter_journal_work_pages(
         self,
@@ -490,6 +639,7 @@ class CrossrefClient:
         not_found_message: str | None = None,
         progress_callback: ProgressCallback | None = None,
         activity: ActivityUpdate | None = None,
+        observe_alias: bool = False,
     ) -> dict[str, Any]:
         query = dict(params)
         if self.mailto is not None:
@@ -497,13 +647,10 @@ class CrossrefClient:
         url = f"{self.base_url}{path}"
         if query:
             url = f"{url}?{urlencode(query)}"
-        request = Request(
-            url,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "literature-monitor/0.4.2",
-            },
-        )
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "literature-monitor/0.4.2",
+        }
 
         self._wait_for_rate_limit(
             progress_callback=progress_callback,
@@ -526,9 +673,13 @@ class CrossrefClient:
                     ),
                 )
             try:
-                with self._opener(request, timeout=self.timeout) as response:
-                    payload = json.loads(response.read())
-                    response_headers = getattr(response, "headers", None)
+                response = self._http_client.get(url, headers=headers, timeout=self.timeout)
+                if observe_alias and response.status_code in (301, 308):
+                    self._update_rate_limit(response.headers)
+                    raise _PrimeRedirect(_redirect_prime_doi(response))
+                response.raise_for_status()
+                payload = json.loads(response.content)
+                response_headers = response.headers
                 if not isinstance(payload, dict):
                     raise CrossrefRequestError(
                         "Crossref returned a non-object JSON response"
@@ -549,10 +700,11 @@ class CrossrefClient:
                         ),
                     )
                 return payload
-            except HTTPError as error:
-                if error.code == 404 and not_found_message is not None:
+            except httpx.HTTPStatusError as error:
+                status_code = error.response.status_code
+                if status_code == 404 and not_found_message is not None:
                     raise CrossrefNotFoundError(not_found_message) from error
-                if (error.code == 429 or error.code >= 500) and attempt < 2:
+                if (status_code == 429 or status_code >= 500) and attempt < 2:
                     delay = self._retry_delay(attempt)
                     if activity is not None:
                         # retry 事件先于 backoff，且沿用所属 ISSN/DOI activity identity。
@@ -563,19 +715,19 @@ class CrossrefClient:
                                 kind=ActivityKind.RETRYING,
                                 label="Retrying Crossref request",
                                 detail=(
-                                    f"{activity.detail} · HTTP {error.code} · "
+                                    f"{activity.detail} · HTTP {status_code} · "
                                     f"backoff {delay}s"
                                     if activity.detail
-                                    else f"HTTP {error.code} · backoff {delay}s"
+                                    else f"HTTP {status_code} · backoff {delay}s"
                                 ),
                             ),
                         )
                     self._sleep(delay)
                     continue
                 raise CrossrefRequestError(
-                    f"Crossref request failed with HTTP {error.code}"
+                    f"Crossref request failed with HTTP {status_code}"
                 ) from error
-            except (TimeoutError, socket.timeout, URLError, OSError) as error:
+            except httpx.RequestError as error:
                 if attempt < 2:
                     delay = self._retry_delay(attempt)
                     if activity is not None:
@@ -602,6 +754,242 @@ class CrossrefClient:
                 raise CrossrefRequestError("Crossref returned invalid JSON") from error
 
         raise AssertionError("unreachable")
+
+
+@dataclass(frozen=True)
+class CrossrefManifestMember:
+    doi: str
+    issns: tuple[str, ...]
+    indexed_at: datetime | None
+
+    def __post_init__(self) -> None:
+        if normalize_doi(self.doi) != self.doi or not re.fullmatch(r"10\.\d{4,9}/\S+", self.doi):
+            raise ValueError("manifest DOI must already be normalized")
+        if self.issns != tuple(sorted(set(self.issns))) or any(not _valid_issn(i) for i in self.issns):
+            raise ValueError("manifest ISSNs must be normalized, sorted and unique")
+        object.__setattr__(self, "indexed_at", parse_crossref_indexed_at(self.indexed_at))
+
+
+@dataclass(frozen=True)
+class CrossrefManifestUnit:
+    issn: str
+    members: tuple[CrossrefManifestMember, ...]
+    complete: bool
+    issues: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CrossrefHydration:
+    doi: str
+    record: CrossrefWorkRecord | None
+    issues: tuple[str, ...] = ()
+
+
+def _crossref_work_list(payload: dict[str, Any]) -> tuple[list[Any], int | None]:
+    if payload.get("status") != "ok" or payload.get("message-type") != "work-list":
+        raise CrossrefRequestError("Crossref batch response has an invalid envelope")
+    message = payload.get("message")
+    if not isinstance(message, dict) or not isinstance(message.get("items"), list):
+        raise CrossrefRequestError("Crossref batch response lacks a valid items list")
+    total = _progress_total(message.get("total-results"))
+    return message["items"], total
+
+
+def normalize_crossref_manifest_member(item: object) -> tuple[CrossrefManifestMember, tuple[str, ...]]:
+    if not isinstance(item, dict):
+        raise CrossrefRecordError("Crossref manifest item is not an object")
+    try:
+        doi = normalize_doi(item.get("DOI"))
+    except ValueError as error:
+        raise CrossrefRecordError("Crossref manifest has an invalid DOI") from error
+    if doi is None:
+        raise CrossrefRecordError("Crossref manifest is missing DOI")
+    warnings: list[str] = []
+    issns = tuple(_normalize_issns(item, warnings))
+    try:
+        indexed_at = parse_crossref_indexed_at(item.get("indexed"))
+    except ValueError:
+        indexed_at = None
+    if indexed_at is None:
+        warnings.append("Crossref manifest lacks a usable indexed revision")
+    try:
+        return CrossrefManifestMember(doi, issns, indexed_at), tuple(warnings)
+    except ValueError as error:
+        raise CrossrefRecordError("Crossref manifest has an invalid DOI") from error
+
+
+def _merge_manifest_members(
+    members: Sequence[CrossrefManifestMember],
+) -> tuple[tuple[CrossrefManifestMember, ...], tuple[str, ...]]:
+    merged: dict[str, CrossrefManifestMember] = {}
+    issues: list[str] = []
+    for member in members:
+        previous = merged.get(member.doi)
+        if previous is None:
+            merged[member.doi] = member
+        else:
+            revision = member.indexed_at if member.indexed_at == previous.indexed_at else None
+            if revision is None and previous.indexed_at != member.indexed_at:
+                issues.append(f"conflicting manifest revisions for {member.doi}")
+            merged[member.doi] = CrossrefManifestMember(
+                member.doi, tuple(sorted(set(previous.issns) | set(member.issns))), revision,
+            )
+    return tuple(merged.values()), tuple(issues)
+
+
+def _read_manifest_page(
+    payload: dict[str, Any], issns: Sequence[str],
+) -> tuple[tuple[CrossrefManifestMember, ...], int | None, tuple[str, ...]]:
+    items, total = _crossref_work_list(payload)
+    members, issues = [], []
+    if total is None:
+        issues.append("Crossref manifest lacks usable total-results")
+    for item in items:
+        try:
+            member, warnings = normalize_crossref_manifest_member(item)
+            issues.extend(warnings)
+            if not set(member.issns).intersection(issns):
+                raise CrossrefRecordError("Crossref manifest member cannot map to a queried ISSN")
+            members.append(member)
+        except CrossrefRecordError as error:
+            issues.append(str(error))
+    merged, conflicts = _merge_manifest_members(members)
+    return merged, total, tuple(issues) + conflicts
+
+
+def retrieve_crossref_manifests(
+    client: CrossrefClient, issns: Sequence[str], from_date: date, to_date: date, *,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[CrossrefManifestUnit, ...]:
+    """ISSN → date → single-day cursor planner, retaining trustworthy siblings."""
+    if from_date > to_date:
+        raise ValueError("from_date must not be after to_date")
+    ordered = tuple(dict.fromkeys(issns))
+
+    def units(group, members, complete, issues):
+        return {issn: CrossrefManifestUnit(issn, tuple(m for m in members if issn in m.issns),
+                                          complete, tuple(issues)) for issn in group}
+
+    def cursor_day(issn, day):
+        members, issues, seen = (), [], set()
+        cursor, expected = "*", None
+        while True:
+            try:
+                if cursor in seen:
+                    raise CrossrefRequestError("Crossref returned a repeated cursor")
+                seen.add(cursor)
+                payload = client.get_manifest_page((issn,), day, day, cursor=cursor,
+                                                    progress_callback=progress_callback)
+                page, total, warnings = _read_manifest_page(payload, (issn,))
+                previous_count = len(members)
+                members, conflicts = _merge_manifest_members((*members, *page))
+                issues.extend((*warnings, *conflicts))
+                if total is None:
+                    raise CrossrefRequestError("Crossref cursor lacks usable total-results")
+                if expected is not None and total != expected:
+                    raise CrossrefRequestError("Crossref cursor total-results changed during traversal")
+                expected = total
+                if len(members) > total:
+                    raise CrossrefRequestError("Crossref manifest unique count exceeds total-results")
+                if len(members) == total and not issues:
+                    return units((issn,), members, True, ())
+                if len(members) == previous_count and payload["message"]["items"]:
+                    raise CrossrefRequestError("Crossref cursor made no unique DOI progress")
+                if len(payload["message"]["items"]) < CROSSREF_PAGE_SIZE:
+                    raise CrossrefRequestError("Crossref cursor evidence does not reconcile with total-results")
+                next_cursor = payload["message"].get("next-cursor")
+                if not isinstance(next_cursor, str) or not next_cursor.strip():
+                    raise CrossrefRequestError("Crossref manifest lacks a valid next cursor")
+                cursor = next_cursor
+            except CrossrefError as error:
+                return units((issn,), members, False, (*issues, str(error)))
+
+    def plan(group, start, end):
+        members, issues = (), ()
+        try:
+            payload = client.get_manifest_page(group, start, end, progress_callback=progress_callback)
+            members, total, issues = _read_manifest_page(payload, group)
+            if total is not None and total <= CROSSREF_PAGE_SIZE and len(members) == total and not issues:
+                return units(group, members, True, ())
+            issues += ("Crossref manifest is oversized or incomplete",)
+        except CrossrefError as error:
+            issues = (str(error),)
+            cause = error.__cause__
+            if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code in (401, 403):
+                return units(group, members, False, issues)
+        if len(group) > 1:
+            middle = len(group) // 2
+            children = plan(group[:middle], start, end) | plan(group[middle:], start, end)
+        elif start < end:
+            middle = start + timedelta(days=(end - start).days // 2)
+            left, right = plan(group, start, middle), plan(group, middle + timedelta(days=1), end)
+            child = left[group[0]]
+            other = right[group[0]]
+            combined, conflicts = _merge_manifest_members((*child.members, *other.members))
+            children = units(group, combined, child.complete and other.complete and not conflicts,
+                             (*child.issues, *other.issues, *conflicts))
+        else:
+            children = cursor_day(group[0], start)
+        for issn, child in children.items():
+            if not child.complete:
+                combined, conflicts = _merge_manifest_members(
+                    (*child.members, *(m for m in members if issn in m.issns)))
+                children[issn] = CrossrefManifestUnit(issn, combined, False,
+                                                      (*child.issues, *issues, *conflicts))
+        return children
+
+    result = {}
+    for offset in range(0, len(ordered), _CROSSREF_MANIFEST_BATCH_SIZE):
+        result.update(plan(ordered[offset:offset + _CROSSREF_MANIFEST_BATCH_SIZE], from_date, to_date))
+    return tuple(result[issn] for issn in ordered)
+
+
+def hydrate_crossref_records(
+    client: CrossrefClient, dois: Sequence[str], *, retrieved_at: datetime,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[CrossrefHydration, ...]:
+    """Full DOI batches, splitting only unresolved records after recoverable failures."""
+    ordered = tuple(dict.fromkeys(dois))
+    results: dict[str, CrossrefHydration] = {}
+
+    def hydrate(group):
+        errors: list[str] = []
+        recoverable = True
+        try:
+            items, _ = _crossref_work_list(client.get_doi_batch(group, progress_callback=progress_callback))
+            candidates: dict[str, list[tuple[CrossrefWorkRecord, tuple[str, ...]]]] = {}
+            for item in items:
+                try:
+                    record, warnings = normalize_crossref_discovered_work(item, retrieved_at)
+                    validate_normalized_crossref_record(record)
+                    if record.doi in group:
+                        candidates.setdefault(record.doi, []).append((record, warnings))
+                except (CrossrefRecordError, ValueError) as error:
+                    errors.append(str(error))
+            for doi, values in candidates.items():
+                record, warnings = values[0]
+                if any(other != record for other, _ in values[1:]):
+                    errors.append(f"conflicting full records for {doi}")
+                else:
+                    results[doi] = CrossrefHydration(doi, record, warnings)
+        except CrossrefError as error:
+            errors.append(str(error))
+            cause = error.__cause__
+            recoverable = not (isinstance(cause, httpx.HTTPStatusError)
+                               and cause.response.status_code in (401, 403))
+        missing = tuple(doi for doi in group if doi not in results)
+        if len(group) > 1 and missing and recoverable:
+            middle = (len(missing) + 1) // 2
+            hydrate(missing[:middle])
+            if missing[middle:]:
+                hydrate(missing[middle:])
+        else:
+            for doi in missing:
+                results[doi] = CrossrefHydration(doi, None, tuple(errors) or ("required full Crossref record is missing",))
+
+    for offset in range(0, len(ordered), _CROSSREF_MANIFEST_BATCH_SIZE):
+        hydrate(ordered[offset:offset + _CROSSREF_MANIFEST_BATCH_SIZE])
+    return tuple(results[doi] for doi in ordered)
 
 
 class _AbstractTextParser(HTMLParser):
@@ -925,6 +1313,11 @@ def _normalize_crossref_message(
         else retrieved_at
     )
     warnings: list[str] = []
+    try:
+        indexed_at = parse_crossref_indexed_at(message.get("indexed"))
+    except ValueError:
+        indexed_at = None
+        warnings.append("invalid indexed was treated as missing")
     title = _first_optional_string(message.get("title"), "title", warnings)
     journal = _first_optional_string(
         message.get("container-title"), "container-title", warnings
@@ -955,6 +1348,7 @@ def _normalize_crossref_message(
             dates=tuple(dates),
             relations=tuple(relations),
             work_type=work_type,
+            indexed_at=indexed_at,
             provenance=MetadataSource(
                 provider="crossref",
                 record_id=doi,

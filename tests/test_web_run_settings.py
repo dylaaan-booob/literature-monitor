@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import re
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
 
@@ -39,6 +39,9 @@ from literature_monitor.progress import (
     PROGRESS_STAGES,
     ActivityKind,
     ActivitySnapshot,
+    ActivityUpdate,
+    ProgressEvent,
+    ProgressState,
 )
 from literature_monitor.web.app import create_app
 from literature_monitor.web.run_presentation import build_run_presentation
@@ -262,7 +265,7 @@ def running_snapshot(
             PROGRESS_STAGES.index(stage) + 1 if stage is not None else None
         ),
         stage_total=len(PROGRESS_STAGES),
-        current_activity=activity,
+        activities=(activity,) if activity is not None else (),
         stage_started_at=actual_started_at if stage is not None else None,
         last_activity_at=last_activity_at,
         worker_alive=worker_alive,
@@ -387,8 +390,7 @@ class StubCoordinator:
         self.start_calls = 0
         self.snapshot_calls = 0
 
-    def start(self, *, reuse_provider_cache: bool = False) -> StartResult:
-        self.reuse_provider_cache = reuse_provider_cache
+    def start(self) -> StartResult:
         self.start_calls += 1
         if self.snapshot_after_start is not None:
             self.current_snapshot = self.snapshot_after_start
@@ -430,45 +432,31 @@ def test_run_post_requires_csrf_before_start(tmp_path: Path) -> None:
     assert coordinator.start_calls == 0
 
 
-@pytest.mark.parametrize("choice,expected", [(None, False), ("false", False), ("true", True)])
-def test_run_form_binds_transient_reuse_choice(tmp_path, choice, expected):
+def test_run_form_has_only_run_and_requires_no_mode_field(tmp_path):
     app = create_app(tmp_path / "monitor.yaml")
     coordinator = StubCoordinator()
     app.state.run_coordinator = coordinator
     with TestClient(app, base_url="http://localhost") as client:
         html = client.get("/fragments/run").text
-        assert "Run with cache reuse" in html
-        data = {"csrf_token": csrf_from_html(html)}
-        if choice is not None:
-            data["reuse_provider_cache"] = choice
-        response = client.post("/run", data=data)
-    assert response.status_code == 200
-    assert coordinator.reuse_provider_cache is expected
+        assert ">Run</button>" in html
+        assert "reuse_provider_cache" not in html and "cache reuse" not in html
+        response = client.post("/run", data={"csrf_token": csrf_from_html(html)})
+    assert response.status_code == 200 and coordinator.start_calls == 1
     assert not (tmp_path / "monitor.yaml").exists()
 
 
-@pytest.mark.parametrize("choice", ["1", "yes", "TRUE", "", "unexpected"])
-def test_run_form_rejects_noncanonical_reuse_values(tmp_path, choice):
-    app = create_app(tmp_path / "monitor.yaml")
-    coordinator = StubCoordinator()
-    app.state.run_coordinator = coordinator
-    with TestClient(app, base_url="http://localhost") as client:
-        csrf = csrf_from_html(client.get("/fragments/run").text)
-        response = client.post("/run", data={"csrf_token": csrf, "reuse_provider_cache": choice})
-    assert response.status_code == 422 and coordinator.start_calls == 0
-
-
-def test_finished_fragment_distinguishes_reuse_from_live_coverage(tmp_path):
-    from literature_monitor.coverage import ProviderReuseUnit
-    result = replace(make_run_result(), reused_units=(ProviderReuseUnit("openalex", CoverageComponent.OPENALEX_DISCOVERY,
-                     journal="Cached journal"),))
+def test_finished_fragment_reports_provider_state_separately_from_coverage(tmp_path):
+    from literature_monitor.application.monitor import ProviderStateUsage
+    result = replace(make_run_result(), state_usage=ProviderStateUsage(1, 2, 3, 4, 5))
     app = create_app(tmp_path / "monitor.yaml")
     app.state.run_coordinator = StubCoordinator(snapshot=finished_snapshot(result=result))
     with TestClient(app, base_url="http://localhost") as client:
         response = client.get("/fragments/run")
-    assert "Cache reuse: OpenAlex 1" in response.text
+    assert "Crossref metadata 1 reused · 2 refreshed · 3 new" in response.text
+    assert "OpenAlex versions 4 reused · 5 hydrated" in response.text
     assert "Live OpenAlex coverage:" in response.text
-    assert "Run again with cache reuse" in response.text
+    assert ">Run again</button>" in response.text
+    assert "Cache reuse:" not in response.text and "reuse_provider_cache" not in response.text
 
 
 @pytest.mark.parametrize(
@@ -744,6 +732,115 @@ def test_running_snapshot_with_dead_worker_is_stopped_not_in_progress(
     assert "No recent activity" not in response.text
 
 
+def test_concurrent_provider_fragment_has_independent_rows_ages_and_eta(tmp_path, monkeypatch):
+    now = datetime(2026, 9, 22, 12, 1, 30, tzinfo=timezone.utc)
+    oa = replace(activity_snapshot(
+        source="openalex", operation="works", label="Discovering OpenAlex works",
+        current=20, total=100, unit="work", eta_seconds=8,
+    ), updated_at=now - timedelta(seconds=70))
+    cr = replace(activity_snapshot(
+        source="crossref", operation="manifest", label="Retrieving Crossref manifest",
+        current=35, total=200, unit="work", eta_seconds=None,
+    ), updated_at=now - timedelta(seconds=5))
+    snapshot = replace(running_snapshot(last_activity_at=cr.updated_at), activities=(oa, cr))
+    app = create_app(tmp_path / "monitor.yaml")
+    app.state.run_coordinator = StubCoordinator(snapshot=snapshot)
+    monkeypatch.setattr(web_app, "_utc_now", lambda: now)
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get("/fragments/run")
+        repeated = client.get("/fragments/run")
+    oa_card, cr_card = response.text.split('<div class="activity-card">')[1:]
+    assert "OpenAlex" in oa_card and "Discovering OpenAlex works" in oa_card
+    assert "20 / 100 works" in oa_card and "ETA 8s" in oa_card
+    assert "Updated 1m 10s ago" in oa_card
+    assert "Estimating…" not in oa_card
+    assert "Crossref" in cr_card and "Retrieving Crossref manifest" in cr_card
+    assert "35 / 200 works" in cr_card and "Estimating…" in cr_card
+    assert "Updated 5s ago" in cr_card and "ETA 8s" not in cr_card
+    assert response.text.count('<progress class="activity-progress"') == 2
+    assert "Elapsed 1m 30s" in response.text and "Last activity 5s ago" in response.text
+    assert "No recent activity" not in response.text
+    assert 'hx-trigger="every 750ms"' in response.text
+    assert repeated.text == response.text
+    assert app.state.run_coordinator.snapshot().activities == snapshot.activities
+    inactive = build_run_presentation(replace(snapshot, inactivity_warning=True), now=now)
+    assert all(row["eta_text"] is None and not row["estimating"] for row in inactive["activities"])
+
+
+def test_recovered_web_rows_keep_quiet_provider_age_without_stale_eta(tmp_path, monkeypatch):
+    base = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
+    state = ProgressState()
+    state.apply(ProgressEvent(stage=ProgressStage.DISCOVERING_PAPERS), at=base)
+    def report(source, current, seconds):
+        state.apply(ProgressEvent(activity=ActivityUpdate(
+            kind=ActivityKind.WORKING, source=source, operation="works",
+            label=f"{source} records", current=current, total=10, unit="work",
+        )), at=base + timedelta(seconds=seconds))
+    for current in range(3):
+        for source in ("openalex", "crossref"):
+            report(source, current, current + 1)
+    assert all(activity.eta_seconds is not None for activity in state.snapshot(
+        at=base + timedelta(seconds=3), active=True,
+    ).activities)
+    inactive = state.snapshot(at=base + timedelta(seconds=63), active=True)
+    assert inactive.inactivity_warning
+    assert all(activity.eta_seconds is None for activity in inactive.activities)
+    report("openalex", 3, 64)
+    now = base + timedelta(seconds=64)
+    recovered = state.snapshot(at=now, active=True)
+    snapshot = replace(
+        running_snapshot(started_at=base, last_activity_at=recovered.last_activity_at),
+        activities=recovered.activities, inactivity_warning=recovered.inactivity_warning,
+    )
+    view = build_run_presentation(snapshot, now=now)
+    assert len(view["activities"]) == 2 and not snapshot.inactivity_warning
+    quiet = next(row for row in view["activities"] if row["activity"].source == "crossref")
+    assert quiet["age_text"] == "1m 01s" and quiet["eta_text"] is None
+    app = create_app(tmp_path / "monitor.yaml")
+    app.state.run_coordinator = StubCoordinator(snapshot=snapshot)
+    monkeypatch.setattr(web_app, "_utc_now", lambda: now)
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get("/fragments/run")
+    assert response.text.count('<div class="activity-card">') == 2
+    assert "OpenAlex" in response.text and "Crossref" in response.text
+    assert "Updated 1m 01s ago" in response.text and "Updated 0s ago" in response.text
+    assert "ETA " not in response.text and "No recent activity" not in response.text
+    assert "Last activity 0s ago" in response.text
+
+
+@pytest.mark.parametrize("change", ["counter", "age", "operation", "retry", "add", "remove", "inactive"])
+def test_announcement_key_uses_all_sources_but_excludes_counters_and_ages(change):
+    now = datetime(2026, 9, 22, 12, 1, 30, tzinfo=timezone.utc)
+    oa = activity_snapshot(source="openalex", operation="works", label="Discovering works")
+    cr = activity_snapshot(source="crossref", operation="manifest", label="Retrieving manifest")
+    first = replace(running_snapshot(), activities=(oa, cr))
+    if change == "counter":
+        updated = replace(first, activities=(replace(oa, current=19, eta_seconds=2), cr))
+    elif change == "age":
+        updated = replace(first, activities=(replace(oa, updated_at=now), replace(cr, updated_at=now)))
+    elif change == "operation":
+        updated = replace(first, activities=(replace(oa, operation="next_work_batch"), cr))
+    elif change == "retry":
+        updated = replace(first, activities=(oa, replace(cr, kind=ActivityKind.RETRYING)))
+    elif change == "add":
+        updated = replace(first, activities=(oa, cr, activity_snapshot(source="custom")))
+    elif change == "remove":
+        updated = replace(first, activities=(cr,))
+    else:
+        updated = replace(first, inactivity_warning=True)
+    before = build_run_presentation(first, now=now)
+    after = build_run_presentation(updated, now=now)
+    if change in {"counter", "age"}:
+        assert before["announcement_key"] == after["announcement_key"]
+    else:
+        assert before["announcement_key"] != after["announcement_key"]
+    assert "OpenAlex." in before["announcement_message"] and "Crossref." in before["announcement_message"]
+    assert build_run_presentation(first, now=now + timedelta(seconds=1))["announcement_key"] == before["announcement_key"]
+    if change == "inactive":
+        recovered = build_run_presentation(replace(updated, inactivity_warning=False), now=now)
+        assert recovered["announcement_key"] == before["announcement_key"]
+
+
 def test_run_presentation_semantic_key_ignores_timer_and_counter_only_changes() -> None:
     first_activity = activity_snapshot(current=18, total=47)
     first = running_snapshot(
@@ -756,7 +853,7 @@ def test_run_presentation_semantic_key_ignores_timer_and_counter_only_changes() 
         current=19,
         eta_seconds=20.0,
     )
-    later = replace(first, current_activity=later_activity)
+    later = replace(first, activities=(later_activity,))
     now = datetime(2026, 9, 22, 12, 1, 24, tzinfo=timezone.utc)
 
     first_view = build_run_presentation(first, now=now)
@@ -778,11 +875,11 @@ def test_run_presentation_semantic_key_ignores_timer_and_counter_only_changes() 
     retry_view = build_run_presentation(
         replace(
             later,
-            current_activity=replace(
+            activities=(replace(
                 later_activity,
                 kind=ActivityKind.RETRYING,
                 eta_seconds=None,
-            ),
+            ),),
         ),
         now=now,
     )
@@ -797,7 +894,7 @@ def test_run_presentation_semantic_key_ignores_timer_and_counter_only_changes() 
     changed_activity_view = build_run_presentation(
         replace(
             later,
-            current_activity=activity_snapshot(
+            activities=(activity_snapshot(
                 operation="materialize_write",
                 label="Writing workspace",
                 source="workspace",
@@ -805,7 +902,7 @@ def test_run_presentation_semantic_key_ignores_timer_and_counter_only_changes() 
                 total=3,
                 unit="file",
                 eta_seconds=None,
-            ),
+            ),),
         ),
         now=now,
     )

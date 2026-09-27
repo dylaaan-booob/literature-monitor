@@ -66,6 +66,37 @@ def _anchor(record: OpenAlexWorkRecord) -> ProviderRecordRef:
     )
 
 
+def assemble_live_provider_evidence(
+    openalex_records: Sequence[OpenAlexWorkRecord],
+    discovered_crossref_records: Sequence[CrossrefWorkRecord],
+    supplement_evidence: Sequence[ProviderWorkEvidence] = (),
+) -> tuple[ProviderWorkEvidence, ...]:
+    """Combine current snapshots and anchors without performing Provider requests."""
+    evidence = [record.to_evidence() for record in openalex_records]
+    anchors: dict[str, list[ProviderRecordRef]] = defaultdict(list)
+    for record in openalex_records:
+        if (doi := normalize_doi(record.external_ids.doi)) is not None:
+            ref = _anchor(record)
+            if ref not in anchors[doi]:
+                anchors[doi].append(ref)
+    crossref = {
+        record.doi: record.to_evidence(supplements=tuple(sorted(
+            anchors.get(record.doi, ()), key=lambda ref: ref.record_id,
+        )))
+        for record in discovered_crossref_records
+    }
+    for record in supplement_evidence:
+        doi = record.external_ids.doi
+        previous = crossref.get(doi)
+        if previous is None:
+            crossref[doi] = record
+        else:
+            refs = tuple(dict.fromkeys((*previous.supplements, *record.supplements)))
+            # Supplement resolution may have refreshed this prime DOI after discovery.
+            crossref[doi] = record.model_copy(update={"supplements": refs})
+    return (*evidence, *crossref.values())
+
+
 def _report_activity(
     callback: ProgressCallback | None,
     activity: ActivityUpdate,

@@ -80,10 +80,14 @@ class ProgressStateSnapshot:
     progress_stage: ProgressStage | None
     stage_index: int | None
     stage_total: int
-    current_activity: ActivitySnapshot | None
+    activities: tuple[ActivitySnapshot, ...]
     stage_started_at: datetime | None
     last_activity_at: datetime | None
     inactivity_warning: bool
+
+    @property
+    def current_activity(self) -> ActivitySnapshot | None:
+        return max(self.activities, key=lambda activity: activity.updated_at, default=None)
 
 
 ActivityIdentity = tuple[ProgressStage | None, str | None, str, str | None]
@@ -108,6 +112,67 @@ class ProgressState:
         self.progress_stage: ProgressStage | None = None
         self.stage_started_at: datetime | None = None
         self.last_activity_at: datetime | None = None
+        self._sources: dict[str | None, _SourceActivityState] = {}
+
+    def apply(self, event: ProgressEvent, *, at: datetime) -> bool:
+        """Apply one real worker event; callers serialize updates and snapshots."""
+        stage_changed = event.stage is not None and event.stage is not self.progress_stage
+        if not stage_changed and event.activity is None:
+            return False
+
+        if self._is_inactive_at(at):
+            # Recovery invalidates every old estimate without inventing source events.
+            for state in self._sources.values():
+                state.invalidate_estimator()
+        if stage_changed:
+            self.progress_stage = event.stage
+            self.stage_started_at = at
+            self._sources.clear()
+
+        if event.activity is not None:
+            source = event.activity.source
+            if source not in self._sources:
+                self._sources[source] = _SourceActivityState(self._smoothing)
+            state = self._sources[source]
+            state.apply(event.activity, stage=self.progress_stage, at=at)
+
+        self.last_activity_at = max(self.last_activity_at, at) if self.last_activity_at else at
+        return True
+
+    def snapshot(self, *, at: datetime, active: bool) -> ProgressStateSnapshot:
+        """Return an immutable view; reading never creates worker activity."""
+        inactivity_warning = active and self._is_inactive_at(at)
+        source_order = {"application": 0, "openalex": 1, "crossref": 2, "workspace": 3, None: 4}
+        activities = tuple(
+            state.current_activity
+            for source, state in sorted(
+                self._sources.items(), key=lambda item: (source_order.get(item[0], 5), item[0] or ""),
+            )
+            if state.current_activity is not None
+        )
+        if inactivity_warning:
+            activities = tuple(replace(activity, rate=None, eta_seconds=None) for activity in activities)
+        return ProgressStateSnapshot(
+            progress_stage=self.progress_stage,
+            stage_index=PROGRESS_STAGES.index(self.progress_stage) + 1 if self.progress_stage else None,
+            stage_total=len(PROGRESS_STAGES),
+            activities=activities,
+            stage_started_at=self.stage_started_at,
+            last_activity_at=self.last_activity_at,
+            inactivity_warning=inactivity_warning,
+        )
+
+    def _is_inactive_at(self, at: datetime) -> bool:
+        return self.last_activity_at is not None and (
+            at - self.last_activity_at
+        ).total_seconds() >= self._inactivity_seconds
+
+
+class _SourceActivityState:
+    """One source's Activity identity and EWMA sampling history."""
+
+    def __init__(self, smoothing: float) -> None:
+        self._smoothing = smoothing
         self.current_activity: ActivitySnapshot | None = None
         self._activity_identity: ActivityIdentity | None = None
         self._sample_current: int | None = None
@@ -116,56 +181,11 @@ class ProgressState:
         self._valid_samples = 0
         self._sampled_units = 0
 
-    def apply(self, event: ProgressEvent, *, at: datetime) -> bool:
-        """Apply one real worker event and report whether state actually changed."""
-
-        stage_changed = event.stage is not None and event.stage is not self.progress_stage
-        has_activity = event.activity is not None
-        if not stage_changed and not has_activity:
-            return False
-
-        # 恢复自长时间无活动后必须重新采样，避免把旧速率带入新的 ETA。
-        if self._is_inactive_at(at):
-            self._reset_estimator()
-
-        if stage_changed:
-            self.progress_stage = event.stage
-            self.stage_started_at = at
-            self.current_activity = None
-            self._activity_identity = None
-            self._reset_estimator()
-
-        if event.activity is not None:
-            self._apply_activity(event.activity, at=at)
-
-        self.last_activity_at = at
-        return True
-
-    def snapshot(self, *, at: datetime, active: bool) -> ProgressStateSnapshot:
-        """Return an immutable view; reading never creates worker activity."""
-
-        inactivity_warning = active and self._is_inactive_at(at)
-        activity = self.current_activity
-        if inactivity_warning and activity is not None:
-            activity = replace(activity, rate=None, eta_seconds=None)
-
-        return ProgressStateSnapshot(
-            progress_stage=self.progress_stage,
-            stage_index=(
-                PROGRESS_STAGES.index(self.progress_stage) + 1
-                if self.progress_stage is not None
-                else None
-            ),
-            stage_total=len(PROGRESS_STAGES),
-            current_activity=activity,
-            stage_started_at=self.stage_started_at,
-            last_activity_at=self.last_activity_at,
-            inactivity_warning=inactivity_warning,
-        )
-
-    def _apply_activity(self, update: ActivityUpdate, *, at: datetime) -> None:
+    def apply(
+        self, update: ActivityUpdate, *, stage: ProgressStage | None, at: datetime,
+    ) -> None:
         identity: ActivityIdentity = (
-            self.progress_stage,
+            stage,
             update.source,
             update.operation,
             update.unit,
@@ -289,9 +309,7 @@ class ProgressState:
         self._valid_samples = 0
         self._sampled_units = 0
 
-    def _is_inactive_at(self, at: datetime) -> bool:
-        if self.last_activity_at is None:
-            return False
-        return (
-            at - self.last_activity_at
-        ).total_seconds() >= self._inactivity_seconds
+    def invalidate_estimator(self) -> None:
+        self._reset_estimator()
+        if self.current_activity is not None:
+            self.current_activity = replace(self.current_activity, rate=None, eta_seconds=None)

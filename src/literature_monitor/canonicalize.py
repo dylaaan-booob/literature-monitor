@@ -180,7 +180,6 @@ def _completeness(record: ProviderWorkEvidence) -> tuple[int, ...]:
         sum(author.orcid is not None for author in record.authors),
         sum(_is_complete_date(item) for item in record.dates),
         len(record.relations),
-        len(record.version_hints),
     )
 
 
@@ -198,7 +197,7 @@ def _choose_evidence(
     return min(
         candidates,
         key=lambda record: record.model_copy(
-            update={"provider_topics": (), "fields_of_study": ()}
+            update={"provider_topics": (), "fields_of_study": (), "version_hints": ()}
         ).model_dump_json(),
     )
 

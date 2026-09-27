@@ -2,8 +2,10 @@ import json
 import logging
 from io import StringIO
 from datetime import date, datetime, timezone
+from contextlib import nullcontext
 from pathlib import Path
 
+import httpx
 import pytest
 
 from literature_monitor.application.monitor import (
@@ -24,12 +26,12 @@ from literature_monitor.application.run_state import (
     last_run_snapshot_path,
     write_last_run_snapshot,
 )
-from literature_monitor.application.provider_cache import provider_cache_path
 from literature_monitor.cli import _build_parser, main
 from literature_monitor.cli_progress import _CliProgressRenderer
 from literature_monitor.config import JournalConfig, load_config
 from literature_monitor.coverage import CoverageComponent, CoverageStatus, CoverageUnit
 from literature_monitor.crossref import (
+    CrossrefClient,
     CrossrefDiscoveryIssue,
     CrossrefDiscoveryResult,
     CrossrefWorkRecord,
@@ -62,10 +64,26 @@ from literature_monitor.openalex import (
     DiscoveryIssue,
     DiscoveryResult,
     IssueSeverity,
+    OpenAlexClient,
     OpenAlexWorkRecord,
     ResolvedSource,
 )
 from literature_monitor.search import SearchBackendError, SearchableProjection
+
+
+@pytest.fixture(autouse=True)
+def diagnostic_clients(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unexpected_request(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected diagnostic HTTP request: {request.url}")
+
+    monkeypatch.setattr(
+        "literature_monitor.cli.OpenAlexClient",
+        lambda **kwargs: OpenAlexClient(transport=httpx.MockTransport(unexpected_request), **kwargs),
+    )
+    monkeypatch.setattr(
+        "literature_monitor.cli.CrossrefClient",
+        lambda **kwargs: CrossrefClient(transport=httpx.MockTransport(unexpected_request), **kwargs),
+    )
 
 
 def application_handlers() -> list[logging.Handler]:
@@ -825,7 +843,7 @@ def test_openalex_discover_without_cli_dates_uses_config_policy(
 
     monkeypatch.setattr("literature_monitor.cli.date", FixedDate)  # type: ignore[attr-defined]
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.OpenAlexClient", lambda **kwargs: object()
+        "literature_monitor.cli.OpenAlexClient", lambda **kwargs: nullcontext(object())
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.discover_journals", fake_discover
@@ -880,7 +898,7 @@ def test_cli_date_override_forms_resolve_without_merging_config(
 
     monkeypatch.setattr("literature_monitor.cli.date", FixedDate)  # type: ignore[attr-defined]
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.OpenAlexClient", lambda **kwargs: object()
+        "literature_monitor.cli.OpenAlexClient", lambda **kwargs: nullcontext(object())
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.discover_journals", fake_discover
@@ -1057,7 +1075,6 @@ def test_run_cli_shapes_date_override_for_application(
         *,
         date_override: DateRangeSpec | None = None,
         progress_callback: ProgressCallback | None = None,
-        reuse_provider_cache: bool = False,
     ) -> RunResult:
         calls.append((path, date_override))
         assert progress_callback is not None
@@ -1089,7 +1106,6 @@ def test_run_cli_passes_none_without_date_override(
         *,
         date_override: DateRangeSpec | None = None,
         progress_callback: ProgressCallback | None = None,
-        reuse_provider_cache: bool = False,
     ) -> RunResult:
         received.append(date_override)
         assert progress_callback is not None
@@ -1106,21 +1122,24 @@ def test_run_cli_passes_none_without_date_override(
 
 
 @pytest.mark.parametrize("reuse", [False, True])
-def test_run_cli_passes_explicit_reuse_mode_and_reports_it(tmp_path, monkeypatch, capsys, reuse):
+def test_run_cli_ignores_compatibility_flag_and_reports_usage(tmp_path, monkeypatch, capsys, reuse):
     from dataclasses import replace
-    from literature_monitor.coverage import ProviderReuseUnit
-    modes = []
-    def run(path, *, date_override, progress_callback, reuse_provider_cache):
-        modes.append(reuse_provider_cache)
-        result = cli_run_result(RunOutcome.COMPLETED)
-        return replace(result, reused_units=(ProviderReuseUnit("openalex", CoverageComponent.OPENALEX_DISCOVERY,
-                       journal="Biometrics"),) if reuse else ())
+    from literature_monitor.application.monitor import ProviderStateUsage
+    calls = []
+    result = replace(cli_run_result(RunOutcome.COMPLETED), state_usage=ProviderStateUsage(1, 2, 3, 4, 5))
+    def run(path, *, date_override, progress_callback):
+        calls.append((path, date_override, callable(progress_callback)))
+        return result
     monkeypatch.setattr("literature_monitor.cli.run_monitor", run)
     args = ["run", "--config", str(tmp_path / "monitor.yaml")]
     assert main((*args, *(("--reuse-provider-cache",) if reuse else ()))) == 0
-    assert modes == [reuse]
+    assert calls == [(tmp_path / "monitor.yaml", None, True)]
     captured = capsys.readouterr()
-    assert ("Cache reuse: OpenAlex 1" in captured.err) is reuse
+    assert captured.err.count("Provider-state reuse is now automatic.") == int(reuse)
+    assert "Crossref metadata 1 reused · 2 refreshed · 3 new" in captured.err
+    assert "OpenAlex versions 4 reused · 5 hydrated" in captured.err
+    assert "Cache reuse:" not in captured.err
+    assert result.warnings == () and result.outcome is RunOutcome.COMPLETED
 
 
 @pytest.mark.parametrize("command", ["validate", "canonicalize", "materialize", "openalex-discover",
@@ -1176,7 +1195,7 @@ def test_run_cli_maps_structured_outcome_to_exit_code(
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.run_monitor",
-        lambda path, *, date_override=None, progress_callback=None, reuse_provider_cache=False: value,
+        lambda path, *, date_override=None, progress_callback=None: value,
     )
 
     result = main(("run", "--config", str(tmp_path / "monitor.yaml")))
@@ -1225,7 +1244,7 @@ def test_run_cli_logs_compact_structured_coverage_summary(
     value = cli_run_result(RunOutcome.COMPLETED, coverage=coverage)
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.run_monitor",
-        lambda path, *, date_override=None, progress_callback=None, reuse_provider_cache=False: value,
+        lambda path, *, date_override=None, progress_callback=None: value,
     )
 
     result = main(("run", "--config", str(tmp_path / "monitor.yaml")))
@@ -1251,7 +1270,6 @@ def test_run_cli_non_tty_progress_is_plain_stderr(
         *,
         date_override: DateRangeSpec | None = None,
         progress_callback: ProgressCallback | None = None,
-        reuse_provider_cache: bool = False,
     ) -> RunResult:
         assert progress_callback is not None
         progress_callback(
@@ -1318,7 +1336,6 @@ def test_run_cli_tty_progress_cleans_before_summary(
         *,
         date_override: DateRangeSpec | None = None,
         progress_callback: ProgressCallback | None = None,
-        reuse_provider_cache: bool = False,
     ) -> RunResult:
         assert progress_callback is not None
         progress_callback(
@@ -1510,6 +1527,7 @@ def test_tty_renderer_uses_shared_eta_and_drops_stale_eta() -> None:
 
     renderer(
         ProgressEvent(
+            stage=ProgressStage.UPDATING_WORKSPACE,
             activity=ActivityUpdate(
                 kind=ActivityKind.WORKING,
                 source="workspace",
@@ -1571,7 +1589,6 @@ def test_run_cli_tty_cleanup_on_unexpected_exception(
         *,
         date_override: DateRangeSpec | None = None,
         progress_callback: ProgressCallback | None = None,
-        reuse_provider_cache: bool = False,
     ) -> RunResult:
         assert progress_callback is not None
         progress_callback(
@@ -1613,10 +1630,10 @@ def test_historical_diagnostics_do_not_enter_production_core(
         ),
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.OpenAlexClient", lambda **kwargs: object()
+        "literature_monitor.cli.OpenAlexClient", lambda **kwargs: nullcontext(object())
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: nullcontext(object())
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.discover_journals",
@@ -2394,7 +2411,7 @@ def test_crossref_enrich_uses_config_filter_before_enrichment(
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.CrossrefClient",
-        lambda **kwargs: client_sentinel,
+        lambda **kwargs: nullcontext(client_sentinel),
     )
 
     def fake_match(
@@ -2492,7 +2509,7 @@ def test_crossref_enrich_override_is_one_run_only_and_passes_mailto(
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.CrossrefClient",
-        lambda *, mailto=None: mailto_values.append(mailto) or object(),
+        lambda *, mailto=None: mailto_values.append(mailto) or nullcontext(object()),
     )
 
     def fake_enrich(
@@ -2646,7 +2663,7 @@ def test_crossref_enrich_emits_all_records_on_partial_hard_failure(
         lambda *args: enrichment_diagnostic_result(all_retained=True),
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: nullcontext(object())
     )
 
     def fake_enrich(
@@ -2712,7 +2729,7 @@ def test_crossref_enrich_not_found_is_nonfatal(
         lambda *args: enrichment_diagnostic_result(),
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: nullcontext(object())
     )
 
     def fake_enrich(
@@ -2770,7 +2787,7 @@ def test_crossref_enrich_keeps_openalex_hard_error_exit_status(
         lambda *args: enrichment_diagnostic_result(with_error=True),
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: nullcontext(object())
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.enrich_records",
@@ -2862,7 +2879,7 @@ def test_crossref_discover_is_crossref_only_and_emits_provider_ndjson(
         "literature_monitor.cli.OpenAlexClient", unexpected_openalex
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: client
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: nullcontext(client)
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.discover_crossref_journals", fake_discover
@@ -2902,7 +2919,7 @@ def test_crossref_discover_keeps_records_on_isolated_hard_error(
         message="server unavailable",
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
-        "literature_monitor.cli.CrossrefClient", lambda **kwargs: object()
+        "literature_monitor.cli.CrossrefClient", lambda **kwargs: nullcontext(object())
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
         "literature_monitor.cli.discover_crossref_journals",
@@ -2967,7 +2984,7 @@ def test_nonproduction_commands_preserve_provider_cache(command, tmp_path, monke
     config_path = config_with_date_policy(tmp_path, "from_date: 2026-01-01\nto_date: 2026-01-31\n")
     output_dir = tmp_path / "workspace"
     config_path.write_text(config_path.read_text() + f"output_dir: {output_dir}\n")
-    cache_path = provider_cache_path(output_dir)
+    cache_path = output_dir / ".literature-monitor" / "provider-cache.json"
     cache_path.parent.mkdir(parents=True)
     cache_path.write_bytes(b"existing cache must remain untouched")
     write_last_run_snapshot(output_dir, LastRunSnapshot(
@@ -2978,11 +2995,12 @@ def test_nonproduction_commands_preserve_provider_cache(command, tmp_path, monke
     def unexpected(*args, **kwargs):
         raise AssertionError("nonproduction command must not write provider cache or call run_monitor")
 
-    monkeypatch.setattr("literature_monitor.application.provider_cache.write_provider_cache", unexpected)
-    monkeypatch.setattr("literature_monitor.application.monitor.write_provider_cache", unexpected)
     monkeypatch.setattr("literature_monitor.cli.run_monitor", unexpected)
-    monkeypatch.setattr("literature_monitor.cli.OpenAlexClient", lambda **kwargs: object())
-    monkeypatch.setattr("literature_monitor.cli.CrossrefClient", lambda **kwargs: object())
+    for namespace in ("literature_monitor.application.provider_state", "literature_monitor.application.monitor"):
+        for name in ("read_provider_state", "update_provider_state", "replace_invalid_provider_state"):
+            monkeypatch.setattr(f"{namespace}.{name}", unexpected)
+    monkeypatch.setattr("literature_monitor.cli.OpenAlexClient", lambda **kwargs: nullcontext(object()))
+    monkeypatch.setattr("literature_monitor.cli.CrossrefClient", lambda **kwargs: nullcontext(object()))
     monkeypatch.setattr("literature_monitor.cli.discover_journals", lambda *args: filter_diagnostic_result())
     monkeypatch.setattr("literature_monitor.cli.discover_crossref_journals", lambda *args: crossref_discovery_result())
     monkeypatch.setattr("literature_monitor.cli.enrich_records", lambda client, records: EnrichmentResult(
@@ -3325,3 +3343,45 @@ def test_export_kept_cli_missing_papers_directory_is_empty_and_read_only(
     assert captured.out == ""
     assert "Kept export completed: 0 entries, 0 issues" in captured.err
     assert not output_dir.exists()
+
+
+@pytest.mark.parametrize("command", ["openalex-discover", "openalex-filter", "crossref-discover", "crossref-enrich"])
+@pytest.mark.parametrize("unexpected_failure", [False, True])
+def test_provider_diagnostics_close_http_clients(
+    command: str,
+    unexpected_failure: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    sessions: list[httpx.Client] = []
+    real_client = httpx.Client
+
+    def create_session(**kwargs) -> httpx.Client:
+        session = real_client(**kwargs)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(httpx, "Client", create_session)
+    monkeypatch.setattr("literature_monitor.cli.discover_journals", lambda *args: filter_diagnostic_result())
+    monkeypatch.setattr("literature_monitor.cli.discover_crossref_journals", lambda *args: crossref_discovery_result())
+    monkeypatch.setattr("literature_monitor.cli.enrich_records", lambda *args: EnrichmentResult(records=(), issues=()))
+    if unexpected_failure:
+        def fail(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("unexpected diagnostic failure")
+        operation = (
+            "discover_crossref_journals" if command == "crossref-discover"
+            else "enrich_records" if command == "crossref-enrich"
+            else "discover_journals"
+        )
+        monkeypatch.setattr(f"literature_monitor.cli.{operation}", fail)
+
+    args = (command, "--config", str(Path(__file__).resolve().parents[1] / "config.example.yaml"))
+    if unexpected_failure:
+        with pytest.raises(RuntimeError, match="unexpected diagnostic failure"):
+            main(args)
+    else:
+        assert main(args) == 0
+    capsys.readouterr()
+
+    assert len(sessions) == (2 if command == "crossref-enrich" else 1)
+    assert all(session.is_closed for session in sessions)

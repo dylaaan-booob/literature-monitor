@@ -1,11 +1,12 @@
 import json
+import os
 from copy import deepcopy
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
@@ -36,46 +37,41 @@ def fixture(name: str) -> dict[str, Any]:
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 
-class FakeResponse:
-    def __init__(self, payload: dict[str, Any]) -> None:
-        self.payload = payload
-
-    def __enter__(self) -> "FakeResponse":
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        return None
-
-    def read(self) -> bytes:
-        return json.dumps(self.payload).encode()
-
-
-class SequenceOpener:
-    def __init__(self, *outcomes: dict[str, Any] | Exception) -> None:
+class SequenceTransport(httpx.MockTransport):
+    def __init__(self, *outcomes: object) -> None:
         self.outcomes = list(outcomes)
-        self.requests: list[tuple[Any, float]] = []
+        self.requests: list[httpx.Request] = []
+        self.closed = False
+        super().__init__(self._respond)
 
-    def __call__(self, request: Any, *, timeout: float) -> FakeResponse:
-        self.requests.append((request, timeout))
+    def _respond(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if not self.outcomes:
+            raise AssertionError(f"unexpected HTTP request: {request.url}")
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
-        return FakeResponse(outcome)
+        if isinstance(outcome, httpx.Response):
+            return outcome
+        return httpx.Response(200, json=outcome)
+
+    def close(self) -> None:
+        self.closed = True
+        super().close()
+
+def http_error(code: int) -> httpx.Response:
+    return httpx.Response(code)
 
 
-def http_error(code: int) -> HTTPError:
-    return HTTPError("https://api.openalex.org/test", code, "failure", {}, None)
-
-
-def make_client(*outcomes: dict[str, Any] | Exception) -> tuple[OpenAlexClient, SequenceOpener]:
-    opener = SequenceOpener(*outcomes)
-    return OpenAlexClient(opener=opener, sleep=lambda _: None), opener
+def make_client(*outcomes: dict[str, Any] | httpx.Response | Exception) -> tuple[OpenAlexClient, SequenceTransport]:
+    transport = SequenceTransport(*outcomes)
+    return OpenAlexClient(transport=transport, sleep=lambda _: None), transport
 
 
 def test_singleton_requests_each_issn_independently_and_uses_bearer_key() -> None:
     payload = fixture("source_cybernetics.json")
-    opener = SequenceOpener(payload, payload)
-    client = OpenAlexClient(api_key="secret", opener=opener, sleep=lambda _: None)
+    transport = SequenceTransport(payload, payload)
+    client = OpenAlexClient(api_key="secret", transport=transport, sleep=lambda _: None)
     journal = JournalConfig(
         name="IEEE Transactions on Cybernetics",
         issn=("2168-2267", "2168-2275"),
@@ -87,24 +83,24 @@ def test_singleton_requests_each_issn_independently_and_uses_bearer_key() -> Non
     assert source.openalex_id == "https://openalex.org/S4210191041"
     assert source.resolved_issns == journal.issn
     assert not issues
-    assert len(opener.requests) == 2
-    assert [urlparse(request.full_url).path for request, _ in opener.requests] == [
+    assert len(transport.requests) == 2
+    assert [urlparse(str(request.url)).path for request in transport.requests] == [
         "/sources/issn:2168-2267",
         "/sources/issn:2168-2275",
     ]
     assert all(
-        "filter" not in parse_qs(urlparse(request.full_url).query)
-        for request, _ in opener.requests
+        "filter" not in parse_qs(urlparse(str(request.url)).query)
+        for request in transport.requests
     )
     assert all(
-        request.get_header("Authorization") == "Bearer secret"
-        for request, _ in opener.requests
+        request.headers["Authorization"] == "Bearer secret"
+        for request in transport.requests
     )
     assert all(
-        request.get_header("User-agent") == "literature-monitor/0.4.2"
-        for request, _ in opener.requests
+        request.headers["User-Agent"] == "literature-monitor/0.4.2"
+        for request in transport.requests
     )
-    assert all(timeout == 30 for _, timeout in opener.requests)
+    assert all(request.extensions["timeout"]["read"] == 30 for request in transport.requests)
 
 
 def test_one_resolved_and_one_missing_issn_resolves_with_warning() -> None:
@@ -154,9 +150,9 @@ def test_no_successful_issn_is_an_error() -> None:
 def test_remote_failure_is_not_treated_as_an_unresolved_issn() -> None:
     client, _ = make_client(
         fixture("source_cybernetics.json"),
-        TimeoutError("timed out"),
-        TimeoutError("timed out"),
-        TimeoutError("timed out"),
+        httpx.ReadTimeout("timed out"),
+        httpx.ReadTimeout("timed out"),
+        httpx.ReadTimeout("timed out"),
     )
     journal = JournalConfig(
         name="IEEE Transactions on Cybernetics",
@@ -250,57 +246,57 @@ def test_normalized_name_allows_leading_the_and_punctuation() -> None:
 
 def test_retry_backoff_is_injected_and_never_really_sleeps() -> None:
     delays: list[float] = []
-    opener = SequenceOpener(http_error(429), http_error(500), fixture("source_biometrics.json"))
-    client = OpenAlexClient(opener=opener, sleep=delays.append)
+    transport = SequenceTransport(http_error(429), http_error(500), fixture("source_biometrics.json"))
+    client = OpenAlexClient(transport=transport, sleep=delays.append)
 
     payload = client.get_source_by_issn("0006-341X")
 
     assert payload["id"] == "https://openalex.org/S8265502"
     assert delays == [1, 2]
-    assert len(opener.requests) == 3
+    assert len(transport.requests) == 3
 
 
 def test_timeout_retries_use_injected_backoff_without_real_sleep() -> None:
     delays: list[float] = []
-    opener = SequenceOpener(
-        TimeoutError("timed out"),
-        TimeoutError("timed out"),
+    transport = SequenceTransport(
+        httpx.ReadTimeout("timed out"),
+        httpx.ReadTimeout("timed out"),
         fixture("source_biometrics.json"),
     )
-    client = OpenAlexClient(opener=opener, sleep=delays.append)
+    client = OpenAlexClient(transport=transport, sleep=delays.append)
 
     payload = client.get_source_by_issn("0006-341X")
 
     assert payload["id"] == "https://openalex.org/S8265502"
     assert delays == [1, 2]
-    assert len(opener.requests) == 3
+    assert len(transport.requests) == 3
 
 
 def test_connection_retries_use_injected_backoff_without_real_sleep() -> None:
     delays: list[float] = []
-    opener = SequenceOpener(
-        URLError("connection refused"),
-        URLError("connection refused"),
+    transport = SequenceTransport(
+        httpx.ConnectError("connection refused"),
+        httpx.ConnectError("connection refused"),
         fixture("source_biometrics.json"),
     )
-    client = OpenAlexClient(opener=opener, sleep=delays.append)
+    client = OpenAlexClient(transport=transport, sleep=delays.append)
 
     payload = client.get_source_by_issn("0006-341X")
 
     assert payload["id"] == "https://openalex.org/S8265502"
     assert delays == [1, 2]
-    assert len(opener.requests) == 3
+    assert len(transport.requests) == 3
 
 
 @pytest.mark.parametrize(
     "transient_failure",
-    (http_error(429), http_error(500), TimeoutError("timed out")),
+    (http_error(429), http_error(500), httpx.ReadTimeout("timed out")),
 )
 def test_request_progress_reports_retry_before_backoff_and_success(
-    transient_failure: Exception,
+    transient_failure: httpx.Response | Exception,
 ) -> None:
     trace: list[tuple[str, object]] = []
-    opener = SequenceOpener(transient_failure, fixture("source_biometrics.json"))
+    transport = SequenceTransport(transient_failure, fixture("source_biometrics.json"))
 
     def report(event: ProgressEvent) -> None:
         assert event.activity is not None
@@ -309,7 +305,7 @@ def test_request_progress_reports_retry_before_backoff_and_success(
     def sleep(delay: float) -> None:
         trace.append(("sleep", delay))
 
-    client = OpenAlexClient(opener=opener, sleep=sleep)
+    client = OpenAlexClient(transport=transport, sleep=sleep)
     activity = ActivityUpdate(
         kind=ActivityKind.WORKING,
         source="openalex",
@@ -328,7 +324,7 @@ def test_request_progress_reports_retry_before_backoff_and_success(
     )
 
     assert payload["id"] == "https://openalex.org/S8265502"
-    assert len(opener.requests) == 2
+    assert len(transport.requests) == 2
     assert [kind for kind, _ in trace] == [
         "activity",
         "activity",
@@ -350,17 +346,18 @@ def test_request_progress_reports_retry_before_backoff_and_success(
     assert identities == {("openalex", "source_resolution:0", "issn", 0, 1)}
 
 
-def test_non_retryable_client_error_is_not_retried() -> None:
-    client, opener = make_client(http_error(400))
+@pytest.mark.parametrize("status_code", [400, 401, 403, 422])
+def test_non_retryable_client_error_is_not_retried(status_code: int) -> None:
+    client, transport = make_client(http_error(status_code))
 
-    with pytest.raises(OpenAlexRequestError, match="HTTP 400"):
+    with pytest.raises(OpenAlexRequestError, match=f"HTTP {status_code}"):
         client.get_source_by_issn("0006-341X")
 
-    assert len(opener.requests) == 1
+    assert len(transport.requests) == 1
 
 
 def test_discovery_pages_normalizes_records_and_builds_venue_first_query() -> None:
-    client, opener = make_client(
+    client, transport = make_client(
         fixture("source_biometrics.json"),
         fixture("works_page_1.json"),
         fixture("works_page_2.json"),
@@ -402,8 +399,8 @@ def test_discovery_pages_normalizes_records_and_builds_venue_first_query() -> No
     assert result.units[0].issues == result.issues
     assert tuple(unit.coverage for unit in result.units) == result.coverage
 
-    work_requests = [request for request, _ in opener.requests[1:]]
-    first_query = parse_qs(urlparse(work_requests[0].full_url).query)
+    work_requests = [request for request in transport.requests[1:]]
+    first_query = parse_qs(urlparse(str(work_requests[0].url)).query)
     assert first_query == {
         "filter": [
             "primary_location.source.id:S8265502,"
@@ -416,15 +413,15 @@ def test_discovery_pages_normalizes_records_and_builds_venue_first_query() -> No
         "per_page": ["100"],
         "cursor": ["*"],
     }
-    assert parse_qs(urlparse(work_requests[1].full_url).query)["cursor"] == ["next-page"]
+    assert parse_qs(urlparse(str(work_requests[1].url)).query)["cursor"] == ["next-page"]
     assert all(
-        "search" not in parse_qs(urlparse(request.full_url).query)
+        "search" not in parse_qs(urlparse(str(request.url)).query)
         for request in work_requests
     )
 
 
 def test_source_resolution_and_discovery_report_natural_progress_without_extra_requests() -> None:
-    client, opener = make_client(
+    client, transport = make_client(
         fixture("source_biometrics.json"),
         fixture("works_page_1.json"),
         fixture("works_page_2.json"),
@@ -440,7 +437,7 @@ def test_source_resolution_and_discovery_report_natural_progress_without_extra_r
     )
 
     assert not result.has_errors
-    assert len(opener.requests) == 3
+    assert len(transport.requests) == 3
     activities = [event.activity for event in events if event.activity is not None]
     source_checks = [
         item for item in activities if item.label == "Checked OpenAlex ISSN"
@@ -489,9 +486,9 @@ def test_discovery_later_page_failure_is_partial() -> None:
     client, _ = make_client(
         fixture("source_biometrics.json"),
         fixture("works_page_1.json"),
-        TimeoutError("timed out"),
-        TimeoutError("timed out"),
-        TimeoutError("timed out"),
+        httpx.ReadTimeout("timed out"),
+        httpx.ReadTimeout("timed out"),
+        httpx.ReadTimeout("timed out"),
     )
 
     result = discover_journals(
@@ -522,9 +519,9 @@ def test_discovery_source_absence_is_unavailable() -> None:
 
 def test_discovery_source_request_failure_is_failed() -> None:
     client, _ = make_client(
-        TimeoutError("timed out"),
-        TimeoutError("timed out"),
-        TimeoutError("timed out"),
+        httpx.ReadTimeout("timed out"),
+        httpx.ReadTimeout("timed out"),
+        httpx.ReadTimeout("timed out"),
     )
 
     result = discover_journals(
@@ -562,7 +559,7 @@ def test_discovery_unusable_meta_count_stays_indeterminate(count: object) -> Non
         page["meta"].pop("count", None)
     else:
         page["meta"]["count"] = count
-    client, opener = make_client(fixture("source_biometrics.json"), page)
+    client, transport = make_client(fixture("source_biometrics.json"), page)
     events: list[ProgressEvent] = []
 
     result = discover_journals(
@@ -574,7 +571,7 @@ def test_discovery_unusable_meta_count_stays_indeterminate(count: object) -> Non
     )
 
     assert not result.has_errors
-    assert len(opener.requests) == 2
+    assert len(transport.requests) == 2
     works = [
         event.activity
         for event in events
@@ -911,7 +908,7 @@ def test_failed_later_page_keeps_successful_earlier_records() -> None:
 
 
 def test_reverse_date_range_is_rejected_before_requests() -> None:
-    client, opener = make_client()
+    client, transport = make_client()
 
     with pytest.raises(ValueError, match="from_date"):
         discover_journals(
@@ -921,4 +918,554 @@ def test_reverse_date_range_is_rejected_before_requests() -> None:
             date(2026, 1, 1),
         )
 
-    assert not opener.requests
+    assert not transport.requests
+
+
+@pytest.mark.parametrize("unexpected_failure", [False, True])
+def test_client_reuses_one_http_session_and_closes_it(
+    monkeypatch: pytest.MonkeyPatch,
+    unexpected_failure: bool,
+) -> None:
+    transport = SequenceTransport(
+        fixture("source_biometrics.json"), fixture("source_biometrics.json"),
+    )
+    sessions: list[httpx.Client] = []
+    real_client = httpx.Client
+
+    def create_session(**kwargs: Any) -> httpx.Client:
+        session = real_client(**kwargs)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(httpx, "Client", create_session)
+
+    def execute() -> None:
+        with OpenAlexClient(transport=transport) as client:
+            client.get_source_by_issn("0006-341X")
+            client.get_source_by_issn("1541-0420")
+            if unexpected_failure:
+                raise RuntimeError("downstream failure")
+
+    if unexpected_failure:
+        with pytest.raises(RuntimeError, match="downstream failure"):
+            execute()
+    else:
+        execute()
+
+    assert len(sessions) == 1
+    assert sessions[0].is_closed
+    assert transport.closed
+    assert len(transport.requests) == 2
+    assert all(request.method == "GET" for request in transport.requests)
+
+
+def set_proxy_environment(monkeypatch: pytest.MonkeyPatch, no_proxy: str) -> None:
+    for name in tuple(os.environ):
+        if name.lower().endswith("_proxy"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9999")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9999")
+    monkeypatch.setenv("NO_PROXY", no_proxy)
+
+
+def test_client_constructs_and_closes_with_unparseable_proxy_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_proxy_environment(monkeypatch, "fc00::/7,fe80::/10")
+    requests: list[httpx.Request] = []
+
+    def unexpected_request(self: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise AssertionError("construction must not send a request")
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", unexpected_request)
+    with OpenAlexClient() as client:
+        assert not client._http_client.trust_env
+        assert not client._http_client.is_closed
+
+    assert client._http_client.is_closed
+    assert requests == []
+    assert os.environ["NO_PROXY"] == "fc00::/7,fe80::/10"
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_default_client_uses_valid_environment_proxy(
+    monkeypatch: pytest.MonkeyPatch, scheme: str,
+) -> None:
+    set_proxy_environment(monkeypatch, "localhost,127.0.0.1")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9998")
+    proxies: dict[httpx.HTTPTransport, httpx.Proxy | None] = {}
+    used_proxies: list[httpx.Proxy | None] = []
+    real_init = httpx.HTTPTransport.__init__
+
+    def record_transport(self: httpx.HTTPTransport, **kwargs: Any) -> None:
+        proxies[self] = kwargs.get("proxy")
+        real_init(self, **kwargs)
+
+    def respond(self: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+        used_proxies.append(proxies[self])
+        return httpx.Response(200, json=fixture("source_biometrics.json"))
+
+    monkeypatch.setattr(httpx.HTTPTransport, "__init__", record_transport)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
+    with OpenAlexClient(base_url=f"{scheme}://provider.example") as client:
+        assert client._http_client.trust_env
+        assert client.get_source_by_issn("0006-341X") == fixture("source_biometrics.json")
+
+    assert len(used_proxies) == 1
+    assert used_proxies[0] is not None
+    assert used_proxies[0].url == httpx.URL(os.environ[f"{scheme.upper()}_PROXY"])
+    assert client._http_client.is_closed
+
+
+def test_mock_transport_works_with_unparseable_proxy_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_proxy_environment(monkeypatch, "fc00::/7,fe80::/10")
+    payload = fixture("source_biometrics.json")
+    transport = SequenceTransport(payload)
+    with OpenAlexClient(transport=transport) as client:
+        assert client.get_source_by_issn("0006-341X") == payload
+
+    assert len(transport.requests) == 1
+    assert transport.closed
+    assert client._http_client.is_closed
+
+
+@pytest.mark.parametrize("error, explicit_transport", [
+    (ValueError("invalid configuration"), False),
+    (RuntimeError("programming error"), False),
+    (httpx.InvalidURL("explicit transport error"), True),
+])
+def test_client_does_not_fallback_for_unrelated_construction_errors(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, explicit_transport: bool,
+) -> None:
+    set_proxy_environment(monkeypatch, "localhost")
+    calls: list[dict[str, Any]] = []
+
+    def fail_construction(**kwargs: Any) -> httpx.Client:
+        calls.append(kwargs)
+        raise error
+
+    monkeypatch.setattr(httpx, "Client", fail_construction)
+    with pytest.raises(type(error)) as raised:
+        OpenAlexClient(transport=SequenceTransport() if explicit_transport else None)
+
+    assert raised.value is error
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("revision,expected", [
+    (None, None),
+    ("2026-09-26T10:30:00+08:00", datetime(2026, 9, 26, 2, 30, tzinfo=timezone.utc)),
+    ("2026-09-26T10:30:00", datetime(2026, 9, 26, 10, 30, tzinfo=timezone.utc)),
+    ("invalid", None),
+])
+def test_work_revision_is_optional_timezone_safe_and_not_evidence(revision: str | None, expected: datetime | None) -> None:
+    source = openalex_module.ResolvedSource(
+        "Biometrics", ("0006-341X",), ("0006-341X",), (),
+        "https://openalex.org/S8265502", "Biometrics", "0006-341X", ("0006-341X",),
+    )
+    payload = fixture("works_page_1.json")["results"][0]
+    plain, _ = openalex_module._normalize_work(payload, source, datetime(2026, 9, 26, tzinfo=timezone.utc))
+    payload["updated_date"] = revision
+    record, warnings = openalex_module._normalize_work(payload, source, plain.provenance.retrieved_at)
+    assert record.updated_at == expected
+    assert record.to_evidence() == plain.to_evidence()
+    assert bool(warnings) == (revision is not None and expected is None)
+
+
+@pytest.mark.parametrize("revision", [None, datetime(2026, 9, 26, tzinfo=timezone.utc)])
+def test_default_record_serialization_preserves_released_shape(revision: datetime | None) -> None:
+    source = openalex_module.ResolvedSource(
+        "Biometrics", ("0006-341X",), ("0006-341X",), (),
+        "https://openalex.org/S8265502", "Biometrics", "0006-341X", ("0006-341X",),
+    )
+    plain, _ = openalex_module._normalize_work(
+        fixture("works_page_1.json")["results"][0], source,
+        datetime(2026, 9, 26, tzinfo=timezone.utc),
+    )
+    record = plain.model_copy(update={"updated_at": revision})
+    assert record.updated_at == revision
+    expected_fields = {"metadata", "external_ids", "authors", "source_id", "provenance", "version_hints"}
+    assert set(record.model_dump()) == expected_fields
+    assert set(json.loads(record.model_dump_json())) == expected_fields
+    assert record.model_dump() == plain.model_dump()
+    assert record.model_dump_json() == plain.model_dump_json()
+
+
+def a4_sources(*sources):
+    return {"meta": {"count": len(sources)}, "results": list(sources)}
+
+
+def a4_page(*works, cursor=None, count=None):
+    return {"meta": {"count": len(works) if count is None else count, "next_cursor": cursor}, "results": list(works)}
+
+
+def a4_work(work_id="W1", source_id="S8265502", **updates):
+    raw = fixture("works_page_1.json")["results"][0]
+    raw.update(id=f"https://openalex.org/{work_id}", updated_date="2026-01-31T00:00:00")
+    raw["primary_location"]["source"]["id"] = f"https://openalex.org/{source_id}"
+    raw.update(updates)
+    return raw
+
+
+def a4_journals():
+    return (JournalConfig(name="Biometrics", issn=("0006-341X",)),
+            JournalConfig(name="IEEE Transactions on Cybernetics", issn=("2168-2267",)))
+
+
+def a4_discover(client, journals=None):
+    return openalex_module.discover_journals_batched(
+        client, journals or a4_journals(), date(2026, 1, 1), date(2026, 1, 31),
+        retrieved_at=datetime(2026, 1, 31, tzinfo=timezone.utc),
+    )
+
+
+@pytest.mark.parametrize("size", [1, 2, 100, 101, 205])
+def test_a4_source_batches_are_bounded_and_ordered(size):
+    journals = tuple(JournalConfig(name=f"Journal {i}", issn=(f"{i:04d}-000X",)) for i in range(size))
+    sources = [dict(fixture("source_biometrics.json"), id=f"S{i}", display_name=j.name, issn=list(j.issn)) for i, j in enumerate(journals)]
+    client, transport = make_client(*(a4_sources(*sources[offset:offset + 100]) for offset in range(0, size, 100)))
+    with client:
+        units = openalex_module.resolve_journal_sources_batched(client, journals)
+    assert [unit.journal for unit in units] == list(journals)
+    assert all(unit.source and not unit.issues for unit in units)
+    assert len(transport.requests) == (size + 99) // 100
+    requested = []
+    for request in transport.requests:
+        params = dict(request.url.params)
+        batch = params["filter"].removeprefix("issn:").split("|")
+        assert len(batch) <= 100
+        assert params["select"] == openalex_module.SOURCE_FIELDS
+        requested.extend(batch)
+    assert requested == [j.issn[0] for j in journals]
+
+
+def test_a4_one_source_satisfies_two_issns_without_singletons():
+    journal = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"))
+    client, transport = make_client(a4_sources(fixture("source_biometrics.json")))
+    with client:
+        unit, = openalex_module.resolve_journal_sources_batched(client, (journal,))
+    assert unit.source.resolved_issns == journal.issn
+    assert not unit.issues
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize("damage", ["missing", "malformed", "ambiguous"])
+def test_a4_source_recovery_requests_only_unsafe_issn(damage):
+    biometrics, cyber = fixture("source_biometrics.json"), fixture("source_cybernetics.json")
+    raws = [biometrics]
+    if damage == "malformed":
+        raws.append(dict(cyber, type="repository"))
+    if damage == "ambiguous":
+        raws.extend([cyber, dict(cyber, id="S999")])
+    client, transport = make_client(a4_sources(*raws), cyber)
+    with client:
+        units = openalex_module.resolve_journal_sources_batched(client, a4_journals())
+    assert all(unit.source and not unit.issues for unit in units)
+    assert len(transport.requests) == 2
+    assert transport.requests[-1].url.path == "/sources/issn:2168-2267"
+
+
+@pytest.mark.parametrize("damage", ["conflict", "name", "issn", "type", "id"])
+def test_a4_source_identity_validation_is_preserved(damage):
+    first = fixture("source_biometrics.json")
+    other = dict(first, id="S999", issn=["1541-0420"])
+    journal = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"))
+    if damage == "conflict":
+        first["issn"] = ["0006-341X"]
+        client, _ = make_client(a4_sources(first, other))
+    else:
+        bad = dict(first)
+        bad[{"name": "display_name", "issn": "issn", "type": "type", "id": "id"}[damage]] = {
+            "name": "Other", "issn": ["9999-9999"], "type": "repository", "id": "bad",
+        }[damage]
+        client, _ = make_client(a4_sources(bad), bad, bad)
+    with client:
+        unit, = openalex_module.resolve_journal_sources_batched(client, (journal,))
+    assert unit.source is None
+    assert unit.status is CoverageStatus.FAILED
+    assert any(issue.severity is IssueSeverity.ERROR for issue in unit.issues)
+
+
+@pytest.mark.parametrize("status,requests", [(401, 1), (403, 1), (429, 3)])
+def test_a4_terminal_source_failure_opens_execution_circuit(status, requests):
+    client, transport = make_client(*(http_error(status) for _ in range(requests)))
+    with client:
+        units = openalex_module.resolve_journal_sources_batched(client, a4_journals())
+        assert all(unit.status is CoverageStatus.FAILED for unit in units)
+        for call in (lambda: client.get_source_by_issn("0006-341X"),
+                     lambda: list(client.iter_thin_work_pages(("S1",), date(2026, 1, 1), date(2026, 1, 31))),
+                     lambda: client.get_work_locations(("W1",))):
+            with pytest.raises(OpenAlexRequestError) as raised:
+                call()
+            assert raised.value.kind is openalex_module.OpenAlexFailureKind.CIRCUIT_OPEN
+    assert len(transport.requests) == requests
+    assert transport.closed
+
+
+def test_a4_thin_discovery_fields_mapping_and_searchable_metadata():
+    first, second = a4_work(), a4_work("W2", "S4210191041")
+    first["locations"] = [{"invalid": "must never be parsed during discovery"}]
+    client, transport = make_client(a4_sources(fixture("source_biometrics.json"), fixture("source_cybernetics.json")), a4_page(second, first))
+    with client:
+        result = a4_discover(client)
+    assert [unit.records[0].external_ids.openalex for unit in result.units] == ["https://openalex.org/W1", "https://openalex.org/W2"]
+    assert all(unit.coverage.status is CoverageStatus.COMPLETE for unit in result.units)
+    assert all(record.version_hints == () for record in result.records)
+    assert all(record.updated_at == datetime(2026, 1, 31, tzinfo=timezone.utc) for record in result.records)
+    assert not result.issues
+    params = dict(transport.requests[-1].url.params)
+    assert params["filter"] == "primary_location.source.id:S8265502|S4210191041,from_publication_date:2026-01-01,to_publication_date:2026-01-31"
+    assert params["select"] == openalex_module.THIN_WORK_FIELDS
+    assert "updated_date" in params["select"].split(",")
+    assert "updated_at" not in params["select"].split(",")
+    assert "locations" not in params["select"].split(",")
+    assert set(params) == {"filter", "select", "per_page", "cursor"}
+    source = result.units[0].source
+    legacy, _ = openalex_module._normalize_work(first, source, result.records[0].provenance.retrieved_at)
+    assert result.records[0].metadata == legacy.metadata
+    assert result.records[0].authors == legacy.authors
+    assert result.records[0].external_ids == legacy.external_ids
+
+
+@pytest.mark.parametrize("revision", [None, "bad", "2026-02-30T00:00:00", "2026-01-31", 123, {}])
+def test_a4_missing_or_invalid_revision_preserves_candidate_with_warning(revision):
+    client, _ = make_client(a4_sources(fixture("source_biometrics.json")), a4_page(a4_work(updated_date=revision)))
+    with client:
+        result = a4_discover(client, a4_journals()[:1])
+    assert len(result.records) == 1
+    assert result.records[0].updated_at is None
+    assert result.coverage[0].status is CoverageStatus.COMPLETE
+    assert any("updated_date" in issue.message for issue in result.issues)
+
+
+def test_a4_same_source_preserves_both_journal_reporting_units():
+    source = fixture("source_biometrics.json")
+    source["alternate_titles"] = ["Biometrics Alias"]
+    journals = (a4_journals()[0], JournalConfig(name="Biometrics Alias", issn=("1541-0420",)))
+    client, transport = make_client(a4_sources(source), a4_page(a4_work()))
+    with client:
+        result = a4_discover(client, journals)
+    assert [unit.coverage.journal for unit in result.units] == [journal.name for journal in journals]
+    assert all(unit.records for unit in result.units)
+    assert len(transport.requests) == 2
+
+
+@pytest.mark.parametrize("damage", ["unknown_source", "missing_source", "bad_title", "bad_id"])
+def test_a4_bad_work_recovers_safely_without_optimization_issue(damage):
+    bad = a4_work()
+    if damage == "unknown_source":
+        bad["primary_location"]["source"]["id"] = "S999"
+    elif damage == "missing_source":
+        bad["primary_location"] = None
+    elif damage == "bad_title":
+        bad["title"] = None
+    else:
+        bad["id"] = "bad"
+    # Unassignable evidence affects every Source; known malformed works only their Source.
+    outcomes = [a4_sources(fixture("source_biometrics.json"), fixture("source_cybernetics.json")), a4_page(bad, a4_work("W2", "S4210191041")), a4_page(a4_work())]
+    if damage in {"unknown_source", "missing_source"}:
+        outcomes.append(a4_page(a4_work("W2", "S4210191041")))
+    client, transport = make_client(*outcomes)
+    with client:
+        result = a4_discover(client)
+    assert all(unit.coverage.status is CoverageStatus.COMPLETE for unit in result.units)
+    assert not result.issues
+    assert len(result.records) == 2
+    assert len(transport.requests) == (4 if damage in {"unknown_source", "missing_source"} else 3)
+
+
+def test_a4_unrecovered_malformed_work_is_partial_only_in_affected_unit():
+    bad = a4_work("W3", title=None)
+    client, _ = make_client(a4_sources(fixture("source_biometrics.json"), fixture("source_cybernetics.json")),
+                            a4_page(a4_work(), bad, a4_work("W2", "S4210191041")), a4_page(a4_work(), bad))
+    with client:
+        result = a4_discover(client)
+    assert [coverage.status for coverage in result.coverage] == [CoverageStatus.PARTIAL, CoverageStatus.COMPLETE]
+    assert len(result.units[0].records) == 1
+
+
+@pytest.mark.parametrize("recovered", [False, True])
+def test_a4_pagination_failure_preserves_evidence_and_deduplicates_fallback(recovered):
+    outcomes = [a4_sources(fixture("source_biometrics.json"), fixture("source_cybernetics.json")),
+                a4_page(a4_work(), cursor="next", count=2), *[http_error(500)] * 3]
+    outcomes += [a4_page(a4_work()) if recovered else a4_page(a4_work(), cursor="next", count=2)]
+    if not recovered:
+        outcomes += [http_error(500)] * 3
+    outcomes += [a4_page()]
+    client, transport = make_client(*outcomes)
+    with client:
+        result = a4_discover(client)
+    assert len(result.units[0].records) == 1
+    assert result.coverage[0].status is (CoverageStatus.COMPLETE if recovered else CoverageStatus.PARTIAL)
+    assert result.coverage[1].status is CoverageStatus.COMPLETE
+    assert bool(result.issues) is not recovered
+    assert transport.requests[2].url.params["cursor"] == "next"
+
+
+@pytest.mark.parametrize("status,requests", [(401, 1), (429, 3)])
+def test_a4_terminal_works_failure_prevents_fallback(status, requests):
+    client, transport = make_client(a4_sources(fixture("source_biometrics.json"), fixture("source_cybernetics.json")), *[http_error(status)] * requests)
+    with client:
+        result = a4_discover(client)
+    assert all(coverage.status is CoverageStatus.FAILED for coverage in result.coverage)
+    assert len(transport.requests) == 1 + requests
+
+
+@pytest.mark.parametrize("bad_meta", [{"count": 2, "next_cursor": None}, {"count": None, "next_cursor": None}, {"count": 1, "next_cursor": "*"}])
+def test_a4_incomplete_single_source_traversal_is_never_complete(bad_meta):
+    page = a4_page(a4_work())
+    page["meta"] = bad_meta
+    client, _ = make_client(a4_sources(fixture("source_biometrics.json")), page)
+    with client:
+        result = a4_discover(client, a4_journals()[:1])
+    assert result.coverage[0].status is not CoverageStatus.COMPLETE
+
+
+def test_a4_duplicate_work_traversal_is_conservative_and_keeps_one_record():
+    client, _ = make_client(a4_sources(fixture("source_biometrics.json")), a4_page(a4_work(), a4_work()))
+    with client:
+        result = a4_discover(client, a4_journals()[:1])
+    assert len(result.records) == 1
+    assert result.coverage[0].status is CoverageStatus.PARTIAL
+
+
+@pytest.mark.parametrize("outcome", [httpx.Response(404), httpx.Response(400)])
+def test_a4_unresolved_issn_preserves_existing_warning_semantics(outcome):
+    source = fixture("source_biometrics.json")
+    source["issn"] = ["0006-341X"]
+    journal = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"))
+    client, transport = make_client(a4_sources(source), outcome)
+    with client:
+        unit, = openalex_module.resolve_journal_sources_batched(client, (journal,))
+    assert unit.source.resolved_issns == ("0006-341X",)
+    assert len(unit.issues) == 1
+    assert unit.issues[0].severity is IssueSeverity.WARNING
+    assert unit.issues[0].issn == "1541-0420"
+    assert len(transport.requests) == 2
+
+
+def test_a4_works_batches_are_bounded_and_same_client_is_reused():
+    journals = tuple(JournalConfig(name=f"Journal {i}", issn=(f"{i:04d}-000X",)) for i in range(101))
+    sources = [dict(fixture("source_biometrics.json"), id=f"S{i}", display_name=j.name, issn=list(j.issn)) for i, j in enumerate(journals)]
+    client, transport = make_client(a4_sources(*sources[:100]), a4_sources(*sources[100:]), a4_page(), a4_page())
+    with client:
+        pooled = client._http_client
+        result = a4_discover(client, journals)
+        assert client._http_client is pooled
+    assert len(result.units) == 101
+    assert all(unit.coverage.status is CoverageStatus.COMPLETE for unit in result.units)
+    assert [len(request.url.params["filter"].split(",")[0].split("|")) for request in transport.requests[2:]] == [100, 1]
+    assert pooled.is_closed and transport.closed
+
+
+def test_a4_terminal_failure_after_usable_page_remains_partial_without_fallback():
+    client, transport = make_client(a4_sources(fixture("source_biometrics.json"), fixture("source_cybernetics.json")),
+                                    a4_page(a4_work(), cursor="next", count=2), http_error(401))
+    with client:
+        result = a4_discover(client)
+    assert [coverage.status for coverage in result.coverage] == [CoverageStatus.PARTIAL, CoverageStatus.FAILED]
+    assert len(result.records) == 1
+    assert len(transport.requests) == 3
+
+
+def test_a4_complete_traversal_with_only_dropped_records_retains_legacy_partial_semantics():
+    client, _ = make_client(a4_sources(fixture("source_biometrics.json")), a4_page(a4_work(title=None)))
+    with client:
+        result = a4_discover(client, a4_journals()[:1])
+    assert not result.records
+    assert result.coverage[0].status is CoverageStatus.PARTIAL
+    assert result.issues
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (None, None),
+    ("2026-09-26T08:19:03.415552", datetime(2026, 9, 26, 8, 19, 3, 415552, tzinfo=timezone.utc)),
+    ("2026-09-26T08:19:03.415552Z", datetime(2026, 9, 26, 8, 19, 3, 415552, tzinfo=timezone.utc)),
+    ("2026-09-26T16:19:03.415552+08:00", datetime(2026, 9, 26, 8, 19, 3, 415552, tzinfo=timezone.utc)),
+    ("2026-09-26T08:19:03Z", datetime(2026, 9, 26, 8, 19, 3, tzinfo=timezone.utc)),
+    ("2026-09-26T16:19:03+08:00", datetime(2026, 9, 26, 8, 19, 3, tzinfo=timezone.utc)),
+])
+def test_openalex_updated_date_adapter_preserves_utc_precision(raw, expected):
+    assert openalex_module.parse_openalex_updated_date(raw) == expected
+    if expected is not None:
+        assert openalex_module.parse_openalex_updated_date(raw).tzinfo is timezone.utc
+
+
+@pytest.mark.parametrize("raw", [
+    "bad", "2026-09-26", "2026-02-30T08:19:03", "2026-09-26T25:19:03",
+    "2026-09-26T08:19:03.1234567", "2026-09-26T08:19:03+00:99",
+    "2026-09-26 08:19:03", " 2026-09-26T08:19:03", 123, True, {}, [],
+    datetime(2026, 9, 26, tzinfo=timezone.utc),
+])
+def test_openalex_updated_date_adapter_rejects_invalid_raw_values(raw):
+    with pytest.raises(ValueError):
+        openalex_module.parse_openalex_updated_date(raw)
+
+
+def test_generic_revision_parser_and_internal_model_still_reject_timezone_naive_values():
+    from literature_monitor.provider_revision import parse_revision_timestamp
+
+    raw = "2026-09-26T08:19:03.415552"
+    with pytest.raises(ValueError):
+        parse_revision_timestamp(raw)
+    client, _ = make_client(a4_sources(fixture("source_biometrics.json")), a4_page(a4_work(updated_date=raw)))
+    with client:
+        record, = a4_discover(client, a4_journals()[:1]).records
+    assert record.updated_at == datetime(2026, 9, 26, 8, 19, 3, 415552, tzinfo=timezone.utc)
+    assert "updated_at" not in record.model_dump()
+    assert "updated_at" not in json.loads(record.model_dump_json())
+    assert "updated_at" not in record.to_evidence().model_dump()
+    data = record.model_dump()
+    data["updated_at"] = raw
+    with pytest.raises(ValidationError):
+        openalex_module.OpenAlexWorkRecord.model_validate(data)
+
+
+def test_raw_updated_at_is_ignored_and_legacy_select_remains_unchanged():
+    raw = a4_work()
+    raw.pop("updated_date")
+    raw["updated_at"] = "2026-09-26T08:19:03Z"
+    client, _ = make_client(a4_sources(fixture("source_biometrics.json")), a4_page(raw))
+    with client:
+        result = a4_discover(client, a4_journals()[:1])
+    assert result.records[0].updated_at is None
+    assert any("missing updated_date" in issue.message for issue in result.issues)
+    assert "updated_date" not in openalex_module.WORK_FIELDS.split(",")
+    assert "updated_at" not in openalex_module.WORK_FIELDS.split(",")
+    legacy, warnings = openalex_module._normalize_work(raw, result.sources[0], result.records[0].provenance.retrieved_at)
+    assert legacy.updated_at is None
+    assert not warnings
+
+
+@pytest.mark.parametrize("mode", ["matching", "changed", "missing"])
+def test_provider_updated_date_drives_internal_version_state_binding(mode):
+    from literature_monitor.application.openalex_retrieval import hydrate_retained_openalex_versions
+    from literature_monitor.application.provider_state import OpenAlexVersionState
+    from literature_monitor.openalex import OpenAlexVersionHint
+
+    revision = datetime(2026, 9, 26, 8, 19, 3, 415552, tzinfo=timezone.utc)
+    old_hints = (OpenAlexVersionHint(source="doi", identifier="10.5555/old", version=OpenAlexVersion.ACCEPTED),)
+    state = OpenAlexVersionState("https://openalex.org/W1", revision, revision, old_hints)
+    raw_revision = {"matching": "2026-09-26T08:19:03.415552", "changed": "2026-09-27T08:19:03.415552", "missing": None}[mode]
+    outcomes = [a4_sources(fixture("source_biometrics.json")), a4_page(a4_work(updated_date=raw_revision))]
+    if mode != "matching":
+        outcomes.append(a4_page({"id": "W1", "locations": []}))
+    client, transport = make_client(*outcomes)
+    with client:
+        discovery = a4_discover(client, a4_journals()[:1])
+        result = hydrate_retained_openalex_versions(client, discovery.records, version_state=(state,), retrieved_at=revision)
+    assert len(transport.requests) == (2 if mode == "matching" else 3)
+    assert len(result.records) == 1
+    if mode == "matching":
+        assert result.records[0].version_hints == old_hints
+        assert result.reused_work_ids == (state.work_id,)
+        assert not result.pending_changes
+    else:
+        assert result.hydrated_work_ids == (state.work_id,)
+        assert len(result.pending_changes) == (1 if mode == "changed" else 0)
+        if mode == "changed":
+            assert result.pending_changes[0].hydrated_against_updated_at == discovery.records[0].updated_at
+    assert discovery.coverage[0].status is CoverageStatus.COMPLETE

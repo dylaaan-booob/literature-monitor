@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import socket
 import time
 import unicodedata
 from collections.abc import Callable, Iterator, Sequence
@@ -12,11 +11,10 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
-from urllib.request import Request, urlopen
 
-from pydantic import ValidationError
+import httpx
+from pydantic import Field, ValidationError, field_validator
 
 from literature_monitor.config import JournalConfig
 from literature_monitor.coverage import (
@@ -25,6 +23,7 @@ from literature_monitor.coverage import (
     CoverageUnit,
 )
 from literature_monitor.identifiers import normalize_doi
+from literature_monitor.provider_revision import parse_revision_timestamp
 from literature_monitor.models import (
     Author,
     CanonicalMetadata,
@@ -47,6 +46,12 @@ OPENALEX_BASE_URL = "https://api.openalex.org"
 SOURCE_FIELDS = (
     "id,display_name,issn_l,issn,type,alternate_titles,abbreviated_title"
 )
+THIN_WORK_FIELDS = (
+    "id,doi,title,publication_date,abstract_inverted_index,authorships,"
+    "primary_location,updated_date"
+)
+VERSION_FIELDS = "id,locations"
+_OPENALEX_BATCH_SIZE = 100
 WORK_FIELDS = (
     "id,doi,title,publication_date,abstract_inverted_index,authorships,"
     "primary_location,locations"
@@ -109,6 +114,12 @@ class OpenAlexWorkRecord(DomainModel):
     source_id: NonEmptyStr
     provenance: MetadataSource
     version_hints: tuple[OpenAlexVersionHint, ...] = ()
+    updated_at: datetime | None = Field(default=None, exclude=True)
+
+    @field_validator("updated_at", mode="before")
+    @classmethod
+    def normalize_revision(cls, value: object) -> datetime | None:
+        return parse_revision_timestamp(value)
 
     def to_evidence(self) -> ProviderWorkEvidence:
         roles = {
@@ -169,8 +180,23 @@ class OpenAlexNotFoundError(OpenAlexError):
     """The requested singleton external identifier was not found."""
 
 
+class OpenAlexFailureKind(str, Enum):
+    RECOVERABLE = "recoverable"
+    AUTHORIZATION = "authorization"
+    QUOTA = "quota"
+    CIRCUIT_OPEN = "circuit_open"
+
+
 class OpenAlexRequestError(OpenAlexError):
     """A remote request failed or returned an invalid response."""
+
+    def __init__(self, message: str, *, kind: OpenAlexFailureKind = OpenAlexFailureKind.RECOVERABLE):
+        super().__init__(message)
+        self.kind = kind
+
+    @property
+    def terminal(self) -> bool:
+        return self.kind is not OpenAlexFailureKind.RECOVERABLE
 
 
 class OpenAlexRecordError(OpenAlexError):
@@ -194,20 +220,46 @@ def _progress_total(value: Any) -> int | None:
 
 
 class OpenAlexClient:
+    """Own one pooled HTTP client; close it after each execution, usually with `with`."""
+
     def __init__(
         self,
         *,
         api_key: str | None = None,
         base_url: str = OPENALEX_BASE_URL,
         timeout: float = 30,
-        opener: Callable[..., Any] = urlopen,
+        transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.api_key = api_key.strip() if api_key and api_key.strip() else None
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self._opener = opener
+        try:
+            self._http_client = httpx.Client(
+                transport=transport,
+                timeout=timeout,
+                follow_redirects=True,
+            )
+        except httpx.InvalidURL:
+            if transport is not None:
+                raise
+            # No URL configuration is passed here; InvalidURL comes from env proxies.
+            self._http_client = httpx.Client(
+                timeout=timeout,
+                follow_redirects=True,
+                trust_env=False,
+            )
         self._sleep = sleep
+        self._terminal_failure: OpenAlexRequestError | None = None
+
+    def close(self) -> None:
+        self._http_client.close()
+
+    def __enter__(self) -> OpenAlexClient:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
 
     def get_source_by_issn(
         self,
@@ -242,9 +294,54 @@ class OpenAlexClient:
         progress_callback: ProgressCallback | None = None,
         activity: ActivityUpdate | None = None,
     ) -> Iterator[dict[str, Any]]:
+        yield from self._iter_work_pages(
+            (source_id,), from_date, to_date, fields=WORK_FIELDS,
+            progress_callback=progress_callback, activity=activity,
+        )
+
+    def get_sources_by_issns(
+        self, issns: Sequence[str], *, progress_callback: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        if not 1 <= len(issns) <= _OPENALEX_BATCH_SIZE:
+            raise ValueError("Source batch requires 1–100 ISSNs")
+        return self._request_json(
+            "/sources", {"filter": "issn:" + "|".join(issns), "select": SOURCE_FIELDS, "per_page": "100"},
+            progress_callback=progress_callback,
+            activity=ActivityUpdate(kind=ActivityKind.WORKING, source="openalex",
+                                    operation="source_resolution:batch", label="Resolving OpenAlex sources", unit="issn"),
+        )
+
+    def iter_thin_work_pages(
+        self, source_ids: Sequence[str], from_date: date, to_date: date, *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        if not 1 <= len(source_ids) <= _OPENALEX_BATCH_SIZE:
+            raise ValueError("Works batch requires 1–100 Sources")
+        yield from self._iter_work_pages(
+            source_ids, from_date, to_date, fields=THIN_WORK_FIELDS,
+            progress_callback=progress_callback,
+        )
+
+    def get_work_locations(
+        self, work_ids: Sequence[str], *, progress_callback: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        if not 1 <= len(work_ids) <= _OPENALEX_BATCH_SIZE:
+            raise ValueError("Version batch requires 1–100 Works")
+        ids = "|".join(_short_openalex_id(work_id, "W") for work_id in work_ids)
+        return self._request_json(
+            "/works", {"filter": "ids.openalex:" + ids, "select": VERSION_FIELDS, "per_page": "100"},
+            progress_callback=progress_callback,
+            activity=ActivityUpdate(kind=ActivityKind.WORKING, source="openalex",
+                                    operation="version_hydration", label="Hydrating OpenAlex versions", unit="work"),
+        )
+
+    def _iter_work_pages(
+        self, source_ids: Sequence[str], from_date: date, to_date: date, *, fields: str,
+        progress_callback: ProgressCallback | None = None, activity: ActivityUpdate | None = None,
+    ) -> Iterator[dict[str, Any]]:
         cursor: str | None = "*"
         seen_cursors: set[str] = set()
-        short_source_id = _short_openalex_id(source_id, "S")
+        short_source_id = "|".join(_short_openalex_id(source_id, "S") for source_id in source_ids)
         if activity is None and progress_callback is not None:
             activity = ActivityUpdate(
                 kind=ActivityKind.WORKING,
@@ -291,7 +388,7 @@ class OpenAlexClient:
                         f"from_publication_date:{from_date.isoformat()},"
                         f"to_publication_date:{to_date.isoformat()}"
                     ),
-                    "select": WORK_FIELDS,
+                    "select": fields,
                     "per_page": "100",
                     "cursor": cursor,
                 },
@@ -348,6 +445,10 @@ class OpenAlexClient:
         progress_callback: ProgressCallback | None = None,
         activity: ActivityUpdate | None = None,
     ) -> dict[str, Any]:
+        if self._terminal_failure is not None:
+            raise OpenAlexRequestError(
+                "OpenAlex execution circuit is open", kind=OpenAlexFailureKind.CIRCUIT_OPEN,
+            ) from self._terminal_failure
         url = f"{self.base_url}{path}?{urlencode(params)}"
         headers = {
             "Accept": "application/json",
@@ -355,7 +456,6 @@ class OpenAlexClient:
         }
         if self.api_key is not None:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        request = Request(url, headers=headers)
 
         for attempt in range(3):
             attempt_number = attempt + 1
@@ -374,8 +474,9 @@ class OpenAlexClient:
                     ),
                 )
             try:
-                with self._opener(request, timeout=self.timeout) as response:
-                    payload = json.loads(response.read())
+                response = self._http_client.get(url, headers=headers, timeout=self.timeout)
+                response.raise_for_status()
+                payload = json.loads(response.content)
                 if not isinstance(payload, dict):
                     raise OpenAlexRequestError("OpenAlex returned a non-object JSON response")
                 if activity is not None:
@@ -393,10 +494,11 @@ class OpenAlexClient:
                         ),
                     )
                 return payload
-            except HTTPError as error:
-                if error.code == 404 and not_found_message is not None:
+            except httpx.HTTPStatusError as error:
+                status_code = error.response.status_code
+                if status_code == 404 and not_found_message is not None:
                     raise OpenAlexNotFoundError(not_found_message) from error
-                if (error.code == 429 or error.code >= 500) and attempt < 2:
+                if (status_code == 429 or status_code >= 500) and attempt < 2:
                     delay = 2**attempt
                     if activity is not None:
                         # retry 事件必须先于 sleep，避免 backoff 被误判成无活动。
@@ -407,19 +509,23 @@ class OpenAlexClient:
                                 kind=ActivityKind.RETRYING,
                                 label="Retrying OpenAlex request",
                                 detail=(
-                                    f"{activity.detail} · HTTP {error.code} · "
+                                    f"{activity.detail} · HTTP {status_code} · "
                                     f"backoff {delay}s"
                                     if activity.detail
-                                    else f"HTTP {error.code} · backoff {delay}s"
+                                    else f"HTTP {status_code} · backoff {delay}s"
                                 ),
                             ),
                         )
                     self._sleep(delay)
                     continue
-                raise OpenAlexRequestError(
-                    f"OpenAlex request failed with HTTP {error.code}"
-                ) from error
-            except (TimeoutError, socket.timeout, URLError) as error:
+                kind = (OpenAlexFailureKind.AUTHORIZATION if status_code in {401, 403}
+                        else OpenAlexFailureKind.QUOTA if status_code in {402, 429}
+                        else OpenAlexFailureKind.RECOVERABLE)
+                failure = OpenAlexRequestError(f"OpenAlex request failed with HTTP {status_code}", kind=kind)
+                if failure.terminal:
+                    self._terminal_failure = failure
+                raise failure from error
+            except httpx.RequestError as error:
                 if attempt < 2:
                     delay = 2**attempt
                     if activity is not None:
@@ -607,6 +713,14 @@ def _resolve_journal_source(
             ),
         )
 
+    return _finish_journal_source(journal, hits, unresolved, request_failures, source_validation_failures)
+
+
+def _finish_journal_source(
+    journal: JournalConfig, hits: list[_SourceHit], unresolved: list[str],
+    request_failures: list[tuple[str, str]], source_validation_failures: list[tuple[str, str]],
+) -> tuple[ResolvedSource | None, tuple[DiscoveryIssue, ...], CoverageStatus | None]:
+    issues: list[DiscoveryIssue] = []
     if not hits:
         details: list[str] = []
         if unresolved:
@@ -738,6 +852,17 @@ def resolve_journal_source(
     return source, issues
 
 
+def parse_openalex_updated_date(value: object) -> datetime | None:
+    """OpenAlex defines its raw updated_date as UTC even when the offset is omitted."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("OpenAlex updated_date must be an ISO timestamp string")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?", value):
+        value += "Z"
+    return parse_revision_timestamp(value)
+
+
 def _parse_publication_date(value: Any) -> date | None:
     if value is None:
         return None
@@ -851,6 +976,7 @@ def _normalize_work(
     payload: Any,
     source: ResolvedSource,
     retrieved_at: datetime,
+    *, thin: bool = False,
 ) -> tuple[OpenAlexWorkRecord, tuple[str, ...]]:
     if not isinstance(payload, dict):
         raise OpenAlexRecordError("work response entry is not an object")
@@ -871,6 +997,11 @@ def _normalize_work(
 
     warnings: list[str] = []
     try:
+        updated_at = parse_openalex_updated_date(payload.get("updated_date"))
+    except ValueError:
+        updated_at = None
+        warnings.append("invalid updated_date was treated as missing")
+    try:
         publication_date = _parse_publication_date(payload.get("publication_date"))
     except (TypeError, ValueError):
         publication_date = None
@@ -885,9 +1016,9 @@ def _normalize_work(
     except ValueError:
         abstract = None
         warnings.append("invalid abstract_inverted_index was treated as missing")
-    version_hints, location_warnings = _normalize_version_hints(
-        payload.get("locations")
-    )
+    version_hints, location_warnings = ((), ()) if thin else _normalize_version_hints(payload.get("locations"))
+    if thin and updated_at is None and payload.get("updated_date") is None:
+        warnings.append("missing updated_date prevents version-state reuse")
     warnings.extend(location_warnings)
 
     authorships = payload.get("authorships")
@@ -935,6 +1066,7 @@ def _normalize_work(
                 retrieved_at=retrieved_at,
             ),
             version_hints=version_hints,
+            updated_at=updated_at,
         ),
         tuple(warnings),
     )
@@ -1115,3 +1247,265 @@ def discover_journals(
         coverage=tuple(unit.coverage for unit in units),
         units=units,
     )
+
+
+@dataclass(frozen=True)
+class SourceResolutionUnit:
+    journal: JournalConfig
+    source: ResolvedSource | None
+    issues: tuple[DiscoveryIssue, ...]
+    status: CoverageStatus | None
+
+
+def resolve_journal_sources_batched(
+    client: OpenAlexClient, journals: Sequence[JournalConfig], *,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[SourceResolutionUnit, ...]:
+    """Resolve the complete configured sequence without changing legacy entrypoints."""
+    issns = tuple(dict.fromkeys(issn for journal in journals for issn in journal.issn))
+    outcomes: dict[str, _SourceHit | OpenAlexError] = {}
+    for offset in range(0, len(issns), _OPENALEX_BATCH_SIZE):
+        batch = issns[offset:offset + _OPENALEX_BATCH_SIZE]
+        candidates: dict[str, list[_SourceHit]] = {issn: [] for issn in batch}
+        try:
+            payload = client.get_sources_by_issns(batch, progress_callback=progress_callback)
+            results = payload.get("results")
+            if not isinstance(results, list):
+                raise OpenAlexRequestError("OpenAlex Sources response lacks results")
+            count = _progress_total(payload.get("meta", {}).get("count")) if isinstance(payload.get("meta"), dict) else None
+            if count is not None and count != len(results):
+                raise OpenAlexRequestError("incomplete OpenAlex Source batch")
+            unsafe: set[str] = set()
+            for raw in results:
+                if not isinstance(raw, dict) or not isinstance(raw.get("issn"), list):
+                    continue
+                for issn in batch:
+                    if issn not in raw["issn"]:
+                        continue
+                    try:
+                        candidates[issn].append(_parse_source(raw, issn))
+                    except OpenAlexRecordError:
+                        unsafe.add(issn)
+            for issn, hits in candidates.items():
+                if issn not in unsafe and hits and len({hit.openalex_id for hit in hits}) == 1:
+                    outcomes[issn] = hits[0]
+        except OpenAlexRequestError as error:
+            if error.terminal:
+                outcomes.update((issn, error) for issn in batch)
+        for issn in batch:
+            if issn in outcomes:
+                continue
+            try:
+                raw = client.get_source_by_issn(issn, progress_callback=progress_callback)
+                outcomes[issn] = _parse_source(raw, issn)
+            except OpenAlexError as error:
+                outcomes[issn] = error
+                if isinstance(error, OpenAlexRequestError) and error.terminal:
+                    outcomes.update((remaining, error) for remaining in batch if remaining not in outcomes)
+                    break
+    units = []
+    for journal in journals:
+        hits, unresolved, requests, validation = [], [], [], []
+        for issn in journal.issn:
+            outcome = outcomes[issn]
+            if isinstance(outcome, _SourceHit):
+                if _journal_name_matches(journal.name, outcome):
+                    hits.append(outcome)
+                else:
+                    validation.append((issn, f"configured journal name does not match OpenAlex source {outcome.display_name!r}"))
+            elif isinstance(outcome, OpenAlexNotFoundError):
+                unresolved.append(issn)
+            elif isinstance(outcome, OpenAlexRecordError):
+                validation.append((issn, str(outcome)))
+            else:
+                requests.append((issn, str(outcome)))
+        source, issues, status = _finish_journal_source(journal, hits, unresolved, requests, validation)
+        units.append(SourceResolutionUnit(journal, source, issues, status))
+    return tuple(units)
+
+
+def _record_order(record: OpenAlexWorkRecord) -> tuple[date, str]:
+    return record.metadata.publication_date or date.max, record.external_ids.openalex or ""
+
+
+def _fetch_thin_sources(
+    client: OpenAlexClient, sources: dict[str, ResolvedSource], from_date: date, to_date: date,
+    timestamp: datetime, progress_callback: ProgressCallback | None,
+) -> dict[str, tuple[tuple[OpenAlexWorkRecord, ...], tuple[DiscoveryIssue, ...], CoverageStatus]]:
+    records: dict[str, dict[str, OpenAlexWorkRecord]] = {key: {} for key in sources}
+    issues: dict[str, list[DiscoveryIssue]] = {key: [] for key in sources}
+    affected: set[str] = set()
+    seen: set[str] = set()
+    obtained = 0
+    expected: int | None = None
+    terminal = False
+    request_failed = False
+    try:
+        for page in client.iter_thin_work_pages(tuple(sources), from_date, to_date, progress_callback=progress_callback):
+            count = _progress_total(page["meta"].get("count"))
+            invalid_count = count is None or (expected is not None and expected != count)
+            expected = count
+            for raw in page["results"]:
+                obtained += 1
+                try:
+                    source_id = _canonical_openalex_id(raw["primary_location"]["source"]["id"], "S")
+                    if source_id not in sources:
+                        raise OpenAlexRecordError("unassignable primary Source")
+                except (KeyError, TypeError, OpenAlexRecordError):
+                    affected.update(sources)
+                    for key, source in sources.items():
+                        issues[key].append(DiscoveryIssue(IssueSeverity.ERROR, "record_normalization", source.journal, "unassignable primary Source"))
+                    continue
+                record_id = raw.get("id")
+                try:
+                    work_id = _canonical_openalex_id(record_id, "W")
+                    if work_id in seen:
+                        affected.add(source_id)
+                        issues[source_id].append(DiscoveryIssue(IssueSeverity.ERROR, "work_retrieval", sources[source_id].journal,
+                                                               "duplicate Work in traversal", record_id=work_id))
+                    seen.add(work_id)
+                    record, warnings = _normalize_work(raw, sources[source_id], timestamp, thin=True)
+                except (OpenAlexError, ValidationError) as error:
+                    affected.add(source_id)
+                    issues[source_id].append(DiscoveryIssue(IssueSeverity.ERROR, "record_normalization", sources[source_id].journal, str(error), record_id=record_id if isinstance(record_id, str) else None))
+                    continue
+                records[source_id][record.external_ids.openalex] = record
+                issues[source_id].extend(DiscoveryIssue(IssueSeverity.WARNING, "record_normalization", sources[source_id].journal, warning, record_id=record.external_ids.openalex) for warning in warnings)
+            if invalid_count:
+                raise OpenAlexRequestError("invalid or changing OpenAlex Works count")
+        if expected != obtained:
+            raise OpenAlexRequestError("incomplete OpenAlex Works traversal")
+    except OpenAlexError as error:
+        request_failed = True
+        terminal = isinstance(error, OpenAlexRequestError) and error.terminal
+        affected.update(sources)
+        for key, source in sources.items():
+            issues[key].append(DiscoveryIssue(IssueSeverity.ERROR, "work_retrieval", source.journal, str(error)))
+    result = {
+        key: (tuple(sorted(records[key].values(), key=_record_order)), tuple(issues[key]),
+              (CoverageStatus.PARTIAL if records[key] or not request_failed else CoverageStatus.FAILED) if key in affected else CoverageStatus.COMPLETE)
+        for key in sources
+    }
+    if affected and len(sources) > 1 and not terminal:
+        # Retry only affected identities. Split a fully failed batch to bound its failure domain.
+        keys = [key for key in sources if key in affected]
+        midpoint = max(1, len(keys) // 2)
+        for subset in (keys[:midpoint], keys[midpoint:]):
+            if not subset:
+                continue
+            recovered = _fetch_thin_sources(client, {key: sources[key] for key in subset}, from_date, to_date, timestamp, progress_callback)
+            for key, (new_records, new_issues, status) in recovered.items():
+                if status is CoverageStatus.COMPLETE:
+                    result[key] = new_records, new_issues, status
+                else:
+                    merged = {record.external_ids.openalex: record for record in (*result[key][0], *new_records)}
+                    partial = bool(merged) or status is CoverageStatus.PARTIAL or result[key][2] is CoverageStatus.PARTIAL
+                    result[key] = (tuple(sorted(merged.values(), key=_record_order)), (*result[key][1], *new_issues),
+                                   CoverageStatus.PARTIAL if partial else CoverageStatus.FAILED)
+    return result
+
+
+def discover_journals_batched(
+    client: OpenAlexClient, journals: Sequence[JournalConfig], from_date: date, to_date: date, *,
+    retrieved_at: datetime | None = None, progress_callback: ProgressCallback | None = None,
+) -> DiscoveryResult:
+    """v0.4.3 live thin discovery, still separate from production Run/validate."""
+    if from_date > to_date:
+        raise ValueError("from_date must not be after to_date")
+    timestamp = retrieved_at or datetime.now(timezone.utc)
+    if timestamp.utcoffset() is None:
+        raise ValueError("retrieved_at must include a timezone")
+    timestamp = timestamp.astimezone(timezone.utc)
+    resolutions = resolve_journal_sources_batched(client, journals, progress_callback=progress_callback)
+    sources = {unit.source.openalex_id: unit.source for unit in resolutions if unit.source is not None}
+    keys = tuple(sources)
+    fetched = {}
+    for offset in range(0, len(keys), _OPENALEX_BATCH_SIZE):
+        batch = keys[offset:offset + _OPENALEX_BATCH_SIZE]
+        fetched.update(_fetch_thin_sources(client, {key: sources[key] for key in batch}, from_date, to_date, timestamp, progress_callback))
+    units = []
+    for resolution in resolutions:
+        source = resolution.source
+        records, issues, status = fetched[source.openalex_id] if source else ((), (), resolution.status or CoverageStatus.FAILED)
+        # Source requests are shared; reporting remains journal-local even for aliases.
+        issues = tuple(replace(issue, journal=resolution.journal.name) for issue in issues)
+        units.append(OpenAlexDiscoveryUnitResult(
+            resolution.journal,
+            CoverageUnit("openalex", CoverageComponent.OPENALEX_DISCOVERY, status, journal=resolution.journal.name),
+            source, records, (*resolution.issues, *issues),
+        ))
+    return DiscoveryResult(
+        tuple(unit.source for unit in units if unit.source),
+        tuple(record for unit in units for record in unit.records),
+        tuple(issue for unit in units for issue in unit.issues),
+        tuple(unit.coverage for unit in units), tuple(units),
+    )
+
+
+@dataclass(frozen=True)
+class OpenAlexVersionHydration:
+    work_id: str
+    version_hints: tuple[OpenAlexVersionHint, ...]
+    issues: tuple[DiscoveryIssue, ...] = ()
+    succeeded: bool = True
+
+
+def hydrate_work_versions(
+    client: OpenAlexClient, work_ids: Sequence[str], *, progress_callback: ProgressCallback | None = None,
+) -> tuple[OpenAlexVersionHydration, ...]:
+    """Locations only; no membership, retention decision, coverage, or durable access."""
+    ids = tuple(dict.fromkeys(_canonical_openalex_id(work_id, "W") for work_id in work_ids))
+
+    def fetch(batch: tuple[str, ...]) -> dict[str, OpenAlexVersionHydration]:
+        mapped: dict[str, OpenAlexVersionHydration] = {}
+        terminal = False
+        failure = "missing or malformed OpenAlex location record"
+        try:
+            payload = client.get_work_locations(batch, progress_callback=progress_callback)
+            results = payload.get("results")
+            if not isinstance(results, list):
+                raise OpenAlexRequestError("OpenAlex version response lacks results")
+            duplicates: set[str] = set()
+            seen_ids: set[str] = set()
+            for raw in results:
+                try:
+                    work_id = _canonical_openalex_id(raw.get("id"), "W") if isinstance(raw, dict) else None
+                except OpenAlexRecordError:
+                    continue
+                if work_id not in batch:
+                    continue
+                if work_id in seen_ids:
+                    duplicates.add(work_id)
+                seen_ids.add(work_id)
+                if not isinstance(raw.get("locations"), list):
+                    continue
+                try:
+                    hints, warnings = _normalize_version_hints(raw["locations"])
+                except (ValueError, ValidationError):
+                    continue
+                mapped[work_id] = OpenAlexVersionHydration(work_id, hints, tuple(
+                    DiscoveryIssue(IssueSeverity.WARNING, "version_hydration", "", warning, record_id=work_id)
+                    for warning in warnings
+                ))
+            for work_id in duplicates:
+                mapped.pop(work_id, None)
+        except OpenAlexError as error:
+            terminal = isinstance(error, OpenAlexRequestError) and error.terminal
+            failure = str(error)
+        missing = tuple(work_id for work_id in batch if work_id not in mapped)
+        if missing and len(batch) > 1 and not terminal:
+            midpoint = max(1, len(missing) // 2)
+            for subset in (missing[:midpoint], missing[midpoint:]):
+                if subset:
+                    mapped.update(fetch(subset))
+        for work_id in missing:
+            if work_id not in mapped:
+                mapped[work_id] = OpenAlexVersionHydration(work_id, (), (
+                    DiscoveryIssue(IssueSeverity.WARNING, "version_hydration", "", failure, record_id=work_id),
+                ), False)
+        return mapped
+
+    results = {}
+    for offset in range(0, len(ids), _OPENALEX_BATCH_SIZE):
+        results.update(fetch(ids[offset:offset + _OPENALEX_BATCH_SIZE]))
+    return tuple(results[work_id] for work_id in ids)

@@ -149,6 +149,7 @@ version = "0.4.2"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "jinja2" },
     { name = "pydantic" },
     { name = "python-multipart" },
@@ -158,13 +159,13 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "pytest" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.116,<1" },
+    { name = "httpx", specifier = ">=0.27,<0.29" },
     { name = "jinja2", specifier = ">=3.1,<4" },
     { name = "pydantic", specifier = ">=2,<3" },
     { name = "python-multipart", specifier = ">=0.0.20,<1" },
@@ -173,10 +174,7 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [
-    { name = "httpx", specifier = ">=0.27,<0.29" },
-    { name = "pytest", specifier = ">=8" },
-]
+dev = [{ name = "pytest", specifier = ">=8" }]
 
 [[package]]
 name = "markupsafe"
