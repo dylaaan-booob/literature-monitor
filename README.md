@@ -11,6 +11,13 @@ v0.4.4 is the latest released version. It completes Crossref Elapsed-Aware Pacin
 model and compatibility boundaries. Its A1–A5 implementation, independent stage
 reviews, final independent audit, release transaction, and closeout are complete.
 
+The current source tree has completed v0.4.5 Candidate Eligibility, Warning
+Semantics & Scrollable Master-Detail Workspace implementation, independent
+stage reviews, and final integration audit. It is in **v0.4.5 release preparation /
+closeout**, with package metadata at `0.4.5`; v0.4.5 remains unreleased. Its tag,
+main/tag pushes, and GitHub Release are pending; v0.4.4 remains the latest
+released version until the release transaction completes.
+
 The workflow automatically reuses revision-validated Provider
 state while establishing live candidate membership on every Run. It batches
 OpenAlex Source/Works retrieval, hydrates locations/version hints only for
@@ -59,6 +66,16 @@ retrying, waiting, and stopped-worker states remain distinct. Runtime progress
 is process-local, with snapshot-only HTMX polling every 750 ms and no durable
 progress or heartbeat. Web offers only normal **Run** / **Run again** actions.
 
+At desktop widths >760px, the Paper list and detail panes have equal,
+viewport-bounded height and scroll independently. The active selection is
+visible and always belongs to the current view. Clicking a Paper replaces only
+the detail and preserves list scroll. A successful decision reloads disk state:
+if the Paper leaves the view, selection moves to its next neighbor, then the
+previous neighbor, then empty detail. Whole-workspace refreshes preserve a still
+valid transient selection and restore the list's review neighborhood; failures
+show refreshed state without stepping to a neighbor. At mobile widths ≤760px,
+list and detail stack in normal page flow without nested pane scrolling.
+
 Paper Markdown remains the durable workflow state. The GUI does not add a
 workflow/execution database, persistent run history, heartbeat, SSE, WebSocket,
 queue, or another source of Paper decision state.
@@ -100,7 +117,7 @@ marker only. Discovery does not download `locations` for every Work; only
 retained W IDs hydrate locations/version hints, once per distinct ID. Those
 hints may be reused when the current live revision matches Provider state.
 
-In the v0.4.4 source tree, OpenAlex Provider evidence eligibility is separate
+In the current source tree, OpenAlex Provider evidence eligibility is separate
 from `CanonicalPaper` eligibility. A valid Work identity, trustworthy Source,
 and usable DOI or title allow evidence to continue even with empty authors,
 missing abstract, or missing publication date. Ordinary sparsity does not
@@ -120,20 +137,52 @@ DOI-anchored partial OpenAlex evidence can receive Crossref supplementation
 even without an OpenAlex title or authors. Title-only evidence without a DOI
 can proceed directly to local matching without a production `missing_doi`
 warning or a DOI-supplement request/coverage unit. After consolidation, a
-cluster with no usable title, author keywords, or abstract receives an
-`unsearchable` warning and is excluded from matcher candidates, including for
+eligible cluster with no usable title, author keywords, or abstract receives
+an `unsearchable` warning and is excluded from matcher candidates, including for
 pure `NOT` and complement expressions. This is a search-boundary warning,
 not a Provider retrieval issue. Matched evidence still needs a title, journal,
 and at least one author for `CanonicalPaper`; unmet eligibility produces the
 existing `insufficient_metadata` warning. Evidence grouping and representative
 selection remain in use without generic field-by-field Provider synthesis.
 
+Candidate Eligibility is evaluated after current Crossref supplementation and
+before evidence assembly and local matching. Exact Crossref `journal-article`
+with a target ISSN is strong eligible evidence; `journal-issue` is excluded
+before matching. An explicit non-journal type without a target ISSN is
+`INELIGIBLE`; conflicting type/venue evidence, `other`, missing type, or an
+article with explicit non-target ISSNs is `SCOPE_DISPUTED` under SPEC §32.
+OpenAlex `type` itself never vetoes a candidate.
+
+When Crossref has no exact record, OpenAlex `primary_location.is_published`
+provides the fallback: `UNAVAILABLE` and DOI-less evidence use true → eligible,
+false → ineligible, unknown → disputed. `FAILED` uses true → eligible and
+false/unknown → disputed, retaining the Provider execution error. Disputed
+evidence continues to matching to protect recall. Unmatched or unsearchable
+pure disputes remain diagnostics only; matched disputes warn unless the same
+cluster has strong eligible evidence, in which case the dispute remains a
+diagnostic. An empty mixed eligible/disputed cluster retains both its genuine
+unsearchable warning and scope diagnostic.
+
+Non-candidate exclusion, scope dispute, repeated-title separation, and
+conflicting-DOI separation are typed transient Run diagnostics. CLI and Web
+show their logical-group counts and context separately from warnings/errors.
+Diagnostics alone do not change exit codes or `RunOutcome` and are not written
+to last-run, Paper/Author Markdown, monitor YAML, or Provider state.
+
+Title fallback distinguishes `MATCH`, `INCONCLUSIVE`, and `CONFLICT`, merging
+only on `MATCH`; a one-sided stable ID does not automatically conflict. Once
+same-work identity is established, limited author display forms may compare
+equivalent while preserving author sequence and representative display names.
+Abstract comparison uses deterministic HTML/JATS, entity, Unicode, whitespace,
+punctuation, and structural-label normalization, preserving substantive text
+and the selected raw abstract. No fuzzy, embedding, or LLM similarity is used.
+
 OpenAlex Works discovery keeps cursor pagination at `per_page=100`. Crossref
 uses bounded manifest retrieval, splitting ISSNs and date intervals as needed,
 then traversing cursors for oversized single days, with `rows=1000`. A Crossref
 client uses valid `X-Rate-Limit-Limit` and `X-Rate-Limit-Interval` response
 metadata to pace later requests without rate-limit probes or count-only
-requests. In the v0.4.4 source tree, pacing uses elapsed-aware, process-local
+requests. In the current source tree, pacing uses elapsed-aware, process-local
 monotonic timing, with independent Provider-derived state for singleton DOI
 and list/filter request classes. Network and processing time count toward the
 interval; retry and pacing deadlines share the remaining wait instead of
@@ -192,6 +241,15 @@ checkpoint/cursor state. Normal production Run automatically uses it, but live
 Provider evidence always determines current membership. Matching revisions may
 reuse metadata/version hints; changed revisions refresh live. Missing state
 causes an ordinary all-live Run.
+
+Current Provider-state logical schema is v2. Crossref semantic hashes now
+consume `work_type`; the SQLite physical layout and both Provider serialization
+versions remain unchanged. Reading a valid v1 DB validates its original hashes
+and converts state in memory without writing, allowing revision-validated reuse
+in that same Run. The normal production persistence boundary transactionally
+migrates all historical Crossref hashes, including out-of-window records, to v2
+alongside pending state. Migration failure rolls back Provider state and reports
+a persistence warning without rolling back completed Paper/Author materialization.
 
 Corrupt or incompatible regular state causes an all-live Run with a warning;
 a successfully constructed fresh DB can safely replace that invalid regular
@@ -483,12 +541,14 @@ The local keyword filtering diagnostic does not perform Crossref enrichment,
 canonicalization, Markdown materialization, Zotero integration, conference
 monitoring, or persistence.
 
-In the v0.4.4 source tree, filtering uses `record.to_evidence()` and its Provider
+In the current source tree, filtering uses `record.to_evidence()` and its Provider
 searchable projection. Partial title-only or DOI-only records, empty authors,
 and missing abstract/publication date are supported. Records with no title,
 author keywords, or abstract are filtered out before the matcher, so an empty
 projection cannot be retained through `NOT`. Searchable records keep the normal
 FTS5 semantics and discovery order; output remains the original OpenAlex records.
+Legacy `openalex-filter` and `crossref-enrich` do not apply the production
+Candidate Eligibility boundary described above.
 
 ## Keyword matching semantics
 

@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.4.4 is the current/latest released and completed baseline
+**Status:** Active; v0.4.4 remains the current/latest released baseline until the v0.4.5 release transaction completes; v0.4.5 is unreleased and in release preparation / closeout
 
-**Stage:** v0.4.4 released / closeout complete
+**Stage:** v0.4.5 release preparation / closeout; v0.4.4 released / closeout complete
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
@@ -1836,7 +1836,7 @@ The §31 implementation is complete. A1–A5 implementation and independent stag
 
 ### 23.18 v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace
 
-v0.4.5 is the active development stage. The following are required observable acceptance scenarios for the §32 contract, pending implementation and verification; they are not completed acceptance, final-audit, or release claims:
+v0.4.5 §32 implementation is complete. A1–A6 and their independent stage reviews are complete; the following acceptance scenarios have been demonstrated and the final independent integration audit passed. The full automated suite passed (1877 tests, with two known dependency deprecation warnings). The desktop/mobile manual Web smoke passed during A6, and the final independent integration audit separately verified the corresponding desktop/mobile browser behavior. v0.4.5 remains unreleased at release preparation / closeout; v0.4.4 remains the latest released baseline.
 
 - A Crossref `journal-issue` is `INELIGIBLE` before topic matching, including with a target ISSN or an empty searchable projection. It creates neither a candidate nor an `unsearchable` warning. OpenAlex `paratext` or `book-chapter` misclassification does not veto exact Crossref `journal-article` evidence with a target ISSN.
 - An explicit non-journal Crossref type without a target ISSN is excluded even when its container name equals the configured journal name. `other` or missing Crossref type is `SCOPE_DISPUTED`; `journal-article` with explicit non-target ISSNs is also disputed. A `journal-article` without ISSNs may use strict configured/resolved journal-name equality as weak venue support, never as an override for nonmatching ISSNs.
@@ -1857,7 +1857,7 @@ v0.4.5 is the active development stage. The following are required observable ac
 - A failed decision, state conflict, or I/O failure displays refreshed real disk state and the failure, without reporting successful neighbor navigation. Out-of-range navigation positions are clamped and never influence decision authorization, UUID validation, or expected-status checks.
 - At viewport width ≤760px, the workspace returns to ordinary single-column document flow, without desktop pane-height constraints or nested pane scrolling. Both list and detail remain reachable through page scrolling.
 - Existing CSRF, compare-before-replace, Markdown ownership/preservation, UUID identity, Zotero, retrieval coverage, revision reuse/alias behavior, five-stage progress, inert legacy cache, and historical last-run compatibility continue to hold within §32.1's narrow supersede boundary.
-- Final acceptance requires the full automated suite plus manual desktop and mobile Web smoke demonstrating scrolling, active selection, view membership, successful decisions, refreshed failure states, empty views, and scroll-neighborhood restoration. These checks remain pending for this development contract.
+- Final acceptance requires the full automated suite plus manual desktop and mobile Web smoke demonstrating scrolling, active selection, view membership, successful decisions, refreshed failure states, empty views, and scroll-neighborhood restoration. The required desktop/mobile manual Web smoke passed during A6. The final independent integration audit separately verified the corresponding desktop/mobile browser behavior, and the full automated suite passed.
 
 ---
 
@@ -2106,6 +2106,35 @@ v0.4.4 feature implementation complete
 ```
 
 The full closeout sequence is complete. v0.4.4 is released and is the current released and completed baseline.
+
+---
+
+### 24.13 v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace
+
+A1–A6 implementation, independent stage reviews, and the final independent integration audit are complete. The §23.18 acceptance scenarios and full automated suite passed. The A6 desktop/mobile manual Web smoke passed, and separate independent desktop/mobile browser verification passed during the final integration audit. The repository is at release preparation / closeout; v0.4.5 has not yet been released.
+
+The completed bounded result includes:
+
+- Candidate Eligibility tri-state decisions and pre-matching exclusion, with distinct Crossref absence/failure and DOI-less OpenAlex publication fallback semantics;
+- typed transient Run diagnostics that do not change outcomes, with logical-group counts and context shown separately in CLI/Web;
+- conservative author/title identity decisions and deterministic author/abstract metadata representation equivalence;
+- Provider-state logical schema v2, Crossref `work_type` semantic-hash consumption, immediate valid-v1 reuse, and transactional migration of historical v1 hashes with rollback;
+- viewport-bounded equal-height desktop master-detail panes, independent scrolling, current-view selection, success-only neighbor navigation, and mobile normal page flow;
+- preserved Markdown ownership, workflow decisions, retrieval/coverage, revision reuse, alias, progress, and security boundaries.
+
+The release closeout sequence is:
+
+```text
+v0.4.5 feature implementation complete
+→ final audit complete
+→ release-preparation commit
+→ tag
+→ push main
+→ push tag
+→ GitHub Release
+```
+
+Currently the first two steps are complete and the release-preparation commit is pending. After that commit, only the first three steps will be complete: tag, push main, push tag, and GitHub Release remain pending. v0.4.4 remains the latest released baseline until the transaction completes.
 
 ---
 
@@ -2583,6 +2612,8 @@ v0.4.3 is released and complete. Its A1–A8 implementation, independent stage r
 
 v0.4.4 is released and complete. Its §31 implementation and §23.17 acceptance are complete; A1–A5 independent stage reviews, final independent audit, release preparation, release transaction, and closeout are complete (§24.12). The preserved workflow and compatibility contracts remain in force.
 
+v0.4.5 implementation and independent stage reviews are complete; §23.18 acceptance has been demonstrated, including the full automated suite and A6 desktop/mobile manual Web smoke. The final independent integration audit passed and separately verified the corresponding desktop/mobile browser behavior. The current stage is release preparation / closeout (§24.13). v0.4.5 remains unreleased; v0.4.4 remains the latest released version until the release transaction completes.
+
 ---
 
 ## 28. Current Project Stage
@@ -2591,7 +2622,7 @@ R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity s
 
 The v0.4.4 release and closeout are complete, following §24.12. Its §31 implementation, independent stage reviews, and final independent audit are complete; the §23.17 acceptance scenarios have been demonstrated.
 
-v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace is now the active development stage. §32 is its authoritative development contract and §23.18 defines its pending acceptance. Implementation, automated verification, manual Web smoke, independent reviews, final audit, and release work remain pending. v0.4.5 is not complete, audited, released, or tagged; the released baseline and package version remain v0.4.4 / `0.4.4`.
+v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace implementation, A1–A6 independent stage reviews, §23.18 acceptance, and full automated verification are complete. The A6 desktop/mobile manual Web smoke passed, and separate independent desktop/mobile browser verification passed during the final integration audit. §32 remains its authoritative behavior contract. The current stage is v0.4.5 release preparation / closeout (§24.13), with package metadata `0.4.5`. v0.4.5 remains unreleased and untagged; release-preparation commit, tag, main/tag pushes, and GitHub Release are pending. v0.4.4 remains the latest released baseline until the release transaction completes.
 
 OpenAlex remains the primary discovery provider, Crossref the secondary discovery/bibliographic provider, and Semantic Scholar remains excluded. Automatic revision-validated Provider-state reuse is in scope for v0.4.3. Checkpoint resume, provider cursors/watermarks, late-index recovery, run history, scheduling/notification, and persistent execution databases remain excluded; the reconstructible Provider-state DB is not execution state.
 
@@ -3154,7 +3185,7 @@ The existing §4.2 and §30.11 scope exclusions remain in force. v0.4.4 addition
 
 ## 32. v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace Contract
 
-This is the authoritative v0.4.5 development contract and the source of truth for subsequent bounded implementation tasks. Acceptance is defined in §23.18 and remains pending; this section establishes requirements, not implementation, test, audit, or release completion.
+This is the authoritative v0.4.5 behavior contract. A1–A6 implementation and independent stage reviews are complete, §23.18 acceptance has been demonstrated, and the full automated suite passed. The desktop/mobile manual Web smoke passed during A6, and the final independent integration audit passed with separate verification of the corresponding desktop/mobile browser behavior. v0.4.5 is now in release preparation / closeout (§24.13) and remains unreleased; v0.4.4 remains the latest released baseline until the release transaction completes.
 
 ### 32.1 Authority and supersede boundary
 
@@ -3295,4 +3326,4 @@ The unaffected exclusions in §4.2 and the preserved release contracts remain in
 - unrelated retrieval/performance refactors;
 - release, tag, push, version bump, or User-Agent bump within this development contract.
 
-Establishing this contract changes only `SPEC.md`. Later implementation tasks must satisfy §23.18 before v0.4.5 can be described as accepted; final acceptance includes the full automated suite and desktop/mobile manual Web smoke, with results reported at their actual verification level.
+The initial contract task changed only `SPEC.md`; the subsequent bounded A1–A6 implementation and independent reviews are complete. §23.18 acceptance and the full automated suite passed. The desktop/mobile manual Web smoke passed during A6, and the final independent integration audit passed with separate verification of the corresponding desktop/mobile browser behavior. Release preparation separately updates package/User-Agent metadata and release-state documentation without changing this behavior contract. v0.4.5 remains unreleased until the release transaction in §24.13 completes.
