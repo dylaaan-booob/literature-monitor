@@ -6,17 +6,12 @@ secondary discovery and bibliographic evidence, consolidates provider evidence
 before local keyword filtering, canonicalizes retained papers and versions,
 safely updates durable Paper and Author Markdown, and exports kept papers.
 
-v0.4.4 is the latest released version. It completes Crossref Elapsed-Aware Pacing
-& Partial Provider Evidence Semantics while preserving the durable workflow
-model and compatibility boundaries. Its A1–A5 implementation, independent stage
-reviews, final independent audit, release transaction, and closeout are complete.
-
-The current source tree has completed v0.4.5 Candidate Eligibility, Warning
-Semantics & Scrollable Master-Detail Workspace implementation, independent
-stage reviews, and final integration audit. It is in **v0.4.5 release preparation /
-closeout**, with package metadata at `0.4.5`; v0.4.5 remains unreleased. Its tag,
-main/tag pushes, and GitHub Release are pending; v0.4.4 remains the latest
-released version until the release transaction completes.
+v0.4.5 is the latest released version. It completes Candidate Eligibility,
+warning/diagnostic semantics, Provider-state logical schema v2 migration, and
+the scrollable master-detail review workspace while preserving the durable
+workflow model and compatibility boundaries. Its A1–A6 implementation,
+independent stage reviews, final independent integration audit, release
+preparation, release transaction, and closeout are complete.
 
 The workflow automatically reuses revision-validated Provider
 state while establishing live candidate membership on every Run. It batches
