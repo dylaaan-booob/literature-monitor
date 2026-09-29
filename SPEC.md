@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.4.7 UNRELEASED / release preparation; v0.4.6 remains the latest released and completed baseline
+**Status:** Active; v0.4.7 is the current/latest released and completed baseline
 
-**Stage:** v0.4.7 Journals Organization & Bulk Import implementation and independent final integration audit complete / release preparation in progress (§24.15); release-preparation diff requires independent review before commit; package metadata `0.4.7`; v0.4.6 released / closeout complete (§24.14)
+**Stage:** v0.4.7 released / closeout complete (§24.15); package metadata `0.4.7`
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
@@ -1863,7 +1863,7 @@ v0.4.5 §32 implementation is complete. A1–A6 and their independent stage revi
 
 ### 23.19 v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI
 
-v0.4.6 A0 specification alignment, A1–A3 implementation, and A0–A3 independent stage reviews are complete. The A2 `START_FAILED` Current run lifecycle finding was fixed and re-reviewed; the final independent integration audit passed. The following §33 acceptance scenarios have been demonstrated at the verification levels recorded here. Final release validation passed, and release preparation, the release transaction, and closeout are complete (§24.14). v0.4.6 is released and is the current/latest released and completed baseline.
+v0.4.6 A0 specification alignment, A1–A3 implementation, and A0–A3 independent stage reviews are complete. The A2 `START_FAILED` Current run lifecycle finding was fixed and re-reviewed; the final independent integration audit passed. The following §33 acceptance scenarios have been demonstrated at the verification levels recorded here. Final release validation passed, and release preparation, the release transaction, and closeout are complete (§24.14). v0.4.6 is released and was the current/latest released and completed baseline at its closeout.
 
 The implementation environment reported 1910 tests passing. The independent final AgentDock audit ran 1907 tests successfully and skipped three Node-dependent Clipboard harness cases because no JavaScript runtime was available; those three cases passed in the implementation environment. Both environments reported two known dependency deprecation warnings. The independent audit also inspected the retained real-browser `Copied` / `Copy failed` artifacts and the server-normalized DOI → Clipboard API chain.
 
@@ -1885,7 +1885,7 @@ Final release validation passed with 1910 tests passing, zero skipped, and two k
 
 ### 23.20 v0.4.7 Journals Organization & Bulk Import — demonstrated acceptance
 
-A0–A7 implementation and all A0–A7 independent stage reviews are complete. `V0_4_7_FINAL_INTEGRATION_AUDIT` passed with APPROVED status, demonstrating the following acceptance requirements for the implemented §34 contract. The verification levels recorded below remain distinct. Package metadata is `0.4.7`, but v0.4.7 remains **UNRELEASED** and its release-preparation diff requires independent review before commit. v0.4.6 remains the latest released and completed baseline until the release transaction succeeds.
+A0–A7 implementation and all A0–A7 independent stage reviews are complete. `V0_4_7_FINAL_INTEGRATION_AUDIT` passed with APPROVED status, demonstrating the following acceptance requirements for the implemented §34 contract. The verification levels recorded below remain distinct. Final release validation passed; release preparation, the release transaction, and closeout are complete (§24.15). v0.4.7 is released and is the current/latest released and completed baseline, with package metadata `0.4.7`.
 
 - Journal configuration remains an ordered flat `tuple[JournalConfig, ...]`, with at most one optional Group per Journal. Group order derives from Journal configuration order; Ungrouped uses `group=None`. Create, rename, delete, Up / Down, and Journal assignment work without nested Groups, multi-Group membership, independent positions, or durable empty Groups. Deleting a Group moves its Journals to Ungrouped without deleting them.
 - Both `Journal | ISSN/EISSN` and `Journal | ISSN/EISSN | Group` tables load. A legacy ungrouped two-column file stays two-column, including on unrelated Settings Save. Actual Group use saves canonical three-column storage; a file already using three columns retains that shape after all Groups are removed. Upgrade and Settings open do not rewrite the file. Existing name, checksum, and globally unique configured ISSN validation remains applicable, with safe Markdown-table Group storage validation.
@@ -1908,9 +1908,11 @@ Actual final integration audit evidence:
 - Independent AgentDock full suite: **2198 passed, 11 skipped, 2 known dependency warnings**; the skips were Node-dependent tests because Node was unavailable in that environment. Its independent cross-stage suite recorded **986 passed, 8 Node-dependent skips**, and independent `git diff --check` passed. The implementation environment's Node harness evidence was not independently rerun by AgentDock.
 - Independent temporary end-to-end integration: **Import → Apply → Validate → Save → Workspace reprojection PASS**, with existing Paper bytes unchanged.
 
-Release preparation updates only package/User-Agent version identity, matching test expectations, and current-state documentation. Release-preparation validation and independent diff review are separate from the completed final integration audit; the review remains pending before commit. Tag creation, push main, push tag, GitHub Release, and post-release closeout remain pending.
+Release preparation updated only package/User-Agent version identity, matching test expectations, and current-state documentation without functional changes. Its independently reviewed diff was committed before annotated tag creation and the release transaction. The release-preparation commit, annotated tag, push main, push tag, GitHub Release, and post-release closeout are complete (§24.15).
 
-Release-preparation validation in the implementation environment passed: targeted OpenAlex/Crossref tests **436 passed**; full suite **2209 passed, 0 skipped, 2 known dependency warnings**. Node **v24.21.0** was available and all executable DOM/browser harnesses ran. The two warnings were the existing Starlette TestClient/httpx and anyio BlockingPortal alias deprecations. `uv lock --check` and `git diff --check` passed. This validation does not constitute independent review of the release-preparation diff or a release transaction.
+Release-preparation validation in the implementation environment passed: targeted OpenAlex/Crossref tests **436 passed**; full suite **2209 passed, 0 skipped, 2 known dependency warnings**. Node **v24.21.0** was available and all executable DOM/browser harnesses ran. The two warnings were the existing Starlette TestClient/httpx and anyio BlockingPortal alias deprecations. `uv lock --check` and `git diff --check` passed. This release-preparation validation is distinct from the completed independent diff review and final release validation.
+
+Final release validation separately passed with **2209 passed, 0 skipped, 2 known dependency deprecation warnings**. Node **v24.21.0** was available and all executable DOM/browser harnesses ran. `uv lock --check` and `git diff --check` passed. Wheel/sdist metadata and required package contents were verified against the reviewed release HEAD, including `journal_import.py` and required Web assets; user workspace material was excluded. Wheel import smoke passed.
 
 ---
 
@@ -2215,27 +2217,32 @@ v0.4.6 feature implementation complete
 → GitHub Release
 ```
 
-Release preparation updated package/User-Agent metadata and current-state documentation without functional changes; its reviewed diff was committed before the annotated tag and release transaction. The full release closeout sequence is complete. v0.4.6 is released and is the current/latest released and completed baseline.
+Release preparation updated package/User-Agent metadata and current-state documentation without functional changes; its reviewed diff was committed before the annotated tag and release transaction. The full release closeout sequence is complete. v0.4.6 is released and was the current/latest released and completed baseline at its closeout.
 
 ---
 
-### 24.15 v0.4.7 Journals Organization & Bulk Import — release-preparation sequence
+### 24.15 v0.4.7 Journals Organization & Bulk Import — completed release closeout
 
-A0–A7 implementation and all independent stage reviews are complete. `V0_4_7_FINAL_INTEGRATION_AUDIT` is complete and APPROVED. Release preparation is in progress; its diff still requires independent review before a release-preparation commit.
+A0–A7 implementation, all independent stage reviews, and `V0_4_7_FINAL_INTEGRATION_AUDIT` are complete; the final audit is APPROVED. §23.20 records demonstrated acceptance and distinct verification provenance, including passing final release validation. Release preparation, its independently reviewed commit, annotated tag creation, push main, push tag, GitHub Release, and closeout are complete.
+
+The completed release closeout sequence is:
 
 ```text
-A0–A7 implementation complete
-→ independent final integration audit complete
-→ release preparation in progress
-→ release-preparation commit pending
-→ tag pending
-→ push main pending
-→ push tag pending
-→ GitHub Release pending
-→ post-release closeout pending
+A0–A7 implementation
+→ independent stage reviews
+→ final integration audit
+→ release preparation
+→ release-preparation commit
+→ annotated tag
+→ push main
+→ push tag
+→ GitHub Release
+→ closeout
 ```
 
-§34 is the implemented authoritative behavior contract and §23.20 records demonstrated acceptance with distinct verification provenance. Package metadata is now `0.4.7`; v0.4.7 remains **UNRELEASED**, and v0.4.6 remains the latest released and completed baseline until the release transaction succeeds. The unaffected released contracts and historical release facts remain applicable.
+Release commit and local/remote annotated tag `v0.4.7` target `c9f6091e840f6cef9ab005bbaed7b69e51450682`; main and origin/main synchronized at that release HEAD. The [GitHub Release v0.4.7](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.4.7) is published, non-draft, and non-prerelease, with the verified wheel and sdist uploaded.
+
+§34 remains the implemented authoritative behavior contract. v0.4.7 is released and is the current/latest released and completed baseline, with package metadata `0.4.7`. The unaffected released contracts and historical release facts remain applicable.
 
 ---
 
@@ -2724,13 +2731,13 @@ v0.4.4 is released and complete. Its §31 implementation and §23.17 acceptance 
 
 v0.4.5 is released and complete. Its §32 implementation and A1–A6 independent stage reviews are complete; §23.18 acceptance has been demonstrated, including the full automated suite and A6 desktop/mobile manual Web smoke. The final independent integration audit passed and separately verified the corresponding desktop/mobile browser behavior. Release preparation, release transaction, and closeout are complete (§24.13).
 
-v0.4.6 is released and complete. Its §33 implementation and A0–A3 independent stage reviews are complete; §23.19 acceptance has been demonstrated at its recorded automated/browser verification levels. The final independent integration audit and final release validation passed. Release preparation, release transaction, and closeout are complete (§24.14), with package metadata `0.4.6`. v0.4.6 is the current/latest released and completed baseline.
+v0.4.6 is released and complete. Its §33 implementation and A0–A3 independent stage reviews are complete; §23.19 acceptance has been demonstrated at its recorded automated/browser verification levels. The final independent integration audit and final release validation passed. Release preparation, release transaction, and closeout are complete (§24.14), with package metadata `0.4.6`. v0.4.6 was the current/latest released and completed baseline at its closeout.
 
 ---
 
 ## 28. Current Project Stage
 
-R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback, v0.4.2 Provider Reliability, Coverage, and Explicit Cache Reuse, v0.4.3 Retrieval Efficiency & Revision-Validated Provider Evidence, v0.4.4 Crossref Elapsed-Aware Pacing & Partial Provider Evidence Semantics, v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace, and v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI are completed release history. v0.4.6 is the current released and completed baseline.
+R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback, v0.4.2 Provider Reliability, Coverage, and Explicit Cache Reuse, v0.4.3 Retrieval Efficiency & Revision-Validated Provider Evidence, v0.4.4 Crossref Elapsed-Aware Pacing & Partial Provider Evidence Semantics, v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace, v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI, and v0.4.7 Journals Organization & Bulk Import are completed release history. v0.4.7 is the current released and completed baseline.
 
 The v0.4.4 release and closeout are complete, following §24.12. Its §31 implementation, independent stage reviews, and final independent audit are complete; the §23.17 acceptance scenarios have been demonstrated.
 
@@ -2738,7 +2745,7 @@ v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Works
 
 v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI implementation, A0–A3 independent stage reviews, and final independent integration audit are complete. §33 remains its authoritative behavior contract; §23.19 records demonstrated acceptance and the actual verification levels, including final release validation. Release preparation, release transaction, and closeout are complete (§24.14); its closeout stage was v0.4.6 released / closeout complete, with package metadata `0.4.6`. No subsequent product-development stage was established by that closeout.
 
-The current stage is v0.4.7 Journals Organization & Bulk Import release preparation (§24.15), subsequent to the completed v0.4.6 closeout above. A0–A7 implementation, all independent stage reviews, and `V0_4_7_FINAL_INTEGRATION_AUDIT` are complete; the final audit is APPROVED. §34 is the implemented contract, and §23.20 records demonstrated acceptance and actual verification levels. Package metadata is `0.4.7`, while v0.4.7 remains **UNRELEASED**. Independent review of the release-preparation diff, its commit, tag, pushes, GitHub Release, and post-release closeout remain pending; v0.4.6 remains the latest released and completed baseline until the release transaction succeeds.
+v0.4.7 Journals Organization & Bulk Import implementation, A0–A7 independent stage reviews, and final independent integration audit are complete. §34 remains the authoritative behavior contract; §23.20 records demonstrated acceptance and actual verification levels, including final release validation. Release preparation, the release transaction, and closeout are complete (§24.15). v0.4.7 is released / closeout complete, with package metadata `0.4.7`, and is the current/latest released and completed baseline. No subsequent product-development stage is established by this closeout.
 
 OpenAlex remains the primary discovery provider, Crossref the secondary discovery/bibliographic provider, and Semantic Scholar remains excluded. Automatic revision-validated Provider-state reuse is in scope for v0.4.3. Checkpoint resume, provider cursors/watermarks, late-index recovery, run history, scheduling/notification, and persistent execution databases remain excluded; the reconstructible Provider-state DB is not execution state.
 
@@ -3546,7 +3553,7 @@ The subsequent bounded A1–A3 implementation and independent reviews are comple
 
 ## 34. v0.4.7 Journals Organization & Bulk Import Contract
 
-This is the implemented authoritative v0.4.7 behavior contract. A0–A7 implementation and all independent stage reviews are complete, and `V0_4_7_FINAL_INTEGRATION_AUDIT` passed with APPROVED status. §23.20 records demonstrated acceptance and its verification provenance; §24.15 records release preparation in progress and the pending release sequence. Package metadata is `0.4.7`, but v0.4.7 remains **UNRELEASED**. v0.4.6 remains the latest released and completed baseline until the release transaction succeeds.
+This is the implemented authoritative v0.4.7 behavior contract. A0–A7 implementation and all independent stage reviews are complete, and `V0_4_7_FINAL_INTEGRATION_AUDIT` passed with APPROVED status. §23.20 records demonstrated acceptance and its verification provenance, including passing final release validation. Release preparation, the release transaction, and closeout are complete (§24.15). v0.4.7 is implemented and released, with package metadata `0.4.7`, and is the current/latest released and completed baseline.
 
 ### 34.1 Authority and supersede boundary
 
@@ -3721,4 +3728,4 @@ There is no repository-wide eager Paper migration, Journal UUID/database, Paper 
 
 The unaffected MVP and released-contract exclusions remain in force. v0.4.7 excludes nested Groups, multi-Group membership, independent Group positions or durable empty Groups, drag-and-drop, arbitrary text inference, AI import, Provider-backed import/metadata completion, XLSX dependencies, and partial Apply. It adds no global keyword-first discovery, conference monitoring, publisher scraping, PDF acquisition, custom Zotero ingestion, persistent execution/workflow state, or external integration.
 
-The completed A0 specification-alignment task modified only `SPEC.md`; subsequent A1–A7 implementation and independent reviews are complete. The final independent integration audit passed, with actual verification levels recorded in §23.20. Current release preparation is limited to package/User-Agent version metadata, matching tests, and current-state documentation; it does not change functionality, dependencies, `list.md`, user state, or perform a Paper migration. Its diff requires independent review before commit. v0.4.7 remains **UNRELEASED**; release-preparation commit, tag, pushes, GitHub Release, and post-release closeout remain pending under §24.15.
+The completed A0 specification-alignment task modified only `SPEC.md`; subsequent A1–A7 implementation and independent reviews are complete. The final independent integration audit and final release validation passed, with actual verification levels recorded in §23.20. Release preparation updated only package/User-Agent version identity, matching test expectations, and current-state documentation without changing functionality, dependencies, `list.md`, user state, or performing a Paper migration. Its independently reviewed release commit was created; annotated tag creation, main/tag pushes, GitHub Release, and closeout are complete (§24.15), without changing this behavior contract. v0.4.7 is released.

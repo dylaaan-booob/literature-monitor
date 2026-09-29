@@ -6,12 +6,11 @@ secondary discovery and bibliographic evidence, consolidates provider evidence
 before local keyword filtering, canonicalizes retained papers and versions,
 safely updates durable Paper and Author Markdown, and exports kept papers.
 
-The current source tree has completed v0.4.7 Journals Organization & Bulk
-Import implementation and its final independent integration audit. It is in
-v0.4.7 release preparation, with package metadata `0.4.7`; v0.4.7 remains
-**UNRELEASED**. v0.4.6 is the latest released version until the v0.4.7 release
-transaction succeeds. Its GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI
-implementation, reviews, release transaction, and closeout are complete.
+v0.4.7 is the latest released version. It completes Journals Organization &
+Bulk Import while preserving the durable workflow model and compatibility
+boundaries. Its A0–A7 implementation, independent stage reviews, final
+independent integration audit, release preparation, release transaction, and
+closeout are complete. Released package metadata is `0.4.7`.
 
 The workflow automatically reuses revision-validated Provider
 state while establishing live candidate membership on every Run. It batches
