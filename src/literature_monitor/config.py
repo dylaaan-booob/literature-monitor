@@ -57,6 +57,7 @@ class JournalConfig(BaseModel):
 
     name: NonEmptyStr
     issn: tuple[NonEmptyStr, ...]
+    group: NonEmptyStr | None = None
 
     @field_validator("issn")
     @classmethod
@@ -133,18 +134,25 @@ def _read_text(path: Path) -> str:
         raise ConfigurationError(f"{path}: unable to read file: {error}") from error
 
 
-def _table_cells(line: str, path: Path, line_number: int) -> tuple[str, str]:
+def parse_journal_table_cells(
+    line: str,
+    path: Path,
+    line_number: int,
+    columns: int | None = None,
+) -> tuple[str, ...]:
+    """Read cells from a supported two/three-column Journal table row."""
     stripped = line.strip()
     if not stripped.startswith("|") or not stripped.endswith("|"):
         raise ConfigurationError(
-            f"{path}:{line_number}: expected a two-column Markdown table row"
+            f"{path}:{line_number}: expected a Markdown table row"
         )
     cells = tuple(cell.strip() for cell in stripped[1:-1].split("|"))
-    if len(cells) != 2:
+    if len(cells) not in ((2, 3) if columns is None else (columns,)):
+        expected = "2 or 3" if columns is None else str(columns)
         raise ConfigurationError(
-            f"{path}:{line_number}: expected 2 table columns, found {len(cells)}"
+            f"{path}:{line_number}: expected {expected} table columns, found {len(cells)}"
         )
-    return cells[0], cells[1]
+    return cells
 
 
 def _valid_issn_checksum(issn: str) -> bool:
@@ -153,13 +161,20 @@ def _valid_issn_checksum(issn: str) -> bool:
     return sum(value * weight for value, weight in zip(values, range(8, 0, -1))) % 11 == 0
 
 
-def _normalize_issn_value(raw: str) -> str:
+def normalize_journal_issn(raw: str) -> str:
+    """Normalize one configured ISSN and validate its checksum."""
     issn = raw.strip().upper()
     if not _ISSN_PATTERN.fullmatch(issn):
         raise ValueError(f"invalid ISSN/EISSN {raw!r}; expected NNNN-NNNN")
     if not _valid_issn_checksum(issn):
         raise ValueError(f"invalid ISSN/EISSN checksum for {issn!r}")
     return issn
+
+
+def journal_name_identity(name: str) -> str:
+    """Return the deterministic name key shared by config and Journal import."""
+
+    return name.strip().casefold()
 
 
 def _journal_error(
@@ -202,7 +217,7 @@ def validate_journal_configs(
                 path=path,
                 line_number=line_number,
             )
-        normalized_name = name.casefold()
+        normalized_name = journal_name_identity(name)
         if normalized_name in names:
             first_line = names[normalized_name]
             suffix = (
@@ -231,7 +246,7 @@ def validate_journal_configs(
                     line_number=line_number,
                 )
             try:
-                issn = _normalize_issn_value(raw_issn)
+                issn = normalize_journal_issn(raw_issn)
             except ValueError as error:
                 raise _journal_error(
                     str(error),
@@ -254,16 +269,18 @@ def validate_journal_configs(
             journal_issns.append(issn)
 
         names[normalized_name] = line_number
-        normalized.append(JournalConfig(name=name, issn=tuple(journal_issns)))
+        normalized.append(
+            JournalConfig(name=name, issn=tuple(journal_issns), group=journal.group)
+        )
     return tuple(normalized)
 
 
-def parse_journal_whitelist_text(
+def journal_whitelist_table(
     contents: str,
     *,
     path: Path,
-) -> tuple[JournalConfig, ...]:
-    """Parse the current Markdown Journals section into structured journals."""
+) -> tuple[int, tuple[tuple[int, str], ...]]:
+    """Validate the Journals table structure and return numbered raw data rows."""
 
     lines = contents.splitlines()
     journal_headings = [
@@ -287,22 +304,42 @@ def parse_journal_whitelist_text(
         raise ConfigurationError(f"{path}:{start + 1}: Journals table is missing or empty")
 
     header_line, header = section[0]
-    if _table_cells(header, path, header_line) != ("Journal", "ISSN/EISSN"):
+    header_cells = parse_journal_table_cells(header, path, header_line)
+    if header_cells not in (
+        ("Journal", "ISSN/EISSN"),
+        ("Journal", "ISSN/EISSN", "Group"),
+    ):
         raise ConfigurationError(
-            f"{path}:{header_line}: expected table header '| Journal | ISSN/EISSN |'"
+            f"{path}:{header_line}: expected table header '| Journal | ISSN/EISSN |' "
+            "or '| Journal | ISSN/EISSN | Group |'"
         )
+    columns = len(header_cells)
 
     separator_line, separator = section[1]
-    separator_cells = _table_cells(separator, path, separator_line)
+    separator_cells = parse_journal_table_cells(separator, path, separator_line, columns)
     if not all(_SEPARATOR_PATTERN.fullmatch(cell) for cell in separator_cells):
         raise ConfigurationError(
             f"{path}:{separator_line}: invalid Markdown table separator"
         )
 
+    return columns, tuple(section[2:])
+
+
+def parse_journal_whitelist_text(
+    contents: str,
+    *,
+    path: Path,
+) -> tuple[JournalConfig, ...]:
+    """Parse the current Markdown Journals section into structured journals."""
+
+    columns, rows = journal_whitelist_table(contents, path=path)
+
     journals: list[JournalConfig] = []
     line_numbers: list[int] = []
-    for line_number, row in section[2:]:
-        name, raw_issns = _table_cells(row, path, line_number)
+    for line_number, row in rows:
+        cells = parse_journal_table_cells(row, path, line_number, columns)
+        name, raw_issns = cells[:2]
+        group = (cells[2] or None) if columns == 3 else None
         if not name:
             raise ConfigurationError(f"{path}:{line_number}: Journal must not be empty")
         if not raw_issns:
@@ -316,7 +353,7 @@ def parse_journal_whitelist_text(
                 )
             journal_issns.append(raw_issn.strip())
 
-        journals.append(JournalConfig(name=name, issn=tuple(journal_issns)))
+        journals.append(JournalConfig(name=name, issn=tuple(journal_issns), group=group))
         line_numbers.append(line_number)
 
     return validate_journal_configs(
@@ -335,14 +372,20 @@ def validate_journal_storage(journals: Sequence[JournalConfig]) -> None:
     """Validate constraints of the current Markdown table storage adapter."""
 
     for journal in journals:
-        if any(character in journal.name for character in ("|", "\n", "\r")):
-            raise ConfigurationError(
-                (
-                    f"journal name {journal.name!r} cannot be represented in the "
-                    "current Markdown journal table"
-                ),
-                field="journals",
-            )
+        for field, value in (("name", journal.name), ("group", journal.group)):
+            if value is None:
+                continue
+            unsafe = any(character in value for character in ("|", "\n", "\r"))
+            if field == "group" and value.splitlines() != [value]:
+                unsafe = True
+            if unsafe:
+                raise ConfigurationError(
+                    (
+                        f"journal {field} {value!r} cannot be represented in the "
+                        "current Markdown journal table"
+                    ),
+                    field="journals",
+                )
 
 
 def render_journal_whitelist_text(
@@ -355,21 +398,7 @@ def render_journal_whitelist_text(
 
     normalized = validate_journal_configs(journals)
     validate_journal_storage(normalized)
-    rows = [
-        "## Journals",
-        "",
-        "| Journal | ISSN/EISSN |",
-        "|---|---|",
-    ]
-    rows.extend(
-        f"| {journal.name} | {' / '.join(journal.issn)} |"
-        for journal in normalized
-    )
-    section = "\n".join(rows) + "\n\n"
-    if existing_contents is None:
-        return "# List\n\n" + section
-
-    lines = existing_contents.splitlines(keepends=True)
+    lines = (existing_contents or "").splitlines(keepends=True)
     headings = [
         index
         for index, line in enumerate(lines)
@@ -381,6 +410,41 @@ def render_journal_whitelist_text(
             field="journals",
             path=path,
         )
+
+    start = headings[0] if headings else len(lines)
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if lines[index].lstrip().startswith("## "):
+            end = index
+            break
+
+    grouped = any(journal.group is not None for journal in normalized)
+    if headings:
+        header = next(
+            (line.strip() for line in lines[start + 1:end] if line.strip()), ""
+        )
+        if header.startswith("|") and header.endswith("|"):
+            grouped = grouped or tuple(cell.strip() for cell in header[1:-1].split("|")) == (
+                "Journal",
+                "ISSN/EISSN",
+                "Group",
+            )
+
+    rows = [
+        "## Journals",
+        "",
+        "| Journal | ISSN/EISSN | Group |" if grouped else "| Journal | ISSN/EISSN |",
+        "|---|---|---|" if grouped else "|---|---|",
+    ]
+    for journal in normalized:
+        row = f"| {journal.name} | {' / '.join(journal.issn)} |"
+        if grouped:
+            row += f" {journal.group or ''} |"
+        rows.append(row)
+    section = "\n".join(rows) + "\n\n"
+    if existing_contents is None:
+        return "# List\n\n" + section
+
     if not headings:
         prefix = existing_contents
         if prefix and not prefix.endswith("\n"):
@@ -389,12 +453,6 @@ def render_journal_whitelist_text(
             prefix += "\n"
         return prefix + section
 
-    start = headings[0]
-    end = len(lines)
-    for index in range(start + 1, len(lines)):
-        if lines[index].lstrip().startswith("## "):
-            end = index
-            break
     return "".join(lines[:start]) + section + "".join(lines[end:])
 
 

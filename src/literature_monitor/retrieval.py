@@ -70,9 +70,21 @@ def assemble_live_provider_evidence(
     openalex_records: Sequence[OpenAlexWorkRecord],
     discovered_crossref_records: Sequence[CrossrefWorkRecord],
     supplement_evidence: Sequence[ProviderWorkEvidence] = (),
+    *,
+    monitor_journal_issns: Mapping[ProviderRecordRef, tuple[str, ...]] | None = None,
 ) -> tuple[ProviderWorkEvidence, ...]:
     """Combine current snapshots and anchors without performing Provider requests."""
-    evidence = [record.to_evidence() for record in openalex_records]
+    attribution = monitor_journal_issns or {}
+
+    def attach(record: ProviderWorkEvidence) -> ProviderWorkEvidence:
+        ref = ProviderRecordRef(
+            provider=record.provenance.provider, record_id=record.provenance.record_id,
+        )
+        return record.model_copy(update={"monitor_journal_issns": tuple(sorted({
+            *record.monitor_journal_issns, *attribution.get(ref, ()),
+        }))})
+
+    evidence = [attach(record.to_evidence()) for record in openalex_records]
     anchors: dict[str, list[ProviderRecordRef]] = defaultdict(list)
     for record in openalex_records:
         if (doi := normalize_doi(record.external_ids.doi)) is not None:
@@ -80,20 +92,29 @@ def assemble_live_provider_evidence(
             if ref not in anchors[doi]:
                 anchors[doi].append(ref)
     crossref = {
-        record.doi: record.to_evidence(supplements=tuple(sorted(
+        record.doi: attach(record.to_evidence(supplements=tuple(sorted(
             anchors.get(record.doi, ()), key=lambda ref: ref.record_id,
-        )))
+        ))))
         for record in discovered_crossref_records
     }
     for record in supplement_evidence:
+        record = attach(record)
         doi = record.external_ids.doi
         previous = crossref.get(doi)
         if previous is None:
             crossref[doi] = record
         else:
-            refs = tuple(dict.fromkeys((*previous.supplements, *record.supplements)))
+            refs = tuple(sorted(
+                set((*previous.supplements, *record.supplements)),
+                key=lambda ref: (ref.provider, ref.record_id),
+            ))
             # Supplement resolution may have refreshed this prime DOI after discovery.
-            crossref[doi] = record.model_copy(update={"supplements": refs})
+            crossref[doi] = record.model_copy(update={
+                "supplements": refs,
+                "monitor_journal_issns": tuple(sorted({
+                    *previous.monitor_journal_issns, *record.monitor_journal_issns,
+                })),
+            })
     return (*evidence, *crossref.values())
 
 

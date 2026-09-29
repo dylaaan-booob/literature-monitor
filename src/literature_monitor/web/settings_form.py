@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from itertools import zip_longest
 from pathlib import Path
 
 from starlette.datastructures import FormData
 
+from literature_monitor.application.journal_import import JournalImportMode, JournalImportPlan
 from literature_monitor.application.settings import (
     ContentRevision,
     MonitorDraft,
@@ -23,6 +24,7 @@ from literature_monitor.date_range import DateRangeSpec
 class SettingsJournalRow:
     name: str
     issns: str
+    group: str = ""
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,28 @@ class SettingsFormValues:
     monitor_revision_digest: str
     journal_revision_exists: str
     journal_revision_digest: str
+    groups: tuple[str, ...] = ()  # Presentation only; empty Groups are not durable.
+
+
+@dataclass(frozen=True)
+class SettingsImportValues:
+    contents: str = ""
+    mode: str = JournalImportMode.MERGE.value
+    plan: JournalImportPlan | None = None
+    error: str | None = None
+
+
+def settings_form_after_import(
+    values: SettingsFormValues, draft: MonitorDraft,
+) -> SettingsFormValues:
+    """Project imported Journals, retaining only genuinely empty draft Groups."""
+
+    projected = settings_form_from_draft(draft)
+    previously_represented = {row.group for row in values.journals if row.group}
+    empty_groups = tuple(group for group in values.groups if group not in previously_represented)
+    # A2 changes only Journals. Preserve raw non-Journal browser strings/revisions.
+    return replace(values, journals=projected.journals,
+                   groups=tuple(dict.fromkeys(projected.groups + empty_groups)))
 
 
 def _revision_fields(revision: ContentRevision) -> tuple[str, str]:
@@ -51,7 +75,11 @@ def settings_form_from_draft(draft: MonitorDraft) -> SettingsFormValues:
     monitor_exists, monitor_digest = _revision_fields(draft.monitor_revision)
     journal_exists, journal_digest = _revision_fields(draft.journal_revision)
     rows = tuple(
-        SettingsJournalRow(name=journal.name, issns=", ".join(journal.issn))
+        SettingsJournalRow(
+            name=journal.name,
+            issns=", ".join(journal.issn),
+            group=journal.group or "",
+        )
         for journal in draft.journals
     )
     if not rows:
@@ -66,6 +94,7 @@ def settings_form_from_draft(draft: MonitorDraft) -> SettingsFormValues:
         name=draft.name,
         keyword_expression=draft.keyword_expression,
         journals=rows,
+        groups=tuple(dict.fromkeys(row.group for row in rows if row.group)),
         from_date=(
             draft.date_spec.from_date.isoformat()
             if draft.date_spec.from_date is not None
@@ -95,17 +124,22 @@ def settings_form_from_submission(form: FormData) -> SettingsFormValues:
 
     names = tuple(str(value) for value in form.getlist("journal_name"))
     issns = tuple(str(value) for value in form.getlist("journal_issns"))
+    assignments = tuple(str(value) for value in form.getlist("journal_group"))
     rows = tuple(
-        SettingsJournalRow(name=name, issns=issn_values)
-        for name, issn_values in zip_longest(names, issns, fillvalue="")
+        SettingsJournalRow(name=name, issns=issn_values, group=group)
+        for name, issn_values, group in zip_longest(names, issns, assignments, fillvalue="")
     )
     if not rows:
         rows = (SettingsJournalRow(name="", issns=""),)
+
+    group_names = tuple(str(value) for value in form.getlist("settings_group"))
+    group_names += tuple(row.group for row in rows)
 
     return SettingsFormValues(
         name=str(form.get("name", "")),
         keyword_expression=str(form.get("keyword_expression", "")),
         journals=rows,
+        groups=tuple(dict.fromkeys(group for group in group_names if group.strip())),
         from_date=str(form.get("from_date", "")),
         to_date=str(form.get("to_date", "")),
         window_days=str(form.get("window_days", "")),
@@ -197,7 +231,9 @@ def settings_draft_from_form(
             if identifier.strip()
         )
         try:
-            journals.append(JournalConfig(name=row.name, issn=identifiers))
+            journals.append(
+                JournalConfig(name=row.name, issn=identifiers, group=row.group.strip() or None)
+            )
         except ValueError as error:
             issues.append(_form_issue("journals", str(error)))
 

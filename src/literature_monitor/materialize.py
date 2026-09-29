@@ -177,6 +177,8 @@ def render_paper_markdown(
         "versions": [version.model_dump(mode="json") for version in paper.versions],
         "sources": [source.model_dump(mode="json") for source in paper.sources],
     }
+    if paper.journal_issns:
+        frontmatter["journal_issns"] = list(paper.journal_issns)
     return (
         f"{_yaml_frontmatter(frontmatter)}\n"
         f"# {paper.metadata.title}\n\n"
@@ -774,6 +776,8 @@ def _render_updated_paper(
             "sources": [source.model_dump(mode="json") for source in merged.sources],
         }
     )
+    if merged.journal_issns_update is not None:
+        frontmatter["journal_issns"] = list(merged.journal_issns_update)
     body = rewrite_managed_body(
         state.body,
         title=merged.title,

@@ -339,7 +339,7 @@ def install_core_mocks(
 
     monkeypatch.setattr(monitor, "discover_journals_batched", discover_openalex)
     monkeypatch.setattr(monitor, "CrossrefRetrieval", CrossrefExecution)
-    monkeypatch.setattr(monitor, "assemble_live_provider_evidence", lambda oa, cr, supplied: supplied)
+    monkeypatch.setattr(monitor, "assemble_live_provider_evidence", lambda oa, cr, supplied, **kw: supplied)
     # These orchestration tests use opaque records; scope decisions have dedicated tests.
     from literature_monitor.application.candidate_eligibility import ClusterEligibility
     monkeypatch.setattr(monitor, "filter_candidate_evidence", lambda oa, cr, supplied, journals: SimpleNamespace(
@@ -348,6 +348,7 @@ def install_core_mocks(
         supplement_evidence=supplied.evidence,
         diagnostics=(),
         cluster_eligibility=lambda evidence: ClusterEligibility(True, False, False),
+        monitor_journal_issns={},
     ))
     monkeypatch.setattr(monitor, "hydrate_retained_openalex_versions", hydrate)
     monkeypatch.setattr(monitor, "consolidate_evidence", consolidate)

@@ -10,6 +10,11 @@ import yaml
 import literature_monitor.materialize as materialize_module
 from literature_monitor.inbox import render_default_inbox_base
 from literature_monitor.kept_export import export_kept_papers
+from literature_monitor.markdown_state import (
+    PaperJournalAttributionState,
+    merge_paper_state,
+    parse_paper_state,
+)
 from literature_monitor.materialize import (
     MISSING_ABSTRACT,
     MaterializationIssue,
@@ -643,11 +648,14 @@ def test_existing_author_file_is_available_to_new_paper(tmp_path: Path) -> None:
     assert author_path.read_bytes() == original
 
 
+@pytest.mark.parametrize("attribution_yaml", [None, "[0006-341X]", "damaged"])
 def test_fresh_uuid_recovers_existing_path_from_each_strong_identity(
     tmp_path: Path,
+    attribution_yaml: str | None,
 ) -> None:
     cases = (
         ("uuid", True, ExternalIds(), (), ()),
+        ("title_author", False, ExternalIds(), (), ()),
         ("doi", False, ExternalIds(doi="10.1000/shared"), (), ()),
         (
             "external",
@@ -698,6 +706,8 @@ def test_fresh_uuid_recovers_existing_path_from_each_strong_identity(
             workflow=Workflow(discovered_at=NOW),
         )
         first = materialize_papers((initial,), root)
+        path = first.created_papers[0]
+        path.write_text(with_journal_attribution(path.read_text(), attribution_yaml))
         incoming = initial.model_copy(
             update={
                 "id": (
@@ -705,7 +715,8 @@ def test_fresh_uuid_recovers_existing_path_from_each_strong_identity(
                     if same_uuid
                     else UUID(f"{ordinal + 20:08x}-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
                 ),
-                "metadata": initial.metadata.model_copy(update={"title": "Changed"}),
+                "metadata": initial.metadata.model_copy(update={"title": "Initial" if name == "title_author" else "Changed"}),
+                "journal_issns": ("0090-5364",),
             }
         )
 
@@ -1497,11 +1508,11 @@ def test_ambiguous_existing_identity_and_multiple_incoming_fail_closed(
     first = paper(
         "26345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         title="First duplicate",
-    )
+    ).model_copy(update={"journal_issns": ("0006-341X",)})
     second = paper(
         "27345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         title="Second duplicate",
-    )
+    ).model_copy(update={"journal_issns": ("0090-5364",)})
     seeded = materialize_papers((first, second), tmp_path)
     assert len(seeded.created_papers) == 2
     ambiguous = first.model_copy(
@@ -1595,3 +1606,158 @@ def test_ambiguous_body_blocks_update_without_creating_duplicate(
     assert result.updated_papers == ()
     assert path.read_bytes() == original
     assert len(tuple((tmp_path / "Papers").glob("*.md"))) == 1
+
+
+def with_journal_attribution(contents: str, yaml_value: str | None) -> str:
+    if yaml_value is None:
+        return contents
+    return contents.replace("type: paper\n", f"type: paper\njournal_issns: {yaml_value}\n", 1)
+
+
+@pytest.mark.parametrize("yaml_value,expected,identities", [
+    (None, "MISSING_OR_EMPTY", ()),
+    ("[]", "MISSING_OR_EMPTY", ()),
+    ("[0006-341X]", "VALID", ("0006-341X",)),
+    ("[0006-341X, 1541-0420]", "VALID", ("0006-341X", "1541-0420")),
+    ('[" 0006-341x "]', "VALID", ("0006-341X",)),
+    ('[1541-0420, " 0006-341x ", 0006-341X, 1541-0420]', "VALID", ("0006-341X", "1541-0420")),
+    ("0006-341X", "MALFORMED", ()),
+    ("null", "MALFORMED", ()),
+    ("{issn: 0006-341X}", "MALFORMED", ()),
+    ("[123]", "MALFORMED", ()),
+    ("[true]", "MALFORMED", ()),
+    ('[""]', "MALFORMED", ()),
+    ('["   "]', "MALFORMED", ()),
+    ("[0006341X]", "MALFORMED", ()),
+    ("[0006-3410]", "MALFORMED", ()),
+    ("[0006-341X, invalid]", "MALFORMED", ()),
+])
+def test_optional_journal_attribution_parsing_is_separate_from_identity_and_safety(tmp_path, yaml_value, expected, identities):
+    incoming = paper("31345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    contents = render_paper_markdown(incoming, ("ada-author",))
+    path = tmp_path / "paper.md"
+    baseline = parse_paper_state(path, contents, tmp_path / "Authors")
+    state = parse_paper_state(path, with_journal_attribution(contents, yaml_value), tmp_path / "Authors")
+    assert state is not None and baseline is not None
+    assert state.journal_attribution_state is PaperJournalAttributionState(expected)
+    assert state.journal_issns == identities
+    assert state.updateable and state.problems == ()
+    for attribute in ("paper_id", "identity_external_ids", "identity_version_keys", "identity_source_keys", "has_identity"):
+        assert getattr(state, attribute) == getattr(baseline, attribute)
+    assert state.frontmatter == frontmatter(with_journal_attribution(contents, yaml_value))
+
+
+@pytest.mark.parametrize("identities", [(), ("0006-341X", "1541-0420")])
+def test_new_paper_writes_optional_attribution_and_is_idempotent(tmp_path, identities):
+    incoming = paper("32345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa").model_copy(update={"journal_issns": identities})
+    original = paper(str(incoming.id))
+    first = materialize_papers((incoming,), tmp_path)
+    path, = first.created_papers
+    values = frontmatter(path.read_text())
+    default_keys = list(frontmatter(render_paper_markdown(original, ("ada-author",))))
+    assert list(values) == default_keys + (["journal_issns"] if identities else [])
+    if identities:
+        assert values["journal_issns"] == list(identities)
+    else:
+        assert "journal_issns" not in values
+    before = path.read_bytes()
+    second = materialize_papers((incoming,), tmp_path)
+    assert not second.issues and not second.created_papers and not second.updated_papers
+    assert path.read_bytes() == before
+    author_path, = first.created_authors
+    assert "journal_issns" not in frontmatter(author_path.read_text())
+
+
+@pytest.mark.parametrize("yaml_value", [
+    None, "[]", '[" 0006-341x ", 1541-0420, 0006-341X]',
+    "definitely-not-a-list-or-valid-issn", "null", "{custom: broken}", "[0006-341X, invalid]",
+])
+@pytest.mark.parametrize("incoming_nonempty", [False, True])
+def test_existing_attribution_replacement_repair_or_raw_preservation(tmp_path, yaml_value, incoming_nonempty):
+    initial = paper("33345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    first = materialize_papers((initial,), tmp_path)
+    path, = first.created_papers
+    contents = with_journal_attribution(path.read_text(), yaml_value)
+    contents = contents.replace("status: candidate", "status: kept\ncustom_field:\n  nested: retained")
+    contents = contents.replace("zotero_key: null", "zotero_key: ZOT123")
+    contents = contents.replace("## Notes\n", "## Notes\n\nHuman note.\n\n## Custom\n\nKeep this.\n")
+    path.write_text(contents)
+    original_values = frontmatter(contents)
+    author_before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in first.created_authors}
+    incoming = initial.model_copy(update={
+        "id": UUID("34345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        "journal_issns": ("0006-341X",) if incoming_nonempty else (),
+        "metadata": initial.metadata.model_copy(update={"abstract": "Current abstract."}),
+    })
+    state = parse_paper_state(path, contents, tmp_path / "Authors")
+    assert state is not None and state.updateable and not state.problems
+    merged = merge_paper_state(state, incoming)
+    assert merged.journal_issns_update == (("0006-341X",) if incoming_nonempty else None)
+    result = materialize_papers((incoming,), tmp_path)
+    assert not result.has_errors and not result.created_papers and result.updated_papers == (path,)
+    assert len(tuple((tmp_path / "Papers").glob("*.md"))) == 1
+    updated = path.read_text()
+    values = frontmatter(updated)
+    assert values["id"] == str(initial.id)
+    if incoming_nonempty:
+        assert values["journal_issns"] == ["0006-341X"]
+        repaired = parse_paper_state(path, updated, tmp_path / "Authors")
+        assert repaired.journal_attribution_state is PaperJournalAttributionState.VALID
+        assert repaired.journal_issns == ("0006-341X",)
+    else:
+        assert ("journal_issns" in values) == ("journal_issns" in original_values)
+        assert values.get("journal_issns") == original_values.get("journal_issns")
+    assert values["status"] == "kept" and values["zotero_key"] == "ZOT123"
+    assert values["custom_field"] == {"nested": "retained"}
+    assert "Human note.\n\n## Custom\n\nKeep this.\n" in updated
+    for author_path, (author_bytes, mtime) in author_before.items():
+        assert author_path.read_bytes() == author_bytes and author_path.stat().st_mtime_ns == mtime
+    stable = path.read_bytes()
+    rerun = materialize_papers((incoming,), tmp_path)
+    assert not rerun.issues and not rerun.updated_papers and path.read_bytes() == stable
+
+
+def test_lower_priority_manifestation_updates_attribution_without_version_or_metadata_warning(tmp_path):
+    initial = paper("35345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa").model_copy(update={
+        "journal_issns": ("0006-341X", "1541-0420"),
+    })
+    first = materialize_papers((initial,), tmp_path)
+    path, = first.created_papers
+    before = frontmatter(path.read_text())
+    lower = PaperVersion(source="arxiv", identifier="2601.00001", kind=VersionKind.PREPRINT)
+    incoming = initial.model_copy(update={
+        "id": UUID("36345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        "journal_issns": ("0090-5364",),
+        "versions": (lower,),
+        "preferred_version": VersionRef(source=lower.source, identifier=lower.identifier),
+    })
+    state = parse_paper_state(path, path.read_text(), tmp_path / "Authors")
+    merged = merge_paper_state(state, incoming)
+    assert not merged.incoming_is_preferred and merged.journal_issns_update == ("0090-5364",)
+    assert not merged.warnings
+    result = materialize_papers((incoming,), tmp_path)
+    assert not result.issues and result.updated_papers == (path,) and not result.created_papers
+    after = frontmatter(path.read_text())
+    assert after["journal_issns"] == ["0090-5364"]
+    for key in ("title", "journal", "publication_date", "preferred_version", "external_ids", "authors", "status"):
+        assert after[key] == before[key]
+    assert merged.abstract == initial.metadata.abstract
+    assert f"## Abstract\n\n{initial.metadata.abstract}\n" in path.read_text()
+    assert set(v["identifier"] for v in after["versions"]) == {"10.5555/example", lower.identifier}
+
+
+def test_shared_attribution_does_not_match_unrelated_papers(tmp_path):
+    initial = paper("37345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa").model_copy(update={
+        "journal_issns": ("0006-341X",), "external_ids": ExternalIds(),
+        "versions": (), "preferred_version": None, "sources": (),
+    })
+    first = materialize_papers((initial,), tmp_path)
+    incoming = initial.model_copy(update={
+        "id": UUID("38345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        "metadata": initial.metadata.model_copy(update={"title": "Unrelated title"}),
+        "authors": (Author(name="Other Author"),),
+    })
+    result = materialize_papers((incoming,), tmp_path)
+    assert not result.issues and len(result.created_papers) == 1
+    assert len(tuple((tmp_path / "Papers").glob("*.md"))) == 2
+    assert frontmatter(first.created_papers[0].read_text())["id"] == str(initial.id)

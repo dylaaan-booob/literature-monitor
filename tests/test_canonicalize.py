@@ -10,6 +10,8 @@ from literature_monitor.canonicalize import (
     AuthorIdentity,
     _authors_compatible,
     _normalize_abstract,
+    _normalize_retrievals,
+    _choose_evidence,
     CanonicalizationResult,
     canonicalize_records,
     consolidate_evidence,
@@ -37,6 +39,7 @@ from literature_monitor.openalex import (
     OpenAlexVersionHint,
     OpenAlexWorkRecord,
 )
+from literature_monitor.search import build_searchable_projection
 
 
 NOW = datetime(2026, 9, 18, tzinfo=timezone.utc)
@@ -1514,3 +1517,107 @@ def test_established_identity_real_abstract_differences_remain_issues(layer, lef
 ])
 def test_abstract_comparison_preserves_scientific_angle_tokens_and_operators(raw):
     assert _normalize_abstract(raw) == ' '.join(raw.split())
+
+
+def test_snapshot_attribution_union_preserves_freshness_and_creates_no_conflict():
+    old = openalex("W1", title="Old title").to_evidence().model_copy(update={
+        "monitor_journal_issns": ("0090-5364", "0006-341X"),
+    })
+    new = openalex("W1", title="Current title", retrieved_at=NOW + timedelta(days=1)).to_evidence().model_copy(update={
+        "monitor_journal_issns": ("1541-0420", "0006-341X"),
+    })
+    for snapshots in ((old, new), (new, old)):
+        normalized, issues = _normalize_retrievals(snapshots)
+        selected, = normalized
+        assert selected.title == "Current title" and selected.provenance == new.provenance
+        assert selected.monitor_journal_issns == ("0006-341X", "0090-5364", "1541-0420")
+        assert not issues
+        result = canonicalize_records(snapshots)
+        assert result.papers[0].journal_issns == selected.monitor_journal_issns
+        assert not result.issues and not result.diagnostics
+
+
+@pytest.mark.parametrize("different_metadata", [False, True])
+def test_snapshot_tie_break_ignores_swapped_attribution(different_metadata):
+    left = openalex("W1", title="Left title").to_evidence()
+    right = left.model_copy(update={
+        "title": "Right title" if different_metadata else left.title,
+        "version_hints": (EvidenceVersionHint(
+            source="arxiv", identifier="2601.00001", role=EvidenceVersionRole.PREPRINT,
+        ),),
+    })
+    baseline = _choose_evidence((left, right))
+    for identities in (("0006-341X", "0090-5364"), ("0090-5364", "0006-341X")):
+        snapshots = tuple(r.model_copy(update={"monitor_journal_issns": (issn,)})
+                          for r, issn in zip((left, right), identities, strict=True))
+        selected = _choose_evidence(snapshots)
+        assert selected.model_dump(exclude={"monitor_journal_issns"}) == baseline.model_dump(exclude={"monitor_journal_issns"})
+        _, issues = _normalize_retrievals(snapshots)
+        _, baseline_issues = _normalize_retrievals((left, right))
+        assert issues == baseline_issues
+
+
+def test_attribution_disagreement_alone_has_no_snapshot_or_metadata_diagnostics():
+    record = openalex("W1").to_evidence()
+    snapshots = tuple(record.model_copy(update={"monitor_journal_issns": ids})
+                      for ids in (("0090-5364",), ("0006-341X",), ()))
+    result = canonicalize_records(snapshots)
+    assert result.papers[0].journal_issns == ("0006-341X", "0090-5364")
+    assert not result.issues and not result.diagnostics
+
+
+@pytest.mark.parametrize("case", [
+    "single", "doi", "external_id", "title_author", "relation_versions", "conflicting_doi", "conflicting_authors",
+])
+def test_attribution_is_component_union_and_does_not_change_domain_decisions(case):
+    first = openalex("W1", doi="10.5555/first").to_evidence()
+    second = crossref("10.5555/first", title="A Study", journal="Biometrics", authors=(author(),)).to_evidence()
+    if case == "single":
+        records = (first,)
+    elif case == "external_id":
+        records = (first.model_copy(update={"external_ids": ExternalIds(arxiv="2601.00001")}),
+                   second.model_copy(update={"external_ids": ExternalIds(arxiv="2601.00001")}))
+    elif case == "title_author":
+        records = (first.model_copy(update={"external_ids": ExternalIds(openalex="W1")}),
+                   second.model_copy(update={"external_ids": ExternalIds()}))
+    elif case == "relation_versions":
+        records = (
+            first,
+            crossref("10.5555/pre", title="Preprint title", journal="Biometrics", authors=(author(),),
+                     relations=(relation("is-preprint-of", "10.5555/first"),)).to_evidence(),
+        )
+    elif case == "conflicting_doi":
+        records = (first, crossref("10.5555/other", title="A Study", journal="Biometrics", authors=(author(),)).to_evidence())
+    elif case == "conflicting_authors":
+        records = (first.model_copy(update={"external_ids": ExternalIds()}),
+                   second.model_copy(update={"external_ids": ExternalIds(), "authors": (author("Other Author"),)}))
+    else:
+        records = (first, second)
+
+    baseline = canonicalize_records(records)
+    baseline_clusters = consolidate_evidence(records)
+    tagged = tuple(record.model_copy(update={"monitor_journal_issns": ids})
+                   for record, ids in zip(records, (("0006-341X", "0006-341X"), ("0090-5364", "0006-341X"))))
+    for inputs in (tagged, tuple(reversed(tagged))):
+        clusters = consolidate_evidence(inputs)
+        assert len(clusters.clusters) == len(baseline_clusters.clusters)
+        assert clusters.issues == baseline_clusters.issues and clusters.diagnostics == baseline_clusters.diagnostics
+        for cluster, original in zip(clusters.clusters, baseline_clusters.clusters, strict=True):
+            assert [e.model_dump(exclude={"monitor_journal_issns"}) for e in cluster.evidence] == [
+                e.model_dump(exclude={"monitor_journal_issns"}) for e in original.evidence
+            ]
+            assert build_searchable_projection(cluster.evidence) == build_searchable_projection(original.evidence)
+        result = canonicalize_records(inputs)
+        assert result.issues == baseline.issues and result.diagnostics == baseline.diagnostics
+        for paper, original, cluster in zip(result.papers, baseline.papers, clusters.clusters, strict=True):
+            assert paper.model_dump(exclude={"id", "workflow", "journal_issns"}) == original.model_dump(exclude={"id", "workflow", "journal_issns"})
+            assert paper.workflow.status == original.workflow.status
+            assert paper.journal_issns == tuple(sorted({issn for e in cluster.evidence for issn in e.monitor_journal_issns}))
+        if case in {"doi", "external_id", "title_author", "relation_versions"}:
+            assert len(result.papers) == 1
+            assert result.papers[0].journal_issns == ("0006-341X", "0090-5364")
+        if case == "relation_versions":
+            assert result.papers[0].preferred_version.identifier == "10.5555/first"
+            assert len(result.papers[0].versions) == 2
+    assert "journal_issns" not in CanonicalMetadata.model_fields
+    assert "monitor_journal_issns" not in CanonicalMetadata.model_fields

@@ -49,6 +49,16 @@ Intro text that is not owned by Settings.
 """
 
 
+GROUPED_JOURNAL_DOCUMENT = JOURNAL_DOCUMENT.replace(
+    "| Journal | ISSN/EISSN |", "| Journal | ISSN/EISSN | Group |",
+).replace("|---|---|", "|---|---|---|", 1).replace(
+    "| Biometrics | 0006-341X |", "| Biometrics | 0006-341X | Biostatistics |",
+).replace(
+    "| Annals of Applied Statistics | 1932-6157 / 1941-7330 |",
+    "| Annals of Applied Statistics | 1932-6157 / 1941-7330 | |",
+)
+
+
 def write_valid_settings_files(
     tmp_path: Path,
     *,
@@ -668,3 +678,74 @@ def test_missing_monitor_and_journal_can_be_created_after_valid_edit(tmp_path: P
     assert result.monitor_written
     assert load_config(config_path).name == "Recovered"
     assert parse_journal_whitelist(tmp_path / "list.md") == draft.journals
+
+
+def test_grouped_settings_load_validate_save_and_reread_preserve_groups(tmp_path: Path) -> None:
+    config_path, journal_path = write_valid_settings_files(
+        tmp_path, journal_contents=GROUPED_JOURNAL_DOCUMENT,
+    )
+    before = (config_path.read_bytes(), journal_path.read_bytes())
+
+    opened = load_settings(config_path)
+    assert opened.issues == ()
+    assert [journal.group for journal in opened.draft.journals] == ["Biostatistics", None]
+    assert (config_path.read_bytes(), journal_path.read_bytes()) == before
+
+    draft = replace(opened.draft, keyword_expression="statistics")
+    validated = validate_settings(config_path, draft)
+    assert validated.outcome is SettingsValidationOutcome.VALID
+    assert validated.config is not None
+    assert validated.config.journals == draft.journals
+    assert (config_path.read_bytes(), journal_path.read_bytes()) == before
+
+    saved = save_settings(config_path, draft)
+    assert saved.outcome is SettingsSaveOutcome.SAVED
+    assert saved.state.draft.journals == draft.journals
+    assert load_config(config_path).journals == draft.journals
+    assert parse_journal_whitelist(journal_path) == draft.journals
+    after = journal_path.read_text()
+    prefix, remainder = GROUPED_JOURNAL_DOCUMENT.split("## Journals", 1)
+    assert after.startswith(prefix)
+    assert after.split("## Conferences", 1)[1] == remainder.split("## Conferences", 1)[1]
+
+
+@pytest.mark.parametrize("originally_grouped", [False, True])
+def test_settings_save_keeps_existing_column_shape_with_ungrouped_journals(
+    tmp_path: Path, originally_grouped: bool,
+) -> None:
+    document = GROUPED_JOURNAL_DOCUMENT if originally_grouped else JOURNAL_DOCUMENT
+    config_path, journal_path = write_valid_settings_files(tmp_path, journal_contents=document)
+    opened = load_settings(config_path)
+    draft = replace(
+        opened.draft,
+        name="Unrelated monitor-name edit",
+        journals=tuple(journal.model_copy(update={"group": None}) for journal in opened.draft.journals),
+    )
+
+    saved = save_settings(config_path, draft)
+
+    assert saved.outcome is SettingsSaveOutcome.SAVED
+    after = journal_path.read_text()
+    assert ("| Journal | ISSN/EISSN | Group |" in after) == originally_grouped
+    assert ("| Journal | ISSN/EISSN |\n" in after) == (not originally_grouped)
+    assert saved.state.draft.journals == load_config(config_path).journals == valid_journals()
+
+
+@pytest.mark.parametrize("group", ["Stats|Methods", "Stats\nMethods", "Stats\rMethods"])
+def test_settings_rejects_unsafe_group_without_writing(tmp_path: Path, group: str) -> None:
+    config_path, journal_path = write_valid_settings_files(tmp_path)
+    opened = load_settings(config_path)
+    before = (config_path.read_bytes(), journal_path.read_bytes())
+    draft = replace(opened.draft, journals=(
+        JournalConfig(name="Biometrics", issn=("0006-341X",), group=group),
+    ))
+
+    validation = validate_settings(config_path, draft)
+    saved = save_settings(config_path, draft)
+
+    assert validation.outcome is SettingsValidationOutcome.INVALID
+    assert validation.issues[0].field == "journals"
+    assert "journal group" in validation.issues[0].message
+    assert saved.outcome is SettingsSaveOutcome.INVALID_DRAFT
+    assert not saved.journal_written and not saved.monitor_written
+    assert (config_path.read_bytes(), journal_path.read_bytes()) == before

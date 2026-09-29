@@ -4,7 +4,16 @@ import re
 
 import pytest
 
-from literature_monitor.config import ConfigurationError, load_config, parse_journal_whitelist
+from literature_monitor.config import (
+    ConfigurationError,
+    JournalConfig,
+    load_config,
+    parse_journal_whitelist,
+    parse_journal_whitelist_text,
+    render_journal_whitelist_text,
+    validate_journal_configs,
+    validate_journal_storage,
+)
 from literature_monitor.date_range import DateRangeSpec
 from literature_monitor.keywords import And, Phrase, Term
 
@@ -24,6 +33,21 @@ JOURNAL_FIXTURE = """\
 | Journal | ISSN/EISSN |
 |---|---|
 | Fake Conference | 0378-5955 |
+"""
+
+GROUPED_JOURNAL_FIXTURE = """\
+# Venues
+
+## Journals
+
+| Journal | ISSN/EISSN | Group |
+|---|---|---|
+| Biometrics | 0006-341X | Biostatistics |
+| Annals of Applied Statistics | 1932-6157 / 1941-7330 | |
+
+## Conferences
+
+Conferences remain outside Journal parsing.
 """
 
 
@@ -70,6 +94,7 @@ def test_journal_fixture_parses_multiple_issns_and_excludes_conferences(tmp_path
         "Annals of Applied Statistics",
     ]
     assert journals[1].issn == ("1932-6157", "1941-7330")
+    assert all(journal.group is None for journal in journals)
     assert "Fake Conference" not in {journal.name for journal in journals}
 
 
@@ -341,7 +366,7 @@ def test_invalid_date_value_keeps_config_path_and_field_context(tmp_path: Path) 
     [
         ("| Journal Name | ISSN/EISSN |", "expected table header"),
         ("| Biometrics | 0006-3410 |", "checksum"),
-        ("Biometrics | 0006-341X", "two-column Markdown table row"),
+        ("Biometrics | 0006-341X", "Markdown table row"),
     ],
 )
 def test_whitelist_errors_include_path_and_line(
@@ -449,3 +474,137 @@ def test_repository_list_smoke_parses_and_excludes_conference_names() -> None:
     assert journals
     assert all(journal.issn for journal in journals)
     assert {journal.name for journal in journals}.isdisjoint(conference_names)
+
+
+def test_grouped_whitelist_parses_groups_and_empty_cells(tmp_path: Path) -> None:
+    journals = parse_journal_whitelist(write_whitelist(tmp_path, GROUPED_JOURNAL_FIXTURE))
+
+    assert journals == (
+        JournalConfig(name="Biometrics", issn=("0006-341X",), group="Biostatistics"),
+        JournalConfig(name="Annals of Applied Statistics", issn=("1932-6157", "1941-7330")),
+    )
+
+
+@pytest.mark.parametrize("second_group", ["Biostatistics", "biostatistics", "Other"])
+def test_shared_validation_preserves_group_names_and_journal_order(second_group: str) -> None:
+    journals = (
+        JournalConfig(name=" Biometrics ", issn=(" 0006-341x ",), group=" Biostatistics "),
+        JournalConfig(name="Annals of Applied Statistics", issn=("1932-6157",), group=second_group),
+    )
+
+    normalized = validate_journal_configs(journals)
+
+    assert [journal.name for journal in normalized] == ["Biometrics", "Annals of Applied Statistics"]
+    assert [journal.group for journal in normalized] == ["Biostatistics", second_group]
+    assert normalized[0].issn == ("0006-341X",)
+    assert JournalConfig(name="Ungrouped", issn=("0006-341X",)).group is None
+
+
+@pytest.mark.parametrize("group", ["", "   "])
+def test_journal_domain_rejects_empty_string_group(group: str) -> None:
+    with pytest.raises(ValueError, match="group"):
+        JournalConfig(name="Biometrics", issn=("0006-341X",), group=group)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement", "line_number", "message"),
+    [
+        ("| Journal | ISSN/EISSN | Group |", "| Journal | ISSN/EISSN | Category |", 5, "expected table header"),
+        ("| Journal | ISSN/EISSN | Group |", "| Journal | ISSN/EISSN | Group | Extra |", 5, "expected 2 or 3 table columns, found 4"),
+        ("| Journal | ISSN/EISSN | Group |", "| Journal |", 5, "expected 2 or 3 table columns, found 1"),
+        ("|---|---|---|", "|---|---|", 6, "expected 3 table columns, found 2"),
+        ("|---|---|---|", "|---|---|---|---|", 6, "expected 3 table columns, found 4"),
+        ("|---|---|---|", "|---|---|bad|", 6, "invalid Markdown table separator"),
+        ("| Biometrics | 0006-341X | Biostatistics |", "| Biometrics | 0006-341X |", 7, "expected 3 table columns, found 2"),
+        ("| Biometrics | 0006-341X | Biostatistics |", "| Biometrics | 0006-341X | Biostatistics | Extra |", 7, "expected 3 table columns, found 4"),
+        ("| Biometrics | 0006-341X | Biostatistics |", "Biometrics | 0006-341X | Biostatistics", 7, "Markdown table row"),
+        ("| Biometrics | 0006-341X | Biostatistics |", "| | 0006-341X | Biostatistics |", 7, "Journal must not be empty"),
+        ("| Biometrics | 0006-341X | Biostatistics |", "| Biometrics | 0006-3410 | Biostatistics |", 7, "checksum"),
+    ],
+)
+def test_grouped_whitelist_rejects_invalid_structure_with_location(
+    tmp_path: Path, original: str, replacement: str, line_number: int, message: str,
+) -> None:
+    path = write_whitelist(tmp_path, GROUPED_JOURNAL_FIXTURE.replace(original, replacement))
+
+    with pytest.raises(ConfigurationError) as captured:
+        parse_journal_whitelist(path)
+
+    assert f"{path}:{line_number}:" in str(captured.value)
+    assert message in str(captured.value)
+
+
+def test_legacy_table_rejects_three_column_separator_and_rows(tmp_path: Path) -> None:
+    for original, replacement, line_number in (
+        ("|---|---|", "|---|---|---|", 6),
+        ("| Biometrics | 0006-341X |", "| Biometrics | 0006-341X | Group |", 7),
+    ):
+        path = write_whitelist(tmp_path, JOURNAL_FIXTURE.replace(original, replacement, 1))
+        with pytest.raises(ConfigurationError) as captured:
+            parse_journal_whitelist(path)
+        assert f"{path}:{line_number}: expected 2 table columns, found 3" in str(captured.value)
+
+
+def test_groups_do_not_change_global_issn_uniqueness() -> None:
+    with pytest.raises(ConfigurationError, match="duplicate ISSN"):
+        validate_journal_configs((
+            JournalConfig(name="One", issn=("0006-341X",), group="First"),
+            JournalConfig(name="Two", issn=("0006-341X",), group="Second"),
+        ))
+
+
+@pytest.mark.parametrize(
+    "group", ["Stats|Methods", "Stats\nMethods", "Stats\rMethods", "Stats\u2028Methods"],
+)
+def test_group_storage_rejects_table_breaking_values(group: str, tmp_path: Path) -> None:
+    journals = (JournalConfig(name="Biometrics", issn=("0006-341X",), group=group),)
+    with pytest.raises(ConfigurationError) as captured:
+        validate_journal_storage(journals)
+    assert captured.value.field == "journals"
+    assert "journal group" in str(captured.value)
+    assert repr(group) in str(captured.value)
+    with pytest.raises(ConfigurationError, match="journal group"):
+        render_journal_whitelist_text(None, journals, path=tmp_path / "list.md")
+
+
+@pytest.mark.parametrize(
+    "existing_contents",
+    [None, JOURNAL_FIXTURE, GROUPED_JOURNAL_FIXTURE, "# Custom List\n\n## Conferences\n\nKeep me.\n"],
+    ids=["new-document", "legacy-table", "grouped-table", "missing-journals-section"],
+)
+@pytest.mark.parametrize("group", [None, "统计 & Methods <A> \"B\""])
+def test_renderer_preserves_storage_shape_and_other_sections(
+    tmp_path: Path, existing_contents: str | None, group: str | None,
+) -> None:
+    journals = (
+        JournalConfig(name="Biometrics", issn=("0006-341X",), group=group),
+        JournalConfig(name="Annals of Applied Statistics", issn=("1932-6157", "1941-7330")),
+    )
+    path = tmp_path / "list.md"
+    rendered = render_journal_whitelist_text(existing_contents, journals, path=path)
+
+    grouped = group is not None or existing_contents == GROUPED_JOURNAL_FIXTURE
+    journal_section = rendered.split("## Journals", 1)[1].split("## Conferences", 1)[0]
+    assert ("| Journal | ISSN/EISSN | Group |" in journal_section) == grouped
+    assert ("| Journal | ISSN/EISSN |\n" in journal_section) == (not grouped)
+    assert parse_journal_whitelist_text(rendered, path=path) == journals
+    assert render_journal_whitelist_text(rendered, journals, path=path) == rendered
+    if existing_contents is not None:
+        prefix = existing_contents.split("## Journals", 1)[0]
+        assert rendered.startswith(prefix)
+        if "## Journals" in existing_contents and "## Conferences" in existing_contents:
+            assert rendered.split("## Conferences", 1)[1] == existing_contents.split("## Conferences", 1)[1]
+
+
+def test_renderer_retains_three_columns_with_spaced_header_and_crlf_surroundings(tmp_path: Path) -> None:
+    prefix = "# List\r\n\r\nUnowned introduction.\r\n\r\n"
+    suffix = "## Conferences\r\n\r\nUntouched conference content.\r\n"
+    contents = prefix + "## Journals\r\n\r\n|  Journal  | ISSN/EISSN |  Group  |\r\n|---|---|---|\r\n| Biometrics | 0006-341X | Stats |\r\n\r\n" + suffix
+    journals = (JournalConfig(name="Biometrics", issn=("0006-341X",)),)
+
+    rendered = render_journal_whitelist_text(contents, journals, path=tmp_path / "list.md")
+
+    assert "| Journal | ISSN/EISSN | Group |" in rendered
+    assert rendered.startswith(prefix)
+    assert rendered.endswith(suffix)
+    assert parse_journal_whitelist_text(rendered, path=tmp_path / "list.md") == journals

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+import yaml
 
 from literature_monitor.application import monitor
 from literature_monitor.application.candidate_eligibility import (
@@ -22,6 +23,7 @@ from literature_monitor.application.provider_state import (
 )
 from literature_monitor.diagnostics import RunDiagnosticKind
 from literature_monitor.config import JournalConfig
+from literature_monitor.canonicalize import canonicalize_records
 from literature_monitor.coverage import CoverageComponent, CoverageStatus, CoverageUnit
 from literature_monitor.crossref import (
     CrossrefClient, CrossrefDiscoveryResult, CrossrefDiscoveryUnitResult,
@@ -271,9 +273,12 @@ def production(tmp_path, monkeypatch):
             assert records == case.openalex.records
             return case.supplements
     monkeypatch.setattr(monitor, "CrossrefRetrieval", Retrieval)
-    def assemble(oa_records, cr_records, supplied):
+    def assemble(oa_records, cr_records, supplied, *, monitor_journal_issns=None):
         case.assembly = (tuple(oa_records), tuple(cr_records), tuple(supplied))
-        return assemble_live_provider_evidence(oa_records, cr_records, supplied)
+        case.monitor_journal_issns = monitor_journal_issns
+        return assemble_live_provider_evidence(
+            oa_records, cr_records, supplied, monitor_journal_issns=monitor_journal_issns,
+        )
     monkeypatch.setattr(monitor, "assemble_live_provider_evidence", assemble)
     def hydrate(client, records, **kw):
         case.hydrated = records
@@ -534,3 +539,115 @@ def test_production_representation_equivalence_preserves_markdown_names_and_abst
     assert 'Lovelace, A.' not in updated
     author_file, = (case.output / 'Authors').glob('*.md')
     assert 'Ada Lovelace' in author_file.read_text() and 'O1' in author_file.read_text()
+
+
+@pytest.mark.parametrize("kind", ["journal-article", "other"])
+def test_configured_authority_chain_excludes_provider_only_venue_identities(kind):
+    journal = JournalConfig(name=A.name, issn=(*A.issn, "1541-0420"))
+    resolved = replace(source(journal), issn=B.issn, issn_l=B.issn[0])
+    anchor = oa()
+    record = cr(kind, issns=(*B.issn, "0162-1459"))
+    candidates = filter_candidate_evidence(
+        DiscoveryResult((resolved,), (anchor,), ()), discovery((record,), journal),
+        supplementation(), (journal,),
+    )
+    assert B.issn[0] in target_venue(journal, (resolved,)).issns
+    expected = tuple(sorted(journal.issn))
+    assert candidates.monitor_journal_issns == {ref(anchor): expected, ref(record): expected}
+    assembled = assemble_live_provider_evidence(
+        candidates.openalex_records, candidates.crossref_records, candidates.supplement_evidence,
+        monitor_journal_issns=candidates.monitor_journal_issns,
+    )
+    assert all(e.monitor_journal_issns == expected for e in assembled)
+    paper, = canonicalize_records(assembled).papers
+    assert paper.journal_issns == expected and B.issn[0] not in paper.journal_issns
+    assert candidates.attribution[ref(record)][0].state is (
+        State.ELIGIBLE if kind == "journal-article" else State.SCOPE_DISPUTED
+    )
+
+
+@pytest.mark.parametrize("provider", ["openalex", "crossref"])
+def test_generic_disputed_without_current_venue_has_no_attribution(provider):
+    anchor, record = oa(source_number=999), cr()
+    candidates = filter_candidate_evidence(
+        DiscoveryResult((source(),), (anchor,) if provider == "openalex" else (), ()),
+        CrossrefDiscoveryResult((record,) if provider == "crossref" else (), (), ()),
+        supplementation(), (A,),
+    )
+    retained = anchor if provider == "openalex" else record
+    assert candidates.monitor_journal_issns == {ref(retained): ()}
+    assert candidates.attribution[ref(retained)][0].state is State.SCOPE_DISPUTED
+    assembled = assemble_live_provider_evidence(
+        candidates.openalex_records, candidates.crossref_records, candidates.supplement_evidence,
+        monitor_journal_issns=candidates.monitor_journal_issns,
+    )
+    assert canonicalize_records(assembled).papers[0].journal_issns == ()
+
+
+@pytest.mark.parametrize("kind,expected", [
+    ("journal-article", tuple(sorted((*A.issn, *B.issn)))),
+    ("book-chapter", A.issn),
+    ("journal-issue", ()),
+])
+def test_same_record_unions_retained_contexts_and_ignores_excluded_context(kind, expected):
+    anchor, record = oa(), cr(kind)
+    first, second = discovery((record,), A), discovery((record,), B)
+    acquired = CrossrefDiscoveryResult((record,), (), (), (*first.units, *second.units))
+    for journals, sources in [((A, B), (source(), source(B))), ((B, A), (source(B), source()))]:
+        candidates = filter_candidate_evidence(
+            DiscoveryResult(sources, (anchor,), ()), acquired, supplementation(), journals,
+        )
+        for retained_ref in (ref(anchor), ref(record)):
+            assert candidates.monitor_journal_issns.get(retained_ref, ()) == expected
+        assert bool(candidates.openalex_records) == bool(expected)
+        assert bool(candidates.crossref_records) == bool(expected)
+
+
+@pytest.mark.parametrize("kind,expected", [
+    ("journal-article", tuple(sorted((*A.issn, *B.issn)))),
+    ("book-chapter", A.issn),
+])
+def test_alias_prime_receives_only_retained_anchor_contexts(kind, expected):
+    first = oa(doi="10.5555/alias-a")
+    second = oa(doi="10.5555/alias-b", number=2, source_number=2, journal=B)
+    prime = cr(kind, doi="10.5555/prime")
+    supplied = supplementation(supplement(first, prime), supplement(second, prime))
+    for anchors in ((first, second), (second, first)):
+        candidates = filter_candidate_evidence(
+            DiscoveryResult((source(), source(B, 2)), anchors, ()), discovery(), supplied, (A, B),
+        )
+        assert candidates.monitor_journal_issns[ref(prime)] == expected
+        assembled = assemble_live_provider_evidence(
+            candidates.openalex_records, candidates.crossref_records, candidates.supplement_evidence,
+            monitor_journal_issns=candidates.monitor_journal_issns,
+        )
+        prime_evidence, = (e for e in assembled if e.provenance.provider == "crossref")
+        assert prime_evidence.monitor_journal_issns == expected
+        assert set(prime_evidence.supplements) == {ref(r) for r in candidates.openalex_records}
+        assert canonicalize_records(assembled).papers[0].journal_issns == expected
+
+
+@pytest.mark.parametrize("kind", ["journal-article", "other"])
+def test_production_passes_configured_attribution_without_changing_scope_signals(production, monkeypatch, kind):
+    case = production
+    anchor, record = oa(), cr(kind)
+    case.openalex = replace(case.openalex, records=(anchor,))
+    case.crossref = discovery((record,))
+    papers = []
+    original = monitor.canonicalize_records
+    def canonicalize(records):
+        result = original(records)
+        papers.extend(result.papers)
+        return result
+    monkeypatch.setattr(monitor, "canonicalize_records", canonicalize)
+    result = monitor.run_monitor(case.config)
+    assert case.monitor_journal_issns == {ref(anchor): A.issn, ref(record): A.issn}
+    paper, = papers
+    assert paper.journal_issns == A.issn
+    assert result.canonical_paper_count == 1 and not result.errors
+    assert [w.component for w in result.warnings] == (
+        [monitor.MonitorIssueComponent.CANDIDATE_ELIGIBILITY] if kind == "other" else []
+    )
+    assert not result.diagnostics and result.coverage == case.crossref.coverage
+    persisted, = (case.output / "Papers").glob("*.md")
+    assert yaml.safe_load(persisted.read_text().split("---", 2)[1])["journal_issns"] == list(A.issn)

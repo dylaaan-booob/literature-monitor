@@ -172,6 +172,7 @@ class ProviderWorkEvidence(DomainModel):
     relations: tuple[EvidenceRelation, ...] = ()
     version_hints: tuple[EvidenceVersionHint, ...] = ()
     supplements: tuple[ProviderRecordRef, ...] = ()
+    monitor_journal_issns: tuple[str, ...] = ()
 
 
 class WorkflowStatus(str, Enum):
@@ -203,6 +204,7 @@ class CanonicalPaper(DomainModel):
     sources: tuple[MetadataSource, ...] = ()
     workflow: Workflow = Field(default_factory=Workflow)
     preferred_version: VersionRef | None = None
+    journal_issns: tuple[str, ...] = ()
 
     @field_validator("authors")
     @classmethod

@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from enum import Enum
 from pathlib import Path
 from uuid import UUID
 
-from literature_monitor.markdown_state import PaperMarkdownState, parse_paper_state
+from literature_monitor.config import JournalConfig
+from literature_monitor.markdown_state import (
+    PaperJournalAttributionState,
+    PaperMarkdownState,
+    parse_paper_state,
+)
 from literature_monitor.models import (
     ExternalIds,
     MetadataSource,
@@ -40,6 +48,21 @@ class WorkspacePaper:
     sources: tuple[MetadataSource, ...]
     preferred_version: VersionRef | None
     zotero_key: str | None
+    journal_attribution_state: PaperJournalAttributionState = PaperJournalAttributionState.MISSING_OR_EMPTY
+    journal_issns: tuple[str, ...] = ()
+
+
+class WorkspaceSectionKind(str, Enum):
+    GROUP = "group"
+    UNGROUPED = "ungrouped"
+    UNMAPPED = "unmapped"
+
+
+@dataclass(frozen=True)
+class WorkspaceSection:
+    kind: WorkspaceSectionKind
+    label: str
+    papers: tuple[WorkspacePaper, ...]
 
 
 @dataclass(frozen=True)
@@ -52,36 +75,61 @@ class WorkspaceIssue:
 class WorkspaceSnapshot:
     papers: tuple[WorkspacePaper, ...]
     issues: tuple[WorkspaceIssue, ...]
+    journals: tuple[JournalConfig, ...] = ()
+
+    def sections_for(self, status: WorkflowStatus) -> tuple[WorkspaceSection, ...]:
+        groups = dict.fromkeys(journal.group for journal in self.journals if journal.group is not None)
+        keys = (
+            *((WorkspaceSectionKind.GROUP, group) for group in groups),
+            (WorkspaceSectionKind.UNGROUPED, "Ungrouped"),
+            (WorkspaceSectionKind.UNMAPPED, "Unmapped journals"),
+        )
+        buckets: dict[tuple[WorkspaceSectionKind, str], list[WorkspacePaper]] = {}
+        for paper in _ordered_papers([p for p in self.papers if p.status is status]):
+            key = _section_key(paper, self.journals)
+            buckets.setdefault(key, []).append(paper)
+        return tuple(WorkspaceSection(kind, label, tuple(buckets[(kind, label)]))
+                     for kind, label in keys if buckets.get((kind, label)))
+
+    def papers_for(self, status: WorkflowStatus) -> tuple[WorkspacePaper, ...]:
+        return tuple(paper for section in self.sections_for(status) for paper in section.papers)
 
     @property
     def inbox(self) -> tuple[WorkspacePaper, ...]:
-        return tuple(
-            paper
-            for paper in self.papers
-            if paper.status is WorkflowStatus.CANDIDATE
-        )
+        return self.papers_for(WorkflowStatus.CANDIDATE)
 
     @property
     def kept(self) -> tuple[WorkspacePaper, ...]:
-        return tuple(
-            paper for paper in self.papers if paper.status is WorkflowStatus.KEPT
-        )
+        return self.papers_for(WorkflowStatus.KEPT)
 
     @property
     def rejected(self) -> tuple[WorkspacePaper, ...]:
-        return tuple(
-            paper
-            for paper in self.papers
-            if paper.status is WorkflowStatus.REJECTED
-        )
+        return self.papers_for(WorkflowStatus.REJECTED)
 
     @property
     def in_zotero(self) -> tuple[WorkspacePaper, ...]:
-        return tuple(
-            paper
-            for paper in self.papers
-            if paper.status is WorkflowStatus.IN_ZOTERO
-        )
+        return self.papers_for(WorkflowStatus.IN_ZOTERO)
+
+
+def _journal_name(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
+def _section_key(
+    paper: WorkspacePaper, journals: Sequence[JournalConfig],
+) -> tuple[WorkspaceSectionKind, str]:
+    if paper.journal_attribution_state is PaperJournalAttributionState.VALID:
+        identities = set(paper.journal_issns)
+        matches = [journal for journal in journals if identities.intersection(journal.issn)]
+    elif paper.journal_attribution_state is PaperJournalAttributionState.MISSING_OR_EMPTY:
+        matches = [journal for journal in journals if _journal_name(journal.name) == _journal_name(paper.journal)]
+    else:
+        matches = []
+    if len(matches) != 1:
+        return WorkspaceSectionKind.UNMAPPED, "Unmapped journals"
+    group = matches[0].group
+    return ((WorkspaceSectionKind.GROUP, group) if group is not None else
+            (WorkspaceSectionKind.UNGROUPED, "Ungrouped"))
 
 
 def _project_paper(state: PaperMarkdownState) -> WorkspacePaper:
@@ -110,6 +158,8 @@ def _project_paper(state: PaperMarkdownState) -> WorkspacePaper:
         sources=state.sources,
         preferred_version=state.preferred_version,
         zotero_key=state.zotero_key,
+        journal_attribution_state=state.journal_attribution_state,
+        journal_issns=state.journal_issns,
     )
 
 
@@ -128,7 +178,7 @@ def _ordered_papers(papers: list[WorkspacePaper]) -> tuple[WorkspacePaper, ...]:
     return tuple(ordered)
 
 
-def load_workspace(output_dir: Path) -> WorkspaceSnapshot:
+def load_workspace(output_dir: Path, journals: Sequence[JournalConfig] = ()) -> WorkspaceSnapshot:
     """Load current Paper Markdown into pre-sorted workflow views without writes."""
 
     papers_dir = output_dir / "Papers"
@@ -192,4 +242,5 @@ def load_workspace(output_dir: Path) -> WorkspaceSnapshot:
     return WorkspaceSnapshot(
         papers=_ordered_papers(papers),
         issues=tuple(issues),
+        journals=tuple(journals),
     )

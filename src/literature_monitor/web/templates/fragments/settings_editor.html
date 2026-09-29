@@ -140,21 +140,117 @@
         <button type="button" class="secondary" data-add-journal>Add journal</button>
       </div>
       <p class="muted">Enter ISSN/EISSN values separated by commas. Conferences are not edited here.</p>
-      <div data-journal-rows>
-        {% for row in settings_form.journals %}
-          <div class="journal-row">
-            <label>
-              Journal name
-              <input name="journal_name" value="{{ row.name }}" autocomplete="off">
-            </label>
-            <label>
-              ISSN/EISSN
-              <input name="journal_issns" value="{{ row.issns }}" autocomplete="off">
-            </label>
-            <button type="button" class="secondary" data-remove-journal>Remove</button>
+      <div data-journal-viewport>
+        <section class="journal-import" data-transient-import aria-label="Bulk import Journals">
+          <h2>Bulk import Journals</h2>
+          <label>Local UTF-8 file
+            <input type="file" data-journal-import-file accept=".csv,.tsv,.md,text/csv,text/tab-separated-values,text/markdown,text/plain">
+          </label>
+          <p class="notice error" data-import-file-error role="alert" hidden></p>
+          <label>Import source
+            <textarea name="journal_import_text" data-journal-import-text rows="5">{{ settings_import.contents }}</textarea>
+          </label>
+          <label>Import mode
+            <select name="journal_import_mode">
+              <option value="MERGE" {{ "selected" if settings_import.mode == "MERGE" else "" }}>Merge</option>
+              <option value="REPLACE" {{ "selected" if settings_import.mode == "REPLACE" else "" }}>Replace</option>
+              {% if settings_import.mode not in ("MERGE", "REPLACE") %}
+                <option value="{{ settings_import.mode }}" selected>Invalid mode: {{ settings_import.mode }}</option>
+              {% endif %}
+            </select>
+          </label>
+          <p class="muted">Merge keeps current Journals. Replace previews removals. Both edit this unsaved draft.</p>
+          <button type="button" class="secondary" data-import-preview
+                  hx-post="/settings/import/preview" hx-include="#settings-form"
+                  hx-target="#settings-editor" hx-swap="outerHTML">Preview</button>
+          {% if settings_import.error %}<p class="notice error">{{ settings_import.error }}</p>{% endif %}
+          {% if settings_import.plan %}
+            <div class="import-preview" data-import-plan>
+              <h3>{{ "Ready to Apply" if settings_import.plan.can_apply else "Apply blocked" }}</h3>
+              <p>{{ settings_import.plan.mode.value }}{% if settings_import.plan.source_format %} · {{ settings_import.plan.source_format.value }}{% endif %}</p>
+              <ul class="import-entries">
+                {% set change_labels = {"ADD": "Add", "NO_OP_DUPLICATE": "No-op duplicate", "ISSN_MERGE": "ISSN merge", "ISSN_REMOVE": "ISSN remove", "GROUP_MOVE": "Group move", "ORDER_CHANGE": "Order change", "REMOVE": "Remove", "CONFLICT": "Conflict", "INVALID_ROW": "Invalid row", "FORMAT_ERROR": "Format error"} %}
+                {% for entry in settings_import.plan.entries %}
+                  <li data-import-change="{{ entry.kind.value }}">
+                    <strong>{{ change_labels.get(entry.kind.value, entry.kind.value) }}</strong>
+                    {% if entry.journal_name %} · {{ entry.journal_name }}{% endif %}
+                    {% if entry.source_rows %}<span> · Source rows: {{ entry.source_rows|join(", ") }}</span>{% endif %}
+                    {% if entry.added_issns %}<div>Added ISSNs: {{ entry.added_issns|join(", ") }}</div>{% endif %}
+                    {% if entry.removed_issns %}<div>Removed ISSNs: {{ entry.removed_issns|join(", ") }}</div>{% endif %}
+                    {% if entry.kind.value == "GROUP_MOVE" or (entry.kind.value == "CONFLICT" and (entry.previous_group is not none or entry.new_group is not none)) %}<div>Group: {{ entry.previous_group or "Ungrouped" }} → {{ entry.new_group or "Ungrouped" }}</div>{% endif %}
+                    {% if entry.kind.value == "ADD" and entry.new_group %}<div>Group: {{ entry.new_group }}</div>{% endif %}
+                    {% if entry.kind.value == "REMOVE" %}<div>Previous Group: {{ entry.previous_group or "Ungrouped" }}</div>{% endif %}
+                    {% if entry.previous_position is not none and entry.new_position is not none %}<div>Position: {{ entry.previous_position + 1 }} → {{ entry.new_position + 1 }}</div>{% endif %}
+                    {% if entry.previous_issns or entry.new_issns %}<div>ISSN order: {{ entry.previous_issns|join(", ") }} → {{ entry.new_issns|join(", ") }}</div>{% endif %}
+                    {% if entry.message %}<div>{{ entry.message }}</div>{% endif %}
+                  </li>
+                {% endfor %}
+              </ul>
+              {% if settings_import.plan.can_apply %}
+                <button type="button" data-import-apply
+                        hx-post="/settings/import/apply" hx-include="#settings-form"
+                        hx-target="#settings-editor" hx-swap="outerHTML">Apply to draft</button>
+              {% endif %}
+            </div>
+          {% endif %}
+        </section>
+        <section class="journal-organization" aria-label="Journal groups">
+          <div class="group-create">
+            <label>New Group name <input data-new-group autocomplete="off"></label>
+            <button type="button" class="secondary" data-create-group>Create Group</button>
           </div>
-        {% endfor %}
+          <div data-group-rows>
+            {% for group in settings_form.groups %}
+              <div class="group-row" data-group-row data-group-name="{{ group }}">
+                <input type="hidden" name="settings_group" value="{{ group }}">
+                <label>Group name <input data-group-edit value="{{ group }}" autocomplete="off"></label>
+                <div class="group-actions">
+                  <button type="button" class="secondary" data-rename-group>Rename</button>
+                  <button type="button" class="secondary" data-group-up>Up</button>
+                  <button type="button" class="secondary" data-group-down>Down</button>
+                  <button type="button" class="secondary" data-delete-group>Delete</button>
+                </div>
+              </div>
+            {% endfor %}
+          </div>
+        </section>
+        <div data-journal-rows>
+          {% for row in settings_form.journals %}
+            <div class="journal-row">
+              <label>
+                Journal name
+                <input name="journal_name" value="{{ row.name }}" autocomplete="off">
+              </label>
+              <label>
+                ISSN/EISSN
+                <input name="journal_issns" value="{{ row.issns }}" autocomplete="off">
+              </label>
+              <label>
+                Group
+                <select name="journal_group">
+                  <option value="" {{ "selected" if not row.group else "" }}>Ungrouped</option>
+                  {% for group in settings_form.groups %}
+                    <option value="{{ group }}" {{ "selected" if row.group == group else "" }}>{{ group }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <button type="button" class="secondary" data-remove-journal>Remove</button>
+            </div>
+          {% endfor %}
+        </div>
       </div>
+      <template data-group-template>
+        <div class="group-row" data-group-row data-group-name="">
+          <input type="hidden" name="settings_group" value="">
+          <label>Group name <input data-group-edit value="" autocomplete="off"></label>
+          <div class="group-actions">
+            <button type="button" class="secondary" data-rename-group>Rename</button>
+            <button type="button" class="secondary" data-group-up>Up</button>
+            <button type="button" class="secondary" data-group-down>Down</button>
+            <button type="button" class="secondary" data-delete-group>Delete</button>
+          </div>
+        </div>
+      </template>
       <template data-journal-template>
         <div class="journal-row">
           <label>
@@ -164,6 +260,9 @@
           <label>
             ISSN/EISSN
             <input name="journal_issns" value="" autocomplete="off">
+          </label>
+          <label>Group
+            <select name="journal_group"><option value="" selected>Ungrouped</option></select>
           </label>
           <button type="button" class="secondary" data-remove-journal>Remove</button>
         </div>

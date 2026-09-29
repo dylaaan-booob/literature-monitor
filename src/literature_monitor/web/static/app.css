@@ -235,6 +235,29 @@ button:disabled {
   margin: .75rem 0 0;
 }
 
+.paper-groups {
+  margin-top: 1rem;
+}
+
+.paper-group + .paper-group {
+  margin-top: 1.25rem;
+}
+
+.paper-group-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  padding-bottom: .4rem;
+  border-bottom: 1px solid #d9dde3;
+}
+
+.paper-group-heading h2 {
+  margin: 0;
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+
 .paper-items li + li {
   border-top: 1px solid #eceef1;
 }
@@ -311,10 +334,62 @@ select {
 
 .journal-row {
   display: grid;
-  grid-template-columns: minmax(12rem, 1fr) minmax(16rem, 1.2fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, .8fr) auto;
   gap: .65rem;
   align-items: end;
   padding: .6rem 0;
+}
+
+[data-journal-viewport] {
+  max-height: 55vh;
+  overflow-y: auto;
+  padding-right: .4rem;
+}
+
+.group-create,
+.group-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: .65rem;
+  align-items: end;
+  margin-bottom: .6rem;
+}
+
+.journal-organization label {
+  display: grid;
+  gap: .3rem;
+}
+
+.journal-import {
+  border-bottom: 1px solid #d9dde3;
+  padding-bottom: 1rem;
+  margin-bottom: 1rem;
+}
+
+.journal-import label {
+  display: grid;
+  gap: .3rem;
+  margin-bottom: .6rem;
+}
+
+.journal-import h2 {
+  font-size: 1rem;
+  margin-top: 0;
+}
+
+.import-entries {
+  padding-left: 1.3rem;
+  overflow-wrap: anywhere;
+}
+
+.import-entries li {
+  margin-bottom: .6rem;
+}
+
+.group-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .35rem;
 }
 
 .journal-row + .journal-row {
@@ -403,7 +478,15 @@ textarea {
   }
 
   .form-grid,
-  .journal-row {
+  .journal-row,
+  .group-create,
+  .group-row {
     grid-template-columns: 1fr;
+  }
+
+  [data-journal-viewport] {
+    max-height: none;
+    overflow: visible;
+    padding-right: 0;
   }
 }

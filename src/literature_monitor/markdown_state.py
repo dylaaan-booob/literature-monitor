@@ -6,6 +6,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -13,6 +14,7 @@ from uuid import UUID
 import yaml
 from pydantic import ValidationError
 
+from literature_monitor.config import normalize_journal_issn
 from literature_monitor.identifiers import normalize_doi
 from literature_monitor.models import (
     CanonicalPaper,
@@ -62,6 +64,12 @@ class AuthorMarkdownState:
     orcid_key: str | None
 
 
+class PaperJournalAttributionState(str, Enum):
+    MISSING_OR_EMPTY = "MISSING_OR_EMPTY"
+    VALID = "VALID"
+    MALFORMED = "MALFORMED"
+
+
 @dataclass(frozen=True)
 class PaperMarkdownState:
     path: Path
@@ -87,6 +95,8 @@ class PaperMarkdownState:
     versions: tuple[PaperVersion, ...] = ()
     sources: tuple[MetadataSource, ...] = ()
     preferred_version: VersionRef | None = None
+    journal_attribution_state: PaperJournalAttributionState = PaperJournalAttributionState.MISSING_OR_EMPTY
+    journal_issns: tuple[str, ...] = ()
 
     @property
     def has_identity(self) -> bool:
@@ -111,6 +121,7 @@ class MergedPaperState:
     preferred_version: VersionRef | None
     incoming_is_preferred: bool
     warnings: tuple[str, ...]
+    journal_issns_update: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -550,6 +561,25 @@ def _parse_author_links(value: Any, authors_dir: Path) -> tuple[AuthorLink, ...]
     return tuple(links)
 
 
+def _parse_journal_attribution(
+    frontmatter: dict[str, Any],
+) -> tuple[PaperJournalAttributionState, tuple[str, ...]]:
+    """Parse optional venue context independently of core Paper safety (§34.7)."""
+    state = PaperJournalAttributionState
+    if "journal_issns" not in frontmatter:
+        return state.MISSING_OR_EMPTY, ()
+    raw = frontmatter["journal_issns"]
+    if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+        return state.MALFORMED, ()
+    if not raw:
+        return state.MISSING_OR_EMPTY, ()
+    try:
+        identities = tuple(sorted({normalize_journal_issn(item) for item in raw}))
+    except ValueError:
+        return state.MALFORMED, ()
+    return state.VALID, identities
+
+
 def parse_paper_state(
     path: Path,
     contents: str,
@@ -573,6 +603,7 @@ def parse_paper_state(
     if frontmatter.get("type") != "paper":
         return None
 
+    journal_attribution_state, journal_issns = _parse_journal_attribution(frontmatter)
     problems: list[str] = []
     paper_id: UUID | None = None
     try:
@@ -721,6 +752,8 @@ def parse_paper_state(
         versions=tuple(versions),
         sources=tuple(sources),
         preferred_version=preferred,
+        journal_attribution_state=journal_attribution_state,
+        journal_issns=journal_issns,
     )
 
 
@@ -1012,4 +1045,5 @@ def merge_paper_state(
         preferred_version=preferred,
         incoming_is_preferred=incoming_is_preferred,
         warnings=tuple(warnings),
+        journal_issns_update=paper.journal_issns or None,
     )

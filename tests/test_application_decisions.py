@@ -718,3 +718,27 @@ def test_decision_result_matches_authoritative_parser_after_update(
     assert state.problems == ()
     assert state.paper_id == paper_id
     assert state.status is WorkflowStatus.KEPT
+
+
+@pytest.mark.parametrize("attribution", [
+    ["0006-341X", "1541-0420"], [" 0006-341x ", "0006-341X"],
+    "definitely-not-a-list-or-valid-issn", None, {"issn": "invalid"}, ["0006-341X", "invalid"],
+])
+@pytest.mark.parametrize("action,initial,target", [
+    (keep_paper, WorkflowStatus.CANDIDATE, WorkflowStatus.KEPT),
+    (reject_paper, WorkflowStatus.CANDIDATE, WorkflowStatus.REJECTED),
+    (mark_paper_in_zotero, WorkflowStatus.KEPT, WorkflowStatus.IN_ZOTERO),
+])
+def test_status_only_decisions_preserve_valid_or_malformed_raw_attribution(tmp_path, attribution, action, initial, target):
+    paper_id = UUID("16161616-1616-4616-8616-161616161616")
+    path = write_paper(tmp_path, paper_id, status=initial, zotero_key="ZOT123")
+    replace_frontmatter(path, journal_issns=attribution, custom_field={"nested": ["retain", 3]})
+    path.write_text(path.read_text() + "\nHuman note.\n\n## Custom\n\nPreserve this.\n")
+    before, body_before = document_parts(path)
+    result = action(tmp_path, paper_id, initial)
+    after, body_after = document_parts(path)
+    assert result.outcome is DecisionOutcome.UPDATED and after["status"] == target.value
+    assert after["journal_issns"] == attribution
+    before.pop("status")
+    after.pop("status")
+    assert before == after and body_before == body_after

@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.4.6 is the current/latest released and completed baseline
+**Status:** Active; v0.4.7 UNRELEASED / release preparation; v0.4.6 remains the latest released and completed baseline
 
-**Stage:** v0.4.6 released / closeout complete (§24.14); package metadata `0.4.6`
+**Stage:** v0.4.7 Journals Organization & Bulk Import implementation and independent final integration audit complete / release preparation in progress (§24.15); release-preparation diff requires independent review before commit; package metadata `0.4.7`; v0.4.6 released / closeout complete (§24.14)
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
@@ -1883,6 +1883,37 @@ Final release validation passed with 1910 tests passing, zero skipped, and two k
 
 ---
 
+### 23.20 v0.4.7 Journals Organization & Bulk Import — demonstrated acceptance
+
+A0–A7 implementation and all A0–A7 independent stage reviews are complete. `V0_4_7_FINAL_INTEGRATION_AUDIT` passed with APPROVED status, demonstrating the following acceptance requirements for the implemented §34 contract. The verification levels recorded below remain distinct. Package metadata is `0.4.7`, but v0.4.7 remains **UNRELEASED** and its release-preparation diff requires independent review before commit. v0.4.6 remains the latest released and completed baseline until the release transaction succeeds.
+
+- Journal configuration remains an ordered flat `tuple[JournalConfig, ...]`, with at most one optional Group per Journal. Group order derives from Journal configuration order; Ungrouped uses `group=None`. Create, rename, delete, Up / Down, and Journal assignment work without nested Groups, multi-Group membership, independent positions, or durable empty Groups. Deleting a Group moves its Journals to Ungrouped without deleting them.
+- Both `Journal | ISSN/EISSN` and `Journal | ISSN/EISSN | Group` tables load. A legacy ungrouped two-column file stays two-column, including on unrelated Settings Save. Actual Group use saves canonical three-column storage; a file already using three columns retains that shape after all Groups are removed. Upgrade and Settings open do not rewrite the file. Existing name, checksum, and globally unique configured ISSN validation remains applicable, with safe Markdown-table Group storage validation.
+- UTF-8 CSV, TSV, pasted delimited tables, and Literature Monitor `list.md` use only explicitly supported formats/headers. Parse and normalize produce a preview before Apply; no inference, Provider requests, metadata completion, AI importer, or XLSX dependency occurs.
+- Merge is the default; Replace requires explicit selection and previews removals. Preview distinguishes Add, no-op duplicate, ISSN merge, Group move, Remove (Replace only), conflict, and invalid row. Any invalid row or identity/name conflict blocks the entire Apply and leaves the draft unchanged.
+- Merge can add new ISSNs to the same-name configured Journal, but an ISSN belonging to another Journal or paired with another name conflicts. An imported blank Group preserves an existing Journal's Group; an explicit different non-empty Group previews and applies a move.
+- Apply changes only the current unsaved browser Settings draft and marks it dirty. It preserves `monitor_revision` and `journal_revision`; existing complete-draft Validate / Save and Save revision-conflict/partial-save behavior remain the sole persistence path. An intervening disk edit still causes a normal Save conflict after import.
+- Desktop Journals use a viewport-bounded scroll area with Validate / Save outside it and always accessible; mobile uses normal page flow without nested Journals scrolling. Settings Validate fragment replacement restores Journals scroll position.
+- Candidate Eligibility alone supplies configured Journal attribution as transient `ProviderWorkEvidence.monitor_journal_issns`. Provider raw/Source ISSNs are not copied into Paper attribution. Same-provider/record snapshots from different execution contexts retain the union even when `_choose_evidence()` selects one representative; a canonical work carries the union in `CanonicalPaper.journal_issns`.
+- Attribution does not alter evidence clustering, UUID/canonical identity, representative/version selection, searchable projection/keyword matching, duplicate matching, status, or metadata-conflict diagnostics. `CanonicalMetadata` remains unchanged, and Provider-state storage/revision/cache semantics remain unchanged apart from the transient attribution flow.
+- New materialized Papers write valid available attribution as managed `journal_issns: list[str]`. For an existing matched Paper, non-empty incoming attribution replaces durable attribution; empty incoming attribution preserves it. Legacy Papers without the field remain valid. Parsing exposes missing/empty, valid, and malformed attribution separately from identity and update safety; malformed attribution neither blocks normal materialization/repair nor Keep / Reject / In Zotero.
+- Each Inbox / Kept / Rejected / In Zotero view shows non-empty sections in saved Group order, then Ungrouped, then Unmapped journals. Within each section, existing `discovered_at DESC → publication_date DESC → title ASC` precedence remains. No second Group-tab row or workflow/status system is introduced.
+- Valid non-empty Paper attribution maps only when exactly one current saved Journal matches; zero or multiple matches are Unmapped without name fallback. Missing/empty legacy attribution may use conservative normalized Journal-name equality only when unique. Malformed attribution is Unmapped without creating a Workspace issue solely for that field.
+- Successful Settings Save immediately changes Workspace presentation for Group rename/reorder/assignment, without rewriting Papers. Removing a configured Journal may make historical Papers Unmapped without modifying them; Provider display-name changes cannot disrupt a unique valid ISSN mapping.
+- Preservation checks retain human notes, unknown/custom frontmatter, workflow status, `zotero_key`, preferred versions, Copy DOI, CLI `export-kept`, provider resolution, and existing Web safety/selection/scroll behavior outside the narrow §34 supersede boundary. No eager corpus migration, Journal UUID/database, Paper Group tags, persistent workflow DB, or external integration is introduced.
+
+Actual final integration audit evidence:
+
+- Implementation environment: **2209 passed, 0 skipped, 2 known dependency warnings**. Node **v24.21.0** was available, and executable DOM/browser harnesses passed.
+- Independent AgentDock full suite: **2198 passed, 11 skipped, 2 known dependency warnings**; the skips were Node-dependent tests because Node was unavailable in that environment. Its independent cross-stage suite recorded **986 passed, 8 Node-dependent skips**, and independent `git diff --check` passed. The implementation environment's Node harness evidence was not independently rerun by AgentDock.
+- Independent temporary end-to-end integration: **Import → Apply → Validate → Save → Workspace reprojection PASS**, with existing Paper bytes unchanged.
+
+Release preparation updates only package/User-Agent version identity, matching test expectations, and current-state documentation. Release-preparation validation and independent diff review are separate from the completed final integration audit; the review remains pending before commit. Tag creation, push main, push tag, GitHub Release, and post-release closeout remain pending.
+
+Release-preparation validation in the implementation environment passed: targeted OpenAlex/Crossref tests **436 passed**; full suite **2209 passed, 0 skipped, 2 known dependency warnings**. Node **v24.21.0** was available and all executable DOM/browser harnesses ran. The two warnings were the existing Starlette TestClient/httpx and anyio BlockingPortal alias deprecations. `uv lock --check` and `git diff --check` passed. This validation does not constitute independent review of the release-preparation diff or a release transaction.
+
+---
+
 ## 24. Suggested Implementation Sequence
 
 ### 24.1 Completed v0.1.0 history
@@ -2185,6 +2216,26 @@ v0.4.6 feature implementation complete
 ```
 
 Release preparation updated package/User-Agent metadata and current-state documentation without functional changes; its reviewed diff was committed before the annotated tag and release transaction. The full release closeout sequence is complete. v0.4.6 is released and is the current/latest released and completed baseline.
+
+---
+
+### 24.15 v0.4.7 Journals Organization & Bulk Import — release-preparation sequence
+
+A0–A7 implementation and all independent stage reviews are complete. `V0_4_7_FINAL_INTEGRATION_AUDIT` is complete and APPROVED. Release preparation is in progress; its diff still requires independent review before a release-preparation commit.
+
+```text
+A0–A7 implementation complete
+→ independent final integration audit complete
+→ release preparation in progress
+→ release-preparation commit pending
+→ tag pending
+→ push main pending
+→ push tag pending
+→ GitHub Release pending
+→ post-release closeout pending
+```
+
+§34 is the implemented authoritative behavior contract and §23.20 records demonstrated acceptance with distinct verification provenance. Package metadata is now `0.4.7`; v0.4.7 remains **UNRELEASED**, and v0.4.6 remains the latest released and completed baseline until the release transaction succeeds. The unaffected released contracts and historical release facts remain applicable.
 
 ---
 
@@ -2685,7 +2736,9 @@ The v0.4.4 release and closeout are complete, following §24.12. Its §31 implem
 
 v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace implementation, A1–A6 independent stage reviews, §23.18 acceptance, and full automated verification are complete. The A6 desktop/mobile manual Web smoke passed, and separate independent desktop/mobile browser verification passed during the final integration audit. §32 remains its historical authoritative behavior contract, subject to the narrow v0.4.6 Web presentation supersede boundary in §33.1. Release preparation, release transaction, and closeout are complete (§24.13); its released package metadata is `0.4.5`.
 
-v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI implementation, A0–A3 independent stage reviews, and final independent integration audit are complete. §33 remains its authoritative behavior contract; §23.19 records demonstrated acceptance and the actual verification levels, including final release validation. Release preparation, release transaction, and closeout are complete (§24.14); the current stage is v0.4.6 released / closeout complete, with package metadata `0.4.6`. No subsequent product-development stage is established by this closeout.
+v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI implementation, A0–A3 independent stage reviews, and final independent integration audit are complete. §33 remains its authoritative behavior contract; §23.19 records demonstrated acceptance and the actual verification levels, including final release validation. Release preparation, release transaction, and closeout are complete (§24.14); its closeout stage was v0.4.6 released / closeout complete, with package metadata `0.4.6`. No subsequent product-development stage was established by that closeout.
+
+The current stage is v0.4.7 Journals Organization & Bulk Import release preparation (§24.15), subsequent to the completed v0.4.6 closeout above. A0–A7 implementation, all independent stage reviews, and `V0_4_7_FINAL_INTEGRATION_AUDIT` are complete; the final audit is APPROVED. §34 is the implemented contract, and §23.20 records demonstrated acceptance and actual verification levels. Package metadata is `0.4.7`, while v0.4.7 remains **UNRELEASED**. Independent review of the release-preparation diff, its commit, tag, pushes, GitHub Release, and post-release closeout remain pending; v0.4.6 remains the latest released and completed baseline until the release transaction succeeds.
 
 OpenAlex remains the primary discovery provider, Crossref the secondary discovery/bibliographic provider, and Semantic Scholar remains excluded. Automatic revision-validated Provider-state reuse is in scope for v0.4.3. Checkpoint resume, provider cursors/watermarks, late-index recovery, run history, scheduling/notification, and persistent execution databases remain excluded; the reconstructible Provider-state DB is not execution state.
 
@@ -3488,3 +3541,184 @@ The unaffected MVP and historical release exclusions remain in force. v0.4.6 exc
 The initial A0 contract-alignment task changed only `SPEC.md`. It did not implement A1/A2/A3, change Python/HTML/JS/CSS/tests/README/lockfiles, alter package version or Provider User-Agent, create commits/tags/releases, or push. It did not read/modify/delete/stage the local untracked `monitor.yaml`, `src/.obsidian/`, or `workspace/` objects.
 
 The subsequent bounded A1–A3 implementation and independent reviews are complete, including the fixed and re-reviewed A2 `START_FAILED` lifecycle finding. §23.19 remains the acceptance reference and distinguishes implementation-environment tests, independent automated/browser evidence, and final release validation; the final independent integration audit and final release validation passed. Release preparation, the release transaction, and closeout are complete (§24.14), without changing this behavior contract. v0.4.6 is released.
+
+---
+
+## 34. v0.4.7 Journals Organization & Bulk Import Contract
+
+This is the implemented authoritative v0.4.7 behavior contract. A0–A7 implementation and all independent stage reviews are complete, and `V0_4_7_FINAL_INTEGRATION_AUDIT` passed with APPROVED status. §23.20 records demonstrated acceptance and its verification provenance; §24.15 records release preparation in progress and the pending release sequence. Package metadata is `0.4.7`, but v0.4.7 remains **UNRELEASED**. v0.4.6 remains the latest released and completed baseline until the release transaction succeeds.
+
+### 34.1 Authority and supersede boundary
+
+§§23.19, 24.14, and 33 retain the completed v0.4.6 acceptance, release, and behavior history. Earlier version-specific contracts and exclusions remain historical facts. For v0.4.7, §34 supersedes only conflicting clauses concerning:
+
+- Journal configuration/storage without Groups or restricted to a two-column Journal table; §§5, 12, and 25.6 retain their configuration ownership and ordered flat runtime boundary, with the specific compatibility rules in §§34.2–34.3;
+- Paper schema remaining unchanged in prior versions, including §§31.6, 32.5, 32.7, and 33.7; §§13–14 gain only the optional managed `journal_issns` attribution described in §34.7, without adding Group names or changing Author Markdown or monitor YAML schemas;
+- flat Workspace presentation and view-wide ordering in §§25.4 and 25.8; §34.8 adds sections inside the existing workflow views and retains the existing ordering precedence within each section;
+- Settings Journals presentation where it conflicts with Group organization, import preview/Apply, and desktop scrolling in §§34.4–34.5.
+
+The Candidate Eligibility verdicts, source validation, and fallback rules in §§32.2–32.3 remain authoritative. §34.6 adds retention of the configured Journal attribution established at that boundary, not a new eligibility rule. No historical text is rewritten to imply that v0.4.7 behavior existed in a released version. Unaffected contracts, including §33 Advanced & Diagnostics and Copy DOI, remain in force.
+
+### 34.2 Journal Group state and ordering
+
+`JournalConfig` gains optional `group`; the runtime/configuration boundary remains an ordered flat `tuple[JournalConfig, ...]`. Each Journal belongs to at most one Group; `group=None` means Ungrouped. Nested Groups and multi-Group membership are unsupported.
+
+Group membership and order belong only to the current Journal configuration. Group order is derived from the order of Journals in that configuration, by first occurrence of each Group; no independent `position` field or Group identity store is introduced. Group reordering changes that configuration order. An empty Group has no durable state: a draft create operation may precede assignment, but an empty Group is not persisted independently of Journals.
+
+Settings supports Group create, rename, delete, Up / Down reorder, and Journal assignment. Deleting a Group sets its member Journals to Ungrouped and never deletes those Journals. The first version uses Up / Down controls, without drag-and-drop. Group names are configuration/presentation data and must never be written to Paper Markdown, including as tags.
+
+### 34.3 Journal Markdown storage compatibility
+
+The Journal storage parser accepts both supported table headers in the Journals section of Literature Monitor `list.md`:
+
+```text
+Journal | ISSN/EISSN
+Journal | ISSN/EISSN | Group
+```
+
+The two-column form supplies `group=None`; an empty Group cell in the three-column form also means Ungrouped. Only the Journals section is discovery/import input; the Conferences section remains excluded.
+
+Storage shape follows these compatibility rules:
+
+- A legacy two-column file stays two-column while all Journals are Ungrouped.
+- Once Groups are actually used, a successful Save writes canonical three-column storage.
+- A file already using three columns stays three-column even when all Journals later become Ungrouped.
+- Application upgrade and opening Settings do not rewrite Journal files.
+- An unrelated Settings Save must not migrate a legacy ungrouped two-column file to three columns.
+
+Column shape is a storage-adapter concern; it does not replace or nest the flat Journal domain boundary. Existing deterministic Journal validation remains shared: non-empty Journal names, valid ISSN/EISSN checksums, globally unique configured ISSNs, and existing name-conflict rules. The storage adapter additionally validates that Group values can be represented safely in a Markdown table without corrupting rows/cells or losing their value. No new Journal UUID, database, or eager format migration is introduced.
+
+### 34.4 Bulk import parsing, preview and Apply semantics
+
+Bulk import supports UTF-8 CSV, TSV, pasted delimited tables, and Literature Monitor `list.md`. Parsing recognizes only these supported formats and the `Journal`, `ISSN/EISSN`, and optional `Group` column headers in §34.3. It must not infer Journals from arbitrary text or invent missing metadata. Normalization uses the existing deterministic Journal validation/identity rules; Group values also obey §34.3 storage validation. Import never calls OpenAlex, Crossref, or any other Provider and has no AI importer, metadata-completion step, or XLSX dependency.
+
+The sequence is fixed:
+
+```text
+parse
+→ normalize
+→ preview
+→ Apply to current unsaved Settings draft
+→ existing Validate
+→ existing Save
+```
+
+Preview compares the normalized import against the current unsaved Settings draft, not a substituted saved configuration. Merge is the default mode. Replace must be explicitly selected and preview which current Journals would be removed; no implicit replacement is permitted.
+
+Preview distinguishes at least:
+
+| Preview category | Observable meaning |
+| --- | --- |
+| Add | A new Journal would enter the draft. |
+| no-op duplicate | The imported row makes no effective change. |
+| ISSN merge | New ISSNs would join a same-name existing Journal. |
+| Group move | An existing Journal would receive an explicitly different non-empty Group. |
+| Remove | A current Journal would be removed; Replace only. |
+| conflict | Journal identity/name evidence disagrees. |
+| invalid row | The row cannot satisfy supported parsing or validation rules. |
+
+Any invalid row or identity/name conflict blocks the entire Apply. The draft remains unchanged on a blocked Apply; valid rows must not be partially applied. Conflict checks cover both the imported rows and their relationship to the current draft.
+
+Merge semantics are:
+
+- New ISSNs may merge into an existing Journal with the same name under the existing deterministic name normalization.
+- An ISSN already assigned to another configured Journal is a conflict; the importer cannot silently transfer it.
+- The same ISSN paired with different Journal names is a conflict, including within one import.
+- An imported blank Group on an existing Journal preserves its existing Group.
+- An explicitly different non-empty imported Group previews and applies a Group move.
+
+Replace proposes replacing the current draft Journal list with the normalized imported list and previews its removals; it remains subject to the same whole-Apply invalid-row and identity/name-conflict gate. Removing a Journal from a draft/configuration does not delete its historical Papers.
+
+Import itself never writes a Journal file. Successful Apply changes only the current browser's unsaved Settings draft and marks it dirty. It retains the draft's existing `monitor_revision` and `journal_revision`; it must not refresh them to bypass a concurrent edit. Existing Validate / Save remains the only path for persisting that draft. Save validates the complete draft and checks both original revisions against current disk contents, with the same revision-conflict and partial-save behavior in §25.6. No second persistence path or transaction framework is added.
+
+### 34.5 Settings Journal organization and scrolling
+
+Settings presents the Group operations in §34.2 and the parse/preview/Apply flow in §34.4 as edits to the existing draft. Organization and import do not create independent saved configuration or bypass normal dirty state, Validate, Save, or revision checks.
+
+On desktop, the Journals list uses a viewport-bounded scroll area. Validate / Save are outside that area and remain accessible even with a large Journal list. Settings Validate fragment replacement restores the Journals scroll position so validation feedback does not discard the user's list context. On mobile, Journals use normal document flow without nested Journals scrolling.
+
+§33.3 Advanced & Diagnostics remains read-only, initially collapsed, and outside the Settings form. Its saved-configuration authority and exclusion from dirty state, Validate, and Save are unchanged. Existing Web security and shared configuration validation remain applicable.
+
+### 34.6 Configured venue attribution
+
+Candidate Eligibility is the sole authority for Provider record → configured Journal attribution. Once that boundary confirms the configured Journal, it passes that Journal's configured ISSN identity into provider-neutral evidence. Provider raw ISSNs and OpenAlex Source ISSNs may support the existing eligibility/source checks, but must not be copied directly into Paper `journal_issns` or treated as configured attribution independently of Candidate Eligibility.
+
+The attribution fields are:
+
+```python
+ProviderWorkEvidence.monitor_journal_issns: tuple[str, ...] = ()  # transient
+CanonicalPaper.journal_issns: tuple[str, ...] = ()
+```
+
+`CanonicalMetadata` does not gain `journal_issns`. Attribution is separate from bibliographic Journal display metadata and is not a Group name.
+
+Multiple snapshots with the same provider / record ID may come from different execution contexts and carry different configured Journal attributions. Canonical retrieval normalization must union their `monitor_journal_issns` even when `_choose_evidence()` chooses only one snapshot for representative evidence. Representative choice must not discard other confirmed attribution. A canonical work may accumulate multiple configured Journal attributions; `CanonicalPaper.journal_issns` retains their union.
+
+Neither field participates in evidence clustering, canonical identity/UUID, representative selection, version selection, searchable projection/keyword matching, duplicate matching, workflow status, or metadata-conflict diagnostics. Differences in execution-context attribution are not bibliographic metadata conflicts. Attribution accompanies the existing pipeline without changing its discovery, eligibility, consolidation, or filtering decisions.
+
+`monitor_journal_issns` remains transient current-context data, including when Provider records are reused under normal live revision validation. It is not added to Provider-state serialization, semantic hashes, cache records, or revision identities. Historical Provider state cannot establish current configured venue attribution on its own. Runtime Provider resolution otherwise remains unchanged.
+
+### 34.7 Durable Paper journal_issns
+
+Paper managed frontmatter gains optional `journal_issns: list[str]`, containing valid configured ISSN identities supplied by §34.6. A new materialized Paper writes valid attribution when available; old Papers without the field remain legal and require no eager migration.
+
+For an existing matched Paper:
+
+- Non-empty current incoming attribution replaces durable `journal_issns` with that current attribution.
+- Empty current incoming attribution preserves durable `journal_issns` rather than erasing it.
+
+The union requirement in §34.6 applies within the current canonical work; it does not turn this replace rule into indefinite union with historical durable attribution.
+
+`PaperMarkdownState` exposes venue-attribution parsing state so consumers distinguish missing/empty legacy attribution, valid non-empty attribution, and malformed attribution. A wrong field shape or invalid ISSN value makes attribution unavailable/damaged. Missing or invalid attribution must never enter UUID, external-ID, version, or provider-source identity.
+
+Paper matching remains UUID → external ID → version → provider source → existing title-author fallback, with the existing conservative matching constraints. `journal_issns` never participates in duplicate matching.
+
+Malformed `journal_issns` alone does not make a Paper unsafe or update-blocked, exclude it from its workflow view, or prevent Keep / Reject / In Zotero. Workspace presents it as Unmapped journals without creating an issue solely for that field. Other existing safety/identity/status failures retain their normal handling. Normal subsequent materialization may repair malformed attribution when valid non-empty incoming attribution is available, under the same safe write and ownership rules.
+
+Materialization and decisions preserve human notes, unknown/custom frontmatter, workflow status, and `zotero_key` under their existing contracts. Decisions remain status-only writes; venue parsing does not authorize them to rewrite attribution.
+
+### 34.8 Workspace Group projection
+
+Inbox / Kept / Rejected / In Zotero remain the only top-level workflow views, derived from Paper Markdown status. Grouping is presentation inside each view, not another workflow/status system or a second row of Group tabs.
+
+Each active view displays only sections containing Papers, in this order:
+
+1. saved Journal Groups, in current Journal configuration order (§34.2);
+2. Ungrouped;
+3. Unmapped journals.
+
+Within each section, preserve the existing `discovered_at DESC → publication_date DESC → title ASC` precedence. Grouping does not alter view membership, duplicate Papers into multiple sections, or change decision semantics.
+
+Mapping uses only the current saved `JournalConfig` list, not an unsaved Settings draft:
+
+| Paper attribution | Mapping behavior |
+| --- | --- |
+| Valid non-empty `journal_issns` | Match the supplied ISSNs against current configured Journal ISSNs. Exactly one matching Journal maps to that Journal's current Group, or Ungrouped if `group=None`. Zero or multiple matching Journals map to Unmapped journals, without Journal display-name fallback. |
+| Missing or empty `journal_issns` | Conservative normalized Journal-name equality may map a legacy Paper only when exactly one current Journal matches; otherwise use Unmapped journals. |
+| Malformed `journal_issns` | Attribution is unavailable/damaged; use Unmapped journals without name fallback or a Workspace issue solely for attribution damage. |
+
+All matching ISSNs belonging to the same configured Journal count as one Journal match. Attribution spanning multiple current Journals is ambiguous even if those Journals share a Group; no arbitrary selection or multi-Group duplication is allowed.
+
+After successful Settings Save, Group rename, Group reorder, and Journal assignment immediately affect Workspace presentation using the newly saved configuration. These operations do not rewrite Paper Markdown. Removing a configured Journal may make historical Papers Unmapped, but never modifies or deletes them. A Provider Journal display-name change cannot affect a Paper that still maps uniquely by valid `journal_issns`.
+
+The existing desktop/mobile master-detail, disk reload, active selection, decision-failure handling, and scroll-neighborhood preservation in §32.6 remain applicable to these sectioned views. Group projection introduces no durable membership cache or frontend domain store.
+
+### 34.9 Preservation requirements
+
+The following behavior remains unchanged outside the explicitly scoped additions above:
+
+- OpenAlex / Crossref are never called during Journal import; runtime Provider resolution changes only to retain confirmed configured venue attribution.
+- Inbox / Kept / Rejected / In Zotero workflow semantics, status transitions, decision safety, and `zotero_key` behavior remain unchanged.
+- `CanonicalPaper` UUID/canonical identity, evidence clustering/deduplication, representative selection, and preferred-version behavior remain unchanged.
+- Paper human notes and unknown/custom frontmatter remain preserved; Group names are never Paper state. Author Markdown and monitor YAML schemas remain unchanged.
+- Copy DOI and CLI `export-kept` retain their existing eligibility, output, and non-mutating behavior.
+- Provider-state/cache/revision behavior, schemas, semantic hashes, coverage, diagnostics, and historical snapshot compatibility remain unchanged apart from transient attribution flow.
+- Existing Settings validation, both revision checks, two-file write order, and truthful partial-save reporting remain unchanged. Upgrade/opening Settings never performs Journal format migration.
+
+There is no repository-wide eager Paper migration, Journal UUID/database, Paper Group tag storage, persistent workflow DB, or new external integration. Paper Markdown remains the sole durable user-facing workflow state; current Journal configuration owns organization, and Workspace sections are derived presentation.
+
+### 34.10 Explicit exclusions and delivery boundary
+
+The unaffected MVP and released-contract exclusions remain in force. v0.4.7 excludes nested Groups, multi-Group membership, independent Group positions or durable empty Groups, drag-and-drop, arbitrary text inference, AI import, Provider-backed import/metadata completion, XLSX dependencies, and partial Apply. It adds no global keyword-first discovery, conference monitoring, publisher scraping, PDF acquisition, custom Zotero ingestion, persistent execution/workflow state, or external integration.
+
+The completed A0 specification-alignment task modified only `SPEC.md`; subsequent A1–A7 implementation and independent reviews are complete. The final independent integration audit passed, with actual verification levels recorded in §23.20. Current release preparation is limited to package/User-Agent version metadata, matching tests, and current-state documentation; it does not change functionality, dependencies, `list.md`, user state, or perform a Paper migration. Its diff requires independent review before commit. v0.4.7 remains **UNRELEASED**; release-preparation commit, tag, pushes, GitHub Release, and post-release closeout remain pending under §24.15.

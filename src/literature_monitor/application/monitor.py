@@ -590,6 +590,7 @@ def _execute_canonical_core(
         diagnostics = list(candidates.diagnostics)
         evidence = assemble_live_provider_evidence(
             candidates.openalex_records, candidates.crossref_records, candidates.supplement_evidence,
+            monitor_journal_issns=candidates.monitor_journal_issns,
         )
         coverage = (*openalex.coverage, *crossref.coverage, *retrieval.coverage)
         _emit_activity(

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import unicodedata
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from literature_monitor.application.crossref_retrieval import CrossrefSupplementResult
@@ -37,6 +37,7 @@ class TargetVenue:
     journal: str
     issns: tuple[str, ...]
     names: tuple[str, ...]
+    configured_issns: tuple[str, ...] = ()
 
 
 def _journal_name(value: str) -> str:
@@ -50,6 +51,7 @@ def target_venue(journal: JournalConfig, sources: Sequence[ResolvedSource]) -> T
         tuple(dict.fromkeys((*journal.issn, *(issn for source in resolved for issn in source.issn),
                              *(source.issn_l for source in resolved if source.issn_l)))),
         tuple(dict.fromkeys((journal.name, *(source.display_name for source in resolved)))),
+        journal.issn,
     )
 
 
@@ -108,6 +110,7 @@ class EligibleCandidates:
     supplement_evidence: tuple[ProviderWorkEvidence, ...]
     attribution: Mapping[ProviderRecordRef, tuple[EligibilityDecision, ...]]
     diagnostics: tuple[RunDiagnostic, ...] = ()
+    monitor_journal_issns: Mapping[ProviderRecordRef, tuple[str, ...]] = field(default_factory=dict)
 
     def cluster_eligibility(self, evidence: Sequence[ProviderWorkEvidence]) -> ClusterEligibility:
         decisions = tuple(decision for record in evidence for decision in self.attribution[_ref(record)])
@@ -141,7 +144,13 @@ def filter_candidate_evidence(
     discovered = {record.doi: record for record in crossref.records}
     by_anchor = {(unit.requested_doi, ref): unit for unit in supplements.units for ref in unit.anchors}
     attribution: dict[ProviderRecordRef, list[EligibilityDecision]] = {}
+    monitor_journal_issns: dict[ProviderRecordRef, set[str]] = {}
     exclusions: dict[tuple[str | None, str, str], set[str]] = {}
+
+    def attribute_venue(ref: ProviderRecordRef, journal: str | None) -> None:
+        identities = monitor_journal_issns.setdefault(ref, set())
+        if journal is not None:
+            identities.update(targets[journal].configured_issns)
 
     def retain(
         ref: ProviderRecordRef, decision: EligibilityDecision, journal: str | None,
@@ -154,6 +163,7 @@ def filter_candidate_evidence(
             exclusions.setdefault(key, set()).update((ref.record_id, *related_record_ids))
             return False
         attribution.setdefault(ref, []).append(decision)
+        attribute_venue(ref, journal)
         return True
 
     retained_crossref: dict[str, CrossrefWorkRecord] = {}
@@ -204,6 +214,7 @@ def filter_candidate_evidence(
                 if ref not in anchors:
                     anchors.append(ref)
                 attribution.setdefault(_ref(exact), []).append(decision)
+                attribute_venue(_ref(exact), target.journal)
         if not venues:
             retained = retain(ref, EligibilityDecision(CandidateEligibility.SCOPE_DISPUTED), None)
         if retained:
@@ -218,4 +229,5 @@ def filter_candidate_evidence(
             RunDiagnosticKind.NON_CANDIDATE_EXCLUSION,
             "evidence excluded from the candidate pipeline", tuple(sorted(record_ids)), journal,
         ) for (journal, _namespace, _identity), record_ids in exclusions.items()),
+        {ref: tuple(sorted(issns)) for ref, issns in monitor_journal_issns.items()},
     )

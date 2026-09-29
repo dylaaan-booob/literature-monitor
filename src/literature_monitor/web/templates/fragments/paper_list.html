@@ -4,25 +4,35 @@
     <span class="count">{{ papers|length }}</span>
   </div>
   {% if papers %}
-    <ol class="paper-items">
-      {% for paper in papers %}
-        <li>
-          <a href="/?view={{ active_view }}&paper={{ paper.paper_id }}"
-             data-paper-id="{{ paper.paper_id }}"
-             {% if selected_paper and paper.paper_id == selected_paper.paper_id %}aria-current="true"{% endif %}
-             hx-get="/fragments/papers/{{ paper.paper_id }}?view={{ active_view }}"
-             hx-target="#paper-detail"
-             hx-swap="outerHTML">
-            <strong>{{ paper.title }}</strong>
-            <span>{{ paper.journal }}</span>
-            <span>{{ paper.publication_date.isoformat() if paper.publication_date else "Publication date unavailable" }}</span>
-            <span>{{ paper.authors | map(attribute='name') | join(', ') }}</span>
-            <span>Status: {{ paper.status.value }}</span>
-            <span>Discovered: {{ paper.discovered_at.date().isoformat() }}</span>
-          </a>
-        </li>
+    <div class="paper-groups">
+      {% for section in paper_sections %}
+        <section class="paper-group" data-section-kind="{{ section.kind.value }}">
+          <div class="paper-group-heading">
+            <h2>{{ section.label }}</h2>
+            <span class="count">{{ section.papers|length }}</span>
+          </div>
+          <ol class="paper-items">
+            {% for paper in section.papers %}
+              <li>
+                <a href="/?view={{ active_view }}&paper={{ paper.paper_id }}"
+                   data-paper-id="{{ paper.paper_id }}"
+                   {% if selected_paper and paper.paper_id == selected_paper.paper_id %}aria-current="true"{% endif %}
+                   hx-get="/fragments/papers/{{ paper.paper_id }}?view={{ active_view }}"
+                   hx-target="#paper-detail"
+                   hx-swap="outerHTML">
+                  <strong>{{ paper.title }}</strong>
+                  <span>{{ paper.journal }}</span>
+                  <span>{{ paper.publication_date.isoformat() if paper.publication_date else "Publication date unavailable" }}</span>
+                  <span>{{ paper.authors | map(attribute='name') | join(', ') }}</span>
+                  <span>Status: {{ paper.status.value }}</span>
+                  <span>Discovered: {{ paper.discovered_at.date().isoformat() }}</span>
+                </a>
+              </li>
+            {% endfor %}
+          </ol>
+        </section>
       {% endfor %}
-    </ol>
+    </div>
   {% else %}
     <p class="empty-state">No Papers in this view.</p>
   {% endif %}

@@ -25,13 +25,19 @@ from literature_monitor.application.workspace import (
     WorkspacePaper,
     WorkspaceSnapshot,
 )
+from literature_monitor.config import load_config
+from literature_monitor.materialize import render_paper_markdown
 from literature_monitor.models import (
+    Author,
+    CanonicalMetadata,
+    CanonicalPaper,
     ExternalIds,
     MetadataSource,
     PaperVersion,
     VersionKind,
     VersionRef,
     WorkflowStatus,
+    Workflow,
 )
 from literature_monitor.web.app import create_app
 
@@ -111,7 +117,7 @@ def make_paper(
 
 
 def fake_config(output_dir: Path) -> SimpleNamespace:
-    return SimpleNamespace(output_dir=output_dir)
+    return SimpleNamespace(output_dir=output_dir, journals=())
 
 
 def csrf_from_html(html: str) -> str:
@@ -234,7 +240,7 @@ def test_workspace_page_defaults_to_inbox_and_returns_html(
     kept = make_paper(status=WorkflowStatus.KEPT, title="Kept Paper")
     snapshot = WorkspaceSnapshot(papers=(candidate, kept), issues=())
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
-    monkeypatch.setattr(web_app, "load_workspace", lambda output_dir: snapshot)
+    monkeypatch.setattr(web_app, "load_workspace", lambda output_dir, *, journals: snapshot)
     app = create_app(tmp_path / "monitor.yaml")
 
     with TestClient(app, base_url="http://localhost") as client:
@@ -277,7 +283,7 @@ def test_workspace_views_derive_from_snapshot_membership(
     )
     snapshot = WorkspaceSnapshot(papers=papers, issues=())
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
-    monkeypatch.setattr(web_app, "load_workspace", lambda output_dir: snapshot)
+    monkeypatch.setattr(web_app, "load_workspace", lambda output_dir, *, journals: snapshot)
     app = create_app(tmp_path / "monitor.yaml")
 
     with TestClient(app, base_url="http://localhost") as client:
@@ -305,7 +311,7 @@ def test_valid_papers_render_with_only_workspace_issue_indicator(
         ),
     )
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
-    monkeypatch.setattr(web_app, "load_workspace", lambda output_dir: snapshot)
+    monkeypatch.setattr(web_app, "load_workspace", lambda output_dir, *, journals: snapshot)
     app = create_app(tmp_path / "monitor.yaml")
 
     with TestClient(app, base_url="http://localhost") as client:
@@ -393,7 +399,7 @@ def test_workspace_health_fragment_replaces_old_issue_surface(
         issues=(WorkspaceIssue(path=tmp_path / "broken.md", message="broken Paper"),),
     )
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
-    monkeypatch.setattr(web_app, "load_workspace", lambda output_dir: snapshot)
+    monkeypatch.setattr(web_app, "load_workspace", lambda output_dir, *, journals: snapshot)
     app = create_app(tmp_path / "monitor.yaml")
 
     with TestClient(app, base_url="http://localhost") as client:
@@ -420,7 +426,7 @@ def test_paper_list_renders_projected_metadata(
     paper = make_paper(title="Projected Metadata")
     snapshot = WorkspaceSnapshot(papers=(paper,), issues=())
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
-    monkeypatch.setattr(web_app, "load_workspace", lambda output_dir: snapshot)
+    monkeypatch.setattr(web_app, "load_workspace", lambda output_dir, *, journals: snapshot)
     app = create_app(tmp_path / "monitor.yaml")
 
     with TestClient(app, base_url="http://localhost") as client:
@@ -441,7 +447,7 @@ def test_paper_detail_is_uuid_addressed_and_renders_existing_projection(
     paper = make_paper(title="Detailed Paper", zotero_key="ZOT123")
     snapshot = WorkspaceSnapshot(papers=(paper,), issues=())
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
-    monkeypatch.setattr(web_app, "load_workspace", lambda output_dir: snapshot)
+    monkeypatch.setattr(web_app, "load_workspace", lambda output_dir, *, journals: snapshot)
     app = create_app(tmp_path / "monitor.yaml")
 
     with TestClient(app, base_url="http://localhost") as client:
@@ -480,7 +486,7 @@ def test_copy_doi_is_server_normalized_kept_only_presentation(tmp_path, monkeypa
     paper = replace(make_paper(status=status), external_ids=ExternalIds.model_construct(doi=doi, arxiv=arxiv))
     snapshot = WorkspaceSnapshot(papers=(paper,), issues=())
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
-    monkeypatch.setattr(web_app, "load_workspace", lambda path: snapshot)
+    monkeypatch.setattr(web_app, "load_workspace", lambda path, *, journals: snapshot)
     for action in ("keep_paper", "reject_paper", "mark_paper_in_zotero"):
         monkeypatch.setattr(web_app, action, lambda *args: pytest.fail("Copy presentation must not mutate"))
     normalized_inputs = []
@@ -546,8 +552,11 @@ def test_delegated_copy_doi_clipboard_feedback_without_workflow_requests(tmp_pat
     with TestClient(create_app(tmp_path / "monitor.yaml"), base_url="http://localhost") as client:
         javascript = client.get("/static/app.js").text
     assert "navigator.clipboard.writeText(button.dataset.copyDoi)" in javascript
-    for forbidden in ("alert(", "localStorage", "sessionStorage", "doi.org", ".trim(", ".toLowerCase(", ".toLocaleLowerCase("):
+    for forbidden in ("alert(", "localStorage", "sessionStorage", "doi.org"):
         assert forbidden not in javascript
+    copy_handler = javascript.split("async function copyDoi(button)", 1)[1].split("function syncRunAnnouncement", 1)[0]
+    for forbidden in (".trim(", ".toLowerCase(", ".toLocaleLowerCase("):
+        assert forbidden not in copy_handler
     harness = r"""
 const vm = require("node:vm");
 const assert = require("node:assert/strict");
@@ -607,7 +616,7 @@ def test_unknown_paper_detail_is_safe_normal_fragment(
     monkeypatch.setattr(
         web_app,
         "load_workspace",
-        lambda output_dir: WorkspaceSnapshot(papers=(), issues=()),
+        lambda output_dir, *, journals: WorkspaceSnapshot(papers=(), issues=()),
     )
     app = create_app(tmp_path / "monitor.yaml")
 
@@ -627,7 +636,7 @@ def test_missing_and_invalid_csrf_block_decision_mutation(
     snapshot = WorkspaceSnapshot(papers=(paper,), issues=())
     calls: list[tuple[object, ...]] = []
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
-    monkeypatch.setattr(web_app, "load_workspace", lambda output_dir: snapshot)
+    monkeypatch.setattr(web_app, "load_workspace", lambda output_dir, *, journals: snapshot)
 
     def fake_keep(*args: object) -> DecisionResult:
         calls.append(args)
@@ -674,7 +683,7 @@ def test_valid_csrf_reaches_keep_boundary_with_submitted_expected_status(
     workspace_loads: list[Path] = []
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
 
-    def fake_load_workspace(output_dir: Path) -> WorkspaceSnapshot:
+    def fake_load_workspace(output_dir: Path, *, journals) -> WorkspaceSnapshot:
         workspace_loads.append(output_dir)
         return snapshot
 
@@ -731,7 +740,7 @@ def test_each_decision_route_calls_exact_application_action(
     snapshot = WorkspaceSnapshot(papers=(paper,), issues=())
     called: list[str] = []
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
-    monkeypatch.setattr(web_app, "load_workspace", lambda output_dir: snapshot)
+    monkeypatch.setattr(web_app, "load_workspace", lambda output_dir, *, journals: snapshot)
 
     def fake_action(
         output_dir: Path,
@@ -783,7 +792,7 @@ def test_state_conflict_renders_message_and_refreshed_disk_state(
     load_calls = 0
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
 
-    def fake_load_workspace(output_dir: Path) -> WorkspaceSnapshot:
+    def fake_load_workspace(output_dir: Path, *, journals) -> WorkspaceSnapshot:
         nonlocal load_calls
         snapshot = snapshots[min(load_calls, len(snapshots) - 1)]
         load_calls += 1
@@ -837,7 +846,7 @@ def test_selection_is_current_view_only_and_detail_click_keeps_list_target(tmp_p
     kept = make_paper(title="Other view Paper", status=WorkflowStatus.KEPT)
     snapshot = WorkspaceSnapshot((candidate, kept), ())
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
-    monkeypatch.setattr(web_app, "load_workspace", lambda output: snapshot)
+    monkeypatch.setattr(web_app, "load_workspace", lambda output, *, journals: snapshot)
     requested = candidate if in_view else kept
     detail_only = surface == "/fragments/papers"
     route = f"{surface}/{requested.paper_id}" if detail_only else surface
@@ -882,7 +891,7 @@ def test_successful_decision_uses_refreshed_view_for_safe_neighbor_navigation(
     loads, calls = [], []
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
 
-    def load(output):
+    def load(output, *, journals):
         loads.append(current)
         return current
 
@@ -920,7 +929,7 @@ def test_failed_decision_ignores_position_and_revalidates_original_uuid(tmp_path
     ), ())
     current, calls = before, []
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
-    monkeypatch.setattr(web_app, "load_workspace", lambda output: current)
+    monkeypatch.setattr(web_app, "load_workspace", lambda output, *, journals: current)
 
     def action(output, paper_id, expected_status):
         nonlocal current
@@ -945,7 +954,7 @@ def test_workspace_refresh_revalidates_transient_selected_uuid(tmp_path, monkeyp
     paper = make_paper()
     current = WorkspaceSnapshot((paper,), ())
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
-    monkeypatch.setattr(web_app, "load_workspace", lambda output: current)
+    monkeypatch.setattr(web_app, "load_workspace", lambda output, *, journals: current)
     with TestClient(create_app(tmp_path / "monitor.yaml"), base_url="http://localhost") as client:
         params = {"view": "inbox", "paper": str(paper.paper_id)}
         assert selected_id(client.get("/", params=params).text) == str(paper.paper_id)
@@ -974,7 +983,7 @@ def test_pre_action_failure_has_no_neighbor_navigation_or_mutation(tmp_path, mon
     target, peer = make_paper(title="Original"), make_paper(title="Peer")
     current = WorkspaceSnapshot((target, peer), ())
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
-    monkeypatch.setattr(web_app, "load_workspace", lambda output: current)
+    monkeypatch.setattr(web_app, "load_workspace", lambda output, *, journals: current)
     monkeypatch.setattr(web_app, "keep_paper", lambda *args: pytest.fail("invalid input must not mutate"))
     with TestClient(create_app(tmp_path / "monitor.yaml"), base_url="http://localhost") as client:
         page = client.get("/", params={"paper": str(target.paper_id)})
@@ -1013,7 +1022,7 @@ def test_expected_decision_failures_remain_normal_html_states(
     paper = make_paper()
     snapshot = WorkspaceSnapshot(papers=(paper,), issues=())
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
-    monkeypatch.setattr(web_app, "load_workspace", lambda output_dir: snapshot)
+    monkeypatch.setattr(web_app, "load_workspace", lambda output_dir, *, journals: snapshot)
 
     def expected_failure(
         output_dir: Path,
@@ -1067,7 +1076,7 @@ def test_no_generic_status_and_run_settings_routes_are_explicit(tmp_path: Path) 
 def test_web_zotero_export_is_removed(tmp_path, monkeypatch):
     paper = make_paper(status=WorkflowStatus.KEPT)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
-    monkeypatch.setattr(web_app, "load_workspace", lambda path: WorkspaceSnapshot(papers=(paper,), issues=()))
+    monkeypatch.setattr(web_app, "load_workspace", lambda path, *, journals: WorkspaceSnapshot(papers=(paper,), issues=()))
     app = create_app(tmp_path / "monitor.yaml")
     with TestClient(app, base_url="http://localhost") as client:
         page = client.get("/", params={"view": "kept", "paper": str(paper.paper_id)})
@@ -1112,3 +1121,135 @@ def test_vendored_htmx_is_local_and_package_relative(
     assert "unpkg.com" not in page.text
     assert asset.status_code == 200
     assert b"htmx" in asset.content[:500]
+
+
+def seed_grouped_workspace(tmp_path: Path) -> tuple[Path, Path]:
+    config_path, output_dir = write_valid_config(tmp_path)
+    (tmp_path / "list.md").write_text(
+        "## Journals\n| Journal | ISSN/EISSN | Group |\n|---|---|---|\n"
+        "| Biometrics | 0006-341X | Z Statistics |\n"
+        "| Annals of Statistics | 0090-5364 | |\n"
+        "| JASA | 0162-1459 | A Methods |\n"
+        "| Psychometrika | 0033-3123 | Z Statistics |\n"
+        "| Unused | 0092-5853 | Empty group |\n",
+    )
+    for ordinal, title, issn, status in (
+        (1, "Z grouped", "0006-341X", WorkflowStatus.CANDIDATE),
+        (2, "Y grouped", "0033-3123", WorkflowStatus.CANDIDATE),
+        (3, "A methods", "0162-1459", WorkflowStatus.CANDIDATE),
+        (4, "B ungrouped", "0090-5364", WorkflowStatus.CANDIDATE),
+        (5, "C unmapped", "0036-1992", WorkflowStatus.CANDIDATE),
+        (6, "K kept", "0006-341X", WorkflowStatus.KEPT),
+    ):
+        paper = CanonicalPaper(
+            id=UUID(int=ordinal), metadata=CanonicalMetadata(title=title, journal="Provider label"),
+            authors=(Author(name="Ada Author"),), external_ids=ExternalIds(doi=f"10.5555/{ordinal}"),
+            journal_issns=(issn,), workflow=Workflow(status=status, discovered_at=datetime(2026, 9, 20, tzinfo=timezone.utc)),
+        )
+        path = output_dir / "Papers" / f"{ordinal}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(render_paper_markdown(paper, ("ada-author",)))
+    return config_path, output_dir
+
+
+def group_headings(html: str) -> list[tuple[str, str]]:
+    return re.findall(r'<section class="paper-group" data-section-kind="([^"]+)">\s*<div class="paper-group-heading">\s*<h2>(.*?)</h2>', html)
+
+
+def listed_ids(html: str) -> list[str]:
+    return re.findall(r'data-paper-id="([^"]+)"', html)
+
+
+def test_sectioned_web_list_uses_saved_journals_and_one_flat_selection_order(tmp_path, monkeypatch):
+    config_path, output_dir = seed_grouped_workspace(tmp_path)
+    expected_journals = load_config(config_path).journals
+    captured = []
+    original = web_app.load_workspace
+    def load(output, *, journals):
+        assert output == output_dir and journals == expected_journals
+        captured.append(journals)
+        return original(output, journals=journals)
+    monkeypatch.setattr(web_app, "load_workspace", load)
+    with TestClient(create_app(config_path), base_url="http://localhost") as client:
+        page = client.get("/", params={"paper": str(UUID(int=3))})
+        outside = client.get("/fragments/workspace", params={"paper": str(UUID(int=6))})
+        detail = client.get(f"/fragments/papers/{UUID(int=3)}", params={"view": "inbox"})
+    assert len(captured) == 3
+    assert group_headings(page.text) == [
+        ("group", "Z Statistics"), ("group", "A Methods"),
+        ("ungrouped", "Ungrouped"), ("unmapped", "Unmapped journals"),
+    ]
+    assert listed_ids(page.text) == [str(UUID(int=i)) for i in (2, 1, 3, 4, 5)]
+    nav = re.search(r'<nav class="view-tabs".*?</nav>', page.text, re.S).group()
+    assert re.findall(r'href="/\?view=([^"]+)"', nav) == ["inbox", "kept", "rejected", "in-zotero"]
+    assert page.text.count('class="view-tabs"') == 1 and "Empty group" not in page.text
+    assert '<h1>Inbox</h1>\n    <span class="count">5</span>' in page.text
+    assert selected_id(page.text) == str(UUID(int=3)) and page.text.count('aria-current="true"') == 1
+    assert 'name="position" value="2"' in page.text
+    assert f'href="/?view=inbox&paper={UUID(int=3)}"' in page.text
+    assert f'hx-get="/fragments/papers/{UUID(int=3)}?view=inbox"' in page.text
+    assert 'hx-target="#paper-detail"' in page.text
+    assert selected_id(outside.text) == "" and 'aria-current="true"' not in outside.text
+    assert 'id="paper-detail"' in detail.text and 'id="paper-list"' not in detail.text
+    assert 'name="position" value="2"' in detail.text
+    assert 'hx-trigger="runCompleted from:body, settingsSaved from:body"' in page.text
+
+
+def test_successful_decision_selects_neighbor_across_section_boundary_from_disk(tmp_path):
+    config_path, output_dir = seed_grouped_workspace(tmp_path)
+    target = UUID(int=1)
+    with TestClient(create_app(config_path), base_url="http://localhost") as client:
+        page = client.get("/", params={"paper": str(target)})
+        assert 'name="position" value="1"' in page.text
+        response = client.post(f"/papers/{target}/keep", data={
+            "csrf_token": csrf_from_html(page.text), "expected_status": "candidate", "view": "inbox", "position": "1",
+        })
+    assert response.status_code == 200
+    assert selected_id(response.text) == str(UUID(int=3))
+    assert listed_ids(response.text) == [str(UUID(int=i)) for i in (2, 3, 4, 5)]
+    assert 'data-selection-stepped="true"' in response.text and 'name="position" value="1"' in response.text
+    assert {p.paper_id for p in web_app.load_workspace(output_dir, load_config(config_path).journals).kept} == {UUID(int=1), UUID(int=6)}
+
+
+@pytest.mark.parametrize("outcome", [DecisionOutcome.STATE_CONFLICT, DecisionOutcome.IO_FAILURE])
+def test_sectioned_decision_failure_keeps_current_uuid_and_does_not_step_or_write(tmp_path, monkeypatch, outcome):
+    config_path, output_dir = seed_grouped_workspace(tmp_path)
+    before = {p: p.read_bytes() for p in (output_dir / "Papers").glob("*.md")}
+    target = UUID(int=1)
+    monkeypatch.setattr(web_app, "keep_paper", lambda output, paper_id, expected_status: decision_result(
+        paper_id, expected_status, outcome=outcome, message="Expected sectioned failure",
+    ))
+    with TestClient(create_app(config_path), base_url="http://localhost") as client:
+        page = client.get("/", params={"paper": str(target)})
+        response = client.post(f"/papers/{target}/keep", data={
+            "csrf_token": csrf_from_html(page.text), "expected_status": "candidate", "view": "inbox", "position": "999",
+        })
+    assert selected_id(response.text) == str(target) and 'data-selection-stepped="false"' in response.text
+    assert 'name="position" value="1"' in response.text and "Expected sectioned failure" in response.text
+    assert all(p.read_bytes() == value for p, value in before.items())
+
+
+def test_workspace_reload_after_settings_save_reprojects_groups_without_paper_writes(tmp_path):
+    from literature_monitor.application.settings import load_settings, save_settings, SettingsSaveOutcome
+    config_path, output_dir = seed_grouped_workspace(tmp_path)
+    before = {p: p.read_bytes() for p in (output_dir / "Papers").glob("*.md")}
+    with TestClient(create_app(config_path), base_url="http://localhost") as client:
+        page = client.get("/")
+        state = load_settings(config_path)
+        journals = state.draft.journals
+        unsaved = replace(state.draft, journals=tuple(j.model_copy(update={"group": "Unsaved"}) for j in journals))
+        assert group_headings(client.get("/fragments/workspace").text) == group_headings(page.text)
+        assert unsaved.journals != load_config(config_path).journals
+        changed = (journals[2].model_copy(update={"group": "Unmapped journals"}),
+                   journals[0].model_copy(update={"group": "Ungrouped"}),
+                   journals[1], journals[3].model_copy(update={"group": "Ungrouped"}), journals[4])
+        saved = save_settings(config_path, replace(state.draft, journals=changed))
+        assert saved.outcome is SettingsSaveOutcome.SAVED
+        refreshed = client.get("/fragments/workspace")
+    assert group_headings(refreshed.text) == [
+        ("group", "Unmapped journals"), ("group", "Ungrouped"),
+        ("ungrouped", "Ungrouped"), ("unmapped", "Unmapped journals"),
+    ]
+    assert listed_ids(refreshed.text) == [str(UUID(int=i)) for i in (3, 2, 1, 4, 5)]
+    assert all(p.read_bytes() == value for p, value in before.items())
+    assert sorted(p.name for p in output_dir.iterdir()) == ["Papers"]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
@@ -21,6 +22,11 @@ from literature_monitor.application.decisions import (
     keep_paper,
     mark_paper_in_zotero,
     reject_paper,
+)
+from literature_monitor.application.journal_import import (
+    JournalImportMode,
+    apply_journal_import,
+    preview_journal_import,
 )
 from literature_monitor.application.settings import (
     SettingsIssue,
@@ -51,7 +57,9 @@ from literature_monitor.web.run_coordinator import (
 from literature_monitor.web.run_presentation import build_run_presentation
 from literature_monitor.web.settings_form import (
     SettingsFormValues,
+    SettingsImportValues,
     settings_draft_from_form,
+    settings_form_after_import,
     settings_form_from_draft,
     settings_form_from_submission,
 )
@@ -60,11 +68,11 @@ _PACKAGE_DIR = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _PACKAGE_DIR / "templates"
 _STATIC_DIR = _PACKAGE_DIR / "static"
 _ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
-_VIEW_ATTRIBUTES = {
-    "inbox": "inbox",
-    "kept": "kept",
-    "rejected": "rejected",
-    "in-zotero": "in_zotero",
+_VIEW_STATUSES = {
+    "inbox": WorkflowStatus.CANDIDATE,
+    "kept": WorkflowStatus.KEPT,
+    "rejected": WorkflowStatus.REJECTED,
+    "in-zotero": WorkflowStatus.IN_ZOTERO,
 }
 
 templates = Jinja2Templates(directory=_TEMPLATES_DIR)
@@ -87,7 +95,7 @@ def _workspace_state(
     except ConfigurationError as error:
         return None, str(error)
 
-    return load_workspace(config.output_dir), None
+    return load_workspace(config.output_dir, journals=config.journals), None
 
 
 def _workspace_health_context(config_path: Path) -> dict[str, object]:
@@ -107,10 +115,10 @@ def _view_papers(
     workspace: WorkspaceSnapshot | None,
     view: str,
 ) -> tuple[str, tuple[WorkspacePaper, ...]]:
-    selected_view = view if view in _VIEW_ATTRIBUTES else "inbox"
+    selected_view = view if view in _VIEW_STATUSES else "inbox"
     if workspace is None:
         return selected_view, ()
-    return selected_view, getattr(workspace, _VIEW_ATTRIBUTES[selected_view])
+    return selected_view, workspace.papers_for(_VIEW_STATUSES[selected_view])
 
 
 def _find_paper(
@@ -164,6 +172,7 @@ def _workspace_context(
         "config_error": config_error,
         "active_view": selected_view,
         "papers": view_papers,
+        "paper_sections": workspace.sections_for(_VIEW_STATUSES[selected_view]) if workspace else (),
         "selected_paper": selected_paper,
         "copy_doi": copy_doi,
         "selected_position": selected_position,
@@ -201,6 +210,7 @@ def _settings_context(
     attempted_values: SettingsFormValues | None = None,
     message: str | None = None,
     message_tone: str = "warning",
+    import_values: SettingsImportValues | None = None,
 ) -> dict[str, object]:
     return {
         "request": request,
@@ -213,6 +223,7 @@ def _settings_context(
         "settings_attempted": attempted_values,
         "settings_message": message,
         "settings_message_tone": message_tone,
+        "settings_import": import_values or SettingsImportValues(),
     }
 
 
@@ -330,6 +341,59 @@ def create_app(config_path: Path) -> FastAPI:
             "fragments/current_run.html",
             {"run_snapshot": snapshot},
         )
+
+    async def import_settings_route(request: Request, *, apply: bool) -> HTMLResponse:
+        form = await request.form()
+        submitted_csrf = form.get("csrf_token")
+        if not _csrf_valid(str(submitted_csrf) if submitted_csrf is not None else None, csrf_token):
+            return HTMLResponse('<p class="notice error">Invalid or missing CSRF token.</p>', status_code=403)
+
+        values = settings_form_from_submission(form)
+        draft, issues = settings_draft_from_form(values)
+        import_values = SettingsImportValues(
+            contents=str(form.get("journal_import_text", "")),
+            mode=str(form.get("journal_import_mode", JournalImportMode.MERGE.value)),
+        )
+        try:
+            mode = JournalImportMode(import_values.mode)
+        except ValueError:
+            mode = None
+            import_values = replace(import_values, error="Choose Merge or Replace before importing.")
+
+        applied = False
+        message = "Import could not be applied." if apply else "Import could not be previewed."
+        if draft is not None and mode is not None:
+            if apply:
+                result = apply_journal_import(draft, import_values.contents, mode=mode)
+                plan = result.plan
+                applied = result.applied
+                if applied:
+                    values = settings_form_after_import(values, result.draft)
+                    message = "Import applied to the unsaved Settings draft. Validate and Save to persist it."
+                else:
+                    message = "Import Apply blocked; the current draft is unchanged."
+            else:
+                plan = preview_journal_import(draft, import_values.contents, mode=mode)
+                message = "Import preview ready." if plan.can_apply else "Import Apply blocked."
+            import_values = replace(import_values, plan=plan)
+
+        response = templates.TemplateResponse(
+            request, "fragments/settings_editor.html",
+            _settings_context(request=request, csrf_token=csrf_token, form_values=values,
+                              issues=issues, import_values=import_values, message=message,
+                              message_tone="success" if applied else "warning"),
+        )
+        if applied:
+            response.headers["HX-Trigger"] = "settingsDraftChanged"
+        return response
+
+    @app.post("/settings/import/preview", response_class=HTMLResponse)
+    async def preview_settings_import(request: Request) -> HTMLResponse:
+        return await import_settings_route(request, apply=False)
+
+    @app.post("/settings/import/apply", response_class=HTMLResponse)
+    async def apply_settings_import(request: Request) -> HTMLResponse:
+        return await import_settings_route(request, apply=True)
 
     @app.post("/settings/validate", response_class=HTMLResponse)
     async def validate_settings_route(request: Request) -> HTMLResponse:

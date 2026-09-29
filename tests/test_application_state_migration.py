@@ -10,6 +10,7 @@ from dataclasses import is_dataclass
 
 import httpx
 import pytest
+import yaml
 
 from literature_monitor.application import monitor, provider_state as ps
 from literature_monitor.cli import main
@@ -1148,8 +1149,8 @@ def test_later_alias_refresh_uses_current_prime_metadata_and_counts_identity_onc
     monkeypatch.setattr(e, "route_cr", route)
     assembled = []
     original_assembly = monitor.assemble_live_provider_evidence
-    def assemble(*args):
-        result = original_assembly(*args)
+    def assemble(*args, **kwargs):
+        result = original_assembly(*args, **kwargs)
         assembled.extend(item for item in result if item.provenance.provider == "crossref")
         return result
     monkeypatch.setattr(monitor, "assemble_live_provider_evidence", assemble)
@@ -1178,3 +1179,81 @@ def test_pure_assembly_attaches_current_anchors_and_deduplicates_prime(execution
     assert result[1].supplements == (ProviderRecordRef(provider="openalex", record_id=oa.provenance.record_id), alias_anchor)
     assert result[1].external_ids.crossref == record.doi
     assert not execution.oa_transports and not execution.cr_transports
+
+
+@pytest.mark.parametrize("with_mapping", [False, True])
+def test_pure_assembly_attaches_explicit_mapping_to_every_provider_path(execution, with_mapping):
+    from literature_monitor.models import Author, CanonicalMetadata, ExternalIds, MetadataSource, ProviderRecordRef
+    from literature_monitor.openalex import OpenAlexWorkRecord
+    from literature_monitor.retrieval import assemble_live_provider_evidence
+    anchor = OpenAlexWorkRecord(
+        metadata=CanonicalMetadata(title="statistics study", journal="Biometrics"),
+        authors=(Author(name="Ada Author"),), external_ids=ExternalIds(doi="10.5555/a"),
+        source_id="https://openalex.org/S1",
+        provenance=MetadataSource(provider="openalex", record_id="W1", retrieved_at=NOW),
+    )
+    discovered, prime = cr_state().record, cr_state("10.5555/prime").record
+    records = (anchor, discovered, prime)
+    mapping = {ProviderRecordRef(provider=r.provenance.provider, record_id=r.provenance.record_id): (ISSN,)
+               for r in records}
+    result = assemble_live_provider_evidence(
+        (anchor,), (discovered,), (prime.to_evidence(),),
+        monitor_journal_issns=mapping if with_mapping else None,
+    )
+    assert len(result) == 3
+    assert all(e.monitor_journal_issns == ((ISSN,) if with_mapping else ()) for e in result)
+    assert all(r.to_evidence().monitor_journal_issns == () for r in records)
+    assert not execution.oa_transports and not execution.cr_transports
+
+
+def test_duplicate_crossref_assembly_unions_attribution_and_anchors_deterministically(execution):
+    from literature_monitor.models import ProviderRecordRef
+    from literature_monitor.retrieval import assemble_live_provider_evidence
+    record = cr_state().record
+    record_ref = ProviderRecordRef(provider="crossref", record_id=record.doi)
+    first = record.to_evidence(supplements=(ProviderRecordRef(provider="openalex", record_id="W2"),)).model_copy(
+        update={"monitor_journal_issns": ("1541-0420", ISSN)},
+    )
+    second = record.to_evidence(supplements=(ProviderRecordRef(provider="openalex", record_id="W1"),)).model_copy(
+        update={"monitor_journal_issns": ("0090-5364",)},
+    )
+    for supplements in ((first, second), (second, first)):
+        merged, = assemble_live_provider_evidence(
+            (), (record,), supplements, monitor_journal_issns={record_ref: (ISSN,)},
+        )
+        assert merged.monitor_journal_issns == (ISSN, "0090-5364", "1541-0420")
+        assert tuple(ref.record_id for ref in merged.supplements) == ("W1", "W2")
+    assert not execution.oa_transports and not execution.cr_transports
+
+
+def test_reused_provider_state_gets_current_configuration_attribution_without_schema_or_content_change(execution, monkeypatch):
+    e = execution
+    original_oa = e.route_oa
+    def route_oa(request):
+        result = original_oa(request)
+        if request.url.path == "/sources":
+            result["results"][0]["issn"].append("1541-0420")
+        return result
+    monkeypatch.setattr(e, "route_oa", route_oa)
+    papers = []
+    original = monitor.canonicalize_records
+    def canonicalize(records):
+        result = original(records)
+        papers.extend(result.papers)
+        return result
+    monkeypatch.setattr(monitor, "canonicalize_records", canonicalize)
+    first = e.run()
+    assert first.canonical_paper_count == 1 and papers[-1].journal_issns == (ISSN,)
+    before = durable_state(e.path)
+    state_before = ps.read_provider_state(e.output).state
+    (e.config.parent / "list.md").write_text(
+        "## Journals\n\n| Journal | ISSN/EISSN |\n|---|---|\n| Biometrics | 0006-341X / 1541-0420 |\n",
+    )
+    second = e.run()
+    assert second.state_usage.crossref_reused == 1 and not e.full_requests
+    assert papers[-1].journal_issns == (ISSN, "1541-0420")
+    assert second.warnings == first.warnings and second.diagnostics == first.diagnostics
+    assert ps.SCHEMA_VERSION == 2 and durable_state(e.path) == before
+    assert ps.read_provider_state(e.output).state == state_before
+    persisted, = (e.output / "Papers").glob("*.md")
+    assert yaml.safe_load(persisted.read_text().split("---", 2)[1])["journal_issns"] == [ISSN, "1541-0420"]

@@ -5,8 +5,11 @@ from pathlib import Path
 from uuid import UUID
 
 import yaml
+import pytest
 
-from literature_monitor.application.workspace import load_workspace
+from literature_monitor.application.workspace import WorkspaceSectionKind, load_workspace
+from literature_monitor.config import JournalConfig
+from literature_monitor.markdown_state import PaperJournalAttributionState
 from literature_monitor.materialize import render_paper_markdown
 from literature_monitor.models import (
     Author,
@@ -141,8 +144,10 @@ def test_all_workflow_statuses_appear_only_in_their_derived_view(
     assert len(candidate.sources) == 1
 
 
+@pytest.mark.parametrize("group", ["Statistics", None, "unmapped"])
 def test_workflow_views_use_discovered_date_then_publication_date_then_title(
     tmp_path: Path,
+    group: str | None,
 ) -> None:
     discovered = datetime(2026, 9, 21, tzinfo=timezone.utc)
     write_paper(
@@ -194,7 +199,8 @@ def test_workflow_views_use_discovered_date_then_publication_date_then_title(
         discovered_at=datetime(2026, 9, 20, tzinfo=timezone.utc),
     )
 
-    snapshot = load_workspace(tmp_path)
+    journals = () if group == "unmapped" else (JournalConfig(name="Biometrics", issn=("0006-341X",), group=group),)
+    snapshot = load_workspace(tmp_path, journals)
 
     assert [paper.title for paper in snapshot.inbox] == [
         "Recent discovery",
@@ -322,3 +328,142 @@ def test_papers_path_that_is_not_a_directory_returns_issue(tmp_path: Path) -> No
     assert len(snapshot.issues) == 1
     assert snapshot.issues[0].path == papers_path
     assert snapshot.issues[0].message == "Paper directory is not a directory"
+
+
+@pytest.mark.parametrize("attribution", ["missing", [], ["0006-341X"], "damaged", None, {"issn": "0006-341X"}, ["0006-341X", "invalid"]])
+def test_optional_attribution_does_not_remove_papers_from_any_workflow_view(tmp_path, attribution):
+    for ordinal, status in enumerate(WorkflowStatus, start=1):
+        path = write_paper(tmp_path, f"{status.value}.md", ordinal, status=status,
+                           zotero_key="ZOT123" if status is WorkflowStatus.IN_ZOTERO else None)
+        if attribution != "missing":
+            replace_frontmatter(path, journal_issns=attribution)
+    before = {p: p.read_bytes() for p in (tmp_path / "Papers").glob("*.md")}
+    snapshot = load_workspace(tmp_path)
+    assert len(snapshot.papers) == 4 and snapshot.issues == ()
+    for view, status in ((snapshot.inbox, WorkflowStatus.CANDIDATE), (snapshot.kept, WorkflowStatus.KEPT),
+                         (snapshot.rejected, WorkflowStatus.REJECTED), (snapshot.in_zotero, WorkflowStatus.IN_ZOTERO)):
+        assert len(view) == 1 and view[0].status is status
+    assert all(p.read_bytes() == contents for p, contents in before.items())
+
+
+A = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"), group="Z Statistics")
+B = JournalConfig(name="Annals of Statistics", issn=("0090-5364",))
+C = JournalConfig(name="Psychometrika", issn=("0033-3123",), group="Z Statistics")
+D = JournalConfig(name="JASA", issn=("0162-1459",), group="A Methods")
+
+
+@pytest.mark.parametrize("attribution,name,kind,label", [
+    (["0006-341X"], "Biometrics", "group", "Z Statistics"),
+    (["0006-341X", "1541-0420"], "Biometrics", "group", "Z Statistics"),
+    (["0006-341X", "0092-5853"], "Biometrics", "group", "Z Statistics"),
+    (["0006-341X"], "Provider changed display name", "group", "Z Statistics"),
+    (["0090-5364"], "Biometrics", "ungrouped", "Ungrouped"),
+    (["0006-341X", "0090-5364"], "Biometrics", "unmapped", "Unmapped journals"),
+    (["0006-341X", "0033-3123"], "Biometrics", "unmapped", "Unmapped journals"),
+    (["0092-5853"], "Biometrics", "unmapped", "Unmapped journals"),
+    ("missing", "  Ｂｉｏｍｅｔｒｉｃｓ  ", "group", "Z Statistics"),
+    ("missing", " ANNALS   OF\nSTATISTICS ", "ungrouped", "Ungrouped"),
+    ([], "BIOMETRICS", "group", "Z Statistics"),
+    ([], "Annals of Statistics", "ungrouped", "Ungrouped"),
+    ("missing", "Unknown journal", "unmapped", "Unmapped journals"),
+    ("missing", "Biometrics supplement", "unmapped", "Unmapped journals"),
+    ("missing", "Biometric", "unmapped", "Unmapped journals"),
+    ("missing", "Bio-metrics", "unmapped", "Unmapped journals"),
+    ("0006-341X", "Biometrics", "unmapped", "Unmapped journals"),
+    (None, "Biometrics", "unmapped", "Unmapped journals"),
+    ({"issn": "0006-341X"}, "Biometrics", "unmapped", "Unmapped journals"),
+    (["0006-341X", "invalid"], "Biometrics", "unmapped", "Unmapped journals"),
+])
+def test_current_journal_mapping_uses_parsed_attribution_and_only_allowed_name_fallback(tmp_path, attribution, name, kind, label):
+    path = write_paper(tmp_path, "paper.md", 1)
+    updates = {"journal": name}
+    if attribution != "missing":
+        updates["journal_issns"] = attribution
+    replace_frontmatter(path, **updates)
+    before = path.read_bytes()
+    snapshot = load_workspace(tmp_path, (A, B, C, D))
+    section, = snapshot.sections_for(WorkflowStatus.CANDIDATE)
+    assert section.kind is WorkspaceSectionKind(kind) and section.label == label
+    assert section.papers == snapshot.inbox == snapshot.papers
+    assert snapshot.issues == () and path.read_bytes() == before
+    parsed, = snapshot.papers
+    if isinstance(attribution, list) and attribution and "invalid" not in attribution:
+        assert parsed.journal_attribution_state is PaperJournalAttributionState.VALID
+        assert parsed.journal_issns == tuple(sorted(set(attribution)))
+    elif attribution == "missing" or attribution == []:
+        assert parsed.journal_attribution_state is PaperJournalAttributionState.MISSING_OR_EMPTY
+    else:
+        assert parsed.journal_attribution_state is PaperJournalAttributionState.MALFORMED
+        assert parsed.journal_issns == ()
+
+
+@pytest.mark.parametrize("attribution", ["missing", []])
+def test_ambiguous_normalized_journal_names_never_pick_first_match(tmp_path, attribution):
+    path = write_paper(tmp_path, "paper.md", 1)
+    if attribution != "missing":
+        replace_frontmatter(path, journal_issns=attribution)
+    alias = JournalConfig(name="ＢＩＯＭＥＴＲＩＣＳ", issn=("0092-5853",), group=A.group)
+    snapshot = load_workspace(tmp_path, (A, alias))
+    section, = snapshot.sections_for(WorkflowStatus.CANDIDATE)
+    assert section.kind is WorkspaceSectionKind.UNMAPPED and not snapshot.issues
+
+
+@pytest.mark.parametrize("status", list(WorkflowStatus))
+def test_sections_follow_first_configured_group_occurrence_and_flat_navigation_order(tmp_path, status):
+    journals = (A, B, D, C, JournalConfig(name="Empty journal", issn=("0092-5853",), group="Empty"))
+    for ordinal, title, identities in (
+        (1, "Z first group", ["0006-341X"]), (2, "Y same group", ["0033-3123"]),
+        (3, "X second group", ["0162-1459"]), (4, "A ungrouped", ["0090-5364"]),
+        (5, "B unmapped", ["0036-1992"]),
+    ):
+        path = write_paper(tmp_path, f"{ordinal}.md", ordinal, title=title, status=status,
+                           zotero_key="ZOT123" if status is WorkflowStatus.IN_ZOTERO else None)
+        replace_frontmatter(path, journal_issns=identities)
+    snapshot = load_workspace(tmp_path, journals)
+    sections = snapshot.sections_for(status)
+    assert [s.label for s in sections] == ["Z Statistics", "A Methods", "Ungrouped", "Unmapped journals"]
+    assert [p.title for p in sections[0].papers] == ["Y same group", "Z first group"]
+    flattened = snapshot.papers_for(status)
+    assert [p.title for p in flattened] == ["Y same group", "Z first group", "X second group", "A ungrouped", "B unmapped"]
+    assert [p.title for p in snapshot.papers] == ["A ungrouped", "B unmapped", "X second group", "Y same group", "Z first group"]
+    assert len({p.paper_id for p in flattened}) == len(flattened) == 5
+    for other_status in WorkflowStatus:
+        if other_status is not status:
+            assert snapshot.papers_for(other_status) == () and snapshot.sections_for(other_status) == ()
+
+
+@pytest.mark.parametrize("label", ["Ungrouped", "Unmapped journals", "Statistics"])
+def test_group_identity_is_exact_and_separate_from_reserved_sections(tmp_path, label):
+    grouped = A.model_copy(update={"group": label})
+    lower = D.model_copy(update={"group": label.lower()})
+    for ordinal, ids in ((1, ["0006-341X"]), (2, ["0162-1459"]), (3, ["0090-5364"]), (4, ["0036-1992"])):
+        path = write_paper(tmp_path, f"{ordinal}.md", ordinal)
+        replace_frontmatter(path, journal_issns=ids)
+    sections = load_workspace(tmp_path, (grouped, lower, B)).sections_for(WorkflowStatus.CANDIDATE)
+    assert [(s.kind, s.label) for s in sections] == [
+        (WorkspaceSectionKind.GROUP, label), (WorkspaceSectionKind.GROUP, label.lower()),
+        (WorkspaceSectionKind.UNGROUPED, "Ungrouped"), (WorkspaceSectionKind.UNMAPPED, "Unmapped journals"),
+    ]
+
+
+def test_current_config_changes_reproject_without_paper_writes_or_cache(tmp_path):
+    first_path = write_paper(tmp_path, "a.md", 1)
+    second_path = write_paper(tmp_path, "d.md", 2)
+    replace_frontmatter(first_path, journal_issns=["0006-341X"])
+    replace_frontmatter(second_path, journal_issns=["0162-1459"])
+    before = {p: p.read_bytes() for p in (tmp_path / "Papers").glob("*.md")}
+    renamed = A.model_copy(update={"group": "Renamed"})
+    assigned = A.model_copy(update={"group": D.group})
+    removed = JournalConfig(name="Biometrics", issn=("0092-5853",), group="Name fallback forbidden")
+    for journals, expected in (
+        ((A, D), ["Z Statistics", "A Methods"]),
+        ((renamed, D), ["Renamed", "A Methods"]),
+        ((D, A), ["A Methods", "Z Statistics"]),
+        ((assigned, D), ["A Methods"]),
+        ((D, removed), ["A Methods", "Unmapped journals"]),
+    ):
+        snapshot = load_workspace(tmp_path, journals)
+        assert [s.label for s in snapshot.sections_for(WorkflowStatus.CANDIDATE)] == expected
+        assert all(p.status is WorkflowStatus.CANDIDATE for p in snapshot.papers)
+        assert all(p.read_bytes() == contents for p, contents in before.items())
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["Papers"]

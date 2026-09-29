@@ -6,11 +6,12 @@ secondary discovery and bibliographic evidence, consolidates provider evidence
 before local keyword filtering, canonicalizes retained papers and versions,
 safely updates durable Paper and Author Markdown, and exports kept papers.
 
-v0.4.6 is the latest released version. It completes GUI Cleanup — Advanced &
-Diagnostics + Kept Copy DOI while preserving the durable workflow model and
-compatibility boundaries. Its A0 specification alignment, A1–A3 implementation,
-A0–A3 independent stage reviews, final independent integration audit, release
-preparation, release transaction, and closeout are complete.
+The current source tree has completed v0.4.7 Journals Organization & Bulk
+Import implementation and its final independent integration audit. It is in
+v0.4.7 release preparation, with package metadata `0.4.7`; v0.4.7 remains
+**UNRELEASED**. v0.4.6 is the latest released version until the v0.4.7 release
+transaction succeeds. Its GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI
+implementation, reviews, release transaction, and closeout are complete.
 
 The workflow automatically reuses revision-validated Provider
 state while establishing live candidate membership on every Run. It batches
@@ -49,6 +50,22 @@ The GUI is local-only and binds to `127.0.0.1:8000`; v0.4.0 provides no LAN
 serving mode. Missing or invalid monitor/journal configuration does not block
 startup, so it can be repaired through Settings. GUI Run always uses the
 persisted Monitor date policy and exposes no temporary date override.
+
+In Settings → Journals, create, rename, or delete Journal Groups, use **Up** /
+**Down** to order them, and assign each Journal to a Group or **Ungrouped**.
+Deleting a Group moves its Journals to Ungrouped. The desktop Journals editor
+uses a bounded scroll area with **Validate** / **Save** accessible outside it;
+on mobile, Journals remain in normal page flow.
+
+Bulk Journal import accepts UTF-8 CSV, TSV, pasted supported tables, and
+Literature Monitor `list.md`. Use **Preview** to inspect changes. **Merge** is
+the default; explicitly select **Replace** to replace the Journal list and
+preview removals. **Apply** changes only the unsaved Settings draft; use
+**Validate** and **Save** to validate and persist the complete configuration.
+
+Workspace views show non-empty sections in saved Group order, followed by
+**Ungrouped** and **Unmapped journals**. Saving Group changes immediately
+updates this organization without rewriting existing Papers.
 
 During an active run, the GUI Run panel shows `Stage N of 5`, elapsed time,
 and per-source Activities. OpenAlex and Crossref Activities may coexist, each

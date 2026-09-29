@@ -327,7 +327,8 @@ def _choose_evidence(
     return min(
         candidates,
         key=lambda record: record.model_copy(
-            update={"provider_topics": (), "fields_of_study": (), "version_hints": ()}
+            update={"provider_topics": (), "fields_of_study": (), "version_hints": (),
+                    "monitor_journal_issns": ()}
         ).model_dump_json(),
     )
 
@@ -563,7 +564,10 @@ def _normalize_retrievals(
                     "supplements": tuple(
                         supplements[reference_key]
                         for reference_key in sorted(supplements)
-                    )
+                    ),
+                    "monitor_journal_issns": tuple(sorted({
+                        issn for snapshot in snapshots for issn in snapshot.monitor_journal_issns
+                    })),
                 }
             )
         )
@@ -1228,6 +1232,9 @@ def _build_paper(
     )
 
     return CanonicalPaper(
+        journal_issns=tuple(sorted({
+            issn for index in component for issn in records[index].monitor_journal_issns
+        })),
         metadata=metadata,
         external_ids=_merged_external_ids(
             representative,
