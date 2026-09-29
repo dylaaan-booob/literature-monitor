@@ -13,6 +13,13 @@ workflow model and compatibility boundaries. Its A1–A6 implementation,
 independent stage reviews, final independent integration audit, release
 preparation, release transaction, and closeout are complete.
 
+The current source tree has completed v0.4.6 GUI Cleanup — Advanced &
+Diagnostics + Kept Copy DOI implementation, independent stage reviews, and
+final integration audit. It is in **v0.4.6 release preparation / closeout**,
+with package metadata at `0.4.6`; v0.4.6 remains unreleased. Its release-preparation
+commit, tag, main/tag pushes, and GitHub Release are pending; v0.4.5 remains the
+latest released version until the release transaction completes.
+
 The workflow automatically reuses revision-validated Provider
 state while establishing live candidate membership on every Run. It batches
 OpenAlex Source/Works retrieval, hydrates locations/version hints only for
@@ -70,6 +77,19 @@ previous neighbor, then empty detail. Whole-workspace refreshes preserve a still
 valid transient selection and restore the list's review neighborhood; failures
 show refreshed state without stepping to a neighbor. At mobile widths ≤760px,
 list and detail stack in normal page flow without nested pane scrolling.
+
+A healthy Workspace has no permanent Workspace issues panel. Non-empty issues
+show a compact count and a link to Settings → **Advanced & Diagnostics →
+Workspace health**, where the full details appear. The primary finished Run
+keeps its result summary and warning/error counts; full issues, diagnostics,
+coverage, and Provider-state usage appear in **Advanced & Diagnostics → Current
+run**. These details are process-local and are not restored after server restart.
+
+Kept Paper detail offers **Copy DOI** only when Python normalization supplies a
+DOI; it copies the normalized bare DOI and shows brief `Copied` or `Copy failed`
+feedback. **Mark in Zotero** remains a separate manual action. The old Web
+Zotero export panel, Load export, and textarea workflow are removed; CLI
+`export-kept` remains available and unchanged.
 
 Paper Markdown remains the durable workflow state. The GUI does not add a
 workflow/execution database, persistent run history, heartbeat, SSE, WebSocket,
@@ -159,8 +179,9 @@ diagnostic. An empty mixed eligible/disputed cluster retains both its genuine
 unsearchable warning and scope diagnostic.
 
 Non-candidate exclusion, scope dispute, repeated-title separation, and
-conflicting-DOI separation are typed transient Run diagnostics. CLI and Web
-show their logical-group counts and context separately from warnings/errors.
+conflicting-DOI separation are typed transient Run diagnostics. CLI completion
+shows their logical-group counts and context separately from warnings/errors;
+Web technical details appear in Advanced & Diagnostics → Current run.
 Diagnostics alone do not change exit codes or `RunOutcome` and are not written
 to last-run, Paper/Author Markdown, monitor YAML, or Provider state.
 

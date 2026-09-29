@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.4.5 remains the latest released baseline; v0.4.6 development contract established (§33)
+**Status:** Active; v0.4.5 remains the latest released baseline until the v0.4.6 release transaction completes; v0.4.6 implementation and final integration audit are complete, and v0.4.6 remains unreleased
 
-**Stage:** v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI development; A0 specification alignment established, A1–A3 implementation pending
+**Stage:** v0.4.6 release preparation / closeout (§24.14); package metadata `0.4.6`; v0.4.5 released / closeout complete
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
@@ -1863,7 +1863,9 @@ v0.4.5 §32 implementation is complete. A1–A6 and their independent stage revi
 
 ### 23.19 v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI
 
-These are the required acceptance scenarios for the development contract in §33. A0 establishes the specification only; implementation and runtime/browser verification remain pending for A1–A3.
+v0.4.6 A0–A3 implementation and independent stage reviews are complete. The A2 `START_FAILED` Current run lifecycle finding was fixed and re-reviewed; the final independent integration audit passed. The following §33 acceptance scenarios have been demonstrated at the verification levels recorded here. v0.4.6 remains unreleased and is in release preparation / closeout (§24.14); v0.4.5 remains the latest released baseline.
+
+The implementation environment reported 1910 tests passing. The independent final AgentDock audit ran 1907 tests successfully and skipped three Node-dependent Clipboard harness cases because no JavaScript runtime was available; those three cases passed in the implementation environment. Both environments reported two known dependency deprecation warnings. The independent audit also inspected the retained real-browser `Copied` / `Copy failed` artifacts and the server-normalized DOI → Clipboard API chain.
 
 - A healthy Workspace shows neither a standalone `Workspace issues` panel nor `No workspace issues.`. Non-empty `WorkspaceSnapshot.issues` produces only a lightweight issue indicator/count and a details entry point; full issue paths/messages appear only in Settings `Advanced & Diagnostics → Workspace health`. Invalid Papers are isolated while all valid Papers remain available in their workflow views.
 - Settings has a read-only, initially collapsed `Advanced & Diagnostics` area outside the Settings form. Opening, closing, or reading it does not make the form dirty and it does not participate in Validate or Save.
@@ -2158,7 +2160,29 @@ The full closeout sequence is complete. v0.4.5 is released and is the current/la
 
 ### 24.14 v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI
 
-The A0 specification alignment establishes the authoritative development contract in §33 and acceptance scenarios in §23.19. Subsequent bounded A1–A3 work will implement and verify the Web presentation hierarchy and kept-Paper Copy DOI behavior. That implementation and verification are pending; this specification task does not demonstrate runtime acceptance. v0.4.5 remains the latest released baseline, with package metadata `0.4.5`; v0.4.6 has no release or closeout at this stage.
+A0–A3 implementation, independent stage reviews, and the final independent integration audit are complete. The §23.19 acceptance scenarios have been demonstrated at the recorded automated/browser verification levels, including the fixed and re-reviewed A2 `START_FAILED` lifecycle finding. The repository is in v0.4.6 release preparation / closeout, with package metadata `0.4.6`; v0.4.6 has not yet been released.
+
+The completed bounded result includes:
+
+- read-only Settings `Advanced & Diagnostics → Workspace health` over the saved configuration, with compact Workspace issue presentation;
+- primary finished Run cleanup and process-local Current run technical details, including refresh after a failed worker start;
+- kept-Paper Copy DOI using the server-normalized bare DOI and transient Clipboard feedback;
+- removal of the Web batch Zotero export UI while preserving CLI `export-kept` and independent manual `Mark in Zotero`;
+- preserved workflow/domain boundaries, without new durable run, diagnostic, or domain state.
+
+The release closeout sequence is:
+
+```text
+v0.4.6 feature implementation complete
+→ final audit complete
+→ release-preparation commit
+→ tag
+→ push main
+→ push tag
+→ GitHub Release
+```
+
+The first two steps are complete. Release preparation updates package/User-Agent metadata and current-state documentation without functional changes; its diff awaits independent review before the release-preparation commit. That commit, tag, push main, push tag, and GitHub Release remain pending. v0.4.5 remains the latest released baseline until the release transaction completes; post-release closeout has not begun.
 
 ---
 
@@ -2461,7 +2485,7 @@ Provider clients remain synchronous. These concurrency semantics do not require 
 
 ### 25.8 Web application behavior
 
-This section describes the current shared Web adapter behavior. The v0.4.6 development presentation contract is authoritative in §33; unaffected v0.4.0 application boundaries remain applicable.
+This section describes the current shared Web adapter behavior. The implemented v0.4.6 presentation contract is authoritative in §33; unaffected v0.4.0 application boundaries remain applicable.
 
 The application factory is:
 
@@ -2647,7 +2671,7 @@ v0.4.4 is released and complete. Its §31 implementation and §23.17 acceptance 
 
 v0.4.5 is released and complete. Its §32 implementation and A1–A6 independent stage reviews are complete; §23.18 acceptance has been demonstrated, including the full automated suite and A6 desktop/mobile manual Web smoke. The final independent integration audit passed and separately verified the corresponding desktop/mobile browser behavior. Release preparation, release transaction, and closeout are complete (§24.13). v0.4.5 is the current/latest released and completed baseline.
 
-v0.4.6 development is governed by §33 and requires the §23.19 acceptance scenarios plus regression verification of the preserved application/domain boundaries before feature completion. A0 establishes only the specification; A1–A3 implementation and runtime/browser acceptance are pending. Release preparation, publication, and closeout are outside this task.
+v0.4.6 implementation and independent stage reviews are complete under §33. The §23.19 acceptance scenarios have been demonstrated at their recorded automated/browser verification levels, and the final independent integration audit passed. The current source tree is in release preparation / closeout (§24.14), with package metadata `0.4.6`. v0.4.6 remains unreleased; the release-preparation commit, tag, main/tag pushes, and GitHub Release are pending. v0.4.5 remains the latest released baseline.
 
 ---
 
@@ -2657,9 +2681,9 @@ R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity s
 
 The v0.4.4 release and closeout are complete, following §24.12. Its §31 implementation, independent stage reviews, and final independent audit are complete; the §23.17 acceptance scenarios have been demonstrated.
 
-v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace implementation, A1–A6 independent stage reviews, §23.18 acceptance, and full automated verification are complete. The A6 desktop/mobile manual Web smoke passed, and separate independent desktop/mobile browser verification passed during the final integration audit. §32 remains its historical authoritative behavior contract, subject to the narrow v0.4.6 Web presentation supersede boundary in §33.1. Release preparation, release transaction, and closeout are complete (§24.13); package metadata remains `0.4.5`.
+v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace implementation, A1–A6 independent stage reviews, §23.18 acceptance, and full automated verification are complete. The A6 desktop/mobile manual Web smoke passed, and separate independent desktop/mobile browser verification passed during the final integration audit. §32 remains its historical authoritative behavior contract, subject to the narrow v0.4.6 Web presentation supersede boundary in §33.1. Release preparation, release transaction, and closeout are complete (§24.13); its released package metadata is `0.4.5`.
 
-The current development stage is v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI. A0 establishes §33 and §23.19 as the contract for subsequent A1–A3 implementation. That implementation and its verification are pending; v0.4.6 is not implemented, tested, released, or closeout complete. v0.4.5 remains the latest released baseline.
+v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI implementation, independent stage reviews, and final independent integration audit are complete. §33 remains its authoritative behavior contract; §23.19 records demonstrated acceptance and the actual verification levels. The current stage is v0.4.6 release preparation / closeout (§24.14), with package metadata `0.4.6`. v0.4.6 remains unreleased and untagged; the release-preparation commit, tag, main/tag pushes, and GitHub Release are pending. v0.4.5 remains the latest released baseline until the transaction completes.
 
 OpenAlex remains the primary discovery provider, Crossref the secondary discovery/bibliographic provider, and Semantic Scholar remains excluded. Automatic revision-validated Provider-state reuse is in scope for v0.4.3. Checkpoint resume, provider cursors/watermarks, late-index recovery, run history, scheduling/notification, and persistent execution databases remain excluded; the reconstructible Provider-state DB is not execution state.
 
@@ -3369,7 +3393,7 @@ The initial contract task changed only `SPEC.md`; the subsequent bounded A1–A6
 
 ## 33. v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI Contract
 
-This is the authoritative v0.4.6 development behavior contract for subsequent A1–A3 implementation. A0 establishes the specification only. Implementation and runtime/browser verification are pending; v0.4.5 remains the latest released baseline. §23.19 defines the required acceptance scenarios.
+This is the authoritative v0.4.6 behavior contract. A0–A3 implementation and independent stage reviews are complete, §23.19 acceptance has been demonstrated at its recorded automated/browser verification levels, and the final independent integration audit passed. v0.4.6 is in release preparation / closeout (§24.14), with package metadata `0.4.6`, and remains unreleased; v0.4.5 remains the latest released baseline until the release transaction completes.
 
 ### 33.1 Authority and supersede boundary
 
@@ -3459,6 +3483,6 @@ The unaffected MVP and historical release exclusions remain in force. v0.4.6 exc
 - unrelated retrieval, canonicalization, Provider-state, or Author behavior changes;
 - a notification system or frontend domain storage for this cleanup.
 
-The initial A0 contract-alignment task changes only `SPEC.md`. It does not implement A1/A2/A3, change Python/HTML/JS/CSS/tests/README/lockfiles, alter package version or Provider User-Agent, create commits/tags/releases, or push. It does not read/modify/delete/stage the local untracked `monitor.yaml`, `src/.obsidian/`, or `workspace/` objects.
+The initial A0 contract-alignment task changed only `SPEC.md`. It did not implement A1/A2/A3, change Python/HTML/JS/CSS/tests/README/lockfiles, alter package version or Provider User-Agent, create commits/tags/releases, or push. It did not read/modify/delete/stage the local untracked `monitor.yaml`, `src/.obsidian/`, or `workspace/` objects.
 
-Subsequent A1–A3 implementation must stay within this contract and demonstrate §23.19 acceptance with the relevant application/route checks and browser evidence for presentation/clipboard behavior. A0 does not claim implementation, testing, release, or closeout completion. Release/version metadata and publication require a separate release task.
+The subsequent bounded A1–A3 implementation and independent reviews are complete, including the A2 `START_FAILED` lifecycle fix. §23.19 records demonstrated acceptance and distinguishes implementation-environment tests from independent automated/browser evidence; the final independent integration audit passed. Release preparation separately updates package/User-Agent metadata and release-state documentation without changing this behavior contract. v0.4.6 remains unreleased until the §24.14 release transaction completes; the release-preparation commit, tag, main/tag pushes, GitHub Release, and post-release closeout remain pending.
