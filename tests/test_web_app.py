@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
 from dataclasses import replace
 from datetime import date, datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -21,7 +25,6 @@ from literature_monitor.application.workspace import (
     WorkspacePaper,
     WorkspaceSnapshot,
 )
-from literature_monitor.kept_export import KeptExportIssue, KeptExportResult
 from literature_monitor.models import (
     ExternalIds,
     MetadataSource,
@@ -170,7 +173,6 @@ def test_application_construction_does_not_load_config_or_call_providers(
     monkeypatch.setattr(web_app, "load_config", forbidden)
     monkeypatch.setattr(web_app, "load_settings", forbidden)
     monkeypatch.setattr(web_app, "load_workspace", forbidden)
-    monkeypatch.setattr(web_app, "export_kept_papers", forbidden)
 
     app = create_app(tmp_path / "monitor.yaml")
 
@@ -243,6 +245,9 @@ def test_workspace_page_defaults_to_inbox_and_returns_html(
     assert "<h1>Inbox</h1>" in response.text
     assert "Inbox Paper" in response.text
     assert "Kept Paper" not in response.text
+    assert "Workspace issues" not in response.text
+    assert "No workspace issues." not in response.text
+    assert "workspace-health-indicator" not in response.text
 
 
 @pytest.mark.parametrize(
@@ -285,25 +290,35 @@ def test_workspace_views_derive_from_snapshot_membership(
             assert other.title not in response.text
 
 
-def test_valid_papers_render_alongside_workspace_issues(
+@pytest.mark.parametrize("surface", ("/", "/fragments/workspace"))
+def test_valid_papers_render_with_only_workspace_issue_indicator(
+    surface: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     paper = make_paper(title="Still Valid")
     snapshot = WorkspaceSnapshot(
         papers=(paper,),
-        issues=(WorkspaceIssue(path=tmp_path / "bad.md", message="invalid frontmatter"),),
+        issues=(
+            WorkspaceIssue(path=tmp_path / "bad.md", message="invalid frontmatter"),
+            WorkspaceIssue(path=tmp_path / "other.md", message="invalid status"),
+        ),
     )
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
     monkeypatch.setattr(web_app, "load_workspace", lambda output_dir: snapshot)
     app = create_app(tmp_path / "monitor.yaml")
 
     with TestClient(app, base_url="http://localhost") as client:
-        response = client.get("/")
+        response = client.get(surface)
 
     assert response.status_code == 200
     assert "Still Valid" in response.text
-    assert "invalid frontmatter" in response.text
+    assert "Workspace · 2 issues" in response.text
+    assert 'href="/settings#workspace-health">View details</a>' in response.text
+    assert "Workspace issues" not in response.text
+    for issue in snapshot.issues:
+        assert str(issue.path) not in response.text
+        assert issue.message not in response.text
 
 
 def test_missing_workspace_is_normal_empty_state_and_not_created(tmp_path: Path) -> None:
@@ -368,7 +383,7 @@ output_dir: workspace
     assert "Traceback" not in response.text
 
 
-def test_workspace_and_issue_fragments_render_fresh_application_state(
+def test_workspace_health_fragment_replaces_old_issue_surface(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -383,12 +398,19 @@ def test_workspace_and_issue_fragments_render_fresh_application_state(
 
     with TestClient(app, base_url="http://localhost") as client:
         workspace_response = client.get("/fragments/workspace")
-        issues_response = client.get("/fragments/issues")
+        health_response = client.get("/fragments/workspace-health")
+        old_issues_response = client.get("/fragments/issues")
 
     assert workspace_response.status_code == 200
     assert "Fragment Paper" in workspace_response.text
-    assert issues_response.status_code == 200
-    assert "broken Paper" in issues_response.text
+    assert "broken Paper" not in workspace_response.text
+    assert health_response.status_code == 200
+    assert '<h2>Workspace health</h2>' in health_response.text
+    assert str(tmp_path / "broken.md") in health_response.text
+    assert "broken Paper" in health_response.text
+    assert 'hx-trigger="settingsSaved from:body"' in health_response.text
+    assert "every " not in health_response.text
+    assert old_issues_response.status_code == 404
 
 
 def test_paper_list_renders_projected_metadata(
@@ -434,6 +456,147 @@ def test_paper_detail_is_uuid_addressed_and_renders_existing_projection(
     assert "journal_final" in response.text
     assert "openalex · W123" in response.text
     assert "ZOT123" in response.text
+
+
+@pytest.mark.parametrize(
+    "status, doi, arxiv, expected",
+    [
+        (WorkflowStatus.KEPT, " 10.1000/EXAMPLE ", None, "10.1000/example"),
+        (WorkflowStatus.KEPT, " https://doi.org/10.1000/EXAMPLE ", None, "10.1000/example"),
+        (WorkflowStatus.CANDIDATE, "10.1000/example", None, None),
+        (WorkflowStatus.REJECTED, "10.1000/example", None, None),
+        (WorkflowStatus.IN_ZOTERO, "10.1000/example", None, None),
+        (WorkflowStatus.KEPT, None, None, None),
+        (WorkflowStatus.KEPT, "", None, None),
+        (WorkflowStatus.KEPT, 123, None, None),
+        (WorkflowStatus.KEPT, "https://doi.org/", None, None),
+        (WorkflowStatus.KEPT, None, "2609.12345", None),
+        (WorkflowStatus.KEPT, '10.1000/"<script>bad</script>', None, '10.1000/"<script>bad</script>'),
+    ],
+)
+@pytest.mark.filterwarnings("ignore:Pydantic serializer warnings:UserWarning")
+def test_copy_doi_is_server_normalized_kept_only_presentation(tmp_path, monkeypatch, status, doi, arxiv, expected):
+    # Bypass model validation to exercise malformed adapter input without changing the domain schema.
+    paper = replace(make_paper(status=status), external_ids=ExternalIds.model_construct(doi=doi, arxiv=arxiv))
+    snapshot = WorkspaceSnapshot(papers=(paper,), issues=())
+    monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
+    monkeypatch.setattr(web_app, "load_workspace", lambda path: snapshot)
+    for action in ("keep_paper", "reject_paper", "mark_paper_in_zotero"):
+        monkeypatch.setattr(web_app, action, lambda *args: pytest.fail("Copy presentation must not mutate"))
+    normalized_inputs = []
+    original_normalize = web_app.normalize_doi
+
+    def normalize(value):
+        normalized_inputs.append(value)
+        return original_normalize(value)
+
+    monkeypatch.setattr(web_app, "normalize_doi", normalize)
+    view = {WorkflowStatus.CANDIDATE: "inbox", WorkflowStatus.IN_ZOTERO: "in-zotero"}.get(status, status.value)
+
+    class CopyButtons(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.form_depth = 0
+            self.buttons = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "form":
+                self.form_depth += 1
+            if tag == "button" and "data-copy-doi" in attrs:
+                self.buttons.append((attrs, self.form_depth))
+
+        def handle_endtag(self, tag):
+            if tag == "form":
+                self.form_depth -= 1
+
+    with TestClient(create_app(tmp_path / "monitor.yaml"), base_url="http://localhost") as client:
+        responses = (
+            client.get("/", params={"view": view, "paper": str(paper.paper_id)}),
+            client.get(f"/fragments/papers/{paper.paper_id}", params={"view": view}),
+        )
+    for response in responses:
+        assert response.status_code == 200
+        parser = CopyButtons()
+        parser.feed(response.text)
+        if expected is None:
+            assert not parser.buttons and "Copy DOI" not in response.text
+        else:
+            assert len(parser.buttons) == 1
+            attrs, form_depth = parser.buttons[0]
+            assert attrs["data-copy-doi"] == expected
+            assert attrs["type"] == "button" and form_depth == 0
+            assert not any(key.startswith("hx-") or key in ("form", "formaction", "disabled") for key in attrs)
+            assert "<script>bad</script>" not in response.text
+        assert ("Mark in Zotero" in response.text) == (status is WorkflowStatus.KEPT)
+        if status is WorkflowStatus.KEPT:
+            assert f'hx-post="/papers/{paper.paper_id}/mark-in-zotero"' in response.text
+            assert 'name="expected_status" value="kept"' in response.text
+            assert 'name="csrf_token"' in response.text
+        assert "HX-Trigger" not in response.headers
+    assert normalized_inputs == ([doi, doi] if status is WorkflowStatus.KEPT else [])
+    assert paper.status is status and paper.zotero_key is None
+
+
+@pytest.mark.parametrize("clipboard_outcome", ["success", "rejected", "unavailable"])
+def test_delegated_copy_doi_clipboard_feedback_without_workflow_requests(tmp_path, clipboard_outcome):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is unavailable for the executable browser-handler test")
+    with TestClient(create_app(tmp_path / "monitor.yaml"), base_url="http://localhost") as client:
+        javascript = client.get("/static/app.js").text
+    assert "navigator.clipboard.writeText(button.dataset.copyDoi)" in javascript
+    for forbidden in ("alert(", "localStorage", "sessionStorage", "doi.org", ".trim(", ".toLowerCase(", ".toLocaleLowerCase("):
+        assert forbidden not in javascript
+    harness = r"""
+const vm = require("node:vm");
+const assert = require("node:assert/strict");
+const handlers = {};
+const timers = [];
+const copies = [];
+class Element {}
+class Button extends Element {
+  constructor() { super(); this.dataset = {copyDoi: "10.1000/example"}; this.textContent = "Copy DOI"; this.disabled = false; }
+  closest(selector) { return selector === "button[data-copy-doi]" ? this : null; }
+}
+const document = {
+  documentElement: {dataset: {}},
+  getElementById: () => null,
+  querySelector: () => null,
+  addEventListener: (name, handler) => { handlers[name] = handler; },
+  body: {addEventListener: () => {}},
+};
+const navigator = OUTCOME === "unavailable" ? {} : {clipboard: {writeText: async (value) => {
+  copies.push(value);
+  if (OUTCOME === "rejected") throw new Error("Permission denied");
+}}};
+vm.runInNewContext(SOURCE, {
+  document, navigator, Element, HTMLElement: Element, HTMLDetailsElement: Element,
+  window: {location: {hash: ""}, addEventListener: () => {}, setTimeout: (fn, delay) => {
+    assert.ok(delay > 0 && delay <= 3000); timers.push(fn);
+  }},
+  fetch: () => assert.fail("Copy must not request the server"),
+  alert: () => assert.fail("Copy must not alert"),
+});
+(async () => {
+  // Both buttons are created after script initialization, including a replaced detail.
+  for (let i = 0; i < 2; i++) {
+    const button = new Button();
+    handlers.click({target: button});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(button.textContent, OUTCOME === "success" ? "Copied" : "Copy failed");
+    if (OUTCOME === "success") {
+      timers.shift()();
+      assert.equal(button.textContent, "Copy DOI");
+    }
+    assert.equal(button.disabled, false);
+  }
+  assert.deepEqual(copies, OUTCOME === "unavailable" ? [] : ["10.1000/example", "10.1000/example"]);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+    harness = "const SOURCE = " + json.dumps(javascript) + "; const OUTCOME = " + json.dumps(clipboard_outcome) + ";\n" + harness
+    result = subprocess.run([node], input=harness, text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_unknown_paper_detail_is_safe_normal_fragment(
@@ -894,43 +1057,29 @@ def test_no_generic_status_and_run_settings_routes_are_explicit(tmp_path: Path) 
     }
 
     assert not any(path.endswith("/status") for path, _ in route_methods)
+    assert not any("copy" in path or path == "/fragments/zotero-export" for path, _ in route_methods)
     assert ("/run", "POST") in route_methods
     assert ("/fragments/run", "GET") in route_methods
     assert ("/settings/validate", "POST") in route_methods
     assert ("/settings/save", "POST") in route_methods
 
 
-def test_zotero_export_fragment_reuses_existing_export_boundary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    output_dir = tmp_path / "workspace"
-    calls: list[Path] = []
-    monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(output_dir))
-
-    def fake_export(path: Path) -> KeptExportResult:
-        calls.append(path)
-        return KeptExportResult(
-            entries=("10.1000/exported", "arXiv:2609.12345"),
-            issues=(
-                KeptExportIssue(
-                    path=output_dir / "Papers" / "bad.md",
-                    message="invalid Paper",
-                ),
-            ),
-        )
-
-    monkeypatch.setattr(web_app, "export_kept_papers", fake_export)
+def test_web_zotero_export_is_removed(tmp_path, monkeypatch):
+    paper = make_paper(status=WorkflowStatus.KEPT)
+    monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
+    monkeypatch.setattr(web_app, "load_workspace", lambda path: WorkspaceSnapshot(papers=(paper,), issues=()))
     app = create_app(tmp_path / "monitor.yaml")
-
     with TestClient(app, base_url="http://localhost") as client:
-        response = client.get("/fragments/zotero-export")
-
-    assert response.status_code == 200
-    assert calls == [output_dir]
-    assert "10.1000/exported" in response.text
-    assert "arXiv:2609.12345" in response.text
-    assert "invalid Paper" in response.text
+        page = client.get("/", params={"view": "kept", "paper": str(paper.paper_id)})
+        fragment = client.get("/fragments/workspace", params={"view": "kept"})
+        removed = client.get("/fragments/zotero-export")
+    assert removed.status_code == 404
+    for response in (page, fragment):
+        for old_export in ("Zotero export", "Load export", "zotero-export", "<textarea"):
+            assert old_export not in response.text
+    assert not hasattr(web_app, "export_kept_papers")
+    assert not hasattr(web_app, "_export_context")
+    assert not (Path(web_app.__file__).parent / "templates/fragments/zotero_export.html").exists()
 
 
 def test_settings_get_is_recoverable_editor(tmp_path: Path) -> None:

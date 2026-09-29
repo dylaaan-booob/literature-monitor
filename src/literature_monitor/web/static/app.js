@@ -70,6 +70,30 @@
     return target instanceof Element && target.closest("form[data-settings-form]");
   }
 
+  function revealWorkspaceHealth() {
+    if (window.location.hash === "#workspace-health") {
+      const advanced = document.getElementById("advanced-diagnostics");
+      if (advanced instanceof HTMLDetailsElement) {
+        advanced.open = true;
+      }
+    }
+  }
+
+  async function copyDoi(button) {
+    button.disabled = true;
+    try {
+      await navigator.clipboard.writeText(button.dataset.copyDoi);
+      button.textContent = "Copied";
+      window.setTimeout(() => {
+        button.textContent = "Copy DOI";
+        button.disabled = false;
+      }, 1500);
+    } catch {
+      button.textContent = "Copy failed";
+      button.disabled = false;
+    }
+  }
+
   function syncRunAnnouncement() {
     const panel = document.getElementById("run-panel");
     const announcer = document.getElementById("run-live-announcer");
@@ -103,6 +127,12 @@
   document.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof Element)) {
+      return;
+    }
+
+    const copyButton = target.closest("button[data-copy-doi]");
+    if (copyButton) {
+      copyDoi(copyButton);
       return;
     }
 
@@ -162,6 +192,7 @@
   });
 
   window.addEventListener("resize", sizeWorkspacePanes);
+  window.addEventListener("hashchange", revealWorkspaceHealth);
 
   window.addEventListener("beforeunload", (event) => {
     if (!settingsDirty) {
@@ -172,6 +203,7 @@
   });
 
   setSettingsDirty(false);
+  revealWorkspaceHealth();
   syncRunAnnouncement();
   syncWorkspaceSelection();
   sizeWorkspacePanes();

@@ -1,0 +1,18 @@
+<section id="workspace-health"
+         hx-get="/fragments/workspace-health"
+         hx-trigger="settingsSaved from:body"
+         hx-target="this"
+         hx-swap="outerHTML">
+  <h2>Workspace health</h2>
+  {% if health_config_error %}
+    <p class="muted">Workspace health unavailable.</p>
+  {% elif health_workspace and health_workspace.issues %}
+    <ul>
+      {% for issue in health_workspace.issues %}
+        <li><strong>{{ issue.path }}</strong>: {{ issue.message }}</li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="muted">No issues detected.</p>
+  {% endif %}
+</section>

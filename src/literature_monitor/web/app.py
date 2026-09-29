@@ -39,7 +39,7 @@ from literature_monitor.application.workspace import (
     load_workspace,
 )
 from literature_monitor.config import ConfigurationError, load_config
-from literature_monitor.kept_export import export_kept_papers
+from literature_monitor.identifiers import normalize_doi
 from literature_monitor.models import WorkflowStatus
 from literature_monitor.web.run_coordinator import (
     CoordinatorSnapshot,
@@ -88,6 +88,11 @@ def _workspace_state(
         return None, str(error)
 
     return load_workspace(config.output_dir), None
+
+
+def _workspace_health_context(config_path: Path) -> dict[str, object]:
+    workspace, config_error = _workspace_state(config_path)
+    return {"health_workspace": workspace, "health_config_error": config_error}
 
 
 def _resolve_output_dir(config_path: Path) -> tuple[Path | None, str | None]:
@@ -146,6 +151,12 @@ def _workspace_context(
         selection_stepped = True
     selected_position = next((index for index, paper in enumerate(view_papers)
                               if paper == selected_paper), None)
+    copy_doi = None
+    if selected_paper is not None and selected_paper.status is WorkflowStatus.KEPT:
+        try:
+            copy_doi = normalize_doi(selected_paper.external_ids.doi)
+        except ValueError:
+            pass
     return {
         "request": request,
         "csrf_token": csrf_token,
@@ -154,30 +165,11 @@ def _workspace_context(
         "active_view": selected_view,
         "papers": view_papers,
         "selected_paper": selected_paper,
+        "copy_doi": copy_doi,
         "selected_position": selected_position,
         "selection_stepped": selection_stepped,
         "decision_result": decision_result,
         "decision_message": decision_message,
-    }
-
-
-def _export_context(
-    request: Request,
-    config_path: Path,
-) -> dict[str, object]:
-    try:
-        config = load_config(config_path)
-    except ConfigurationError as error:
-        return {
-            "request": request,
-            "export_result": None,
-            "config_error": str(error),
-        }
-
-    return {
-        "request": request,
-        "export_result": export_kept_papers(config.output_dir),
-        "config_error": None,
     }
 
 
@@ -263,21 +255,24 @@ def create_app(config_path: Path) -> FastAPI:
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request) -> HTMLResponse:
         settings_state = load_settings(resolved_config_path)
+        context = _settings_context(
+            request=request,
+            csrf_token=csrf_token,
+            form_values=settings_form_from_draft(settings_state.draft),
+            issues=settings_state.issues,
+            disk_state=settings_state,
+            message=(
+                "Configuration needs attention. You can repair it here."
+                if settings_state.issues
+                else None
+            ),
+        )
+        context.update(_workspace_health_context(resolved_config_path))
+        context["run_snapshot"] = app.state.run_coordinator.snapshot()
         return templates.TemplateResponse(
             request,
             "settings.html",
-            _settings_context(
-                request=request,
-                csrf_token=csrf_token,
-                form_values=settings_form_from_draft(settings_state.draft),
-                issues=settings_state.issues,
-                disk_state=settings_state,
-                message=(
-                    "Configuration needs attention. You can repair it here."
-                    if settings_state.issues
-                    else None
-                ),
-            ),
+            context,
         )
 
     @app.get("/fragments/run", response_class=HTMLResponse)
@@ -317,12 +312,24 @@ def create_app(config_path: Path) -> FastAPI:
                 start_result=start_result,
             ),
         )
-        if (
-            start_result.outcome is StartOutcome.STARTED
-            and snapshot.status is CoordinatorStatus.FINISHED
-        ):
-            response.headers["HX-Trigger"] = "runCompleted"
+        if start_result.outcome is StartOutcome.STARTED:
+            response.headers["HX-Trigger"] = (
+                "runStarted, runCompleted"
+                if snapshot.status is CoordinatorStatus.FINISHED
+                else "runStarted"
+            )
+        elif start_result.outcome is StartOutcome.START_FAILED:
+            response.headers["HX-Trigger"] = "runStartFailed"
         return response
+
+    @app.get("/fragments/current-run", response_class=HTMLResponse)
+    def current_run_fragment(request: Request) -> HTMLResponse:
+        snapshot = app.state.run_coordinator.snapshot()
+        return templates.TemplateResponse(
+            request,
+            "fragments/current_run.html",
+            {"run_snapshot": snapshot},
+        )
 
     @app.post("/settings/validate", response_class=HTMLResponse)
     async def validate_settings_route(request: Request) -> HTMLResponse:
@@ -517,26 +524,12 @@ def create_app(config_path: Path) -> FastAPI:
             context,
         )
 
-    @app.get("/fragments/issues", response_class=HTMLResponse)
-    def issues_fragment(request: Request) -> HTMLResponse:
-        context = _workspace_context(
-            request=request,
-            config_path=resolved_config_path,
-            csrf_token=csrf_token,
-            view="inbox",
-        )
+    @app.get("/fragments/workspace-health", response_class=HTMLResponse)
+    def workspace_health_fragment(request: Request) -> HTMLResponse:
         return templates.TemplateResponse(
             request,
-            "fragments/workspace_issues.html",
-            context,
-        )
-
-    @app.get("/fragments/zotero-export", response_class=HTMLResponse)
-    def zotero_export_fragment(request: Request) -> HTMLResponse:
-        return templates.TemplateResponse(
-            request,
-            "fragments/zotero_export.html",
-            _export_context(request, resolved_config_path),
+            "fragments/workspace_health.html",
+            _workspace_health_context(resolved_config_path),
         )
 
     def apply_decision(

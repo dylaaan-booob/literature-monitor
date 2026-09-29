@@ -35,19 +35,12 @@
       {% include "fragments/paper_detail.html" %}
     </div>
 
-    {% include "fragments/workspace_issues.html" %}
+    {% if workspace.issues %}
+      <p class="workspace-health-indicator">
+        Workspace · {{ workspace.issues|length }} {{ "issue" if workspace.issues|length == 1 else "issues" }}
+        · <a href="/settings#workspace-health">View details</a>
+      </p>
+    {% endif %}
 
-    <section class="panel export-shell">
-      <div class="section-heading">
-        <h2>Zotero export</h2>
-        <button type="button"
-                hx-get="/fragments/zotero-export"
-                hx-target="#zotero-export"
-                hx-swap="innerHTML">Load export</button>
-      </div>
-      <div id="zotero-export">
-        <p class="muted">Read-only export of currently kept Papers.</p>
-      </div>
-    </section>
   {% endif %}
 </section>

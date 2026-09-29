@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.4.5 is the current/latest released and completed baseline
+**Status:** Active; v0.4.5 remains the latest released baseline; v0.4.6 development contract established (§33)
 
-**Stage:** v0.4.5 released / closeout complete
+**Stage:** v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI development; A0 specification alignment established, A1–A3 implementation pending
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
@@ -335,7 +335,7 @@ Coverage is produced at provider execution boundaries and carried with the exist
 
 `RunResult` exposes the current run's coverage and a compact derived per-component summary containing total units plus counts for complete, partial, unavailable, and failed states. Coverage is not duplicated into `MonitorStatistics`.
 
-The `run`, `canonicalize`, and `materialize` CLI completion summaries display compact structured coverage without printing every successful unit. The Local Web finished-run view displays compact coverage only while the current process still holds the finished `RunResult`; it must not persist browser-side coverage, add run history, add a coverage API/database, or restore discarded process results after refresh. A4 adds the separate read-only `last-run` CLI diagnostic over the durable snapshot defined below; it does not restore a discarded Web `RunResult`.
+The `run`, `canonicalize`, and `materialize` CLI completion summaries display compact structured coverage without printing every successful unit. Under v0.4.6 §33.4, Local Web coverage is shown only in Settings `Advanced & Diagnostics → Current run`, using the finished process-local `RunResult`; the primary finished Run view does not show coverage detail. A refresh in the same server process can show the retained result again. A server restart cannot reconstruct full Run diagnostics from `last-run.json` or any other durable data. No browser-side coverage persistence, run history, or coverage API/database is introduced. The separate read-only `last-run` CLI diagnostic continues to read the durable snapshot defined below; it does not restore a discarded Web `RunResult`.
 
 Coverage is retrieval execution metadata, not Paper workflow state. Only the single latest-run snapshot at `<output_dir>/.literature-monitor/last-run.json` persists coverage. Provider state in §30.4 must not persist coverage or membership. Coverage must not be written to Paper Markdown, Author Markdown, Inbox, monitor YAML, `.obsidian`, SQLite FTS indexes, or other persistent Web state, or affect canonical identity, keyword filtering, Paper status, human notes, materialization merge, or Zotero export.
 
@@ -1861,6 +1861,24 @@ v0.4.5 §32 implementation is complete. A1–A6 and their independent stage revi
 
 ---
 
+### 23.19 v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI
+
+These are the required acceptance scenarios for the development contract in §33. A0 establishes the specification only; implementation and runtime/browser verification remain pending for A1–A3.
+
+- A healthy Workspace shows neither a standalone `Workspace issues` panel nor `No workspace issues.`. Non-empty `WorkspaceSnapshot.issues` produces only a lightweight issue indicator/count and a details entry point; full issue paths/messages appear only in Settings `Advanced & Diagnostics → Workspace health`. Invalid Papers are isolated while all valid Papers remain available in their workflow views.
+- Settings has a read-only, initially collapsed `Advanced & Diagnostics` area outside the Settings form. Opening, closing, or reading it does not make the form dirty and it does not participate in Validate or Save.
+- Workspace health resolves its target from the currently saved, valid monitor configuration. Editing or validating an unsaved draft, including its output path, does not change that target. A successful Save makes the newly saved target applicable; a missing/invalid/unloadable saved configuration shows Workspace health unavailable and never uses a recovery or unsaved draft to guess a workspace.
+- A finished primary Run shows outcome, Paper result summary, and warning/error counts, without diagnostics summary/details, coverage detail, Provider-state usage, or a full warning/error issue list. A diagnostics-only `COMPLETED` result with zero warnings/errors has the normal completed presentation; `INVALID_CONFIGURATION` remains an explicit configuration problem. Diagnostics do not alter success/error presentation.
+- `Advanced & Diagnostics → Current run` shows full warnings/errors, typed diagnostics with kinds/logical-group counts/context, coverage, and Provider-state usage from the existing `RunCoordinator.snapshot().result`. Once a new Run successfully starts, prior finished details disappear immediately; while it runs this area shows only `Run in progress`.
+- Refresh in the same server process can show the current finished details again. Restarting the server does not restore them from `last-run.json` or other persistent data. No snapshot schema change or diagnostics/history persistence occurs; CLI diagnostics, coverage, and Provider-state usage behavior remain unchanged.
+- Only a `kept` Paper whose DOI is accepted by the existing Python `normalize_doi()` shows `Copy DOI`. A DOI URL representation copies the normalized bare DOI, for example `10.1234/example`, without `https://doi.org/`. Candidate, rejected, and in_zotero Papers never show the action, even when they have valid DOIs.
+- A kept Paper with a missing or non-normalizable DOI shows no button, including no disabled fallback. An available arXiv ID, title, citation, or other identifier does not substitute. Browser JavaScript consumes the Python-normalized value and does not implement a DOI parser.
+- Copy uses only the browser Clipboard API. Success temporarily displays `Copied`, then returns to `Copy DOI`; clipboard failure displays lightweight `Copy failed`, without an alert or notification system. Both paths perform no mutation POST, Workspace reload, Markdown write, workflow/status or `zotero_key` change, or automatic `Mark in Zotero` action.
+- Workspace has no `Zotero export` panel, `Load export` action, or export textarea workflow. CLI `export-kept` and `kept_export.py` retain the existing batch DOI/arXiv/MANUAL behavior; `Mark in Zotero` remains an independent manual confirmation.
+- Existing desktop/mobile master-detail, selection/scroll preservation, Run progress/polling, Settings validation/save, decision safety, and Markdown ownership behavior continue to hold. Copy feedback is transient browser presentation only; no domain localStorage, diagnostics/workspace-health/run history, or new durable state is introduced.
+
+---
+
 ## 24. Suggested Implementation Sequence
 
 ### 24.1 Completed v0.1.0 history
@@ -2135,6 +2153,12 @@ v0.4.5 feature implementation complete
 ```
 
 The full closeout sequence is complete. v0.4.5 is released and is the current/latest released and completed baseline.
+
+---
+
+### 24.14 v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI
+
+The A0 specification alignment establishes the authoritative development contract in §33 and acceptance scenarios in §23.19. Subsequent bounded A1–A3 work will implement and verify the Web presentation hierarchy and kept-Paper Copy DOI behavior. That implementation and verification are pending; this specification task does not demonstrate runtime acceptance. v0.4.5 remains the latest released baseline, with package metadata `0.4.5`; v0.4.6 has no release or closeout at this stage.
 
 ---
 
@@ -2437,6 +2461,8 @@ Provider clients remain synchronous. These concurrency semantics do not require 
 
 ### 25.8 Web application behavior
 
+This section describes the current shared Web adapter behavior. The v0.4.6 development presentation contract is authoritative in §33; unaffected v0.4.0 application boundaries remain applicable.
+
 The application factory is:
 
 ```python
@@ -2493,8 +2519,13 @@ HTMX fragment responses cover at least:
 - Paper list;
 - Paper detail;
 - run status/result;
-- workspace issues;
-- Zotero export.
+- the lightweight workspace issue indicator/count and details entry point.
+
+Healthy Workspace renders no standalone `Workspace issues` panel or `No workspace issues.` message. Full issue paths/messages belong only in `Advanced & Diagnostics → Workspace health`, while valid Papers continue loading despite invalid Papers. Advanced is initially collapsed, outside the Settings form, and excluded from dirty state, Validate, and Save. Its Workspace health target comes only from the currently saved, valid monitor configuration; an unsaved/recovery draft cannot supply that target (§33.2–§33.3).
+
+The primary finished Run shows outcome, Paper result summary, and warning/error counts. Full warnings/errors, diagnostics, coverage, and Provider-state usage are presented only in `Advanced & Diagnostics → Current run`, using the current process-local coordinator result. Successfully starting a new Run removes the previous finished details from Current run; while active, Advanced shows only `Run in progress` for that area (§33.4).
+
+The Web UI provides kept-Paper `Copy DOI` under §33.5 and removes the Workspace `Zotero export` panel and `Load export` / textarea workflow. No Web export fragment/route is required; unused Web-only fragment/route/context glue may be removed during implementation. CLI `export-kept` and `kept_export.py` remain unchanged (§33.6).
 
 After a decision completes, the server reloads the workspace from disk. The browser does not infer the next workflow state or maintain a domain-state store.
 
@@ -2540,6 +2571,8 @@ The following remain outside the v0.4.0 architecture:
 ### 25.10 Zotero boundary
 
 v0.4.0 does not implement Zotero API integration. The GUI reuses the existing read-only kept-paper export boundary. It may present or copy the export result, but it does not ingest items into Zotero or infer `in_zotero` from Zotero state.
+
+The preceding GUI export presentation records the v0.4.0 behavior. For v0.4.6, §33.5–§33.6 supersede it with kept-Paper Copy DOI and removal of the Web export panel; the CLI batch export and manual `Mark in Zotero` boundary remain applicable.
 
 ### 25.11 Testing responsibility boundary
 
@@ -2614,6 +2647,8 @@ v0.4.4 is released and complete. Its §31 implementation and §23.17 acceptance 
 
 v0.4.5 is released and complete. Its §32 implementation and A1–A6 independent stage reviews are complete; §23.18 acceptance has been demonstrated, including the full automated suite and A6 desktop/mobile manual Web smoke. The final independent integration audit passed and separately verified the corresponding desktop/mobile browser behavior. Release preparation, release transaction, and closeout are complete (§24.13). v0.4.5 is the current/latest released and completed baseline.
 
+v0.4.6 development is governed by §33 and requires the §23.19 acceptance scenarios plus regression verification of the preserved application/domain boundaries before feature completion. A0 establishes only the specification; A1–A3 implementation and runtime/browser acceptance are pending. Release preparation, publication, and closeout are outside this task.
+
 ---
 
 ## 28. Current Project Stage
@@ -2622,7 +2657,9 @@ R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity s
 
 The v0.4.4 release and closeout are complete, following §24.12. Its §31 implementation, independent stage reviews, and final independent audit are complete; the §23.17 acceptance scenarios have been demonstrated.
 
-v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace implementation, A1–A6 independent stage reviews, §23.18 acceptance, and full automated verification are complete. The A6 desktop/mobile manual Web smoke passed, and separate independent desktop/mobile browser verification passed during the final integration audit. §32 remains its authoritative behavior contract. Release preparation, release transaction, and closeout are complete (§24.13); the current stage is v0.4.5 released / closeout complete, with package metadata `0.4.5`. No subsequent product-development stage is established by this closeout.
+v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace implementation, A1–A6 independent stage reviews, §23.18 acceptance, and full automated verification are complete. The A6 desktop/mobile manual Web smoke passed, and separate independent desktop/mobile browser verification passed during the final integration audit. §32 remains its historical authoritative behavior contract, subject to the narrow v0.4.6 Web presentation supersede boundary in §33.1. Release preparation, release transaction, and closeout are complete (§24.13); package metadata remains `0.4.5`.
+
+The current development stage is v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI. A0 establishes §33 and §23.19 as the contract for subsequent A1–A3 implementation. That implementation and its verification are pending; v0.4.6 is not implemented, tested, released, or closeout complete. v0.4.5 remains the latest released baseline.
 
 OpenAlex remains the primary discovery provider, Crossref the secondary discovery/bibliographic provider, and Semantic Scholar remains excluded. Automatic revision-validated Provider-state reuse is in scope for v0.4.3. Checkpoint resume, provider cursors/watermarks, late-index recovery, run history, scheduling/notification, and persistent execution databases remain excluded; the reconstructible Provider-state DB is not execution state.
 
@@ -3327,3 +3364,101 @@ The unaffected exclusions in §4.2 and the preserved release contracts remain in
 - release, tag, push, version bump, or User-Agent bump within this development contract.
 
 The initial contract task changed only `SPEC.md`; the subsequent bounded A1–A6 implementation and independent reviews are complete. §23.18 acceptance and the full automated suite passed. The desktop/mobile manual Web smoke passed during A6, and the final independent integration audit passed with separate verification of the corresponding desktop/mobile browser behavior. Release preparation, the release transaction, and closeout are complete (§24.13), without changing this behavior contract. v0.4.5 is released; §23.18 remains its acceptance reference.
+
+---
+
+## 33. v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI Contract
+
+This is the authoritative v0.4.6 development behavior contract for subsequent A1–A3 implementation. A0 establishes the specification only. Implementation and runtime/browser verification are pending; v0.4.5 remains the latest released baseline. §23.19 defines the required acceptance scenarios.
+
+### 33.1 Authority and supersede boundary
+
+§§25 and 29–32 retain the released v0.4.0–v0.4.5 contracts and their completed historical facts. v0.4.6 supersedes only conflicting Web presentation clauses concerning:
+
+- Local Web finished-run coverage placement in §6.5;
+- Workspace issues, Settings Advanced, primary Run/Current run, and Web export fragment/panel behavior in §25.8;
+- GUI presentation/copying of batch kept-export results in §25.10;
+- Web completion Provider-state usage placement in §30.8 and its historical acceptance clause in §23.16;
+- Web completion diagnostics presentation in §32.5 and its historical acceptance clause in §23.18;
+- references to preserved Zotero presentation in §32.6, solely for the Web export-panel replacement.
+
+In particular, §32.5 records that released v0.4.5 directly displayed diagnostics in CLI and Web completion views; this historical text is not rewritten to imply v0.4.6 behavior existed then. §33.4 now moves Web details into Current run while preserving the CLI diagnostics contract. The completed release records in §§24.7–24.13 and the unaffected v0.4.0–v0.4.5 acceptance/domain behavior remain intact.
+
+This is a Web presentation change over existing application/domain data, not a retrieval or domain redesign. Candidate Eligibility, journal/date discovery, evidence consolidation, local filtering, canonical identity, Author behavior, Provider-state schema/revision reuse/alias semantics, coverage meaning, `RunOutcome`/CLI exits, durable Markdown ownership, decision safety, Settings save rules, progress, and Web security remain governed by their existing contracts. The v0.4.5 desktop/mobile master-detail behavior in §32.6 continues to apply.
+
+### 33.2 Workspace hierarchy and issue isolation
+
+A healthy Workspace main view displays neither a separate `Workspace issues` panel nor `No workspace issues.`. When `WorkspaceSnapshot.issues` (`workspace.issues`) is non-empty, the main view shows only a lightweight issue indicator/count and an entry point to view details.
+
+Full issue paths/messages appear only in Settings `Advanced & Diagnostics → Workspace health`. This relocation does not hide issues from the data model or weaken invalid-Paper isolation: malformed/unreliably parsed Papers stay out of workflow views, and all other valid Papers continue to enter Inbox, Kept, Rejected, and In Zotero according to their current Markdown status (§25.4).
+
+### 33.3 Settings Advanced and Workspace health target
+
+Settings adds a read-only `Advanced & Diagnostics` area, initially collapsed and located outside the Settings form. It does not participate in form dirty state, Validate, or Save. Its content uses existing application reads rather than a second configuration or validation path.
+
+`Workspace health` always resolves the output workspace from the currently saved, valid monitor configuration through the existing loading rules. Unsaved Settings edits, Validate results, and recovery drafts cannot change its target. After Save, use actual saved disk configuration, including the existing reread/partial-save semantics; do not assume that a submitted draft became authoritative. If the saved monitor configuration is missing, invalid, or cannot be loaded, show Workspace health unavailable rather than guessing a workspace from a recovery/unsaved draft.
+
+When a valid saved target exists, load its current `WorkspaceSnapshot.issues` and show the complete issue paths/messages in Workspace health. No issue acknowledgment, dismissal, repair action, or health history is added.
+
+### 33.4 Primary Run and Current run details
+
+The finished primary Run continues to show:
+
+- outcome;
+- Paper result summary;
+- warning/error counts.
+
+It no longer directly shows diagnostics summary/details, coverage detail, Provider-state usage, or the full warning/error issue list. Diagnostics must not change primary success/error presentation: a diagnostics-only `COMPLETED` result with zero warnings/errors has the normal completed presentation. `INVALID_CONFIGURATION` continues to show a clear configuration problem; warnings/errors and unexpected failures keep their existing outcome/error semantics.
+
+Settings `Advanced & Diagnostics → Current run` contains the full warning/error lists, typed diagnostics with kinds/logical-group counts/useful context, coverage, and Provider-state usage. It reads the existing process-local `RunCoordinator.snapshot().result` rather than a saved last-run snapshot or a new diagnostics store. Coordinator reads retain the immutable snapshot/small-lock boundary in §25.7; rendering occurs outside the lock.
+
+After a new Run successfully starts, the previous finished details immediately cease to be Current run. While a Run is active, this Advanced area shows only `Run in progress`; the primary Run retains its existing live progress/polling behavior. Once finished, Current run displays the details available from that current result. Without a current process-local result, there are no finished details to show; an empty coordinator or unexpected failure must not resurrect an older result.
+
+A page refresh within the same server process can show the retained finished details again. A server restart discards them; neither `last-run.json` nor any other persistent data may reconstruct full Run diagnostics. `last-run.json` schema and its existing CLI reader/writer behavior remain unchanged (§6.6, §32.5). CLI diagnostics, coverage, Provider-state usage, outcomes, and exit codes are unchanged.
+
+### 33.5 Kept-Paper Copy DOI
+
+Show `Copy DOI` only for a Paper with status=`kept` whose DOI in `WorkspacePaper.external_ids` is accepted by the existing Python/domain `normalize_doi()`. The canonical copy value is its normalized bare DOI, for example `10.1234/example`, never a value prefixed with `https://doi.org/`.
+
+Candidate, rejected, and in_zotero Papers do not show Copy DOI. A kept Paper with no DOI or a DOI that cannot normalize shows no button at all, including no disabled fallback. There is no fallback to arXiv, title, citation, or another identifier. Python/domain normalization remains authoritative; browser JavaScript receives the normalized value and does not reimplement a DOI parser.
+
+Clicking Copy DOI only calls the browser Clipboard API. It performs no mutation POST, Workspace reload, Paper Markdown write, or durable-state change. It changes neither workflow status nor `zotero_key` and never invokes `Mark in Zotero` automatically.
+
+Clipboard success temporarily changes the presentation to `Copied`, then restores `Copy DOI`. Clipboard failure shows lightweight `Copy failed` feedback. Do not use an alert or introduce a notification system. These labels are transient browser presentation state only. `Mark in Zotero` remains a separate, user-directed manual confirmation after downstream import.
+
+### 33.6 Web export removal and CLI preservation
+
+Remove the Workspace `Zotero export` panel. Web UI no longer offers `Load export` or the export textarea workflow. The implementation may remove Web-only export fragments, routes, and context glue that are no longer needed.
+
+Preserve CLI `export-kept` and `kept_export.py` with their existing batch DOI/arXiv/MANUAL behavior (§19, §20.7). Per-Paper Copy DOI is a Web convenience and does not replace or redesign that batch export. No Zotero API, authentication, automatic import, or inferred `in_zotero` state is added.
+
+### 33.7 State and persistence boundary
+
+No new durable state is introduced. Existing responsibilities remain:
+
+- `WorkspaceSnapshot.issues`: read-only issues from the current disk-derived workspace load;
+- `WorkspacePaper.external_ids`: existing Paper identifiers used for Python-normalized DOI presentation;
+- `RunCoordinator`: current process-local execution/snapshot ownership;
+- `RunResult`: existing outcome, Paper result summary, issues, diagnostics, coverage, and Provider-state usage.
+
+`Copied` / `Copy failed` are ephemeral browser presentation only. Do not add diagnostics history, workspace-health history, run history, frontend domain persistence, or browser localStorage domain state. No diagnostic data is added to `last-run.json`, Provider-state, Paper/Author Markdown, or monitor YAML; their schemas and existing ownership remain unchanged. The existing observational coverage snapshot and reconstructible Provider-state DB retain their current narrow roles.
+
+### 33.8 Explicit exclusions and delivery boundary
+
+The unaffected MVP and historical release exclusions remain in force. v0.4.6 excludes:
+
+- Creator Representation / collective authorship, `Author.kind`, and Author repair;
+- Provider-state schema v3;
+- Run history, diagnostics persistence, and workspace-health history;
+- issue acknowledge/dismiss and repair actions;
+- Provider inspector / debug bundle;
+- Zotero API, authentication, automatic import, and PDF retrieval;
+- Copy arXiv, Copy citation, and batch Copy DOI;
+- CLI `export-kept` redesign;
+- workflow status model changes;
+- unrelated retrieval, canonicalization, Provider-state, or Author behavior changes;
+- a notification system or frontend domain storage for this cleanup.
+
+The initial A0 contract-alignment task changes only `SPEC.md`. It does not implement A1/A2/A3, change Python/HTML/JS/CSS/tests/README/lockfiles, alter package version or Provider User-Agent, create commits/tags/releases, or push. It does not read/modify/delete/stage the local untracked `monitor.yaml`, `src/.obsidian/`, or `workspace/` objects.
+
+Subsequent A1–A3 implementation must stay within this contract and demonstrate §23.19 acceptance with the relevant application/route checks and browser evidence for presentation/clipboard behavior. A0 does not claim implementation, testing, release, or closeout completion. Release/version metadata and publication require a separate release task.

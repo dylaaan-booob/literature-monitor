@@ -99,57 +99,20 @@
     <div class="run-status">
       {% if run_snapshot.result %}
         {% set result = run_snapshot.result %}
-        <strong>Run finished · {{ result.outcome.value }}</strong>
+        {% if result.outcome.value == "INVALID_CONFIGURATION" %}
+          <strong class="run-message error">Configuration problem · {{ result.outcome.value }}</strong>
+        {% else %}
+          <strong>Run finished · {{ result.outcome.value }}</strong>
+        {% endif %}
         {% if result.resolved_date_range %}
           <span>{{ result.resolved_date_range.from_date.isoformat() }} → {{ result.resolved_date_range.to_date.isoformat() }}</span>
         {% endif %}
         <span>Papers: {{ result.canonical_paper_count }} canonical · {{ result.created_papers }} created · {{ result.matched_existing_papers }} matched · {{ result.updated_papers }} updated</span>
-        <span>Authors: {{ result.created_authors }} created · {{ result.existing_authors }} existing</span>
-        {% for coverage in result.coverage_summary %}
-          {% if coverage.total_units %}
-            {% set coverage_label = "OpenAlex" if coverage.component.value == "openalex_discovery" else ("Crossref discovery" if coverage.component.value == "crossref_discovery" else "Crossref supplement") %}
-            <span>Live {{ coverage_label }} coverage: {{ coverage.complete }}/{{ coverage.total_units }} complete{% if coverage.partial %} · {{ coverage.partial }} partial{% endif %}{% if coverage.unavailable %} · {{ coverage.unavailable }} unavailable{% endif %}{% if coverage.failed %} · {{ coverage.failed }} failed{% endif %}</span>
-          {% endif %}
-        {% endfor %}
-        {% set usage = result.state_usage %}
-        <span>Provider state: Crossref metadata {{ usage.crossref_reused }} reused · {{ usage.crossref_refreshed }} refreshed · {{ usage.crossref_new }} new</span>
-        <span>Provider state: OpenAlex versions {{ usage.openalex_versions_reused }} reused · {{ usage.openalex_versions_hydrated }} hydrated</span>
-        {% if result.diagnostics %}
-          <div class="run-diagnostics">
-            <span>Diagnostics: {{ result.diagnostics|length }} logical group{{ "" if result.diagnostics|length == 1 else "s" }}</span>
-            <ul>
-              {% for summary in result.diagnostic_summary %}
-                <li>{{ summary.kind.value }} · {{ summary.logical_groups }} logical group{{ "" if summary.logical_groups == 1 else "s" }}</li>
-              {% endfor %}
-            </ul>
-            <details>
-              <summary>Run diagnostics</summary>
-              <ul>
-                {% for diagnostic in result.diagnostics %}
-                  <li>{{ diagnostic.kind.value }}{% if diagnostic.journal %} · journal={{ diagnostic.journal }}{% endif %} · records={{ diagnostic.record_ids|join(", ") }} · {{ diagnostic.message }}</li>
-                {% endfor %}
-              </ul>
-            </details>
-          </div>
-        {% endif %}
         {% if result.warnings %}
           <span>{{ result.warnings|length }} warning{{ "" if result.warnings|length == 1 else "s" }}</span>
         {% endif %}
         {% if result.errors %}
           <span>{{ result.errors|length }} error{{ "" if result.errors|length == 1 else "s" }}</span>
-        {% endif %}
-        {% if result.warnings or result.errors %}
-          <details>
-            <summary>Run issues</summary>
-            <ul>
-              {% for issue in result.warnings %}
-                <li>Warning · {{ issue.component.value }} · {{ issue.message }}</li>
-              {% endfor %}
-              {% for issue in result.errors %}
-                <li>Error · {{ issue.component.value }} · {{ issue.message }}</li>
-              {% endfor %}
-            </ul>
-          </details>
         {% endif %}
       {% elif run_snapshot.unexpected_error %}
         <strong>Run stopped</strong>

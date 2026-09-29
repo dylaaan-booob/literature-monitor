@@ -32,6 +32,7 @@ from literature_monitor.application.settings import (
     SettingsSaveResult,
     SettingsValidationOutcome,
     SettingsValidationResult,
+    load_settings,
 )
 from literature_monitor.config import JournalConfig, LogLevel, parse_monitor_definition
 from literature_monitor.coverage import CoverageComponent, CoverageStatus, CoverageUnit
@@ -447,17 +448,20 @@ def test_run_form_has_only_run_and_requires_no_mode_field(tmp_path):
     assert not (tmp_path / "monitor.yaml").exists()
 
 
-def test_finished_fragment_reports_provider_state_separately_from_coverage(tmp_path):
+def test_provider_state_and_coverage_are_only_in_current_run(tmp_path):
     from literature_monitor.application.monitor import ProviderStateUsage
     result = replace(make_run_result(), state_usage=ProviderStateUsage(1, 2, 3, 4, 5))
     app = create_app(tmp_path / "monitor.yaml")
     app.state.run_coordinator = StubCoordinator(snapshot=finished_snapshot(result=result))
     with TestClient(app, base_url="http://localhost") as client:
-        response = client.get("/fragments/run")
+        primary = client.get("/fragments/run")
+        response = client.get("/fragments/current-run")
     assert "Crossref metadata 1 reused · 2 refreshed · 3 new" in response.text
     assert "OpenAlex versions 4 reused · 5 hydrated" in response.text
     assert "Live OpenAlex coverage:" in response.text
-    assert ">Run again</button>" in response.text
+    assert ">Run again</button>" in primary.text
+    assert "Provider state:" not in primary.text
+    assert "coverage:" not in primary.text
     assert "Cache reuse:" not in response.text and "reuse_provider_cache" not in response.text
 
 
@@ -515,6 +519,49 @@ def test_run_post_start_outcomes_are_normal_html(
     assert text in response.text
     assert coordinator.start_calls == 1
     assert "Traceback" not in response.text
+    if outcome is StartOutcome.STARTED:
+        assert response.headers["HX-Trigger"] == "runStarted"
+    elif outcome is StartOutcome.START_FAILED:
+        assert response.headers["HX-Trigger"] == "runStartFailed"
+    else:
+        assert "HX-Trigger" not in response.headers
+
+
+def test_start_failed_refreshes_current_run_and_discards_previous_finished_details(tmp_path):
+    diagnostic = RunDiagnostic(
+        RunDiagnosticKind.SCOPE_DISPUTE, "Unique previous diagnostic", ("W-OLD",),
+    )
+    previous = replace(make_run_result(), diagnostics=(diagnostic,))
+    failure = UnexpectedRunError(
+        category="RuntimeError", message="The monitor worker could not be started.",
+    )
+    coordinator = StubCoordinator(
+        snapshot=finished_snapshot(result=previous),
+        start_result=StartResult(StartOutcome.START_FAILED),
+        snapshot_after_start=finished_snapshot(unexpected_error=failure),
+    )
+    app = create_app(tmp_path / "monitor.yaml")
+    app.state.run_coordinator = coordinator
+    with TestClient(app, base_url="http://localhost") as client:
+        page = client.get("/settings").text
+        assert 'id="run-panel"' in page and 'id="current-run"' in page
+        assert "Unique previous diagnostic" in page
+        assert "one source warning" in page and "one source error" in page
+        assert "coverage:" in page and "Provider state:" in page
+        assert "runStartFailed from:body" in page
+        response = client.post("/run", data={"csrf_token": csrf_from_html(page)})
+        current = client.get("/fragments/current-run")
+
+    assert response.headers["HX-Trigger"] == "runStartFailed"
+    assert coordinator.current_snapshot.result is None
+    assert "Run stopped" in current.text and failure.message in current.text
+    assert failure.category in current.text
+    for old_detail in (
+        diagnostic.message, diagnostic.kind.value, "W-OLD", "one source warning",
+        "one source error", "Diagnostics:", "Run issues", "coverage:", "Provider state:",
+    ):
+        assert old_detail not in current.text
+    assert "Run in progress" not in current.text and "Traceback" not in current.text
 
 
 def test_run_post_never_calls_run_monitor_directly() -> None:
@@ -1010,11 +1057,14 @@ def test_immediately_finished_started_run_emits_completion_event(tmp_path: Path)
     with TestClient(app, base_url="http://localhost") as client:
         csrf = csrf_from_html(client.get("/fragments/run").text)
         response = client.post("/run", data={"csrf_token": csrf})
+        current = client.get("/fragments/current-run")
 
-    assert response.headers["HX-Trigger"] == "runCompleted"
+    assert response.headers["HX-Trigger"] == "runStarted, runCompleted"
+    assert "one source warning" in current.text
+    assert "Run in progress" not in current.text
 
 
-def test_finished_run_result_renders_summary_and_issues(tmp_path: Path) -> None:
+def test_finished_primary_run_keeps_summary_and_counts_without_technical_details(tmp_path: Path) -> None:
     app = create_app(tmp_path / "monitor.yaml")
     app.state.run_coordinator = StubCoordinator(
         snapshot=finished_snapshot(result=make_run_result())
@@ -1030,17 +1080,28 @@ def test_finished_run_result_renders_summary_and_issues(tmp_path: Path) -> None:
     assert "3 created" in response.text
     assert "4 matched" in response.text
     assert "2 updated" in response.text
-    assert "5 created" in response.text
-    assert "6 existing" in response.text
-    assert "one source warning" in response.text
-    assert "one source error" in response.text
-    assert "OpenAlex coverage: 1/2 complete · 1 failed" in response.text
-    assert (
-        "Crossref discovery coverage: 0/1 complete · 1 unavailable"
-        in response.text
-    )
-    assert "Crossref supplement coverage: 1/1 complete" in response.text
-    assert "Run diagnostics" not in response.text
+    assert "1 warning" in response.text
+    assert "1 error" in response.text
+    for technical_detail in (
+        "Authors:", "one source warning", "one source error", "coverage:",
+        "Provider state:", "Diagnostics:", "Run diagnostics", "Run issues",
+    ):
+        assert technical_detail not in response.text
+
+
+def test_finished_current_run_keeps_full_issues_coverage_and_author_summary(tmp_path: Path) -> None:
+    app = create_app(tmp_path / "monitor.yaml")
+    app.state.run_coordinator = StubCoordinator(snapshot=finished_snapshot(result=make_run_result()))
+    with TestClient(app, base_url="http://localhost") as client:
+        text = client.get("/fragments/current-run").text
+
+    for detail in (
+        "Authors: 5 created · 6 existing", "one source warning", "one source error",
+        "OpenAlex coverage: 1/2 complete · 1 failed",
+        "Crossref discovery coverage: 0/1 complete · 1 unavailable",
+        "Crossref supplement coverage: 1/1 complete",
+    ):
+        assert detail in text
 
 
 @pytest.mark.parametrize("with_issues", [False, True])
@@ -1060,10 +1121,11 @@ def test_finished_run_diagnostics_are_separate_logical_groups_with_context(tmp_p
     app.state.run_coordinator = StubCoordinator(snapshot=finished_snapshot(result=result))
     with TestClient(app, base_url="http://localhost") as client:
         for _ in range(2):
-            response = client.get("/fragments/run")
+            primary = client.get("/fragments/run").text
+            response = client.get("/fragments/current-run")
             assert response.status_code == 200
             text = response.text
-            assert f"Run finished · {result.outcome.value}" in text
+            assert f"Run finished · {result.outcome.value}" in primary
             assert "Diagnostics: 4 logical groups" in text
             labels = ("non_candidate_exclusion · 2 logical groups", "scope_dispute · 1 logical group",
                       "repeated_title_separation · 1 logical group")
@@ -1078,8 +1140,14 @@ def test_finished_run_diagnostics_are_separate_logical_groups_with_context(tmp_p
             assert "Scope unresolved context" in diagnostic_context
             assert "Warning ·" not in diagnostic_context and "Error ·" not in diagnostic_context
             assert ("Run issues" in text) is with_issues
-            assert ("<span>1 warning</span>" in text) is with_issues
-            assert ("<span>1 error</span>" in text) is with_issues
+            assert ("<span>1 warning</span>" in primary) is with_issues
+            assert ("<span>1 error</span>" in primary) is with_issues
+            assert "Diagnostics:" not in primary and "Run diagnostics" not in primary
+            assert "coverage:" not in primary and "Provider state:" not in primary
+            for diagnostic in diagnostics:
+                assert diagnostic.kind.value not in primary
+                assert diagnostic.message not in primary
+            assert "records=" not in primary and "journal=Biometrics" not in primary
             if with_issues:
                 issues = re.search(r"<summary>Run issues</summary>(.*?)</details>", text, re.S).group(1)
                 assert "one source warning" in issues and "one source error" in issues
@@ -1102,11 +1170,173 @@ def test_run_diagnostic_context_uses_normal_template_escaping(tmp_path):
     app = create_app(tmp_path / "monitor.yaml")
     app.state.run_coordinator = StubCoordinator(snapshot=finished_snapshot(result=result))
     with TestClient(app, base_url="http://localhost") as client:
-        text = client.get("/fragments/run").text
+        text = client.get("/fragments/current-run").text
     assert "Diagnostics: 1 logical group" in text
     assert "conflicting_doi_separation · 1 logical group" in text
     for value in (diagnostic.message, diagnostic.journal, *diagnostic.record_ids):
         assert value not in text and escape(value) in text
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    (RunOutcome.COMPLETED, RunOutcome.COMPLETED_WITH_WARNINGS,
+     RunOutcome.COMPLETED_WITH_ERRORS, RunOutcome.INVALID_CONFIGURATION),
+)
+def test_primary_run_outcome_presentation_is_independent_of_diagnostics(tmp_path, outcome):
+    result = make_run_result()
+    result = replace(
+        result,
+        outcome=outcome,
+        warnings=result.warnings if outcome is not RunOutcome.COMPLETED else (),
+        errors=result.errors if outcome in (RunOutcome.COMPLETED_WITH_ERRORS, RunOutcome.INVALID_CONFIGURATION) else (),
+    )
+    app = create_app(tmp_path / "monitor.yaml")
+    coordinator = StubCoordinator(snapshot=finished_snapshot(result=result))
+    app.state.run_coordinator = coordinator
+    with TestClient(app, base_url="http://localhost") as client:
+        before = client.get("/fragments/run").text
+        diagnostic = RunDiagnostic(RunDiagnosticKind.SCOPE_DISPUTE, "Diagnostic context", ("W1",))
+        coordinator.current_snapshot = finished_snapshot(result=replace(result, diagnostics=(diagnostic,)))
+        after = client.get("/fragments/run").text
+
+    assert after == before
+    assert outcome.value in after
+    assert ("1 warning" in after) is bool(result.warnings)
+    assert ("1 error" in after) is bool(result.errors)
+    assert "Diagnostic context" not in after
+    if outcome is RunOutcome.INVALID_CONFIGURATION:
+        assert "Configuration problem" in after
+        assert 'class="run-message error"' in after
+        assert "Run finished ·" not in after
+    else:
+        assert f"Run finished · {outcome.value}" in after
+
+
+@pytest.mark.parametrize("status", (CoordinatorStatus.IDLE, CoordinatorStatus.RUNNING))
+def test_current_run_empty_and_running_states_hide_all_finished_details(tmp_path, status):
+    # Even an inconsistent stale-result snapshot cannot display old details while active/idle.
+    snapshot = replace(
+        running_snapshot(ProgressStage.DISCOVERING_PAPERS),
+        status=status,
+        result=make_run_result(),
+    )
+    app = create_app(tmp_path / "monitor.yaml")
+    app.state.run_coordinator = StubCoordinator(snapshot=snapshot)
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get("/fragments/current-run")
+
+    expected = "Run in progress" if status is CoordinatorStatus.RUNNING else "No process-local run details."
+    assert expected in response.text
+    for detail in ("one source warning", "one source error", "coverage:", "Provider state:", "Stage ", "ETA", "activity-card"):
+        assert detail not in response.text
+    assert "HX-Trigger" not in response.headers
+    assert "every " not in response.text
+
+
+def test_current_run_settings_refresh_uses_the_same_coordinator_snapshot(tmp_path):
+    diagnostic = RunDiagnostic(RunDiagnosticKind.SCOPE_DISPUTE, "Current diagnostic", ("W1",))
+    result = replace(make_run_result(), diagnostics=(diagnostic,))
+    coordinator = StubCoordinator(snapshot=finished_snapshot(result=result))
+    app = create_app(tmp_path / "monitor.yaml")
+    app.state.run_coordinator = coordinator
+    with TestClient(app, base_url="http://localhost") as client:
+        for surface in ("/settings", "/fragments/current-run", "/settings"):
+            text = client.get(surface).text
+            assert diagnostic.message in text
+            assert "one source warning" in text and "one source error" in text
+        page = client.get("/settings").text
+
+    assert coordinator.snapshot_calls == 4
+    assert coordinator.current_snapshot.result is result
+    assert page.index('id="workspace-health"') < page.index('id="current-run"')
+    assert 'hx-trigger="runStarted from:body, runCompleted from:body, runStartFailed from:body"' in page
+    assert 'hx-sync="this:replace"' in page
+    assert page.index('</form>') < page.index('id="advanced-diagnostics"') < page.index('id="current-run"')
+
+
+def test_current_run_restart_never_restores_last_run_snapshot(health_config, monkeypatch):
+    import literature_monitor.application.run_state as run_state
+
+    result = make_run_result()
+    output_dir = web_app.load_config(health_config).output_dir
+    run_state.write_last_run_snapshot(output_dir, run_state.LastRunSnapshot(
+        schema_version=2,
+        resolved_date_range=result.resolved_date_range,
+        outcome=run_state.RecordedRunOutcome.COMPLETED_WITH_ERRORS,
+        coverage=result.coverage,
+    ))
+    snapshot_path = run_state.last_run_snapshot_path(output_dir)
+    original = snapshot_path.read_bytes()
+
+    def forbidden_read(*args, **kwargs):
+        raise AssertionError("Web Current run must not read last-run.json")
+
+    monkeypatch.setattr(run_state, "read_last_run_snapshot", forbidden_read)
+    first = create_app(health_config)
+    first.state.run_coordinator = StubCoordinator(snapshot=finished_snapshot(result=result))
+    with TestClient(first, base_url="http://localhost") as client:
+        assert "one source warning" in client.get("/settings").text
+    restarted = create_app(health_config)
+    with TestClient(restarted, base_url="http://localhost") as client:
+        for surface in ("/settings", "/fragments/current-run"):
+            text = client.get(surface).text
+            assert "No process-local run details." in text
+            assert "one source warning" not in text and "coverage:" not in text
+    assert restarted.state.run_coordinator.snapshot().status is CoordinatorStatus.IDLE
+    assert snapshot_path.read_bytes() == original
+
+
+def test_current_run_start_and_completion_follow_real_coordinator(tmp_path, monkeypatch):
+    import threading
+    import literature_monitor.web.run_coordinator as coordinator_module
+
+    entered, release = threading.Event(), threading.Event()
+    workers = []
+    previous = replace(make_run_result(), diagnostics=(
+        RunDiagnostic(RunDiagnosticKind.SCOPE_DISPUTE, "Previous diagnostic details", ("W-OLD",)),
+    ))
+    current = replace(make_run_result(), diagnostics=(
+        RunDiagnostic(RunDiagnosticKind.SCOPE_DISPUTE, "New diagnostic details", ("W-NEW",)),
+    ))
+
+    def runner(path, *, progress_callback):
+        workers.append(threading.current_thread())
+        if len(workers) == 1:
+            return previous
+        entered.set()
+        assert release.wait(5)
+        return current
+
+    monkeypatch.setattr(coordinator_module, "run_monitor", runner)
+    app = create_app(tmp_path / "monitor.yaml")
+    coordinator = app.state.run_coordinator
+    assert coordinator.start().outcome is StartOutcome.STARTED
+    coordinator._worker.join(2)
+    assert not coordinator._worker.is_alive()
+    try:
+        with TestClient(app, base_url="http://localhost") as client:
+            csrf = csrf_from_html(client.get("/settings").text)
+            assert "Previous diagnostic details" in client.get("/fragments/current-run").text
+            started = client.post("/run", data={"csrf_token": csrf})
+            assert started.headers["HX-Trigger"] == "runStarted"
+            assert entered.wait(2)
+            assert coordinator.snapshot().result is None
+            active = client.get("/fragments/current-run").text
+            assert "Run in progress" in active and "Previous diagnostic details" not in active
+            repeated = client.post("/run", data={"csrf_token": csrf})
+            assert "already active" in repeated.text and "HX-Trigger" not in repeated.headers
+            release.set()
+            workers[-1].join(2)
+            assert not workers[-1].is_alive()
+            completed = client.get("/fragments/run")
+            assert completed.headers["HX-Trigger"] == "runCompleted"
+            finished = client.get("/fragments/current-run").text
+            assert "New diagnostic details" in finished
+            assert "Previous diagnostic details" not in finished
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(2)
 
 
 def test_unexpected_run_error_renders_only_safe_coordinator_text(tmp_path: Path) -> None:
@@ -1122,11 +1352,15 @@ def test_unexpected_run_error_renders_only_safe_coordinator_text(tmp_path: Path)
 
     with TestClient(app, base_url="http://localhost") as client:
         response = client.get("/fragments/run")
+        current = client.get("/fragments/current-run")
 
     assert response.status_code == 200
     assert "unexpected internal error" in response.text
     assert "RuntimeError" in response.text
     assert "Traceback" not in response.text
+    assert "unexpected internal error" in current.text
+    assert "Traceback" not in current.text
+    assert "Provider state:" not in current.text and "coverage:" not in current.text
 
 
 def test_workspace_listens_for_run_completion_and_refreshes_through_workspace_route(
@@ -1711,6 +1945,167 @@ def test_dirty_form_script_is_browser_only_and_save_event_driven(tmp_path: Path)
     assert "sessionStorage" not in script
     assert 'hx-post="/settings/validate"' in settings.text
     assert 'hx-post="/settings/save"' in settings.text
+
+
+@pytest.fixture
+def health_config(tmp_path: Path) -> Path:
+    (tmp_path / "list.md").write_text(
+        "## Journals\n\n| Journal | ISSN/EISSN |\n|---|---|\n| Biometrics | 0006-341X |\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "monitor.yaml"
+    config_path.write_text(
+        "name: Health Monitor\nvenue_whitelist: list.md\nkeyword_expression: causal\n"
+        "output_dir: saved-workspace\nwindow_days: 14\n",
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def broken_health_paper(config_path: Path, workspace: str) -> Path:
+    papers = config_path.parent / workspace / "Papers"
+    papers.mkdir(parents=True)
+    path = papers / f"{workspace}-broken.md"
+    path.write_text("---\ntype: paper\n", encoding="utf-8")
+    return path
+
+
+def test_advanced_is_collapsed_read_only_sibling_of_settings_editor(
+    health_config: Path,
+) -> None:
+    app = create_app(health_config)
+    with TestClient(app, base_url="http://localhost") as client:
+        text = client.get("/settings").text
+
+    assert "Advanced &amp; Diagnostics" in text
+    assert "No issues detected." in text
+    advanced = re.search(r'<details id="advanced-diagnostics"([^>]*)>(.*?)</details>', text, re.S)
+    assert advanced is not None
+    assert "open" not in advanced.group(1)
+    assert re.search(r'</form>\s*</section>\s*<details id="advanced-diagnostics"', text)
+    assert not re.search(r'<(?:form|input|select|textarea|button)\b', advanced.group(2))
+    assert 'hx-get="/fragments/workspace-health"' in advanced.group(2)
+    assert 'hx-trigger="settingsSaved from:body"' in advanced.group(2)
+
+
+def test_unsaved_output_and_validate_do_not_change_saved_workspace_health(
+    health_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved_issue = broken_health_paper(health_config, "saved-workspace")
+    draft_issue = broken_health_paper(health_config, "draft-workspace")
+    state = load_settings(health_config)
+    unsaved_state = replace(state, draft=replace(state.draft, output_dir=Path("draft-workspace")))
+    monkeypatch.setattr(web_app, "load_settings", lambda path: unsaved_state)
+    app = create_app(health_config)
+
+    with TestClient(app, base_url="http://localhost") as client:
+        page = client.get("/settings")
+        assert 'name="output_dir" value="draft-workspace"' in page.text
+        assert str(saved_issue) in page.text
+        assert str(draft_issue) not in page.text
+        validation = client.post(
+            "/settings/validate",
+            data=valid_settings_form(
+                csrf_from_html(page.text),
+                output_dir="draft-workspace",
+                monitor_revision_digest=state.draft.monitor_revision.digest,
+                journal_revision_digest=state.draft.journal_revision.digest,
+            ),
+        )
+        health = client.get("/fragments/workspace-health")
+        refreshed = client.get("/settings")
+
+    assert validation.status_code == 200
+    assert "Runtime date range" in validation.text
+    assert 'value="draft-workspace"' in validation.text
+    assert 'id="advanced-diagnostics"' not in validation.text
+    assert "settingsSaved" not in validation.headers.get("HX-Trigger", "")
+    for response in (health, refreshed):
+        assert str(saved_issue) in response.text
+        assert str(draft_issue) not in response.text
+
+
+@pytest.mark.parametrize("mode", ("missing", "invalid", "unreadable"))
+def test_workspace_health_unavailable_never_scans_recovery_draft(
+    mode: str,
+    health_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = load_settings(health_config)
+    config_path = health_config.parent / "unavailable.yaml"
+    if mode == "invalid":
+        config_path.write_text("keyword_expression: [\n", encoding="utf-8")
+    elif mode == "unreadable":
+        config_path.mkdir()
+    recovery = replace(state, draft=replace(state.draft, output_dir=Path("recovery-workspace")))
+    monkeypatch.setattr(web_app, "load_settings", lambda path: recovery)
+
+    def forbidden_scan(output_dir: Path) -> None:
+        raise AssertionError("Invalid saved configuration must not scan any workspace")
+
+    monkeypatch.setattr(web_app, "load_workspace", forbidden_scan)
+    app = create_app(config_path)
+    with TestClient(app, base_url="http://localhost") as client:
+        page = client.get("/settings")
+        health = client.get("/fragments/workspace-health")
+
+    assert 'value="recovery-workspace"' in page.text
+    for response in (page, health):
+        assert response.status_code == 200
+        assert "Workspace health unavailable" in response.text
+        assert "No issues detected" not in response.text
+
+
+def test_settings_saved_refresh_reads_new_target_from_actual_disk(
+    health_config: Path,
+) -> None:
+    old_issue = broken_health_paper(health_config, "saved-workspace")
+    new_issue = broken_health_paper(health_config, "new-workspace")
+    state = load_settings(health_config)
+    app = create_app(health_config)
+    with TestClient(app, base_url="http://localhost") as client:
+        page = client.get("/settings")
+        saved = client.post(
+            "/settings/save",
+            data=valid_settings_form(
+                csrf_from_html(page.text),
+                output_dir="new-workspace",
+                monitor_revision_digest=state.draft.monitor_revision.digest,
+                journal_revision_digest=state.draft.journal_revision.digest,
+            ),
+        )
+        health = client.get("/fragments/workspace-health")
+        refreshed = client.get("/settings")
+
+    assert saved.headers["HX-Trigger"] == "settingsSaved"
+    assert 'id="advanced-diagnostics"' not in saved.text
+    assert str(old_issue) in page.text
+    for response in (health, refreshed):
+        assert str(new_issue) in response.text
+        assert str(old_issue) not in response.text
+    assert web_app.load_config(health_config).output_dir == new_issue.parent.parent
+
+
+def test_workspace_health_ignores_save_result_draft_when_disk_differs(
+    health_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    disk_issue = broken_health_paper(health_config, "saved-workspace")
+    result = make_save_result(
+        health_config.parent,
+        outcome=SettingsSaveOutcome.SAVED,
+        state_draft=make_draft(output_dir=Path("not-on-disk")),
+    )
+    monkeypatch.setattr(web_app, "save_settings", lambda path, draft: result)
+    app = create_app(health_config)
+    with TestClient(app, base_url="http://localhost") as client:
+        csrf = csrf_from_html(client.get("/settings").text)
+        saved = client.post("/settings/save", data=valid_settings_form(csrf))
+        health = client.get("/fragments/workspace-health")
+
+    assert 'value="not-on-disk"' in saved.text
+    assert str(disk_issue) in health.text
 
 
 def test_trusted_hosts_remain_local_only(tmp_path: Path) -> None:

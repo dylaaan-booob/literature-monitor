@@ -73,6 +73,9 @@
           <button type="submit" class="secondary">Reject</button>
         </form>
       {% elif paper.status.value == "kept" %}
+        {% if copy_doi %}
+          <button type="button" class="secondary" data-copy-doi="{{ copy_doi }}">Copy DOI</button>
+        {% endif %}
         <form method="post"
               action="/papers/{{ paper.paper_id }}/mark-in-zotero"
               hx-post="/papers/{{ paper.paper_id }}/mark-in-zotero"
