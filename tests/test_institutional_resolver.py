@@ -180,7 +180,7 @@ def test_profile_and_authenticated_resolution(scenario):
     assert scenario.platform_calls == [("Literature Monitor", {"appauthor": False})]
     profile, options = scenario.launches[0]
     assert Path(profile) == scenario.app_data / "institutional-browser"
-    assert "0.4.7" not in profile and "Chrome" not in profile
+    assert "0.5.0" not in profile and "Chrome" not in profile
     assert options == {"channel": "chrome", "headless": False, "accept_downloads": False, "timeout": 5000}
     assert Path(profile).is_dir()
     assert scenario.context.closed and scenario.stopped == 1

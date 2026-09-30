@@ -6,7 +6,12 @@ secondary discovery and bibliographic evidence, consolidates provider evidence
 before local keyword filtering, canonicalizes retained papers and versions,
 safely updates durable Paper and Author Markdown, and exports kept papers.
 
-v0.4.7 is the latest released version. It completes Journals Organization &
+v0.5.0 Institutional PDF Acquisition implementation, A0–A7 independent reviews,
+and the final audit are complete. It is **UNRELEASED / release preparation**,
+with current package metadata `0.5.0`. v0.4.7 remains the latest released version
+until the v0.5.0 release transaction succeeds.
+
+v0.4.7 completes Journals Organization &
 Bulk Import while preserving the durable workflow model and compatibility
 boundaries. Its A0–A7 implementation, independent stage reviews, final
 independent integration audit, release preparation, release transaction, and
@@ -106,8 +111,8 @@ queue, or another source of Paper decision state.
 ### Add PDF to Zotero — current source workflow
 
 In the current source tree, **Add PDF to Zotero** is available in **In Zotero**
-Paper detail when the Paper has a valid DOI. This source-tree feature is not
-part of the released v0.4.7 package.
+Paper detail when the Paper has a valid DOI. This capability is implemented in
+the current unreleased v0.5.0 source tree; release preparation is in progress.
 
 1. **Keep** a Paper.
 2. Use **Copy DOI** in Kept detail.
