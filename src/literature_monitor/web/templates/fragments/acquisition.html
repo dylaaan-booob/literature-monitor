@@ -1,0 +1,29 @@
+<section id="acquisition-panel"
+         data-acquisition-paper-id="{{ acquisition_paper_id if acquisition_paper_id else '' }}"
+         aria-live="polite"
+         {% if acquisition_busy and acquisition_paper_id %}
+         hx-get="/fragments/acquisition/{{ acquisition_paper_id }}?view={{ acquisition_view }}"
+         hx-trigger="every 750ms"
+         hx-target="this"
+         hx-swap="outerHTML"
+         {% endif %}>
+  {% if acquisition_message %}
+    <p class="notice warning">{{ acquisition_message }}</p>
+  {% endif %}
+  {% if acquisition_busy %}
+    {% if acquisition_owns_attempt %}
+      <p><strong>PDF acquisition in progress</strong> · {{ acquisition_stage_label }}</p>
+      {% if acquisition_human_auth %}
+        <p>Complete institutional login or verification manually in the dedicated browser, then start a new attempt.</p>
+      {% endif %}
+    {% elif not acquisition_message %}
+      <p>Another PDF acquisition is already in progress.</p>
+    {% endif %}
+  {% elif acquisition_result %}
+    <p><strong>{{ acquisition_stage_label }}</strong></p>
+    <p>{{ acquisition_result.message }}</p>
+    {% if acquisition_recovery %}<p>{{ acquisition_recovery }}</p>{% endif %}
+  {% elif acquisition_unexpected %}
+    <p class="notice error">PDF acquisition stopped because of an unexpected internal error. Start a new attempt after checking Zotero.</p>
+  {% endif %}
+</section>

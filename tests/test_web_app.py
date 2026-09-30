@@ -540,7 +540,7 @@ def test_copy_doi_is_server_normalized_kept_only_presentation(tmp_path, monkeypa
             assert 'name="expected_status" value="kept"' in response.text
             assert 'name="csrf_token"' in response.text
         assert "HX-Trigger" not in response.headers
-    assert normalized_inputs == ([doi, doi] if status is WorkflowStatus.KEPT else [])
+    assert normalized_inputs == ([doi, doi] if status in (WorkflowStatus.KEPT, WorkflowStatus.IN_ZOTERO) else [])
     assert paper.status is status and paper.zotero_key is None
 
 

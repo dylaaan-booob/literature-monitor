@@ -1,6 +1,12 @@
 <section class="panel paper-detail" id="paper-detail"
          data-active-view="{{ active_view }}"
-         data-selected-paper-id="{{ selected_paper.paper_id if selected_paper else '' }}">
+         data-selected-paper-id="{{ selected_paper.paper_id if selected_paper else '' }}"
+         {% if selected_paper %}
+         hx-get="/fragments/papers/{{ selected_paper.paper_id }}?view={{ active_view }}"
+         hx-trigger="acquisitionCompleted from:body"
+         hx-target="this"
+         hx-swap="outerHTML"
+         {% endif %}>
   {% if selected_paper %}
     {% set paper = selected_paper %}
     <h2>{{ paper.title }}</h2>
@@ -87,8 +93,19 @@
           <input type="hidden" name="position" value="{{ selected_position }}">
           <button type="submit">Mark in Zotero</button>
         </form>
+      {% elif acquisition_eligible %}
+        <form method="post"
+              action="/papers/{{ paper.paper_id }}/acquire-pdf"
+              hx-post="/papers/{{ paper.paper_id }}/acquire-pdf"
+              hx-target="#acquisition-panel"
+              hx-swap="outerHTML">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="view" value="{{ active_view }}">
+          <button type="submit"{% if acquisition_busy %} disabled{% endif %}>Add PDF to Zotero</button>
+        </form>
       {% endif %}
     </div>
+    {% include "fragments/acquisition.html" %}
   {% else %}
     <h2>Paper detail</h2>
     <p class="empty-state">{{ detail_message if detail_message else "Select a Paper to review its details." }}</p>

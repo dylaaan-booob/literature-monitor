@@ -23,6 +23,9 @@ from literature_monitor.application.decisions import (
     mark_paper_in_zotero,
     reject_paper,
 )
+from literature_monitor.application.acquisition import (
+    AcquisitionRecovery, AcquisitionService, AcquisitionStage, AuthorizationRetryBoundary,
+)
 from literature_monitor.application.journal_import import (
     JournalImportMode,
     apply_journal_import,
@@ -46,7 +49,12 @@ from literature_monitor.application.workspace import (
 )
 from literature_monitor.config import ConfigurationError, load_config
 from literature_monitor.identifiers import normalize_doi
+from literature_monitor.institutional_resolver import XmuInstitutionalResolver
 from literature_monitor.models import WorkflowStatus
+from literature_monitor.pdf_acquisition import GenericPdfAcquirer
+from literature_monitor.web.acquisition_coordinator import (
+    AcquisitionCoordinator, AcquisitionCoordinatorStatus, AcquisitionSnapshot, AcquisitionStartOutcome,
+)
 from literature_monitor.web.run_coordinator import (
     CoordinatorSnapshot,
     CoordinatorStatus,
@@ -160,9 +168,15 @@ def _workspace_context(
     selected_position = next((index for index, paper in enumerate(view_papers)
                               if paper == selected_paper), None)
     copy_doi = None
+    acquisition_eligible = False
     if selected_paper is not None and selected_paper.status is WorkflowStatus.KEPT:
         try:
             copy_doi = normalize_doi(selected_paper.external_ids.doi)
+        except ValueError:
+            pass
+    if selected_paper is not None and selected_paper.status is WorkflowStatus.IN_ZOTERO:
+        try:
+            acquisition_eligible = normalize_doi(selected_paper.external_ids.doi) is not None
         except ValueError:
             pass
     return {
@@ -175,10 +189,61 @@ def _workspace_context(
         "paper_sections": workspace.sections_for(_VIEW_STATUSES[selected_view]) if workspace else (),
         "selected_paper": selected_paper,
         "copy_doi": copy_doi,
+        "acquisition_eligible": acquisition_eligible,
+        **_acquisition_context(request, selected_paper.paper_id if selected_paper else None,
+                               selected_view, request.app.state.acquisition_coordinator.snapshot()),
         "selected_position": selected_position,
         "selection_stepped": selection_stepped,
         "decision_result": decision_result,
         "decision_message": decision_message,
+    }
+
+
+def _build_acquisition_service(output_dir: Path, config_path: Path, *,
+                               authorization_retry_boundary: AuthorizationRetryBoundary | None = None) -> AcquisitionService:
+    protected = {"project_dir": _PACKAGE_DIR.parent, "workspace_dir": output_dir, "config_path": config_path}
+    return AcquisitionService(output_dir, resolver=XmuInstitutionalResolver(**protected),
+                              pdf_acquirer=GenericPdfAcquirer(**protected),
+                              authorization_retry_boundary=authorization_retry_boundary)
+
+
+def _acquisition_context(
+    request: Request, paper_id: UUID | None, view: str, snapshot: AcquisitionSnapshot,
+    *, message: str | None = None,
+) -> dict[str, object]:
+    owns_attempt = paper_id is not None and snapshot.paper_id == paper_id
+    stage_labels = {
+        AcquisitionStage.LOCATING_ZOTERO: "Verifying Zotero item",
+        AcquisitionStage.CHECKING_ATTACHMENT: "Checking existing PDF files",
+        AcquisitionStage.RESOLVING: "Finding institutional full text",
+        AcquisitionStage.WAITING_FOR_INSTITUTION_AUTH: "Institutional login required",
+        AcquisitionStage.DISCOVERING_PDF: "Acquiring and validating PDF",
+        AcquisitionStage.ATTACHING: "Attaching PDF to Zotero",
+        AcquisitionStage.SUCCEEDED: "PDF acquisition finished",
+        AcquisitionStage.FAILED: "PDF acquisition stopped",
+    }
+    recovery_messages = {
+        AcquisitionRecovery.CHECK_PAPER: "Check the current Paper, then start a new attempt.",
+        AcquisitionRecovery.CHECK_ZOTERO: "Check the item and attachments in Zotero before retrying.",
+        AcquisitionRecovery.INSTITUTION_LOGIN: "Complete institutional login or verification manually in the dedicated browser, then start a new attempt.",
+        AcquisitionRecovery.ZOTERO_AUTHORIZATION: "Check Zotero authorization before starting a new attempt.",
+        AcquisitionRecovery.CHECK_BROWSER: "Check Chrome and close any other window using the dedicated profile before retrying.",
+        AcquisitionRecovery.RETRY: "Start a new attempt when ready.",
+        AcquisitionRecovery.RATE_LIMITED: "Wait for Zotero's authorization retry boundary before starting another attempt.",
+    }
+    result = snapshot.result if owns_attempt else None
+    return {
+        "request": request,
+        "acquisition_paper_id": paper_id,
+        "acquisition_view": view if view in _VIEW_STATUSES else "in-zotero",
+        "acquisition_busy": snapshot.status is AcquisitionCoordinatorStatus.RUNNING,
+        "acquisition_owns_attempt": owns_attempt,
+        "acquisition_human_auth": owns_attempt and snapshot.stage is AcquisitionStage.WAITING_FOR_INSTITUTION_AUTH,
+        "acquisition_stage_label": stage_labels.get(snapshot.stage) if owns_attempt else None,
+        "acquisition_result": result,
+        "acquisition_recovery": recovery_messages.get(result.recovery) if result else None,
+        "acquisition_message": message,
+        "acquisition_unexpected": owns_attempt and snapshot.unexpected_error is not None,
     }
 
 
@@ -241,6 +306,19 @@ def create_app(config_path: Path) -> FastAPI:
     app.state.config_path = resolved_config_path
     app.state.csrf_token = csrf_token
     app.state.run_coordinator = RunCoordinator(resolved_config_path)
+    app.state.acquisition_coordinator = AcquisitionCoordinator()
+    authorization_retry_boundary = AuthorizationRetryBoundary()
+    bound_output_dir, bound_service = None, None
+
+    def acquisition_service_for(output_dir: Path) -> AcquisitionService:
+        nonlocal bound_output_dir, bound_service
+        # Called only for an accepted start under the coordinator lock. Each
+        # workspace binding uses the same process-local authorization limit.
+        if bound_service is None or bound_output_dir != output_dir:
+            service = _build_acquisition_service(output_dir, resolved_config_path,
+                authorization_retry_boundary=authorization_retry_boundary)
+            bound_output_dir, bound_service = output_dir, service
+        return bound_service
 
     app.add_middleware(
         TrustedHostMiddleware,
@@ -341,6 +419,39 @@ def create_app(config_path: Path) -> FastAPI:
             "fragments/current_run.html",
             {"run_snapshot": snapshot},
         )
+
+    def acquisition_response(request: Request, paper_id: UUID, view: str,
+                             snapshot: AcquisitionSnapshot, *, message: str | None = None,
+                             refresh_detail: bool = True) -> HTMLResponse:
+        response = templates.TemplateResponse(
+            request, "fragments/acquisition.html",
+            _acquisition_context(request, paper_id, view, snapshot, message=message),
+        )
+        if snapshot.status is AcquisitionCoordinatorStatus.FINISHED and refresh_detail:
+            response.headers["HX-Trigger-After-Swap"] = "acquisitionCompleted"
+        return response
+
+    @app.get("/fragments/acquisition/{paper_id}", response_class=HTMLResponse)
+    def acquisition_fragment(request: Request, paper_id: UUID, view: str = "in-zotero") -> HTMLResponse:
+        return acquisition_response(request, paper_id, view, app.state.acquisition_coordinator.snapshot())
+
+    @app.post("/papers/{paper_id}/acquire-pdf", response_class=HTMLResponse)
+    def start_acquisition(
+        request: Request, paper_id: UUID,
+        csrf_token_value: Annotated[str | None, Form(alias="csrf_token")] = None,
+        view: Annotated[str, Form()] = "in-zotero",
+    ) -> HTMLResponse:
+        if not _csrf_valid(csrf_token_value, csrf_token):
+            return HTMLResponse('<p class="notice error">Invalid or missing CSRF token.</p>', status_code=403)
+        output_dir, config_error = _resolve_output_dir(resolved_config_path)
+        if config_error is not None or output_dir is None:
+            return acquisition_response(request, paper_id, view, app.state.acquisition_coordinator.snapshot(),
+                message="Configuration needs attention. Open Settings before starting PDF acquisition.", refresh_detail=False)
+        start = app.state.acquisition_coordinator.start(
+            paper_id, service_factory=lambda: acquisition_service_for(output_dir),
+        )
+        message = "Another PDF acquisition is already in progress." if start.outcome is AcquisitionStartOutcome.ALREADY_RUNNING else None
+        return acquisition_response(request, paper_id, view, app.state.acquisition_coordinator.snapshot(), message=message)
 
     async def import_settings_route(request: Request, *, apply: bool) -> HTMLResponse:
         form = await request.form()

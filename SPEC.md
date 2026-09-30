@@ -3729,3 +3729,228 @@ There is no repository-wide eager Paper migration, Journal UUID/database, Paper 
 The unaffected MVP and released-contract exclusions remain in force. v0.4.7 excludes nested Groups, multi-Group membership, independent Group positions or durable empty Groups, drag-and-drop, arbitrary text inference, AI import, Provider-backed import/metadata completion, XLSX dependencies, and partial Apply. It adds no global keyword-first discovery, conference monitoring, publisher scraping, PDF acquisition, custom Zotero ingestion, persistent execution/workflow state, or external integration.
 
 The completed A0 specification-alignment task modified only `SPEC.md`; subsequent A1–A7 implementation and independent reviews are complete. The final independent integration audit and final release validation passed, with actual verification levels recorded in §23.20. Release preparation updated only package/User-Agent version identity, matching test expectations, and current-state documentation without changing functionality, dependencies, `list.md`, user state, or performing a Paper migration. Its independently reviewed release commit was created; annotated tag creation, main/tag pushes, GitHub Release, and closeout are complete (§24.15), without changing this behavior contract. v0.4.7 is released.
+
+---
+
+## 35. v0.5.0 Institutional PDF Acquisition to Existing Zotero Item Contract
+
+This is the authoritative approved behavior contract for the first version of v0.5.0 Institutional PDF Acquisition to Existing Zotero Item. A0 establishes the specification only; implementation and the acceptance evidence below remain future work. v0.4.7 remains the current released baseline, with package metadata `0.4.7`. This section does not claim that v0.5.0 is implemented, validated, or released.
+
+### 35.1 Authority and limited supersede boundary
+
+Historical version-specific text, acceptance evidence, and release closeouts remain facts about their corresponding versions. For v0.5.0 only, §35 supersedes conflicting PDF acquisition, Zotero API/write/attachment, authentication, and external-integration exclusions in §§2, 4.2, 18.5, 19.2, 22.2, 22.4, 25.10, 33.6, 33.8, 34.9, and 34.10 solely to permit the user-triggered acquisition action defined here for an existing Zotero My Library bibliographic item. This does not add PDF acquisition to Obsidian Review Inbox, kept-paper export, candidate discovery, or the production monitor pipeline. Automatic bibliographic ingestion and automatic workflow decisions remain excluded.
+
+The existing ownership and persistence clauses in §§12–14, 25.5, 33.7, and 34.7 gain only the independently verified null/missing `zotero_key` linkage in §35.4 and the machine-local browser/credential state in §§35.6–35.7. No historical section is rewritten to imply that an earlier release had this capability. All unaffected contracts remain in force, including journal-whitelist-first discovery, OpenAlex/Crossref retrieval, Candidate Eligibility, local keyword filtering, conservative canonicalization, UUIDs, Journal Groups/attribution, human decisions/notes, CLI export, Copy DOI, Settings, Web security, Run progress, Provider state, and coverage.
+
+Literature Monitor owns acquisition orchestration. Zotero owns the bibliographic item and PDF attachment/storage. The institutional resolver owns holdings and routing authority. No provider routing or holdings authority is transferred into Literature Monitor.
+
+### 35.2 Product eligibility and workflow preservation
+
+The only domain workflow statuses remain:
+
+```text
+candidate
+rejected
+kept
+in_zotero
+```
+
+`Mark in Zotero` remains a user-directed, status-only `kept → in_zotero` decision under §25.5. It neither creates a Zotero item nor starts acquisition; acquisition must never invoke it or infer a workflow transition from Zotero/PDF state. `in_zotero` continues to express the user's confirmation and does not require a PDF attachment.
+
+`Copy DOI` retains all §33.5 behavior, including its kept-only eligibility, Python normalization, clipboard presentation, and non-mutating semantics. CLI `export-kept` remains unchanged.
+
+The Paper detail action `Add PDF to Zotero` is shown only when `status == in_zotero` and the Paper DOI is accepted by the existing Python/domain `normalize_doi()`. Missing or invalid DOI means no action at all, including no disabled fallback. Candidate, kept, and rejected Papers never expose acquisition. There is no title / author / year / fuzzy matching, arXiv fallback, or browser-side replacement DOI parser for this action or Zotero identity.
+
+An execution request identifies the Paper by its workspace-local UUID. The server must independently locate and reread the Paper and enforce the same status/normalized-DOI eligibility; a visible button, submitted path, or stale browser value is not authorization to acquire for an ineligible Paper. Revalidate UUID, status, and the attempt's normalized DOI before linkage and immediately before upload, including an authorization retry. A missing or changed Paper identity/eligibility returns conflict and must not authorize a Zotero write.
+
+### 35.3 Verified Zotero identity
+
+The first version supports only Zotero Desktop Local API and My Library, using API version 3 at `http://localhost:23119/api/`, with the My Library prefix `/users/0`. Zotero Web API, OAuth, Group Libraries, direct SQLite access, a Zotero plugin, and automatic bibliographic item creation are excluded. Creating the PDF child attachment under a verified existing parent is the only permitted Zotero content write for this feature; parent bibliographic metadata must not be edited.
+
+Use the Paper normalized DOI as the identity authority. Prefer an existing `zotero_key`, but retrieve its actual My Library item and verify that it is a non-attachment bibliographic item whose DOI, normalized by the same `normalize_doi()`, exactly equals the Paper normalized DOI. A key alone is never proof of identity. A missing key, stale/not-found key, or wrong-DOI key falls back to paginated enumeration of non-attachment items at `/api/users/0/items`. Matching must inspect item DOI metadata, not a search-result title or arbitrary text. Incomplete pagination, an unavailable API, or an unreadable response cannot establish uniqueness and must fail without mutation.
+
+Count exact normalized DOI matches across the complete fallback enumeration:
+
+| Exact matches | Required result |
+| --- | --- |
+| 0 | Failure: no existing Zotero item; no Zotero or Paper mutation. |
+| 1 | This is the verified My Library parent item. |
+| >1 | Failure: require the user to resolve the Zotero duplicate first; no automatic selection and no Zotero or Paper mutation. |
+
+The verified parent and current Zotero Server-ID belong to the current attempt. A stale/wrong key is a recoverable identity lookup condition only if fallback establishes one exact match; otherwise report the corresponding identity failure. No fuzzy identity or automatic bibliographic creation may rescue a failed lookup.
+
+### 35.4 Independent safe Paper linkage
+
+The only newly permitted durable Paper mutation is:
+
+```text
+zotero_key: null/missing → verified Zotero My Library item key
+```
+
+This is an independent linkage write, not a workflow decision. It must not change `status`, bibliographic metadata, `journal_issns`, versions, provenance, human notes, unknown/custom frontmatter, or any other Paper content. An existing non-null key, including a stale/wrong-DOI key, is preserved rather than overwritten; fallback may use the newly verified parent within the current attempt without persisting a replacement key. A completed safe linkage may remain if a later acquisition step fails; this does not imply PDF success or change workflow state. Normal materialization reruns must continue to preserve `zotero_key`.
+
+Linkage requires safety equivalent to the existing §25.5 decision boundary:
+
+1. Locate the current Paper by UUID within the workspace; reject missing/ambiguous UUIDs and unsafe/non-regular targets.
+2. Read the complete current file, parse it again, and verify UUID, updateability, `status == in_zotero`, and the same normalized DOI used to verify the Zotero parent.
+3. Verify that the durable field is actually null or missing; parser failure or malformed non-null data must not be treated as an empty field.
+4. Prepare a change limited to `zotero_key`, preserving all other frontmatter and Paper body content.
+5. Compare the complete current content against the read used to prepare the write before atomic replacement.
+
+A Paper that disappears or changes UUID, status, DOI, linkage, or any content during this locate/read/parse/compare-before-replace sequence returns conflict. Do not recreate it, silently reread-and-overwrite new content, or continue to Zotero upload after a linkage conflict. This feature must not weaken decision safety or turn decision actions into general metadata writers.
+
+### 35.5 Existing PDF short circuit
+
+After verifying the Zotero parent, query its child attachments before any institutional acquisition. Zotero is the sole durable source of truth for PDF attachment existence. If a PDF attachment already exists, return `PDF already attached`, perform no download, and create no duplicate upload; Paper workflow state remains unchanged. Failure to read child attachment state is a failure, not proof that the item has no PDF.
+
+Every new attempt, including a retry after restart or uncertain upload completion, repeats parent verification and the child-attachment check. Recheck attachments before upload so a PDF attached while institutional resolution was in progress also short-circuits. Do not add `pdf_status`, `pdf_path`, acquisition history, or an attachment-existence cache to Paper Markdown, monitor YAML, workspace state, or any other durable application state.
+
+### 35.6 Local API write authorization and credentials
+
+Use the official `POST /api/local/authorize` flow. Read the current `Zotero-Server-ID` and supply it with every Local API write; a missing ID must not be guessed. Identity verification, authorization, credential selection, and the target parent must belong to the same current Server-ID. Detecting a Server-ID change invalidates the attempt's credential/linkage assumptions: do not reuse an old credential or upload to a previously verified parent, and require fresh linkage verification against the current Zotero instance before retry.
+
+Non-remembered local API keys exist only in the current process and must never be persisted to a file. A successful write is allowed to consume/invalidate such a key; subsequent writes must not assume it remains authorized.
+
+A remembered key is a credential and must be stored in the OS credential store, associated with the Zotero Server-ID. Python `keyring` is the recommended implementation option, not an A0 dependency addition. The key must never be stored in the project, workspace, monitor YAML, ordinary app-data files, logs, or Paper state. An unavailable secure credential store must not cause fallback to plaintext persistence. A Server-ID change must never select the previous instance's credential.
+
+Authorization denial is a normal action failure. If a write using remembered authorization returns 401, the current attempt may request fresh authorization once and retry the failed write after rechecking Server-ID, parent identity, and attachments. Further denial/401 ends the attempt; no prompt loop is permitted. If `/api/local/authorize` returns 429, honor its retry boundary, including `Retry-After` when supplied: no repeated authorization request or new authorization window before retry is permitted. A 429 must not trigger automatic prompt repetition; expose a retryable failure and allow a new user-triggered attempt only after the boundary. Do not invent an unbounded authorization retry policy.
+
+### 35.7 Institutional browser and resolver authority
+
+Use a Literature Monitor-dedicated persistent real-browser profile. Browser profile/session is machine-local application state outside both workspace and project; `platformdirs` is recommended for selecting the application-data path. This profile is not the user's ordinary browser profile and is not an acquisition-history store. Do not store institution passwords. Institution login/session cookies may remain only in that protected browser profile and must not be copied into logs, Paper state, or project configuration.
+
+CAPTCHA, MFA, Cloudflare, and institutional verification must be completed manually by the user in the persistent browser. No bypass is permitted. Expired authentication must produce an actionable authentication result or `WAITING_FOR_INSTITUTION_AUTH` presentation, with continuation only after the required human step succeeds.
+
+The supplied confirmed Xiamen University Full Text Finder configuration is:
+
+```text
+UI OPID: 45yels
+customer/profile: s1215021.main.ftf
+```
+
+Public LinkIQ guest access must not be a dependency. Obtain resolver candidates through `POST https://resolver.ebsco.com/api/links` within the authenticated resolver browser context, using the Paper normalized DOI and this institutional context. Only `FullText` and `SmartLinks` categories are eligible for automatic acquisition.
+
+The following are forbidden automatic acquisition sources, even if reachable in the browser:
+
+- `/api/get-research-tool-links`;
+- generic page anchors used as a substitute for resolver candidates;
+- chat integrations;
+- `SearchEngines`, `Other`, and `DocumentDelivery` categories;
+- Sci-Hub / research-tool links.
+
+Try eligible candidates in resolver-provided precedence/rank order; filtering must preserve that order rather than re-sort by provider or link label. Do not write special branches for names such as `EBSCOhost SmartLinks`, or journal→provider, publisher→provider, or DOI-prefix routing tables. Candidate failures must not discard remaining eligible candidates. The resolver response remains the holdings/routing authority; no holdings cache or general institution/resolver plugin framework is introduced.
+
+### 35.8 Generic PDF discovery and byte validation
+
+Within each eligible resolver candidate, use this discovery priority:
+
+1. The response/navigation itself already provides a PDF.
+2. A browser download event supplies the candidate file.
+3. `citation_pdf_url` metadata supplies the PDF URL.
+4. An explicit PDF / `application/pdf` link supplies the PDF URL.
+
+These are generic discovery methods within the selected candidate, not permission to harvest arbitrary page anchors as resolver sources. The first version adds no publisher-specific adapters. An HTML landing page may provide the explicit metadata/link above, but HTML/login/error bytes themselves must never be uploaded as a PDF.
+
+Success requires validation of the actual downloaded bytes, with `%PDF` mandatory. Content-Type, a `.pdf` filename, link text, a browser navigation result, or a successful HTTP status cannot independently prove success. Candidate PDF discovery or byte validation failure must continue to the next eligible resolver candidate in order when one remains; exhaustion returns an acquisition failure. User verification requirements retain the human boundary in §35.7 rather than becoming automated bypass steps.
+
+### 35.9 Temporary files, upload provenance, and sensitive data
+
+PDF temporary files must be outside the workspace and project. Successful Zotero upload deletes the temporary file; failure performs best-effort cleanup of attempt-owned temporary files. Literature Monitor does not retain a PDF store. An interrupted process may lose its attempt and leave an orphan temporary file; such a file is never authoritative acquisition state or proof of success, and restart must recheck Zotero before retry (§35.5).
+
+Upload only validated PDF bytes as a child attachment of the verified existing My Library parent. Prefer the canonical DOI URL (`https://doi.org/<normalized DOI>`) for stable attachment source metadata. Do not use temporary authenticated resolver URLs as durable source metadata.
+
+Auth tokens, cookies, Zotero write keys, signed resolver URLs, proxy-session URLs, and resolver URL components containing proxy/session/auth/signature information must never enter Paper Markdown, provenance, logs, monitor YAML, workspace state, or durable acquisition state. The dedicated browser profile and OS credential store are only the narrowly authorized session/credential locations in §§35.6–35.7. Sanitize action errors and server logs, including exception messages, so failure reporting cannot leak these values.
+
+### 35.10 Independent single-active execution
+
+Introduce a separate, narrow `AcquisitionCoordinator` for one Paper acquisition at a time within the running application. The active slot is shared across Web requests; a concurrent start must return a busy action result without starting a second attempt, queueing it, or creating another worker acquisition. Release the slot on success, normal failure, or unexpected failure so later user-triggered attempts remain possible.
+
+Acquisition state and current-attempt presentation are process-local and may be lost on restart. Do not extend or reuse `RunCoordinator` to execute acquisition, alter monitor Run state, create a generic job framework, batch/queue acquisition, or introduce a durable acquisition database/history. Existing `RunCoordinator` responsibilities and production pipeline behavior remain unchanged.
+
+Suggested presentation stages are:
+
+```text
+LOCATING_ZOTERO
+CHECKING_ATTACHMENT
+RESOLVING
+WAITING_FOR_INSTITUTION_AUTH
+DISCOVERING_PDF
+ATTACHING
+SUCCEEDED
+FAILED
+```
+
+These describe the current acquisition attempt only; they are not domain workflow statuses and must not be written into Paper state. `PDF already attached` is a terminal successful no-op action result. Starting/executing acquisition, waiting for human verification, browser operations, Local API calls, and PDF upload must not block the FastAPI Web server; the existing UI and current-attempt polling must remain responsive.
+
+### 35.11 Failure and restart semantics
+
+Acquisition failures are action results. They are neither `WorkspaceIssue` entries nor monitor Run diagnostics, and must not alter workflow status on success or failure. Report useful failure/retry/human-action information without introducing durable history, timing telemetry, or sensitive values. A previously completed independent safe linkage is the only possible Paper change (§35.4).
+
+| Condition | Required action/state behavior |
+| --- | --- |
+| Paper is no longer `in_zotero`, or DOI is missing/invalid | Refuse acquisition after current-disk validation; no workflow transition or Zotero write. |
+| Paper disappears or changes before linkage replacement | Conflict; do not overwrite/recreate the Paper or upload after conflict. |
+| Zotero unavailable / Local API disabled, or identity/attachments cannot be fully read | Failure with a useful local-API recovery action; no speculative parent choice or upload. |
+| Missing / stale / wrong-DOI `zotero_key` | Complete exact-DOI fallback; preserve a non-null key and never trust it without verification. |
+| Zero / multiple exact DOI matches | Failure without Zotero/Paper mutation; multiple matches require manual Zotero duplicate resolution. |
+| Server-ID changes | Invalidate current verification/credential assumptions; no old-key reuse or write under the old linkage. |
+| Authorization denied | Normal failure; no prompt loop. |
+| Remembered authorization revoked / write returns 401 | At most one fresh authorization and guarded write retry under §35.6; further failure terminates. |
+| Authorization endpoint returns 429 | Respect the retry boundary; no repeated authorization window. |
+| Existing PDF attachment | `PDF already attached`; no download or duplicate upload. |
+| Zero eligible `FullText` / `SmartLinks` candidates | Failure; do not substitute forbidden sources. |
+| Expired institutional authentication / human verification | Show required manual action in the dedicated browser; no password storage or verification bypass. |
+| Candidate HTML/login/error response or invalid PDF bytes | Do not upload those bytes; continue ordered remaining candidates or fail on exhaustion. |
+| Zotero upload failure | Failure, best-effort temporary cleanup, and no workflow change; a retry begins by checking actual Zotero attachment state. |
+| Restart during attempt | Current attempt is lost and must not be presented as completed; a new user-triggered attempt re-verifies Zotero identity and attachments before any acquisition. |
+
+### 35.12 Web action and presentation scope
+
+The local Web adapter supports the eligible `in_zotero` detail action, one-Paper-at-a-time execution, and HTMX/polling presentation of the current attempt. Polling reads process-local snapshots and never starts acquisition or performs a workflow/Paper mutation. No current-attempt history, frontend domain persistence, batch controls, acquisition ETA, or timing telemetry is introduced.
+
+Acquisition starts and linkage writes retain the existing loopback/Host/CSRF boundaries in §25.9 and UUID/current-disk validation in §§35.2–35.4. A stale detail or concurrent start cannot bypass status eligibility or the single-active coordinator. Useful acquisition failures may offer a manual `Open Full Text Finder` escape hatch for the institutional resolver, without embedding an authenticated/signed/proxy-session URL in the Web response or stored provenance. Opening it does not authorize automatic source substitution, imply success, or change workflow state.
+
+### 35.13 Explicit exclusions
+
+v0.5.0 does not include:
+
+- automatic Zotero bibliographic item creation or parent metadata updates;
+- automatic `kept → in_zotero` or any PDF workflow status;
+- acquisition for candidate / kept / rejected Papers or invalid/missing DOI;
+- batch acquisition / queue or a generic job framework;
+- Zotero Group Libraries, Zotero Web API/OAuth, direct SQLite, or a Zotero plugin;
+- workspace/project PDF storage or durable acquisition database/history;
+- publisher-specific adapters, journal/publisher/DOI-prefix routing tables, or holdings cache;
+- acquisition ETA/timing telemetry;
+- OCR, PDF parsing/reader/preview/annotation;
+- Sci-Hub/research-tool acquisition, chat acquisition, or forbidden resolver categories;
+- paywall/CAPTCHA/MFA/Cloudflare/institutional-verification bypass;
+- institution password storage or plaintext remembered credentials;
+- a general institution/resolver plugin framework;
+- unrelated discovery, Provider, canonicalization, Journal organization, decision, or Obsidian changes.
+
+### 35.14 Acceptance and A0 delivery boundary
+
+Future implementation must verify the following observable behavior and preservation requirements:
+
+| Acceptance area | Required evidence |
+| --- | --- |
+| Workflow and existing actions | Exactly the original four workflow statuses; existing Keep / Reject / Mark in Zotero, Copy DOI, and CLI export retain their behavior. Acquisition success/failure never changes `status`. |
+| Detail eligibility and server validation | Only `in_zotero` + DOI accepted by `normalize_doi()` exposes acquisition; missing/invalid DOI has no disabled fallback. Crafted/stale requests for other statuses are rejected. |
+| Exact Zotero identity | A valid key is retrieved and DOI-verified; missing/stale/wrong keys use complete paginated non-attachment My Library enumeration. Zero/one/multiple exact-match cases and incomplete enumeration are covered; duplicates never cause arbitrary selection. |
+| Independent linkage safety | Only null/missing `zotero_key` may become the verified key. Notes, custom frontmatter, all other content/status, and non-null keys are preserved. Locate/read/parse/compare-write conflicts, disappearance, UUID/status/DOI/content changes, malformed data, and materialization-rerun preservation are covered. |
+| Existing attachments and safe retry | Child attachment checks precede institutional acquisition and upload; `PDF already attached` short-circuits download/duplicate upload. Restart and uncertain upload retry recheck Zotero instead of relying on process state. |
+| Server-ID and authorization | API version 3, current Server-ID on every write, identity/credential isolation across Server-ID mismatch, official authorization, denial, non-remembered key lifecycle, revoked remembered authorization/401 with one fresh authorization, and 429 retry/prompt boundaries are covered. |
+| Secure remembered credentials | Remembered credentials use the OS credential store, isolated by Server-ID; unavailable storage has no plaintext fallback. No key enters project/workspace/YAML/app-data/logs. |
+| Independent coordinator and responsiveness | A narrow `AcquisitionCoordinator` allows exactly one active Paper, rejects concurrent starts without queueing, releases its slot on all terminal paths, and does not reuse/alter `RunCoordinator`. FastAPI and HTMX polling remain responsive during browser/API/upload/human-wait work. |
+| Authenticated institutional resolution | Real authenticated XMU browser evidence uses OPID `45yels`, profile `s1215021.main.ftf`, and `POST https://resolver.ebsco.com/api/links`; guest LinkIQ is not a dependency. Expired login/human verification follows the manual boundary. |
+| Resolver filtering and ordering | Only `FullText` / `SmartLinks` are attempted in resolver precedence/rank order. Forbidden endpoints/categories, generic anchors as resolver sources, research-tool links, and link-name/provider routing branches are absent. Zero candidates and continuation after candidate failure are covered. |
+| Generic discovery and PDF validation | Response/navigation → download event → `citation_pdf_url` → explicit PDF / `application/pdf` link priority is exercised without publisher adapters. Actual bytes require `%PDF`; misleading Content-Type and HTML/login/error/invalid bytes are rejected and remaining candidates continue in order. |
+| Temporary isolation and upload | Attempt temporary PDFs are outside project/workspace, uploaded only under the verified existing parent, deleted after successful upload, and best-effort cleaned after failure. Upload failure and attachment recheck before retry are covered. |
+| Provenance and sensitive-data preservation | Stable attachment source metadata prefers canonical DOI URL. Auth tokens, cookies, keys, signed/proxy-session/authenticated resolver URLs do not leak through Paper content, provenance, Web errors, exception logs, or project/workspace state. |
+| Action-result separation | Failures/busy/authentication/conflict results are useful current-attempt presentation, not `WorkspaceIssue`, Run diagnostics, or durable state. No `pdf_status`, `pdf_path`, history, ETA, or new workflow transition appears. |
+| Web recovery | Current-attempt polling is observational; a useful failure can offer manual `Open Full Text Finder` without sensitive URL leakage or implied acquisition success. |
+
+Network-independent behavior tests must cover the relevant failure and concurrency cases, but mocks alone do not demonstrate authenticated institutional browser resolution, actual Local API authorization, or PDF upload/storage. Later implementation must report those live validation levels separately and must not claim them from this A0 specification task.
+
+A0 changes only `SPEC.md`. It adds no runtime code, Web assets/templates, tests, README changes, dependencies (including Playwright, `keyring`, or `platformdirs`), lockfile changes, package/User-Agent version changes, Zotero/browser implementation, or persistent application state. It must leave the existing `list.md` modification and untracked `monitor.yaml`, `src/.obsidian/`, and `workspace/` objects untouched, and creates no commit, tag, release, or push. The released v0.4.7 text remains historically accurate; §35 is the future implementation and acceptance authority for this approved scope only.
