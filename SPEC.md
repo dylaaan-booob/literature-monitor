@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.5.0 UNRELEASED / release preparation; v0.4.7 remains the latest released baseline
+**Status:** Active; v0.5.0 is the current/latest released and completed baseline
 
-**Stage:** v0.5.0 implementation, A0–A7 independent reviews, and final audit complete; release preparation in progress (§24.16); package metadata `0.5.0`
+**Stage:** v0.5.0 released / closeout complete (§24.16); package metadata `0.5.0`
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
@@ -1918,7 +1918,7 @@ Final release validation separately passed with **2209 passed, 0 skipped, 2 know
 
 ### 23.21 v0.5.0 Institutional PDF Acquisition to Existing Zotero Item — demonstrated acceptance
 
-A0–A7 implementation and all independent stage reviews are complete. `V0_5_0_FINAL_AUDIT_COMMIT_REVIEW` passed with READY_FOR_COMMIT status. Implementation commit `a06474ae2aadd5631be74697809f3bff95f3ce14` (`Add institutional PDF acquisition to Zotero`) was created and independently verified as the exact reviewed 25-file implementation. The implemented §35 contract has the following demonstrated acceptance at the distinct verification levels below. Release preparation is in progress (§24.16), with package metadata `0.5.0`; v0.5.0 remains **UNRELEASED**, and v0.4.7 remains the latest released baseline.
+A0–A7 implementation and all independent stage reviews are complete. `V0_5_0_FINAL_AUDIT_COMMIT_REVIEW` passed with READY_FOR_COMMIT status. Implementation commit `a06474ae2aadd5631be74697809f3bff95f3ce14` (`Add institutional PDF acquisition to Zotero`) was created and independently verified as the exact reviewed 25-file implementation. The implemented §35 contract has the following demonstrated acceptance at the distinct verification levels below. Final release validation passed; release preparation, the release transaction, and closeout are complete (§24.16). v0.5.0 is released and is the current/latest released and completed baseline, with package metadata `0.5.0`.
 
 - Add PDF to Zotero is available only for a current-disk `in_zotero` Paper with a valid normalized DOI. Exact-DOI verification locates an existing My Library parent; it never creates a bibliographic parent. Only null/missing `zotero_key` can be safely linked, preserving workflow status, notes, custom frontmatter, and all other Paper content. Concurrent linkage/content changes stop the attempt.
 - Complete Zotero enumeration requires a stable `Last-Modified-Version`, current Server-ID, and complete pagination/count checks for both parent identity and child attachments. An actual existing PDF file short-circuits acquisition; metadata-only partial attachments do not count as success or prevent a later explicit retry.
@@ -1932,9 +1932,11 @@ Network-independent final audit evidence:
 - `uv lock --check` and `git diff --check`: **PASS**.
 - Source-tree wheel/sdist build and isolated wheel installation, CLI help, acquisition-module imports, and Web acquisition-template loading/compilation: **PASS**.
 
+Final release validation separately ran from a clean export of release HEAD `413b2505b8cab4d74bd5e6e43f4c9ec5aee6815c`: **2887 passed, 0 skipped, 2 known dependency warnings, 2887 collected**. Node **v24.21.0** was available and Node-powered Web harnesses executed. `uv lock --check` and `git diff --check` passed. Wheel/sdist metadata and required acquisition package contents were verified against that exact HEAD; isolated installed-wheel CLI/import/template smoke passed. The committed grouped `list.md` release source used `Journal | ISSN/EISSN | Group` and passed parsing/storage validation with **74 Journals**. It is repository release source, not part of the Python wheel/sdist payload.
+
 Previously established live evidence: headed real Google Chrome launched; authenticated XMU Full Text Finder was observed; a real `POST https://resolver.ebsco.com/api/links` returned **HTTP 200** with **4 ordered eligible FullText candidates**. This evidence demonstrates authenticated resolver access and ordered candidates only.
 
-Successful institutional PDF retrieval, actual Zotero authorization dialog/authorization, actual Zotero child attachment creation, actual PDF upload/registration, and full live end-to-end acquisition are **not demonstrated live**. Mocked failure, retry, and upload tests do not substitute for those live operations. Release preparation performs no new live acquisition or Zotero mutation.
+Successful institutional PDF retrieval, actual Zotero authorization dialog/authorization, actual Zotero child attachment creation, actual PDF upload/registration, and full live end-to-end acquisition are **not demonstrated live**. Mocked failure, retry, and upload tests do not substitute for those live operations. Release preparation and final release validation performed no new live acquisition or Zotero mutation.
 
 ---
 
@@ -2268,30 +2270,36 @@ Release commit and local/remote annotated tag `v0.4.7` target `c9f6091e840f6cef9
 
 ---
 
-### 24.16 v0.5.0 Institutional PDF Acquisition to Existing Zotero Item — release preparation
+### 24.16 v0.5.0 Institutional PDF Acquisition to Existing Zotero Item — completed release closeout
 
-A0–A7 implementation, independent stage reviews, final audit, and the independently verified implementation commit `a06474ae2aadd5631be74697809f3bff95f3ce14` are complete. §23.21 records demonstrated acceptance and the actual network-independent/live verification boundaries. Release preparation is in progress, with package metadata `0.5.0`. v0.5.0 remains **UNRELEASED**; v0.4.7 remains the latest released baseline.
+A0–A7 implementation, independent stage reviews, final audit, and the independently verified implementation commit `a06474ae2aadd5631be74697809f3bff95f3ce14` are complete. §23.21 records demonstrated acceptance and the actual network-independent/live verification boundaries, including passing final release validation. Release preparation, its independent review and commit, the grouped Journal list commit, annotated tag creation, main/tag pushes, GitHub Release, and documentation closeout are complete. v0.5.0 is released, with package metadata `0.5.0`, and is the current/latest released and completed baseline.
 
-The release sequence is:
+The completed release closeout sequence is:
 
 ```text
 A0–A7 implementation
 → independent stage reviews
 → final audit
 → implementation commit
-→ release preparation in progress
-→ independent review of release-preparation diff
+→ release preparation
+→ independent release-prep review
 → release-preparation commit
+→ grouped Journal list commit
 → annotated tag
 → push main
 → push tag
 → GitHub Release
-→ post-release closeout
+→ closeout
 ```
 
-The implementation and review steps before release preparation are complete; preparation is the current in-progress step. Independent release-preparation diff review, its commit, annotated tag creation, main/tag pushes, GitHub Release, and post-release closeout remain pending. No future release-preparation commit SHA is assigned.
+The independently reviewed release-preparation commit is `18f3793f1cf3952fa36912ce909dd197f47faeda` (`Prepare v0.5.0 release`). It changed only package/Provider User-Agent identity, matching tests, current-state documentation, and the credential module's §35.6 comment reference; acquisition behavior and dependencies were preserved, and `list.md` was not modified by that commit. The user-approved current grouped `list.md` was then committed without rewriting its bytes as `413b2505b8cab4d74bd5e6e43f4c9ec5aee6815c` (`Update grouped journal list`). The v0.5.0 tag includes this 74-Journal repository configuration.
 
-This preparation changes only package/Provider User-Agent identity, matching tests, current-state documentation, and the credential module's §35.6 comment reference. It preserves acquisition behavior, dependencies, historical released contracts, and protected user state. Release validation includes targeted/full automated tests, lock/diff checks, external wheel/sdist builds, and isolated installed-package smoke; it does not start Chrome or perform real institutional acquisition or Zotero authorization/writes.
+Annotated tag `v0.5.0` has tag object `11d86e72535e5ea7e757dc51afe604e69973f5a8` and peeled release target `413b2505b8cab4d74bd5e6e43f4c9ec5aee6815c`. Remote main synchronized at that release HEAD. The [GitHub Release v0.5.0](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.5.0) is published, non-draft, and non-prerelease, with exactly the verified wheel and sdist uploaded. GitHub asset digests matched the local SHA-256 values:
+
+- `literature_monitor-0.5.0-py3-none-any.whl`: `b9600a7ab59a444051175a46c84a0fcc021a286925c58e064d0c2a177b37c9a2`.
+- `literature_monitor-0.5.0.tar.gz`: `164c2bcefd759435ed1b04ef1b24efbffdf61ad2744492cc71182141eef7ace0`.
+
+§35 remains the authoritative v0.5.0 behavior contract. Historical release facts and the live validation boundaries in §23.21 remain distinct. `monitor.yaml`, `src/.obsidian/`, and `workspace/` remained untouched and local-only. This documentation closeout follows the release tag; its subsequent documentation commit is not part of the v0.5.0 tag target.
 
 ---
 
@@ -2786,7 +2794,7 @@ v0.4.6 is released and complete. Its §33 implementation and A0–A3 independent
 
 ## 28. Current Project Stage
 
-R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback, v0.4.2 Provider Reliability, Coverage, and Explicit Cache Reuse, v0.4.3 Retrieval Efficiency & Revision-Validated Provider Evidence, v0.4.4 Crossref Elapsed-Aware Pacing & Partial Provider Evidence Semantics, v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace, v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI, and v0.4.7 Journals Organization & Bulk Import are completed release history. v0.4.7 is the current released and completed baseline.
+R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback, v0.4.2 Provider Reliability, Coverage, and Explicit Cache Reuse, v0.4.3 Retrieval Efficiency & Revision-Validated Provider Evidence, v0.4.4 Crossref Elapsed-Aware Pacing & Partial Provider Evidence Semantics, v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace, v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI, v0.4.7 Journals Organization & Bulk Import, and v0.5.0 Institutional PDF Acquisition to Existing Zotero Item are completed release history. v0.5.0 is the current released and completed baseline.
 
 The v0.4.4 release and closeout are complete, following §24.12. Its §31 implementation, independent stage reviews, and final independent audit are complete; the §23.17 acceptance scenarios have been demonstrated.
 
@@ -2794,9 +2802,9 @@ v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Works
 
 v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI implementation, A0–A3 independent stage reviews, and final independent integration audit are complete. §33 remains its authoritative behavior contract; §23.19 records demonstrated acceptance and the actual verification levels, including final release validation. Release preparation, release transaction, and closeout are complete (§24.14); its closeout stage was v0.4.6 released / closeout complete, with package metadata `0.4.6`. No subsequent product-development stage was established by that closeout.
 
-v0.4.7 Journals Organization & Bulk Import implementation, A0–A7 independent stage reviews, and final independent integration audit are complete. §34 remains the authoritative behavior contract; §23.20 records demonstrated acceptance and actual verification levels, including final release validation. Release preparation, the release transaction, and closeout are complete (§24.15). v0.4.7 is released / closeout complete, with package metadata `0.4.7`, and is the current/latest released and completed baseline. No subsequent product-development stage is established by this closeout.
+v0.4.7 Journals Organization & Bulk Import implementation, A0–A7 independent stage reviews, and final independent integration audit are complete. §34 remains the authoritative behavior contract; §23.20 records demonstrated acceptance and actual verification levels, including final release validation. Release preparation, the release transaction, and closeout are complete (§24.15). v0.4.7 is released / closeout complete, with package metadata `0.4.7`, and was the current/latest released and completed baseline at its closeout. No subsequent product-development stage was established by that closeout.
 
-v0.5.0 Institutional PDF Acquisition to Existing Zotero Item implementation, A0–A7 independent reviews, final audit, and the reviewed implementation commit are complete. §35 is its implemented behavior contract and §23.21 records the actual verification levels. Release preparation is in progress (§24.16), with package metadata `0.5.0`; v0.5.0 remains UNRELEASED and v0.4.7 remains the latest released baseline. The release-preparation diff still requires independent review before commit and the release transaction.
+v0.5.0 Institutional PDF Acquisition to Existing Zotero Item implementation, A0–A7 independent reviews, final audit, and the reviewed implementation commit are complete. §35 is its implemented and released behavior contract and §23.21 records the actual verification levels, including passing final release validation. Release preparation, its independent review and commit, the grouped Journal list commit, release transaction, and closeout are complete (§24.16). v0.5.0 is released / closeout complete, with package metadata `0.5.0`, and is the current/latest released and completed baseline.
 
 OpenAlex remains the primary discovery provider, Crossref the secondary discovery/bibliographic provider, and Semantic Scholar remains excluded. Automatic revision-validated Provider-state reuse is in scope for v0.4.3. Checkpoint resume, provider cursors/watermarks, late-index recovery, run history, scheduling/notification, and persistent execution databases remain excluded; the reconstructible Provider-state DB is not execution state.
 
@@ -3785,7 +3793,7 @@ The completed A0 specification-alignment task modified only `SPEC.md`; subsequen
 
 ## 35. v0.5.0 Institutional PDF Acquisition to Existing Zotero Item Contract
 
-This is the implemented authoritative behavior contract for the first version of v0.5.0 Institutional PDF Acquisition to Existing Zotero Item. A0–A7 implementation and independent stage reviews are complete; the final audit passed and the reviewed implementation commit exists. §23.21 records demonstrated acceptance and its network-independent/live provenance. Release preparation is in progress (§24.16), with package metadata `0.5.0`. v0.5.0 remains UNRELEASED; v0.4.7 remains the latest released baseline.
+This is the implemented authoritative behavior contract for the first version of v0.5.0 Institutional PDF Acquisition to Existing Zotero Item. A0–A7 implementation and independent stage reviews are complete; the final audit and final release validation passed. §23.21 records demonstrated acceptance and its network-independent/live provenance. Release preparation, the release transaction, and closeout are complete (§24.16). v0.5.0 is implemented and released, with package metadata `0.5.0`, and is the current/latest released and completed baseline.
 
 ### 35.1 Authority and limited supersede boundary
 
@@ -3980,7 +3988,7 @@ v0.5.0 does not include:
 - a general institution/resolver plugin framework;
 - unrelated discovery, Provider, canonicalization, Journal organization, decision, or Obsidian changes.
 
-### 35.14 Demonstrated acceptance and release-preparation boundary
+### 35.14 Demonstrated acceptance and release closeout
 
 The implemented contract retains the following observable behavior and preservation requirements. §23.21 records demonstrated acceptance and distinguishes network-independent tests from previously established live resolver evidence and the live operations not yet demonstrated:
 
@@ -4004,4 +4012,4 @@ The implemented contract retains the following observable behavior and preservat
 
 Network-independent behavior tests cover the relevant failure and concurrency cases. Mocks alone do not demonstrate authenticated institutional browser resolution, actual Local API authorization, or PDF upload/storage. The actual live validation levels are reported separately in §23.21: authenticated XMU resolver access and ordered candidates were observed; successful PDF retrieval, actual Zotero authorization/child creation/upload/registration, and full live end-to-end acquisition remain undemonstrated.
 
-A0 originally changed only `SPEC.md`. A1–A7 implementation and independent reviews are now complete; the final audit passed and the reviewed implementation commit exists. Release preparation changes only package/Provider User-Agent identity, matching tests, current-state documentation, and the known §35.6 credential comment reference. It leaves `list.md`, `monitor.yaml`, `src/.obsidian/`, and `workspace/` untouched, and creates no commit, tag, push, or GitHub Release. Historical v0.4.7 text remains accurate. v0.5.0 remains UNRELEASED until the independently reviewed release-preparation commit and subsequent release transaction succeed (§24.16).
+A0 originally changed only `SPEC.md`. A1–A7 implementation and independent reviews are complete; the final audit and final release validation passed. The independently reviewed release-preparation commit changed only package/Provider User-Agent identity, matching tests, current-state documentation, and the known §35.6 credential comment reference; it did not modify `list.md`. Afterward, the user-approved grouped `list.md` was committed unchanged as `413b2505b8cab4d74bd5e6e43f4c9ec5aee6815c` (`Update grouped journal list`) and included in the v0.5.0 release tag. It is repository configuration, not an acquisition runtime change or Python package payload. `monitor.yaml`, `src/.obsidian/`, and `workspace/` remained untouched and local-only. The release-preparation commit, annotated tag creation, main/tag pushes, GitHub Release, and documentation closeout are complete (§24.16), without changing this behavior contract. Historical v0.4.7 text remains accurate. v0.5.0 is released.

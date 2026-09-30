@@ -6,10 +6,11 @@ secondary discovery and bibliographic evidence, consolidates provider evidence
 before local keyword filtering, canonicalizes retained papers and versions,
 safely updates durable Paper and Author Markdown, and exports kept papers.
 
-v0.5.0 Institutional PDF Acquisition implementation, A0–A7 independent reviews,
-and the final audit are complete. It is **UNRELEASED / release preparation**,
-with current package metadata `0.5.0`. v0.4.7 remains the latest released version
-until the v0.5.0 release transaction succeeds.
+v0.5.0 is the latest released version. It releases Institutional PDF Acquisition
+while preserving the existing four-state Markdown workflow. Its A0–A7
+implementation and independent reviews, final audit, release preparation,
+release transaction, and closeout are complete. Released package metadata is
+`0.5.0`.
 
 v0.4.7 completes Journals Organization &
 Bulk Import while preserving the durable workflow model and compatibility
@@ -108,11 +109,10 @@ Paper Markdown remains the durable workflow state. The GUI does not add a
 workflow/execution database, persistent run history, heartbeat, SSE, WebSocket,
 queue, or another source of Paper decision state.
 
-### Add PDF to Zotero — current source workflow
+### Add PDF to Zotero — released workflow
 
-In the current source tree, **Add PDF to Zotero** is available in **In Zotero**
-Paper detail when the Paper has a valid DOI. This capability is implemented in
-the current unreleased v0.5.0 source tree; release preparation is in progress.
+**Add PDF to Zotero** is released in v0.5.0 and is available in **In Zotero**
+Paper detail when the Paper has a valid DOI.
 
 1. **Keep** a Paper.
 2. Use **Copy DOI** in Kept detail.
