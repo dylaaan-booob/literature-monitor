@@ -19,9 +19,17 @@ run naturally presented no human-verification challenge; it is recorded as
 challenge manufactured or verification bypass used. Implementation acceptance,
 final audit, release preparation, final clean-export release validation, annotated
 tag creation, main/tag pushes, and the GitHub Release are complete. Published
-wheel/sdist SHA-256 digests are verified. This post-release documentation closeout
-completes product/release closeout when committed after the release tag; that
+wheel/sdist SHA-256 digests are verified. The initial documentation closeout
+at `125bfb7` completed product/release closeout after the release tag; that
 documentation commit is outside the v0.5.1 tag target (SPEC §24.17).
+
+Current main additionally contains post-release PDF acquisition guard/cancellation
+ownership hardening in `0b69d4b` (`Simplify PDF acquisition guard and cancellation
+ownership`). It preserves Add PDF's user-visible workflow, result and recovery
+semantics while removing duplicate checks. This main-branch maintenance has no
+new version, tag or release artifacts and is not included in the v0.5.1 tag,
+published wheel/sdist or GitHub Release artifacts. Current-source behavior and
+the separate engineering verification record are documented in SPEC §36.
 
 v0.5.0 previously released Institutional PDF Acquisition
 while preserving the existing four-state Markdown workflow. Its A0–A7
@@ -128,8 +136,10 @@ queue, or another source of Paper decision state.
 
 ### Add PDF to Zotero — released v0.5.1 workflow
 
-The workflow below is released **v0.5.1** behavior. Python package metadata is
-**0.5.1**; the standalone browser companion is installed from the source repository.
+The user-visible workflow below remains released **v0.5.1** behavior. Final-write
+and cancellation ownership details describe current main's post-release hardening.
+Python package metadata is **0.5.1**; the standalone browser companion is installed
+from the source repository.
 
 1. **Keep** a Paper and use **Copy DOI** in Kept detail.
 2. Manually create or import the bibliographic parent into Zotero **My Library**.
@@ -203,8 +213,13 @@ requires positive published-version evidence; explicit accepted manuscript/AAM
 or preprint evidence rejects it. Missing or ambiguous evidence fails closed.
 There is no **Attach anyway** or lower-version fallback.
 
-Before upload, the application rechecks the frozen key, DOI, Zotero Server-ID
-and actual PDFs. A newly attached PDF suppresses duplicate upload. It writes only
+On current main, a qualified staged artifact may enter writer local preparation.
+Before the first content POST, the writer's application guard checks current
+artifact validity and the frozen key, DOI, Zotero Server-ID and actual PDFs.
+Freshness checks continue at `NO_CONFIRMED_MUTATION` / `CHILD_CREATED`, while
+subsequent mutation still needs the artifact bytes. After confirmed byte upload
+reaches `BYTES_UPLOADED`, registration does not depend on the staging file remaining
+unchanged or present. A newly attached PDF suppresses duplicate upload. It writes only
 a PDF child beneath the verified My Library parent, without editing parent
 bibliographic metadata. A partial or uncertain write can leave an attachment;
 inspect Zotero before starting another attempt. No automatic deletion or rollback
@@ -217,9 +232,10 @@ no durable PDF path, acquisition queue or history is added.
 Initial authorization belongs to Web **Settings → Advanced & Diagnostics →
 Zotero integration**. Acquisition does not initiate the first authorization
 dialog. One-time **Allow** is process-only; remembered authorization uses OS
-credential storage by Zotero Server-ID, with no plaintext fallback. A remembered
-401 replay is guarded and bounded to one eligible reauthorization/replay, with
-fresh identity/PDF checks. Rate limits remain shared across workspace changes.
+credential storage by Zotero Server-ID, with no plaintext fallback. A confirmed
+remembered-credential 401 before mutation permits at most one eligible reauthorization/replay,
+with fresh identity/PDF checks before authorization and again before replay.
+Rate limits remain shared across workspace changes.
 
 If a qualified PDF waits for authorization, authorize in Settings, then click
 **Continue after Zotero authorization**. The same frozen task and staged
@@ -228,9 +244,12 @@ artifact resume, without rereading Paper or acquiring the PDF again.
 There is one process-local active task, no queue or history. Browser/auth waits
 do not hold a lifetime worker; the UI remains navigable. Workspace changes affect
 the next task. **Cancel acquisition** is available only before **ATTACHING** and
-the mutation gate. After the gate, cancellation is too late and implies no
-rollback. Restart loses the task and browser authority; start a new task that
-rechecks current Paper and Zotero state. Normal Chrome session recovery rules
+the mutation gate. Cancel and gate entry compete atomically under the same
+coordinator lock. After gate entry, Cancel returns `TOO_LATE`, even before the
+first POST, and the authorized flow continues without downstream cancellation
+polling or any implication of rollback. Restart loses the task and browser
+authority; start a new task that rechecks current Paper and Zotero state.
+Normal Chrome session recovery rules
 are documented in the companion README.
 
 #### Acquisition troubleshooting
