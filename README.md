@@ -6,13 +6,8 @@ secondary discovery and bibliographic evidence, consolidates provider evidence
 before local keyword filtering, canonicalizes retained papers and versions,
 safely updates durable Paper and Author Markdown, and exports kept papers.
 
-v0.5.0 is the latest released version. It releases Institutional PDF Acquisition
-while preserving the existing four-state Markdown workflow. Its A0–A7
-implementation and independent reviews, final audit, release preparation,
-release transaction, and closeout are complete. Released package metadata is
-`0.5.0`.
-
-The current development source implements the unreleased v0.5.1 path. A0–A9
+v0.5.1 is the latest released and completed baseline, with
+package metadata `0.5.1` and normal-Chrome PDF acquisition governed by SPEC §36. A0–A9
 implementation, independent final-audit Fix 1–3 review, full automated validation,
 and scoped live acquisition and actual Zotero file registration verification
 are complete under SPEC §36.14. The live audit verified normal Chrome,
@@ -21,9 +16,18 @@ staging, `%PDF` validation, PUBLISHED qualification, Settings-owned remembered
 authorization, and a real registered PDF child. A separate institutional-path
 run naturally presented no human-verification challenge; it is recorded as
 `HUMAN_VERIFICATION_NOT_PRESENT`, with that branch not live-exercised and no
-challenge manufactured. Implementation acceptance and final audit are complete;
-release preparation is in progress. Package metadata is now `0.5.1`; the v0.5.1 release
-transaction and product closeout are not complete.
+challenge manufactured or verification bypass used. Implementation acceptance,
+final audit, release preparation, final clean-export release validation, annotated
+tag creation, main/tag pushes, and the GitHub Release are complete. Published
+wheel/sdist SHA-256 digests are verified. This post-release documentation closeout
+completes product/release closeout when committed after the release tag; that
+documentation commit is outside the v0.5.1 tag target (SPEC §24.17).
+
+v0.5.0 previously released Institutional PDF Acquisition
+while preserving the existing four-state Markdown workflow. Its A0–A7
+implementation and independent reviews, final audit, release preparation,
+release transaction, and closeout are complete. Released package metadata is
+`0.5.0`.
 
 v0.4.7 completes Journals Organization &
 Bulk Import while preserving the durable workflow model and compatibility
@@ -122,10 +126,10 @@ Paper Markdown remains the durable workflow state. The GUI does not add a
 workflow/execution database, persistent run history, heartbeat, SSE, WebSocket,
 queue, or another source of Paper decision state.
 
-### Add PDF to Zotero — current development source
+### Add PDF to Zotero — released v0.5.1 workflow
 
-The workflow below describes the current **v0.5.1 development source**. v0.5.1
-is not released; Python package metadata is **0.5.1** during release preparation.
+The workflow below is released **v0.5.1** behavior. Python package metadata is
+**0.5.1**; the standalone browser companion is installed from the source repository.
 
 1. **Keep** a Paper and use **Copy DOI** in Kept detail.
 2. Manually create or import the bibliographic parent into Zotero **My Library**.
@@ -440,7 +444,7 @@ untouched. Neither v0.4.3 nor the current source tree reads, writes, deletes,
 migrates, or modifies it. It has
 no authority over current execution and needs no migration. The deprecated
 `run --reuse-provider-cache` compatibility flag expired after v0.5.0 and is
-removed in the v0.5.1 source; argparse now rejects it as an unknown option.
+removed in released v0.5.1; argparse now rejects it as an unknown option.
 Normal Run continues to reuse revision-validated Provider state automatically.
 
 New last-run snapshots remain schema v2 and write `reused_units: []`. Valid
