@@ -335,10 +335,9 @@ class ZoteroWriteClient(ZoteroAuthorizationClient):
 
     def _write(self, path: str, *, headers=None, guard=None,
                stage=ZoteroUploadStage.NO_CONFIRMED_MUTATION, attachment_key=None, **kwargs) -> httpx.Response:
-        self._guard(guard, stage, attachment_key)
         credential = self._credential_for_write()
         for attempt in range(2):
-            # Authorization may require human interaction; check again afterwards.
+            # Guard each content POST, including replay after fresh authorization.
             self._guard(guard, stage, attachment_key)
             try:
                 response = self._request(
@@ -415,9 +414,12 @@ class ZoteroWriteClient(ZoteroAuthorizationClient):
 
         This operation must follow current identity/attachment inspection. A2
         preserves the supplied file and performs no PDF discovery or parsing.
-        An optional guard runs before authorization access, each write/replay,
-        and fresh 401 authorization. Its stage/child key identifies this attempt's
-        own partial attachment; rejection prevents further writes/dialogs.
+        The caller supplies the optional application guard. It runs once before
+        each credential-authenticated content POST, after credential selection,
+        and once before direct byte upload. A confirmed remembered-credential 401
+        before mutation also runs it before fresh authorization, then again
+        before replay. Its stage/child key identifies this attempt's own partial
+        attachment; rejection prevents the guarded write or fresh dialog.
         """
         stage = ZoteroUploadStage.NO_CONFIRMED_MUTATION
         self._reauthorized = False

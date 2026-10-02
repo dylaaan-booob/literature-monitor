@@ -1095,13 +1095,38 @@ def test_bounded_prepare_and_qualified_commit_keep_the_frozen_target(prepared_co
     s=prepared_commit
     update(s.path, status='rejected', preferred_version=None, custom='later human edit')
     before=s.path.read_bytes()
-    result=s.commit(mutation_allowed=lambda:True)
+    result=s.commit()
     assert result.outcome is Outcome.SUCCEEDED and result.linkage_completed
     assert result.upload_stage is ZoteroUploadStage.REGISTERED
     assert s.writer_calls==1 and s.staging_calls==s.qualification_calls==0
     assert len([r for r in posts(s) if r.url.path=='/api/users/0/items'])==1
     assert all(r.headers['Zotero-Server-ID']==s.task.server_id for r in posts(s))
     assert s.path.read_bytes()==before and len(s.action_reads)==1
+
+
+def test_writer_guard_owns_final_check_before_each_content_post(prepared_commit):
+    s = prepared_commit
+    s.protocol_full = True
+    events = []
+
+    def check_parent(count):
+        # The writer is already constructed; no independent pre-writer check.
+        assert s.writer_calls == 1
+        events.append(('parent',))
+
+    s.identity_hook = check_parent
+    s.attachment_hook = lambda count: events.append(('attachments',))
+    s.write_hook = lambda request: events.append((request.method, request.url.path))
+    result = s.commit()
+    assert result.outcome is Outcome.SUCCEEDED and result.upload_stage is ZoteroUploadStage.REGISTERED
+    assert not result.mutation_uncertain
+    expected_posts = ['/api/users/0/items', f'/api/users/0/items/{CHILD}/file',
+                      '/api/local/uploads/TEST_UPLOAD', f'/api/users/0/items/{CHILD}/file']
+    assert events == [event for endpoint in expected_posts for event in [
+        ('GET', '/api/'), ('parent',), ('attachments',), ('POST', endpoint),
+    ]]
+    assert [r.url.path for r in posts(s)] == expected_posts
+    assert posts(s)[2].content == s.source.read_bytes()
 
 
 def test_final_commit_refuses_raw_paths_or_unqualified_pdf(prepared_commit):
@@ -1117,13 +1142,17 @@ def test_final_zotero_only_identity_check_suppresses_upload(prepared_commit,fiel
     from dataclasses import replace
     s=prepared_commit;s.parent=replace(PARENT,**{field:value})
     result=s.commit()
-    assert result.outcome is Outcome.CONFLICT and s.writer_calls==0 and posts(s)==[]
+    assert result.outcome is Outcome.CONFLICT and s.writer_calls==1 and posts(s)==[]
+    assert result.upload_stage is ZoteroUploadStage.NO_CONFIRMED_MUTATION and not result.mutation_uncertain
+    assert [(r.method,r.url.path) for r in s.requests]==[('GET','/api/')]
 
 
 def test_final_zotero_only_actual_pdf_check_suppresses_upload(prepared_commit):
     s=prepared_commit;s.pdf_keys=s.pdf_file_keys=('EXIST001',)
     result=s.commit()
-    assert result.outcome is Outcome.PDF_ALREADY_ATTACHED and s.writer_calls==0 and posts(s)==[]
+    assert result.outcome is Outcome.PDF_ALREADY_ATTACHED and s.writer_calls==1 and posts(s)==[]
+    assert result.upload_stage is ZoteroUploadStage.NO_CONFIRMED_MUTATION and not result.mutation_uncertain
+    assert [(r.method,r.url.path) for r in s.requests]==[('GET','/api/')]
 
 
 @pytest.mark.parametrize('incomplete',[False,True])
@@ -1132,19 +1161,126 @@ def test_final_attachment_inspection_fails_closed(prepared_commit,incomplete):
     if incomplete:s.unknown_attachments=True
     else:s.attachment_outcome=Read.INVALID_RESPONSE
     result=s.commit()
-    assert result.outcome is Outcome.ZOTERO_FAILURE and s.writer_calls==0 and posts(s)==[]
-
-
-def test_gate_callback_refusal_prevents_every_content_post(prepared_commit):
-    s=prepared_commit;result=s.commit(mutation_allowed=lambda:False)
-    assert result.outcome is Outcome.CONFLICT and posts(s)==[]
+    assert result.outcome is Outcome.ZOTERO_FAILURE and s.writer_calls==1 and posts(s)==[]
     assert result.upload_stage is ZoteroUploadStage.NO_CONFIRMED_MUTATION and not result.mutation_uncertain
+    assert [(r.method,r.url.path) for r in s.requests]==[('GET','/api/')]
 
 
-def test_staged_artifact_changed_before_commit_never_reaches_writer(prepared_commit):
-    s=prepared_commit;s.qualified.artifact.path.write_bytes(b'changed')
+@pytest.mark.parametrize('change',['modify','delete'])
+def test_staged_artifact_changed_before_commit_never_reaches_writer(prepared_commit,change):
+    s=prepared_commit
+    if change=='modify':s.qualified.artifact.path.write_bytes(b'changed')
+    else:s.qualified.artifact.path.unlink()
     result=s.commit()
     assert result.outcome is Outcome.NO_VALID_PDF and s.writer_calls==0 and posts(s)==[]
+    assert not s.requests and not result.mutation_uncertain
+
+
+@pytest.mark.parametrize('change', ['modify', 'delete'])
+def test_staged_artifact_changed_after_commit_check_blocks_first_post(prepared_commit, change):
+    s = prepared_commit
+
+    def change_after_local_preparation(request):
+        # This credential probe follows commit validation and writer file/hash preparation.
+        if request.method == 'GET':
+            if change == 'modify':s.qualified.artifact.path.write_bytes(b'changed')
+            else:s.qualified.artifact.path.unlink()
+
+    s.write_hook = change_after_local_preparation
+    result = s.commit()
+    assert result.outcome is Outcome.CONFLICT and result.upload_stage is ZoteroUploadStage.NO_CONFIRMED_MUTATION
+    assert s.writer_calls == 1 and not posts(s) and not result.mutation_uncertain
+    assert [(r.method, r.url.path) for r in s.requests] == [('GET', '/api/')]
+
+
+@pytest.mark.parametrize('boundary', ['prepare', 'bytes'])
+@pytest.mark.parametrize('change', ['modify', 'delete'])
+def test_staged_artifact_changed_after_child_blocks_remaining_bytes_mutation(prepared_commit, boundary, change):
+    s = prepared_commit
+    s.protocol_full = True
+    expected_posts = ['/api/users/0/items']
+    if boundary == 'bytes':expected_posts.append(f'/api/users/0/items/{CHILD}/file')
+
+    def change_before_boundary(request):
+        if request.method == 'GET' and [r.url.path for r in posts(s)] == expected_posts:
+            if change == 'modify':s.qualified.artifact.path.write_bytes(b'changed')
+            else:s.qualified.artifact.path.unlink()
+
+    s.write_hook = change_before_boundary
+    result = s.commit()
+    assert result.outcome is Outcome.CONFLICT and result.upload_stage is ZoteroUploadStage.CHILD_CREATED
+    assert not result.mutation_uncertain and 'partial or uncertain' in result.message
+    assert [r.url.path for r in posts(s)] == expected_posts
+    assert s.pdf_keys == (CHILD,) and not s.pdf_file_keys
+
+
+@pytest.mark.parametrize('change', ['modify', 'delete'])
+def test_registration_succeeds_without_artifact_validation_after_confirmed_bytes(prepared_commit, monkeypatch, change):
+    from literature_monitor.pdf_staging import StagedPdf
+
+    s = prepared_commit
+    s.protocol_full = True
+    before_registration = ['/api/users/0/items', f'/api/users/0/items/{CHILD}/file',
+                           '/api/local/uploads/TEST_UPLOAD']
+    after_bytes = False
+    validation_after_bytes = []
+    validate = StagedPdf.validate
+
+    def record_validation(artifact):
+        if after_bytes:validation_after_bytes.append(artifact)
+        return validate(artifact)
+
+    monkeypatch.setattr(StagedPdf, 'validate', record_validation)
+
+    def change_after_confirmed_bytes(request):
+        nonlocal after_bytes
+        # The registration credential probe happens only after the bytes response
+        # returned 201 and the real writer advanced to BYTES_UPLOADED.
+        if request.method == 'GET' and [r.url.path for r in posts(s)] == before_registration:
+            after_bytes = True
+            if change == 'modify':s.qualified.artifact.path.write_bytes(b'changed')
+            else:s.qualified.artifact.path.unlink()
+
+    s.write_hook = change_after_confirmed_bytes
+    result = s.commit()
+    assert after_bytes and validation_after_bytes == []
+    assert result.outcome is Outcome.SUCCEEDED and result.upload_stage is ZoteroUploadStage.REGISTERED
+    assert not result.mutation_uncertain
+    assert [r.url.path for r in posts(s)] == before_registration + [f'/api/users/0/items/{CHILD}/file']
+    assert posts(s)[2].content == s.source.read_bytes()
+    assert posts(s)[-1].content == b'upload=TEST_UPLOAD'
+    assert s.pdf_keys == s.pdf_file_keys == (CHILD,)
+
+
+@pytest.mark.parametrize('boundary', ['prepare', 'bytes', 'register'])
+@pytest.mark.parametrize('change', ['parent', 'doi', 'server', 'own_removed', 'external_pdf', 'incomplete'])
+def test_current_zotero_state_blocks_each_remaining_mutation_boundary(prepared_commit, boundary, change):
+    s = prepared_commit
+    s.protocol_full = True
+    expected_posts = ['/api/users/0/items']
+    if boundary in ('bytes', 'register'):expected_posts.append(f'/api/users/0/items/{CHILD}/file')
+    if boundary == 'register':expected_posts.append('/api/local/uploads/TEST_UPLOAD')
+    inspections_before = s.inspect_calls
+
+    def change_before_boundary(request):
+        if request.method != 'GET' or [r.url.path for r in posts(s)] != expected_posts:return
+        if change in ('parent', 'doi', 'server'):
+            s.parent = VerifiedZoteroItem('OTHER001' if change == 'parent' else PARENT.key,
+                '10.5555/changed' if change == 'doi' else DOI,
+                'other-instance' if change == 'server' else PARENT.server_id)
+        elif change == 'own_removed':s.pdf_keys = ()
+        elif change == 'external_pdf':s.pdf_keys, s.pdf_file_keys = (CHILD, 'OTHER001'), ('OTHER001',)
+        else:s.attachment_outcome = Read.INVALID_RESPONSE
+
+    s.write_hook = change_before_boundary
+    result = s.commit()
+    assert result.outcome is (Outcome.ZOTERO_FAILURE if change == 'incomplete' else Outcome.CONFLICT)
+    assert result.upload_stage is (ZoteroUploadStage.BYTES_UPLOADED if boundary == 'register'
+                                   else ZoteroUploadStage.CHILD_CREATED)
+    assert not result.mutation_uncertain and 'partial or uncertain' in result.message
+    assert [r.url.path for r in posts(s)] == expected_posts
+    if change not in ('parent', 'doi', 'server'):
+        assert s.inspect_calls > inspections_before
 
 
 def test_final_commit_remembered_401_rechecks_zotero_before_one_replay(prepared_commit):
@@ -1172,6 +1308,27 @@ def test_new_pdf_at_remembered_401_guard_prevents_dialog_and_replay(prepared_com
     assert result.outcome is Outcome.PDF_ALREADY_ATTACHED
     assert [r.url.path for r in posts(s)]==['/api/users/0/items']
     assert result.upload_stage is ZoteroUploadStage.NO_CONFIRMED_MUTATION and not result.mutation_uncertain
+
+
+@pytest.mark.parametrize('boundary', ['authorization', 'replay'])
+@pytest.mark.parametrize('change', ['modify', 'delete'])
+def test_stale_artifact_at_remembered_401_guard_blocks_dialog_or_replay(prepared_commit, boundary, change):
+    s = prepared_commit
+    s.post_status['/api/users/0/items'] = [401, 200]
+    endpoint = '/api/users/0/items' if boundary == 'authorization' else '/api/local/authorize'
+
+    def change_before_guard(request):
+        if request.method == 'POST' and request.url.path == endpoint:
+            if change == 'modify':s.qualified.artifact.path.write_bytes(b'changed')
+            else:s.qualified.artifact.path.unlink()
+
+    s.write_hook = change_before_guard
+    result = s.commit()
+    assert result.outcome is Outcome.CONFLICT and result.upload_stage is ZoteroUploadStage.NO_CONFIRMED_MUTATION
+    assert not result.mutation_uncertain
+    assert [r.url.path for r in posts(s)] == ['/api/users/0/items'] + (
+        ['/api/local/authorize'] if boundary == 'replay' else [])
+    assert not s.pdf_keys and not s.pdf_file_keys
 
 
 def test_one_time_401_cannot_authorize_or_replay_final_commit(prepared_commit):

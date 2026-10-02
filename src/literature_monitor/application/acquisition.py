@@ -1,6 +1,5 @@
 """Bounded acquisition preflight/commit (SPEC §§36.3–36.7)."""
 
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -244,8 +243,7 @@ class AcquisitionService:
         with ZoteroAuthorizationClient(task.server_id, authorization_runtime=self._authorization_runtime) as client:
             return client.authorization_status()
 
-    def commit(self, task: AcquisitionTask, qualified: 'QualifiedPdf', *, linkage_completed=False,
-               mutation_allowed: Callable[[], bool] | None = None) -> AcquisitionResult:
+    def commit(self, task: AcquisitionTask, qualified: 'QualifiedPdf', *, linkage_completed=False) -> AcquisitionResult:
         from literature_monitor.version_qualification import QualifiedPdf
         if not isinstance(task, AcquisitionTask):
             raise TypeError('A frozen acquisition task is required.')
@@ -258,7 +256,7 @@ class AcquisitionService:
                 AcquisitionRecovery.CHECK_ZOTERO, linkage_completed=linkage_completed)
         try:
             return self._upload(task, qualified.artifact.path, attempt,
-                validate=qualified.artifact.validate, mutation_allowed=mutation_allowed)
+                validate=qualified.artifact.validate)
         except Exception:
             return AcquisitionResult(task.paper_id, AcquisitionOutcome.INTERNAL_FAILURE,
                 AcquisitionRecovery.CHECK_ZOTERO, linkage_completed=attempt.linked,
@@ -314,7 +312,7 @@ class AcquisitionService:
                 return result(AcquisitionOutcome.UPLOAD_FAILURE, AcquisitionRecovery.RATE_LIMITED, retry_after_seconds=delay)
             return PreparedAcquisition(task, attempt.linked)
 
-    def _upload(self, task, path, attempt, *, validate=None, mutation_allowed=None):
+    def _upload(self, task, path, attempt, *, validate=None):
         def result(outcome, recovery=AcquisitionRecovery.NONE, **kwargs):
             return AcquisitionResult(task.paper_id, outcome, recovery, linkage_completed=attempt.linked, **kwargs)
         with ZoteroLocalClient() as local:
@@ -331,9 +329,6 @@ class AcquisitionService:
                 elif checked.has_pdf:
                     return result(AcquisitionOutcome.PDF_ALREADY_ATTACHED)
                 return None
-            failure = revalidate()
-            if failure is not None:
-                return failure
             guard_failure, retried = None, False
             def guard(context):
                 nonlocal guard_failure, retried
@@ -343,7 +338,8 @@ class AcquisitionService:
                         guard_failure = result(AcquisitionOutcome.UPLOAD_FAILURE, AcquisitionRecovery.CHECK_ZOTERO)
                         return False
                     retried = True
-                if (validate is not None and not validate()) or (mutation_allowed is not None and not mutation_allowed()):
+                if (context.stage in (ZoteroUploadStage.NO_CONFIRMED_MUTATION, ZoteroUploadStage.CHILD_CREATED)
+                        and validate is not None and not validate()):
                     guard_failure = result(AcquisitionOutcome.CONFLICT, AcquisitionRecovery.CHECK_ZOTERO)
                     return False
                 guard_failure = revalidate(context.attachment_key)

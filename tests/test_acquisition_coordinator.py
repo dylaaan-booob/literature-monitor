@@ -73,13 +73,11 @@ class ControlledService:
             self.auth_hook()
         return ZoteroAuthorizationResult(self.auth, task.server_id)
 
-    def commit(self, task, qualified, *, linkage_completed, mutation_allowed):
+    def commit(self, task, qualified, *, linkage_completed=False):
         assert task is self.prepared.task and qualified.artifact.task_id == task.task_id
-        assert qualified.artifact.validate() and mutation_allowed()
         self.commits.append((task, qualified, linkage_completed))
         self.commit_entered.set()
         assert self.commit_release.wait(5)
-        assert mutation_allowed()
         self.content_posts += 1
         if self.commit_error:
             raise self.commit_error
@@ -308,16 +306,49 @@ def test_missing_authorization_retains_qualified_task_without_worker(scenario, a
     assert s.c.snapshot().result.outcome is Outcome.SUCCEEDED
 
 
-def test_resume_revalidates_artifact_and_original_server(scenario):
+@pytest.mark.parametrize('change', ['modify', 'delete'])
+def test_resume_leaves_stale_artifact_rejection_to_real_service_commit(scenario, monkeypatch, change):
+    from literature_monitor.application import acquisition as application
+    from literature_monitor.pdf_staging import StagedPdf
+
     s = start_browser(scenario); ready(s); s.service.auth = Auth.REQUIRED
     stage_candidate(s); snapshot = s.c.snapshot()
-    artifact = s.c._active.qualified.artifact
-    artifact.path.write_bytes(b'changed')
+    qualified = s.c._active.qualified
+    artifact = qualified.artifact
+    if change == 'modify':artifact.path.write_bytes(b'changed')
+    else:artifact.path.unlink()
+    events = []
+    s.service.auth_hook = lambda: events.append(('authorization',))
+    real_service = application.AcquisitionService(s.options['workspace_dir'])
+    validate = StagedPdf.validate
+
+    def record_validation(value):
+        assert value is artifact
+        events.append(('validate', s.c.snapshot().stage))
+        return validate(value)
+
+    def commit(task, value, *, linkage_completed=False):
+        assert task is s.task and value is qualified
+        assert s.c._active.gate_entered and s.c.snapshot().stage is Stage.ATTACHING
+        events.append(('commit',))
+        s.service.commits.append((task, value, linkage_completed))
+        return real_service.commit(task, value, linkage_completed=linkage_completed)
+
+    def unexpected_writer(*args, **kwargs):
+        pytest.fail('Stale commit must stop before writer construction or content POST')
+
+    monkeypatch.setattr(StagedPdf, 'validate', record_validation)
+    monkeypatch.setattr(s.service, 'commit', commit)
+    monkeypatch.setattr(application, 'ZoteroWriteClient', unexpected_writer)
     s.service.auth = Auth.AUTHORIZED
     assert s.c.resume(ID,snapshot.attempt_id) is Action.ACCEPTED
     join_workers(s)
-    assert s.c.snapshot().result.outcome is Outcome.NO_VALID_PDF and not s.service.commits
-    assert not artifact.path.exists()
+    assert events == [('authorization',), ('commit',), ('validate', Stage.ATTACHING)]
+    result = s.c.snapshot().result
+    assert result.outcome is Outcome.NO_VALID_PDF and not result.mutation_uncertain
+    assert len(s.service.commits) == 1 and s.service.content_posts == 0
+    assert s.c._active is None and s.c.registry.status(str(s.task.task_id)) is None
+    assert not artifact.path.exists() and s.source.exists()
 
 
 def test_server_change_during_authorization_read_terminates_without_commit(scenario):
@@ -329,17 +360,25 @@ def test_server_change_during_authorization_read_terminates_without_commit(scena
 
 def test_cancel_wins_before_gate_even_after_authorization_check(scenario, monkeypatch):
     s = start_browser(scenario); ready(s)
+    authorization_checked = threading.Event()
+    s.service.auth_hook = authorization_checked.set
     entered, release = threading.Event(), threading.Event()
     original = s.c._enter_gate
-    def gate(attempt): entered.set(); assert release.wait(5); return original(attempt)
+    gate_results = []
+    def gate(attempt):
+        entered.set(); assert release.wait(5)
+        accepted = original(attempt); gate_results.append(accepted); return accepted
     monkeypatch.setattr(s.c,'_enter_gate',gate)
     try:
         dispatch(s,'download_candidate',download_payload(s)); assert entered.wait(5)
+        assert authorization_checked.is_set()
         snapshot = s.c.snapshot(); artifact = s.c._active.qualified.artifact
         assert s.c.cancel(ID,snapshot.attempt_id) is Action.ACCEPTED
         assert not artifact.path.exists() and s.c.registry.status(str(s.task.task_id)) is None
     finally: release.set(); join_workers(s)
+    assert gate_results == [False] and s.service.commits == []
     assert s.service.content_posts == 0 and s.c.snapshot().result.outcome is Outcome.CANCELLED
+    assert s.c._active is None and dispatch(s,'download_candidate',download_payload(s)) is None
 
 
 def test_gate_wins_cancel_is_too_late_before_post_begins(scenario):
@@ -348,6 +387,7 @@ def test_gate_wins_cancel_is_too_late_before_post_begins(scenario):
         dispatch(s,'download_candidate',download_payload(s)); assert s.service.commit_entered.wait(5)
         snapshot = s.c.snapshot()
         assert snapshot.stage is Stage.ATTACHING and not snapshot.cancel_available
+        assert s.c._active.gate_entered and len(s.service.commits) == 1
         assert s.service.content_posts == 0
         assert s.c.cancel(ID,snapshot.attempt_id) is Action.TOO_LATE
         assert s.c.snapshot() == snapshot
@@ -357,8 +397,10 @@ def test_gate_wins_cancel_is_too_late_before_post_begins(scenario):
 
 def test_cancel_and_gate_barrier_exactly_one_wins(scenario, monkeypatch):
     s = start_browser(scenario); ready(s); s.service.commit_release.clear()
-    barrier = threading.Barrier(2); original = s.c._enter_gate; outcomes = []
-    def gate(attempt): barrier.wait(5); return original(attempt)
+    barrier = threading.Barrier(2); original = s.c._enter_gate; outcomes = []; gate_results = []
+    def gate(attempt):
+        barrier.wait(5)
+        accepted = original(attempt); gate_results.append(accepted); return accepted
     monkeypatch.setattr(s.c,'_enter_gate',gate)
     identity = s.c.snapshot().attempt_id
     def cancel(): barrier.wait(5); outcomes.append(s.c.cancel(ID,identity))
@@ -367,7 +409,11 @@ def test_cancel_and_gate_barrier_exactly_one_wins(scenario, monkeypatch):
         dispatch(s,'download_candidate',download_payload(s)); caller.join(5); assert not caller.is_alive()
         assert outcomes[0] in (Action.ACCEPTED,Action.TOO_LATE)
     finally: s.service.commit_release.set(); join_workers(s)
+    assert gate_results == [outcomes[0] is Action.TOO_LATE]
+    assert len(s.service.commits) == (1 if outcomes[0] is Action.TOO_LATE else 0)
     assert (s.service.content_posts,s.c.snapshot().result.outcome) == ((0,Outcome.CANCELLED) if outcomes[0] is Action.ACCEPTED else (1,Outcome.SUCCEEDED))
+    assert s.c._active is None and s.c.registry.status(str(s.task.task_id)) is None
+    assert list(s.root.iterdir()) == [] and s.source.exists()
 
 
 @pytest.mark.parametrize('outcome',[Outcome.SUCCEEDED,Outcome.PDF_ALREADY_ATTACHED,Outcome.CONFLICT,Outcome.UPLOAD_FAILURE])

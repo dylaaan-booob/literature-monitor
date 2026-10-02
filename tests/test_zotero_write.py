@@ -21,6 +21,7 @@ from literature_monitor.zotero_write import (
     ZoteroUploadOutcome as Upload,
     ZoteroUploadStage as Stage,
     ZoteroWriteClient,
+    ZoteroWriteGuardPhase as GuardPhase,
 )
 
 SERVER = "test-instance-A"
@@ -394,10 +395,32 @@ def test_upload_exists_short_circuits_transfer_and_register(backend, local_file)
 def test_authorization_revoked_key_one_fresh_authorization_one_create_retry(backend, local_file):
     backend.remember()
     flow = [response(401), approved(True, FRESH_SECRET), created(), response(payload={"exists": 1})]
-    client, requests = client_for(flow)
+    events = []
+
+    def observe(request):
+        if request.method == "POST":
+            events.append(("POST", request.url.path))
+
+    def guard(context):
+        events.append(("guard", context.phase, context.stage, context.attachment_key))
+        return True
+
+    client, requests = client_for(flow, observer=observe)
     with client:
-        result = client.upload_pdf(local_file)
+        result = client.upload_pdf(local_file, guard=guard)
     assert result.outcome is Upload.SUCCEEDED
+    assert result.stage is Stage.REGISTERED and result.attachment_key == ATTACHMENT
+    assert not result.mutation_uncertain
+    assert events == [
+        ("guard", GuardPhase.BEFORE_WRITE, Stage.NO_CONFIRMED_MUTATION, None),
+        ("POST", "/api/users/0/items"),
+        ("guard", GuardPhase.BEFORE_AUTHORIZATION_RETRY, Stage.NO_CONFIRMED_MUTATION, None),
+        ("POST", "/api/local/authorize"),
+        ("guard", GuardPhase.BEFORE_WRITE, Stage.NO_CONFIRMED_MUTATION, None),
+        ("POST", "/api/users/0/items"),
+        ("guard", GuardPhase.BEFORE_WRITE, Stage.CHILD_CREATED, ATTACHMENT),
+        ("POST", FILE_ENDPOINT),
+    ]
     creates = [r for r in posts(requests) if r.url.path == "/api/users/0/items"]
     assert len(creates) == 2
     assert creates[0].headers["Zotero-Write-Token"] == creates[1].headers["Zotero-Write-Token"]
@@ -680,16 +703,29 @@ def test_upload_later_401_stops_without_authorization_or_replay(backend, local_f
 @pytest.mark.parametrize("failure", [response(400), response(401), httpx.ReadError(SECRET)])
 def test_upload_one_time_consumed_after_failed_authenticated_write(backend, local_file, failure):
     client, requests = client_for([approved(False), failure])
+    contexts = []
+
+    def guard(context):
+        contexts.append(context)
+        return True
+
     with client:
         assert client.authorize().outcome is Auth.AUTHORIZED
-        first = client.upload_pdf(local_file)
-        second = client.upload_pdf(local_file)
+        first = client.upload_pdf(local_file, guard=guard)
+        second = client.upload_pdf(local_file, guard=guard)
     assert first.failure in (Upload.API_FAILURE, Upload.AUTH_FAILURE)
+    assert first.stage is Stage.NO_CONFIRMED_MUTATION and first.attachment_key is None
+    if isinstance(failure, httpx.Response) and failure.status_code == 401:
+        assert first.outcome is first.failure is Upload.AUTH_FAILURE
     assert first.mutation_uncertain is isinstance(failure, httpx.HTTPError)
     assert not second.mutation_uncertain
     assert second.authorization.outcome is Auth.REQUIRED
     assert second.stage is Stage.NO_CONFIRMED_MUTATION
-    assert len(posts(requests)) == 2 and backend.values == {}
+    assert [r.url.path for r in posts(requests)] == ["/api/local/authorize", "/api/users/0/items"]
+    assert backend.values == {}
+    assert [(context.phase, context.stage, context.attachment_key) for context in contexts] == [
+        (GuardPhase.BEFORE_WRITE, Stage.NO_CONFIRMED_MUTATION, None),
+    ]
     assert_no_secrets(first)
     assert_no_secrets(second)
 
@@ -812,39 +848,108 @@ def test_upload_file_size_contract_rejected_before_hash_or_write(backend, tmp_pa
     assert not requests and not backend.calls
 
 
-@pytest.mark.parametrize('phase', ['create','prepare','register'])
-def test_a5_guard_rejects_401_before_new_authorization(backend,local_file,phase):
-    from literature_monitor.zotero_write import ZoteroWriteGuardPhase
+def test_upload_guards_once_per_mutation_boundary_after_credential_selection(backend, local_file):
     backend.remember()
-    prefix=[] if phase=='create' else [created()] if phase=='prepare' else [created(),prepared(),response(201)]
-    client,requests=client_for(prefix+[response(401)])
-    contexts=[]
+    events = []
+    credential_reads_at_guard = []
+
+    def observe(request):
+        events.append((request.method, request.url.path))
+
+    def guard(context):
+        events.append(("guard", context.phase, context.stage, context.attachment_key))
+        credential_reads_at_guard.append(sum(action == "get" for action, _, _ in backend.calls))
+        return True
+
+    client, requests = client_for(
+        [created(), prepared(), response(201), response(204)], observer=observe,
+    )
+    with client:
+        result = client.upload_pdf(local_file, guard=guard)
+    assert result.outcome is Upload.SUCCEEDED and result.stage is Stage.REGISTERED
+    assert result.attachment_key == ATTACHMENT and not result.mutation_uncertain
+    assert events == [
+        ("GET", "/api/"),
+        ("guard", GuardPhase.BEFORE_WRITE, Stage.NO_CONFIRMED_MUTATION, None),
+        ("POST", "/api/users/0/items"),
+        ("GET", "/api/"),
+        ("guard", GuardPhase.BEFORE_WRITE, Stage.CHILD_CREATED, ATTACHMENT),
+        ("POST", FILE_ENDPOINT),
+        ("GET", "/api/"),
+        ("guard", GuardPhase.BEFORE_WRITE, Stage.CHILD_CREATED, ATTACHMENT),
+        ("POST", "/api/local/uploads/" + UPLOAD_SECRET),
+        ("GET", "/api/"),
+        ("guard", GuardPhase.BEFORE_WRITE, Stage.BYTES_UPLOADED, ATTACHMENT),
+        ("POST", FILE_ENDPOINT),
+    ]
+    assert credential_reads_at_guard == [1, 2, 2, 3]
+    assert posts(requests)[2].content == local_file.read_bytes()
+
+
+@pytest.mark.parametrize("phase", ["create", "prepare", "register"])
+def test_guard_rejects_401_before_new_authorization(backend, local_file, phase):
+    backend.remember()
+    prefix = ([] if phase == "create" else [created()] if phase == "prepare"
+              else [created(), prepared(), response(201)])
+    client, requests = client_for(prefix + [response(401)])
+    contexts = []
+
     def guard(context):
         contexts.append(context)
-        return context.phase is not ZoteroWriteGuardPhase.BEFORE_AUTHORIZATION_RETRY
-    with client:result=client.upload_pdf(local_file,guard=guard)
+        return context.phase is not GuardPhase.BEFORE_AUTHORIZATION_RETRY
+
+    with client:
+        result = client.upload_pdf(local_file, guard=guard)
     assert result.failure is (Upload.GUARD_REJECTED if phase == "create" else Upload.AUTH_FAILURE)
-    assert result.stage is {'create':Stage.NO_CONFIRMED_MUTATION,'prepare':Stage.CHILD_CREATED,'register':Stage.BYTES_UPLOADED}[phase]
-    assert result.outcome is (Upload.GUARD_REJECTED if phase=='create' else Upload.PARTIAL_FAILURE)
-    assert all(r.url.path!='/api/local/authorize' for r in posts(requests))
-    context=contexts[-1]
-    assert context.stage is result.stage and context.attachment_key==(None if phase=='create' else ATTACHMENT)
+    assert result.stage is {"create": Stage.NO_CONFIRMED_MUTATION, "prepare": Stage.CHILD_CREATED,
+                            "register": Stage.BYTES_UPLOADED}[phase]
+    assert result.outcome is (Upload.GUARD_REJECTED if phase == "create" else Upload.PARTIAL_FAILURE)
+    assert [r.url.path for r in posts(requests)] == {
+        "create": ["/api/users/0/items"],
+        "prepare": ["/api/users/0/items", FILE_ENDPOINT],
+        "register": ["/api/users/0/items", FILE_ENDPOINT,
+                     "/api/local/uploads/" + UPLOAD_SECRET, FILE_ENDPOINT],
+    }[phase]
+    assert [context.phase for context in contexts] == {
+        "create": [GuardPhase.BEFORE_WRITE, GuardPhase.BEFORE_AUTHORIZATION_RETRY],
+        "prepare": [GuardPhase.BEFORE_WRITE] * 2,
+        "register": [GuardPhase.BEFORE_WRITE] * 4,
+    }[phase]
+    context = contexts[-1]
+    assert context.stage is result.stage and context.attachment_key == result.attachment_key
+    assert result.attachment_key == (None if phase == "create" else ATTACHMENT)
+    assert not result.mutation_uncertain and backend.values == {}
     assert_no_secrets(result)
 
 
-def test_a5_guard_rechecks_after_fresh_authorization_before_replay(backend,local_file):
-    from literature_monitor.zotero_write import ZoteroWriteGuardPhase
+def test_guard_rejects_after_fresh_authorization_before_replay(backend, local_file):
     backend.remember()
-    authorized=False
+    events = []
+
     def observe(request):
-        nonlocal authorized
-        if request.url.path=='/api/local/authorize':authorized=True
-    client,requests=client_for([response(401),approved(True,FRESH_SECRET)],observer=observe)
+        if request.method == "POST":
+            events.append(("POST", request.url.path))
+
+    client, requests = client_for([response(401), approved(True, FRESH_SECRET)], observer=observe)
+
     def guard(context):
-        return context.phase is ZoteroWriteGuardPhase.BEFORE_AUTHORIZATION_RETRY or not authorized
-    with client:result=client.upload_pdf(local_file,guard=guard)
-    assert result.outcome is Upload.GUARD_REJECTED
-    assert [r.url.path for r in posts(requests)]==['/api/users/0/items','/api/local/authorize']
+        events.append(("guard", context.phase, context.stage, context.attachment_key))
+        return not any(r.url.path == "/api/local/authorize" for r in posts(requests))
+
+    with client:
+        result = client.upload_pdf(local_file, guard=guard)
+    assert result.outcome is result.failure is Upload.GUARD_REJECTED
+    assert result.stage is Stage.NO_CONFIRMED_MUTATION and result.attachment_key is None
+    assert not result.mutation_uncertain
+    assert events == [
+        ("guard", GuardPhase.BEFORE_WRITE, Stage.NO_CONFIRMED_MUTATION, None),
+        ("POST", "/api/users/0/items"),
+        ("guard", GuardPhase.BEFORE_AUTHORIZATION_RETRY, Stage.NO_CONFIRMED_MUTATION, None),
+        ("POST", "/api/local/authorize"),
+        ("guard", GuardPhase.BEFORE_WRITE, Stage.NO_CONFIRMED_MUTATION, None),
+    ]
+    assert [r.url.path for r in posts(requests)] == ["/api/users/0/items", "/api/local/authorize"]
+    assert backend.values == {(credentials.SERVICE_NAME, SERVER): FRESH_SECRET}
 
 
 def test_a5_guard_rechecks_after_initial_authorization_before_create(backend,local_file):
@@ -857,17 +962,38 @@ def test_a5_guard_rechecks_after_initial_authorization_before_create(backend,loc
     assert posts(requests)[0].url.path=='/api/local/authorize'
 
 
-def test_a5_guard_false_prevents_any_authorization_or_write(backend,local_file):
-    client,requests=client_for([])
-    with client:result=client.upload_pdf(local_file,guard=lambda context:False)
-    assert result.outcome is Upload.GUARD_REJECTED and requests==[]
+def test_missing_credential_stops_before_application_guard_without_dialog_or_write(backend, local_file):
+    client, requests = client_for([])
+    contexts = []
+
+    def guard(context):
+        contexts.append(context)
+        return False
+
+    with client:
+        result = client.upload_pdf(local_file, guard=guard)
+    assert result.outcome is result.failure is Upload.AUTH_FAILURE
+    assert result.authorization.outcome is Auth.REQUIRED
+    assert result.stage is Stage.NO_CONFIRMED_MUTATION and result.attachment_key is None
+    assert not result.mutation_uncertain and not contexts and not posts(requests)
+    assert [(r.method, r.url.path) for r in requests] == [("GET", "/api/")]
+    assert backend.calls == [("get", credentials.SERVICE_NAME, SERVER)]
 
 
-def test_a5_guard_exception_is_sanitized_and_fail_closed(backend,local_file,caplog):
-    client,requests=client_for([])
-    def guard(context):raise RuntimeError(SECRET+' '+UPLOAD_URL)
-    with client:result=client.upload_pdf(local_file,guard=guard)
-    assert result.outcome is Upload.GUARD_REJECTED and requests==[]
+def test_guard_exception_is_sanitized_and_fail_closed(backend, local_file, caplog):
+    backend.remember()
+    client, requests = client_for([])
+
+    def guard(context):
+        raise RuntimeError(SECRET + ' ' + UPLOAD_URL)
+
+    with client:
+        result = client.upload_pdf(local_file, guard=guard)
+    assert result.outcome is result.failure is Upload.GUARD_REJECTED
+    assert result.stage is Stage.NO_CONFIRMED_MUTATION and result.attachment_key is None
+    assert not result.mutation_uncertain and not posts(requests)
+    assert [(r.method, r.url.path) for r in requests] == [("GET", "/api/")]
+    assert backend.calls == [("get", credentials.SERVICE_NAME, SERVER)]
     assert_no_secrets(result,caplog)
 
 

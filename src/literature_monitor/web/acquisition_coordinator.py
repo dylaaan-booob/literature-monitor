@@ -398,13 +398,9 @@ class AcquisitionCoordinator:
             self._publish(attempt)
             return True
 
-    def _mutation_allowed(self, attempt):
-        with self._lock:
-            return self._active is attempt and attempt.gate_entered
-
     def _ready_to_commit(self, attempt):
         qualified = attempt.qualified
-        if qualified is None or not qualified.artifact.validate():
+        if qualified is None:
             with self._lock:
                 self._failure(attempt)
             return
@@ -421,7 +417,6 @@ class AcquisitionCoordinator:
                 return
         if not self._enter_gate(attempt):
             return
-        result = attempt.service.commit(attempt.task, qualified, linkage_completed=attempt.linked,
-                                       mutation_allowed=lambda: self._mutation_allowed(attempt))
+        result = attempt.service.commit(attempt.task, qualified, linkage_completed=attempt.linked)
         with self._lock:
             self._finish(attempt, result)
