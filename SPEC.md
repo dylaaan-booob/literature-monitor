@@ -2,7 +2,7 @@
 
 **Status:** Active; v0.5.0 is the latest released version; v0.5.1 is the current unreleased development source (§36), with implementation acceptance and final audit complete under the conditional live-verification boundary in §36.14
 
-**Stage:** v0.5.0 released / closeout complete (§24.16); package metadata remains `0.5.0`. v0.5.1 A0–A9 implementation, independent final-audit Fix 1–3 review, full automated validation, scoped live acquisition, and actual Zotero child file registration verification are complete. Release preparation is the remaining stage; the v0.5.1 release transaction and product closeout are not complete
+**Stage:** v0.5.0 released / closeout complete (§24.16); package metadata is now `0.5.1`. v0.5.1 A0–A9 implementation, independent final-audit Fix 1–3 review, full automated validation, scoped live acquisition, and actual Zotero child file registration verification are complete. Release preparation is in progress (§24.17); the v0.5.1 release transaction and product closeout are not complete
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
@@ -1940,6 +1940,20 @@ Successful institutional PDF retrieval, actual Zotero authorization dialog/autho
 
 ---
 
+### 23.22 v0.5.1 Version-Qualified Institutional PDF Acquisition via Normal Chrome — demonstrated acceptance
+
+A0–A9 implementation, independent final-audit Fix 1–3 review, and implementation acceptance/final audit are complete under §36.14. Implementation commit `3720dc375672a492717ae334856dfe73c9343dcf` (`Implement v0.5.1 PDF acquisition via normal Chrome`) contains the independently reviewed 60-file implementation. §36 remains the authoritative behavior contract.
+
+The independent implementation validation recorded 3356 passed / 0 skipped / 2 existing dependency warnings with Node runtime, 174 shipped worker simulation cases, 101 shipped content-adapter cases, passing lock/diff checks, and an offline wheel/sdist build. These implementation checks are distinct from prepared-tree validation in §24.17.
+
+Scoped live evidence in §36.14 includes normal Chrome companion/handoff, publisher-first navigation, explicit XMU fallback, SmartLinks/Research, delayed task-bound blob attribution, private staging, `%PDF` validation, PUBLISHED qualification, and Settings-owned remembered authorization. Actual Zotero child creation/upload/registration succeeded for parent `ZHIST6EG` and child `LJ6UV83V`; fresh complete Local API inspection verified a non-empty regular PDF file and bytes equal to the user Chrome download. Add PDF did not mutate Paper content.
+
+A separate scoped institutional-path run retained its task/tab/frozen version but naturally presented no genuine human-verification challenge. `HUMAN_VERIFICATION_NOT_PRESENT` records this branch as not live-exercised under the conditional §36.14 boundary; no challenge was manufactured or verification bypass used. Pre-mutation cancellation preserved parent `YLF7MWNU` without a PDF child. Meaningful executable human-wait/continuation coverage passed. Historical v0.5.0 live evidence in §23.21 remains unchanged.
+
+v0.5.1 remains unreleased. The prepared working tree has package metadata `0.5.1`; v0.5.0 remains the latest released version. Release-preparation review/commit, the release transaction, and product closeout remain pending (§24.17).
+
+---
+
 ## 24. Suggested Implementation Sequence
 
 ### 24.1 Completed v0.1.0 history
@@ -2300,6 +2314,31 @@ Annotated tag `v0.5.0` has tag object `11d86e72535e5ea7e757dc51afe604e69973f5a8`
 - `literature_monitor-0.5.0.tar.gz`: `164c2bcefd759435ed1b04ef1b24efbffdf61ad2744492cc71182141eef7ace0`.
 
 §35 remains the authoritative v0.5.0 behavior contract. Historical release facts and the live validation boundaries in §23.21 remain distinct. `monitor.yaml`, `src/.obsidian/`, and `workspace/` remained untouched and local-only. This documentation closeout follows the release tag; its subsequent documentation commit is not part of the v0.5.0 tag target.
+
+---
+
+### 24.17 v0.5.1 — release preparation, unreleased
+
+The reviewed implementation commit is `3720dc375672a492717ae334856dfe73c9343dcf`. A0–A9 implementation, independent Fix 1–3 review, and implementation acceptance/final audit are complete (§§23.22, 36.14). Release preparation updates package/Provider User-Agent identity to `0.5.1`, expires the `--reuse-provider-cache` compatibility flag as already required by §30.6, updates affected tests/current-state documentation, and corrects the credential module's authorization reference to §36.7. Automatic revision-validated Provider-state reuse and legacy-cache immutability remain unchanged; acquisition behavior, companion behavior/version, credential behavior, and dependencies are preserved.
+
+Prepared-tree release-preparation validation passed on 2026-10-02: focused CLI/normal-Run/legacy-cache checks 4 passed; Provider tests 436 passed; affected E2E/state-migration tests 77 passed; full pytest with Node v24.21.0 3356 passed / 0 skipped / 2 existing dependency warnings, including 174 shipped worker and 101 shipped content-adapter cases. `uv lock --check` and `git diff --check` passed. An offline build from an isolated export of the implementation commit plus this prepared diff produced `literature_monitor-0.5.1-py3-none-any.whl` and `literature_monitor-0.5.1.tar.gz`; both metadata versions and package contents were verified. Isolated installed-wheel CLI/import/template smoke passed with 26 installed distributions matching the lock. The standalone companion remains outside the Python artifacts, which contain no local monitor/workspace/Obsidian material.
+
+These prepared-tree checks are separate from earlier implementation validation and future final release-commit validation. The prepared diff is ready for independent review and remains uncommitted; final validation of a release commit is still pending.
+
+The remaining separately authorized sequence is:
+
+```text
+independent release-preparation review
+→ release-preparation commit
+→ final release-commit validation
+→ annotated tag
+→ push main
+→ push tag
+→ GitHub Release
+→ product closeout
+```
+
+v0.5.0 remains the latest released version. v0.5.1 is unreleased, with prepared package metadata `0.5.1`; no v0.5.1 tag, push, GitHub Release, release asset upload, or closeout has occurred. Release preparation performs no new live acquisition or Zotero write and does not access `monitor.yaml`, `src/.obsidian/`, or `workspace/`.
 
 ---
 
@@ -2796,7 +2835,7 @@ v0.4.6 is released and complete. Its §33 implementation and A0–A3 independent
 
 R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback, v0.4.2 Provider Reliability, Coverage, and Explicit Cache Reuse, v0.4.3 Retrieval Efficiency & Revision-Validated Provider Evidence, v0.4.4 Crossref Elapsed-Aware Pacing & Partial Provider Evidence Semantics, v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace, v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI, v0.4.7 Journals Organization & Bulk Import, and v0.5.0 Institutional PDF Acquisition to Existing Zotero Item are completed release history. v0.5.0 is the current released and completed baseline.
 
-v0.5.1 Version-Qualified Institutional PDF Acquisition via Normal Chrome is the current unreleased development source governed by §36. A0–A9 implementation, independent final-audit Fix 1–3 review, full automated validation, scoped normal-Chrome/XMU acquisition, and actual Zotero child file registration verification are complete. Implementation acceptance and final audit are complete under §36.14's conditional live-verification boundary. A scoped real run explicitly sought human verification, but no genuine challenge naturally appeared; `HUMAN_VERIFICATION_NOT_PRESENT` records that environmental non-occurrence, not a live continuation pass or an implementation failure. No challenge was manufactured. Release preparation is the remaining stage; the v0.5.1 release transaction and product closeout are not complete. v0.5.0 remains the latest released version and package metadata remains `0.5.0`. The limited §36 supersede boundary governs v0.5.1 development while historical release and acceptance facts remain unchanged.
+v0.5.1 Version-Qualified Institutional PDF Acquisition via Normal Chrome is the current unreleased development source governed by §36. A0–A9 implementation, independent final-audit Fix 1–3 review, full automated validation, scoped normal-Chrome/XMU acquisition, and actual Zotero child file registration verification are complete. Implementation acceptance and final audit are complete under §36.14's conditional live-verification boundary. A scoped real run explicitly sought human verification, but no genuine challenge naturally appeared; `HUMAN_VERIFICATION_NOT_PRESENT` records that environmental non-occurrence, not a live continuation pass or an implementation failure. No challenge was manufactured. Release preparation is in progress (§24.17); the v0.5.1 release transaction and product closeout are not complete. v0.5.0 remains the latest released version and package metadata is now `0.5.1`. The limited §36 supersede boundary governs v0.5.1 development while historical release and acceptance facts remain unchanged.
 
 The v0.4.4 release and closeout are complete, following §24.12. Its §31 implementation, independent stage reviews, and final independent audit are complete; the §23.17 acceptance scenarios have been demonstrated.
 
@@ -4020,7 +4059,7 @@ A0 originally changed only `SPEC.md`. A1–A7 implementation and independent rev
 
 ## 36. v0.5.1 Version-Qualified Institutional PDF Acquisition via Normal Chrome Contract
 
-This is the authoritative v0.5.1 behavior contract for the current unreleased development source. A0–A9 implementation and independent final-audit Fix 1–3 review are complete; §36.14 records completed implementation acceptance and final audit at their actual automated and scoped live verification levels. v0.5.0 remains the latest released version and package metadata remains `0.5.0`. Release preparation remains; the v0.5.1 release transaction and product closeout are not complete.
+This is the authoritative v0.5.1 behavior contract for the current unreleased development source. A0–A9 implementation and independent final-audit Fix 1–3 review are complete; §36.14 records completed implementation acceptance and final audit at their actual automated and scoped live verification levels. v0.5.0 remains the latest released version and package metadata is now `0.5.1`. Release preparation is in progress (§24.17); the v0.5.1 release transaction and product closeout are not complete.
 
 The completed scoped live audit exercised normal Chrome, publisher→XMU, SmartLinks/Research, task-bound delayed blob download attribution, private staging, `%PDF` validation, PUBLISHED qualification, and Settings-owned remembered authorization. An explicitly authorized fresh task successfully created, uploaded, and registered child `LJ6UV83V` under verified parent `ZHIST6EG`; a fresh complete Local API inspection confirmed a real non-empty regular PDF file whose bytes equal the user Chrome download. The earlier incomplete child remains untouched and is not counted as actual PDF success. The separate human-verification attempt and its environmental boundary are recorded in §36.14. Further real writes or re-registration require explicit user authorization.
 
@@ -4209,6 +4248,6 @@ If a scoped real run reaches the relevant institutional browser path without a g
 
 **Current acceptance record (2026-10-02):** A0–A9 implementation and independent final-audit Fix 1–3 review are complete. Independent automated validation passed: shipped worker simulation 174 cases, shipped content adapters 101 cases, full pytest with Node runtime 3356 passed / 0 skipped / 2 existing warnings, `uv lock --check`, `git diff --check`, and offline build. Scoped normal-Chrome/XMU/download/staging/qualification and actual Zotero registration verification are complete: parent `ZHIST6EG`, registered child `LJ6UV83V`, fresh complete Local API `has_pdf=true` with that child in `pdf_file_keys`, an actual non-empty regular PDF file, and registered bytes equal to the user Chrome download. Add PDF did not mutate Paper content, and live verification did not mutate source files.
 
-The separate human-verification run used Paper `38f516c6-885d-4882-8c00-bd2c207c078d`, DOI `10.1287/ijoc.2024.0765.cd`, and verified parent `YLF7MWNU`. Normal Mark in Zotero changed only the owned status/key fields. Fresh task `20fa032b-0ada-40ad-b392-ca74a9b1b66c`, claimed tab `522718311`, and frozen journal-online/PUBLISHED version survived publisher-first navigation and explicit XMU → SmartLinks → EBSCO Research navigation. No genuine login/CAPTCHA/Cloudflare/MFA challenge naturally appeared: `HUMAN_VERIFICATION_NOT_PRESENT`; real human-step continuation was not live-exercised. No challenge was manufactured, cookies inspected/copied, sessions manipulated, or verification bypass used. Normal cancellation occurred before mutation; parent metadata remained unchanged, no child was created, and actual PDF remained absent. Together with the executable human-wait/continuation coverage, this satisfies the conditional acceptance boundary. Implementation acceptance and final audit are complete; release preparation remains, and v0.5.1 remains unreleased with release transaction and product closeout incomplete.
+The separate human-verification run used Paper `38f516c6-885d-4882-8c00-bd2c207c078d`, DOI `10.1287/ijoc.2024.0765.cd`, and verified parent `YLF7MWNU`. Normal Mark in Zotero changed only the owned status/key fields. Fresh task `20fa032b-0ada-40ad-b392-ca74a9b1b66c`, claimed tab `522718311`, and frozen journal-online/PUBLISHED version survived publisher-first navigation and explicit XMU → SmartLinks → EBSCO Research navigation. No genuine login/CAPTCHA/Cloudflare/MFA challenge naturally appeared: `HUMAN_VERIFICATION_NOT_PRESENT`; real human-step continuation was not live-exercised. No challenge was manufactured, cookies inspected/copied, sessions manipulated, or verification bypass used. Normal cancellation occurred before mutation; parent metadata remained unchanged, no child was created, and actual PDF remained absent. Together with the executable human-wait/continuation coverage, this satisfies the conditional acceptance boundary. Implementation acceptance and final audit are complete; release preparation is in progress (§24.17), and v0.5.1 remains unreleased with release transaction and product closeout incomplete.
 
 The browser companion's standalone installation/use documentation, replacement cleanup, and regression tests are present in the current development source. The initial A0 task changed only this specification. Package names, class names beyond the already required writer boundary, endpoint layout, transport, extension internals, staging size limit, and other nonessential implementation choices remain unfrozen.

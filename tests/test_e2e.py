@@ -344,9 +344,9 @@ def test_run_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     expected_authors = set(author_paths)
 
     before_reuse = snapshot_files(output_dir)
-    assert main((*run_args, "--reuse-provider-cache")) == 0
+    assert main(run_args) == 0
     reuse_cli = capsys.readouterr()
-    assert "Provider-state reuse is now automatic." in reuse_cli.err
+    assert "Provider-state reuse is now automatic." not in reuse_cli.err
     assert openalex_transports[-1].requests and crossref_transports[-1].requests
     assert set(snapshot_files(output_dir)) == set(before_reuse)
     assert "Human kept note." in doi_path.read_text()

@@ -1,4 +1,4 @@
-"""OS-only storage for Zotero Local API credentials (SPEC §35.6)."""
+"""OS-only storage for Zotero Local API credentials (SPEC §36.7)."""
 
 from contextlib import contextmanager
 from contextvars import ContextVar

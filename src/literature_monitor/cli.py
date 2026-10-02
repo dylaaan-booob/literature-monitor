@@ -114,8 +114,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="run a persistent monitor and materialize its workspace",
     )
     _add_monitor_date_arguments(run_parser)
-    run_parser.add_argument("--reuse-provider-cache", action="store_true",
-                            help="deprecated and ignored through v0.5.0; Provider-state reuse is automatic")
     last_run_parser = subparsers.add_parser(
         "last-run",
         help="show the latest successfully persisted production-run coverage snapshot",
@@ -587,8 +585,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1 if validation.outcome is ValidationOutcome.SOURCE_ERRORS else 0
 
     if args.command == "run":
-        if args.reuse_provider_cache:
-            print("Provider-state reuse is now automatic.", file=sys.stderr)
         progress = _CliProgressRenderer(
             sys.stderr,
             show_run_stages=True,

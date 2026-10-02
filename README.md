@@ -22,7 +22,7 @@ authorization, and a real registered PDF child. A separate institutional-path
 run naturally presented no human-verification challenge; it is recorded as
 `HUMAN_VERIFICATION_NOT_PRESENT`, with that branch not live-exercised and no
 challenge manufactured. Implementation acceptance and final audit are complete;
-release preparation remains. Package metadata stays `0.5.0`; the v0.5.1 release
+release preparation is in progress. Package metadata is now `0.5.1`; the v0.5.1 release
 transaction and product closeout are not complete.
 
 v0.4.7 completes Journals Organization &
@@ -125,7 +125,7 @@ queue, or another source of Paper decision state.
 ### Add PDF to Zotero — current development source
 
 The workflow below describes the current **v0.5.1 development source**. v0.5.1
-is not released; Python package metadata remains **0.5.0**.
+is not released; Python package metadata is **0.5.1** during release preparation.
 
 1. **Keep** a Paper and use **Copy DOI** in Kept detail.
 2. Manually create or import the bibliographic parent into Zotero **My Library**.
@@ -439,12 +439,9 @@ For v0.4.2 compatibility, an old `provider-cache.json` may remain on disk
 untouched. Neither v0.4.3 nor the current source tree reads, writes, deletes,
 migrates, or modifies it. It has
 no authority over current execution and needs no migration. The deprecated
-`run --reuse-provider-cache` flag remains accepted until v0.5.0, but is ignored
-and emits this notice on stderr without changing the Run outcome:
-
-```text
-Provider-state reuse is now automatic.
-```
+`run --reuse-provider-cache` compatibility flag expired after v0.5.0 and is
+removed in the v0.5.1 source; argparse now rejects it as an unknown option.
+Normal Run continues to reuse revision-validated Provider state automatically.
 
 New last-run snapshots remain schema v2 and write `reused_units: []`. Valid
 historical v1/v2 snapshots remain readable, and `last-run` may still display

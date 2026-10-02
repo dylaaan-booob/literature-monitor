@@ -1150,8 +1150,7 @@ def test_run_cli_passes_none_without_date_override(
     assert received == [None]
 
 
-@pytest.mark.parametrize("reuse", [False, True])
-def test_run_cli_ignores_compatibility_flag_and_reports_usage(tmp_path, monkeypatch, capsys, reuse):
+def test_run_cli_reports_automatic_provider_state_usage(tmp_path, monkeypatch, capsys):
     from dataclasses import replace
     from literature_monitor.application.monitor import ProviderStateUsage
     calls = []
@@ -1161,19 +1160,32 @@ def test_run_cli_ignores_compatibility_flag_and_reports_usage(tmp_path, monkeypa
         return result
     monkeypatch.setattr("literature_monitor.cli.run_monitor", run)
     args = ["run", "--config", str(tmp_path / "monitor.yaml")]
-    assert main((*args, *(("--reuse-provider-cache",) if reuse else ()))) == 0
+    assert main(args) == 0
     assert calls == [(tmp_path / "monitor.yaml", None, True)]
     captured = capsys.readouterr()
-    assert captured.err.count("Provider-state reuse is now automatic.") == int(reuse)
+    assert "Provider-state reuse is now automatic." not in captured.err
     assert "Crossref metadata 1 reused · 2 refreshed · 3 new" in captured.err
     assert "OpenAlex versions 4 reused · 5 hydrated" in captured.err
     assert "Cache reuse:" not in captured.err
     assert result.warnings == () and result.outcome is RunOutcome.COMPLETED
 
 
+def test_run_cli_rejects_expired_cache_reuse_flag_before_execution(tmp_path, monkeypatch, capsys):
+    def unexpected_run(*args, **kwargs):
+        raise AssertionError("invalid CLI arguments must not invoke run_monitor")
+
+    monkeypatch.setattr("literature_monitor.cli.run_monitor", unexpected_run)
+    with pytest.raises(SystemExit) as error:
+        main(("run", "--config", str(tmp_path / "monitor.yaml"), "--reuse-provider-cache"))
+    assert error.value.code == 2
+    captured = capsys.readouterr()
+    assert "unrecognized arguments: --reuse-provider-cache" in captured.err
+    assert "Provider-state reuse is now automatic." not in captured.err
+
+
 @pytest.mark.parametrize("command", ["validate", "canonicalize", "materialize", "openalex-discover",
     "crossref-discover", "openalex-filter", "crossref-enrich", "last-run", "export-kept", "gui"])
-def test_only_run_exposes_cache_reuse_option(command):
+def test_nonrun_commands_reject_cache_reuse_option(command):
     parser = _build_parser()
     with pytest.raises(SystemExit):
         parser.parse_args([command, "--config", "monitor.yaml", "--reuse-provider-cache"])

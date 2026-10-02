@@ -1105,14 +1105,14 @@ def test_diagnostics_are_all_live_and_have_no_state_access(execution, command, m
     assert e.path.read_bytes() == before
 
 
-def test_compatibility_cli_runs_automatic_state_pipeline_and_keeps_old_cache(execution, capsys):
+def test_normal_cli_runs_automatic_state_pipeline_and_keeps_old_cache(execution, capsys):
     e = execution
     cache = e.path.with_name("provider-cache.json")
     cache.parent.mkdir(parents=True)
     cache.write_bytes(b"invalid legacy cache")
     before = cache.stat()
-    assert main(("run", "--config", str(e.config), "--reuse-provider-cache")) == 0
-    assert capsys.readouterr().err.count("Provider-state reuse is now automatic.") == 1
+    assert main(("run", "--config", str(e.config))) == 0
+    assert "Provider-state reuse is now automatic." not in capsys.readouterr().err
     assert cache.stat() == before
     assert cache.read_bytes() == b"invalid legacy cache"
     assert ps.read_provider_state(e.output).status is ps.ProviderStateStatus.AVAILABLE
