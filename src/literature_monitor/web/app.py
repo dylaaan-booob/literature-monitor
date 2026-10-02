@@ -11,10 +11,11 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.requests import ClientDisconnect
 
 from literature_monitor.application.decisions import (
     DecisionOutcome,
@@ -49,12 +50,17 @@ from literature_monitor.application.workspace import (
 )
 from literature_monitor.config import ConfigurationError, load_config
 from literature_monitor.identifiers import normalize_doi
-from literature_monitor.institutional_resolver import XmuInstitutionalResolver
 from literature_monitor.models import WorkflowStatus
-from literature_monitor.pdf_acquisition import GenericPdfAcquirer
+from literature_monitor.zotero_credentials import ZoteroAuthorizationRuntime
+from literature_monitor.zotero_local import ZoteroLocalClient, ZoteroReadOutcome
+from literature_monitor.zotero_write import ZoteroAuthorizationClient
 from literature_monitor.web.acquisition_coordinator import (
-    AcquisitionCoordinator, AcquisitionCoordinatorStatus, AcquisitionSnapshot, AcquisitionStartOutcome,
+    AcquisitionActionOutcome, AcquisitionCoordinator, AcquisitionCoordinatorStatus, AcquisitionSnapshot, AcquisitionStartOutcome,
 )
+from literature_monitor.web.browser_handoff import (
+    BrowserHandoffRegistry, MAX_MESSAGE_BYTES, parse_handoff_message,
+)
+from literature_monitor.web.chrome_launcher import launch_normal_chrome
 from literature_monitor.web.run_coordinator import (
     CoordinatorSnapshot,
     CoordinatorStatus,
@@ -76,6 +82,8 @@ _PACKAGE_DIR = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _PACKAGE_DIR / "templates"
 _STATIC_DIR = _PACKAGE_DIR / "static"
 _ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
+_HANDOFF_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
+                    "X-Content-Type-Options": "nosniff"}
 _VIEW_STATUSES = {
     "inbox": WorkflowStatus.CANDIDATE,
     "kept": WorkflowStatus.KEPT,
@@ -84,6 +92,21 @@ _VIEW_STATUSES = {
 }
 
 templates = Jinja2Templates(directory=_TEMPLATES_DIR)
+
+
+async def _handoff_message(request: Request) -> dict | None:
+    content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if request.url.query or content_type != "application/json":
+        return None
+    raw = bytearray()
+    try:
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > MAX_MESSAGE_BYTES:
+                return None
+            raw.extend(chunk)
+    except ClientDisconnect:
+        return None
+    return parse_handoff_message(bytes(raw))
 
 
 def _utc_now() -> datetime:
@@ -200,11 +223,22 @@ def _workspace_context(
 
 
 def _build_acquisition_service(output_dir: Path, config_path: Path, *,
-                               authorization_retry_boundary: AuthorizationRetryBoundary | None = None) -> AcquisitionService:
-    protected = {"project_dir": _PACKAGE_DIR.parent, "workspace_dir": output_dir, "config_path": config_path}
-    return AcquisitionService(output_dir, resolver=XmuInstitutionalResolver(**protected),
-                              pdf_acquirer=GenericPdfAcquirer(**protected),
-                              authorization_retry_boundary=authorization_retry_boundary)
+                               authorization_retry_boundary: AuthorizationRetryBoundary | None = None,
+                               authorization_runtime: ZoteroAuthorizationRuntime | None = None) -> AcquisitionService:
+    return AcquisitionService(output_dir,
+                              authorization_retry_boundary=authorization_retry_boundary,
+                              authorization_runtime=authorization_runtime)
+
+
+def _zotero_integration_state(runtime: ZoteroAuthorizationRuntime, *, authorize=False) -> dict[str, object]:
+    with ZoteroLocalClient() as local:
+        instance = local.current_instance()
+    authorization = None
+    if instance.outcome is ZoteroReadOutcome.VERIFIED and instance.server_id is not None:
+        with ZoteroAuthorizationClient(instance.server_id, authorization_runtime=runtime) as client:
+            authorization = client.authorize() if authorize else client.authorization_status()
+    return {"zotero_instance": instance, "zotero_authorization": authorization,
+            "zotero_retry_remaining": runtime.retry_boundary.remaining()}
 
 
 def _acquisition_context(
@@ -218,6 +252,13 @@ def _acquisition_context(
         AcquisitionStage.RESOLVING: "Finding institutional full text",
         AcquisitionStage.WAITING_FOR_INSTITUTION_AUTH: "Institutional login required",
         AcquisitionStage.DISCOVERING_PDF: "Acquiring and validating PDF",
+        AcquisitionStage.OPENING_CHROME: "Opening normal Chrome",
+        AcquisitionStage.HANDOFF: "Waiting for the browser companion",
+        AcquisitionStage.BROWSER_ACTION: "Publisher/browser action required",
+        AcquisitionStage.RESOLVER_CHOICE: "Choose a resolver provider in the Chrome companion",
+        AcquisitionStage.VALIDATING_PDF: "Validating downloaded PDF",
+        AcquisitionStage.WAITING_FOR_ZOTERO_AUTH: "Zotero authorization required",
+        AcquisitionStage.CANCELLED: "PDF acquisition cancelled",
         AcquisitionStage.ATTACHING: "Attaching PDF to Zotero",
         AcquisitionStage.SUCCEEDED: "PDF acquisition finished",
         AcquisitionStage.FAILED: "PDF acquisition stopped",
@@ -225,15 +266,16 @@ def _acquisition_context(
     recovery_messages = {
         AcquisitionRecovery.CHECK_PAPER: "Check the current Paper, then start a new attempt.",
         AcquisitionRecovery.CHECK_ZOTERO: "Check the item and attachments in Zotero before retrying.",
-        AcquisitionRecovery.INSTITUTION_LOGIN: "Complete institutional login or verification manually in the dedicated browser, then start a new attempt.",
-        AcquisitionRecovery.ZOTERO_AUTHORIZATION: "Check Zotero authorization before starting a new attempt.",
-        AcquisitionRecovery.CHECK_BROWSER: "Check Chrome and close any other window using the dedicated profile before retrying.",
+        AcquisitionRecovery.INSTITUTION_LOGIN: "Complete institutional login or verification in the same normal Chrome task tab.",
+        AcquisitionRecovery.ZOTERO_AUTHORIZATION: "Open Settings → Advanced & Diagnostics → Zotero integration.",
+        AcquisitionRecovery.CHECK_BROWSER: "Check normal Chrome and its companion installation.",
         AcquisitionRecovery.RETRY: "Start a new attempt when ready.",
         AcquisitionRecovery.RATE_LIMITED: "Wait for Zotero's authorization retry boundary before starting another attempt.",
     }
     result = snapshot.result if owns_attempt else None
     return {
         "request": request,
+        "csrf_token": request.app.state.csrf_token,
         "acquisition_paper_id": paper_id,
         "acquisition_view": view if view in _VIEW_STATUSES else "in-zotero",
         "acquisition_busy": snapshot.status is AcquisitionCoordinatorStatus.RUNNING,
@@ -244,6 +286,11 @@ def _acquisition_context(
         "acquisition_recovery": recovery_messages.get(result.recovery) if result else None,
         "acquisition_message": message,
         "acquisition_unexpected": owns_attempt and snapshot.unexpected_error is not None,
+        "acquisition_attempt_id": snapshot.attempt_id if owns_attempt else None,
+        "acquisition_cancel_available": owns_attempt and snapshot.cancel_available,
+        "acquisition_resume_available": owns_attempt and snapshot.resume_available,
+        "acquisition_open_retry_available": owns_attempt and snapshot.open_retry_available,
+        "acquisition_zotero_auth": owns_attempt and snapshot.stage is AcquisitionStage.WAITING_FOR_ZOTERO_AUTH,
     }
 
 
@@ -306,8 +353,15 @@ def create_app(config_path: Path) -> FastAPI:
     app.state.config_path = resolved_config_path
     app.state.csrf_token = csrf_token
     app.state.run_coordinator = RunCoordinator(resolved_config_path)
-    app.state.acquisition_coordinator = AcquisitionCoordinator()
+    browser_handoff = BrowserHandoffRegistry()
+    app.state.browser_handoff = browser_handoff
+    app.state.chrome_launcher = launch_normal_chrome
+    app.state.acquisition_coordinator = AcquisitionCoordinator(registry=browser_handoff,
+        launcher=lambda launch: app.state.chrome_launcher(launch))
+    app.state.browser_handoff_event_handler = app.state.acquisition_coordinator.handle_event
     authorization_retry_boundary = AuthorizationRetryBoundary()
+    authorization_runtime = ZoteroAuthorizationRuntime(retry_boundary=authorization_retry_boundary)
+    app.state.zotero_authorization = authorization_runtime
     bound_output_dir, bound_service = None, None
 
     def acquisition_service_for(output_dir: Path) -> AcquisitionService:
@@ -316,7 +370,8 @@ def create_app(config_path: Path) -> FastAPI:
         # workspace binding uses the same process-local authorization limit.
         if bound_service is None or bound_output_dir != output_dir:
             service = _build_acquisition_service(output_dir, resolved_config_path,
-                authorization_retry_boundary=authorization_retry_boundary)
+                authorization_retry_boundary=authorization_retry_boundary,
+                authorization_runtime=authorization_runtime)
             bound_output_dir, bound_service = output_dir, service
         return bound_service
 
@@ -325,6 +380,38 @@ def create_app(config_path: Path) -> FastAPI:
         allowed_hosts=_ALLOWED_HOSTS,
     )
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+
+    @app.get("/browser-handoff/{task_id}", response_class=HTMLResponse)
+    def browser_handoff_page(request: Request, task_id: str) -> HTMLResponse:
+        handoff = browser_handoff.status(task_id)
+        if handoff is None or request.url.query:
+            return HTMLResponse("Browser handoff is unavailable.", status_code=404, headers=_HANDOFF_HEADERS)
+        return templates.TemplateResponse(request, "browser_handoff.html", {"handoff": handoff},
+            headers={**_HANDOFF_HEADERS, "Content-Security-Policy":
+                     "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"})
+
+    @app.post("/browser-handoff/claim")
+    async def claim_browser_handoff(request: Request) -> Response:
+        message = await _handoff_message(request)
+        if message is not None and set(message) == {"task_id", "capability", "tab_binding"}:
+            claimed = browser_handoff.claim(**message)
+            if claimed is not None:
+                return JSONResponse({"event_capability": claimed.event_capability}, headers=_HANDOFF_HEADERS)
+        return Response("Browser handoff request rejected.", status_code=403, headers=_HANDOFF_HEADERS)
+
+    @app.post("/browser-handoff/events")
+    async def browser_handoff_event(request: Request) -> Response:
+        message = await _handoff_message(request)
+        if message is not None and set(message) == {"task_id", "capability", "tab_binding", "event_type", "payload"}:
+            try:
+                event = browser_handoff.receive_event(**message, on_event=app.state.browser_handoff_event_handler)
+            except Exception:
+                return Response("Browser handoff event could not be handled.", status_code=500, headers=_HANDOFF_HEADERS)
+            if event is not None:
+                if event.command is not None:
+                    return JSONResponse({"command": event.command}, headers=_HANDOFF_HEADERS)
+                return Response(status_code=204, headers=_HANDOFF_HEADERS)
+        return Response("Browser handoff request rejected.", status_code=403, headers=_HANDOFF_HEADERS)
 
     @app.get("/", response_class=HTMLResponse)
     def workspace_page(
@@ -363,6 +450,20 @@ def create_app(config_path: Path) -> FastAPI:
             "settings.html",
             context,
         )
+
+    @app.get("/settings/zotero", response_class=HTMLResponse)
+    def zotero_integration_status(request: Request) -> HTMLResponse:
+        context = {"request": request, "csrf_token": csrf_token,
+                   **_zotero_integration_state(authorization_runtime)}
+        return templates.TemplateResponse(request, "fragments/zotero_integration.html", context)
+
+    @app.post("/settings/zotero/authorize", response_class=HTMLResponse)
+    def authorize_zotero(request: Request, csrf_token: Annotated[str | None, Form()] = None) -> HTMLResponse:
+        if not _csrf_valid(csrf_token, app.state.csrf_token):
+            return HTMLResponse("Invalid request. Reload Settings and try again.", status_code=403)
+        context = {"request": request, "csrf_token": app.state.csrf_token,
+                   **_zotero_integration_state(authorization_runtime, authorize=True)}
+        return templates.TemplateResponse(request, "fragments/zotero_integration.html", context)
 
     @app.get("/fragments/run", response_class=HTMLResponse)
     def run_fragment(request: Request) -> HTMLResponse:
@@ -449,9 +550,33 @@ def create_app(config_path: Path) -> FastAPI:
                 message="Configuration needs attention. Open Settings before starting PDF acquisition.", refresh_detail=False)
         start = app.state.acquisition_coordinator.start(
             paper_id, service_factory=lambda: acquisition_service_for(output_dir),
+            port=request.url.port or 80,
+            staging_options={"project_dir": _PACKAGE_DIR.parents[2], "workspace_dir": output_dir,
+                             "config_path": resolved_config_path},
         )
         message = "Another PDF acquisition is already in progress." if start.outcome is AcquisitionStartOutcome.ALREADY_RUNNING else None
         return acquisition_response(request, paper_id, view, app.state.acquisition_coordinator.snapshot(), message=message)
+
+    @app.post("/papers/{paper_id}/acquisition/{action}", response_class=HTMLResponse)
+    def acquisition_action(request: Request, paper_id: UUID, action: str,
+        csrf_token_value: Annotated[str | None, Form(alias="csrf_token")] = None,
+        attempt_id: Annotated[str | None, Form()] = None,
+        view: Annotated[str, Form()] = "in-zotero") -> HTMLResponse:
+        if not _csrf_valid(csrf_token_value, csrf_token):
+            return HTMLResponse('<p class="notice error">Invalid or missing CSRF token.</p>', status_code=403)
+        coordinator = app.state.acquisition_coordinator
+        try:
+            identity = UUID(attempt_id) if attempt_id is not None else None
+        except (ValueError, TypeError):
+            identity = None
+        operation = {"cancel": coordinator.cancel, "resume": coordinator.resume, "open-retry": coordinator.reopen}.get(action)
+        outcome = operation(paper_id, identity) if operation is not None and identity is not None else AcquisitionActionOutcome.UNAVAILABLE
+        message = ("Zotero attachment has already begun; cancellation is too late." if outcome is AcquisitionActionOutcome.TOO_LATE
+                   else "This action is unavailable for the current task." if outcome is AcquisitionActionOutcome.UNAVAILABLE else None)
+        response = acquisition_response(request, paper_id, view, coordinator.snapshot(), message=message)
+        if outcome is not AcquisitionActionOutcome.ACCEPTED:
+            response.status_code = 409
+        return response
 
     async def import_settings_route(request: Request, *, apply: bool) -> HTMLResponse:
         form = await request.form()

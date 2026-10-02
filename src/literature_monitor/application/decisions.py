@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass as _dataclass
 from enum import Enum
+import os as _os
 from pathlib import Path
+import re as _re
+import stat as _stat
 from uuid import UUID
 
+from literature_monitor.identifiers import normalize_doi as _normalize_doi
 from literature_monitor.markdown_state import (
     parse_paper_state as _parse_paper_state,
     serialize_document as _serialize_document,
@@ -16,7 +20,12 @@ from literature_monitor.safe_write import (
     CompareReadError as _CompareReadError,
     ContentChangedError as _ContentChangedError,
     read_text_exact as _read_text_exact,
+    replace_regular_text_at_identity as _replace_regular_text_at_identity,
     replace_text_if_unchanged as _replace_text_if_unchanged,
+)
+from literature_monitor.zotero_local import (
+    ZoteroLocalClient as _ZoteroLocalClient,
+    ZoteroReadOutcome as _ZoteroReadOutcome,
 )
 
 __all__ = [
@@ -35,6 +44,9 @@ class DecisionOutcome(str, Enum):
     STATE_CONFLICT = "STATE_CONFLICT"
     INVALID_TRANSITION = "INVALID_TRANSITION"
     IO_FAILURE = "IO_FAILURE"
+    ZOTERO_NOT_FOUND = "ZOTERO_NOT_FOUND"
+    ZOTERO_DUPLICATE = "ZOTERO_DUPLICATE"
+    ZOTERO_FAILURE = "ZOTERO_FAILURE"
 
 
 @_dataclass(frozen=True)
@@ -68,10 +80,37 @@ def _failure(
     )
 
 
+@_dataclass(frozen=True)
+class _MarkRead:
+    contents: str
+    directory_identity: tuple[int, int]
+    file_identity: tuple[int, int]
+
+
+def _read_mark_candidate(path: Path, directory: int) -> _MarkRead:
+    descriptor = _os.open(path.name, _os.O_RDONLY | _os.O_NOFOLLOW | _os.O_NONBLOCK, dir_fd=directory)
+    try:
+        parent = _os.fstat(directory)
+        target = _os.fstat(descriptor)
+        if not _stat.S_ISREG(target.st_mode):
+            raise OSError("Paper candidate is not a regular file")
+        with _os.fdopen(descriptor, "rb") as handle:
+            descriptor = None
+            contents = handle.read().decode("utf-8")
+        return _MarkRead(contents, (parent.st_dev, parent.st_ino), (target.st_dev, target.st_ino))
+    finally:
+        if descriptor is not None:
+            _os.close(descriptor)
+
+
 def _locate_paper(
     output_dir: Path,
     paper_id: UUID,
     expected_status: WorkflowStatus,
+    *,
+    require_safe_candidates: bool = False,
+    directory: int | None = None,
+    mark_reads: dict[Path, _MarkRead] | None = None,
 ) -> tuple[Path | None, DecisionResult | None]:
     papers_dir = output_dir / "Papers"
     if papers_dir.is_symlink():
@@ -99,7 +138,8 @@ def _locate_paper(
         )
 
     try:
-        paths = sorted(papers_dir.glob("*.md"))
+        paths = (sorted(papers_dir / name for name in _os.listdir(directory) if name.endswith(".md"))
+                 if directory is not None else sorted(papers_dir.glob("*.md")))
     except OSError as error:
         return None, _failure(
             DecisionOutcome.IO_FAILURE,
@@ -130,7 +170,12 @@ def _locate_paper(
             continue
 
         try:
-            contents = _read_text_exact(path)
+            if directory is not None:
+                action_read = _read_mark_candidate(path, directory)
+                assert mark_reads is not None
+                contents = action_read.contents
+            else:
+                contents = _read_text_exact(path)
         except (OSError, UnicodeError) as error:
             if unreadable_candidate is None:
                 unreadable_candidate = (
@@ -151,6 +196,8 @@ def _locate_paper(
             continue
         if state.paper_id != paper_id:
             continue
+        if directory is not None:
+            mark_reads[path] = action_read
         matches.append(path)
 
     if len(matches) > 1:
@@ -169,9 +216,7 @@ def _locate_paper(
             message,
             path=path,
         )
-    if matches:
-        return matches[0], None
-    if unsafe_candidate is not None:
+    if unsafe_candidate is not None and (require_safe_candidates or not matches):
         path, message = unsafe_candidate
         return None, _failure(
             DecisionOutcome.INVALID_PAPER,
@@ -180,6 +225,8 @@ def _locate_paper(
             message,
             path=path,
         )
+    if matches:
+        return matches[0], None
     return None, _failure(
         DecisionOutcome.NOT_FOUND,
         paper_id,
@@ -196,12 +243,38 @@ def _apply_decision(
     required_status: WorkflowStatus,
     target_status: WorkflowStatus,
 ) -> DecisionResult:
-    path, failure = _locate_paper(output_dir, paper_id, expected_status)
+    is_mark = target_status is WorkflowStatus.IN_ZOTERO
+    mark_reads: dict[Path, _MarkRead] = {}
+    if is_mark:
+        directory = None
+        try:
+            # One descriptor binds UUID enumeration and every safe candidate
+            # read to the original Papers directory (SPEC §36.2).
+            directory = _os.open(output_dir / "Papers", _os.O_RDONLY | _os.O_DIRECTORY | _os.O_NOFOLLOW)
+            path, failure = _locate_paper(
+                output_dir, paper_id, expected_status, require_safe_candidates=True,
+                directory=directory, mark_reads=mark_reads,
+            )
+        except FileNotFoundError:
+            return _failure(DecisionOutcome.NOT_FOUND, paper_id, expected_status, "Paper UUID was not found")
+        except OSError:
+            return _failure(DecisionOutcome.IO_FAILURE, paper_id, expected_status,
+                            "Cannot safely read or locate the requested Paper.")
+        finally:
+            if directory is not None:
+                _os.close(directory)
+    else:
+        path, failure = _locate_paper(output_dir, paper_id, expected_status)
     if failure is not None:
+        if is_mark and failure.outcome is DecisionOutcome.IO_FAILURE:
+            return _failure(
+                failure.outcome, paper_id, expected_status,
+                "Cannot safely read or locate the requested Paper.", path=failure.path,
+            )
         return failure
     assert path is not None
 
-    if path.is_symlink() or not path.is_file():
+    if not is_mark and (path.is_symlink() or not path.is_file()):
         return _failure(
             DecisionOutcome.INVALID_PAPER,
             paper_id,
@@ -211,13 +284,13 @@ def _apply_decision(
         )
 
     try:
-        current_contents = _read_text_exact(path)
+        current_contents = mark_reads[path].contents if is_mark else _read_text_exact(path)
     except (OSError, UnicodeError) as error:
         return _failure(
             DecisionOutcome.IO_FAILURE,
             paper_id,
             expected_status,
-            f"cannot read Paper before decision: {error}",
+            "Cannot read Paper before marking." if is_mark else f"cannot read Paper before decision: {error}",
             path=path,
         )
 
@@ -251,6 +324,8 @@ def _apply_decision(
             if state.problems
             else "Paper cannot be safely updated"
         )
+        if is_mark:
+            message = "Paper cannot be safely updated; repair its invalid state before marking."
         return _failure(
             DecisionOutcome.INVALID_PAPER,
             paper_id,
@@ -287,15 +362,66 @@ def _apply_decision(
         )
 
     frontmatter = dict(state.frontmatter)
+    if is_mark:
+        try:
+            doi = _normalize_doi(state.external_ids.doi) if state.external_ids else None
+        except ValueError:
+            doi = None
+        if doi is None:
+            return _failure(
+                DecisionOutcome.INVALID_PAPER, paper_id, expected_status,
+                "A valid Paper DOI is required to Mark in Zotero.",
+                current_status=current_status, path=path,
+            )
+        existing_key = frontmatter.get("zotero_key")
+        if existing_key is not None and not _re.fullmatch(r"[A-Z0-9]{8}", existing_key):
+            return _failure(
+                DecisionOutcome.INVALID_PAPER, paper_id, expected_status,
+                "Paper Zotero key is malformed; repair it before marking.",
+                current_status=current_status, path=path,
+            )
+        # Mark requires complete DOI uniqueness, including for an existing key.
+        # Passing that key would permit the acquisition client's keyed fast path.
+        with _ZoteroLocalClient() as client:
+            identity = client.resolve_identity(doi)
+        if identity.outcome is not _ZoteroReadOutcome.VERIFIED or identity.item is None:
+            outcome, message = {
+                _ZoteroReadOutcome.NOT_FOUND: (
+                    DecisionOutcome.ZOTERO_NOT_FOUND,
+                    "No exact DOI match exists in Zotero My Library.",
+                ),
+                _ZoteroReadOutcome.DUPLICATE: (
+                    DecisionOutcome.ZOTERO_DUPLICATE,
+                    "Multiple exact DOI matches exist; resolve Zotero duplicates first.",
+                ),
+            }.get(identity.outcome, (
+                DecisionOutcome.ZOTERO_FAILURE,
+                "Cannot verify complete Zotero My Library; check Zotero Desktop and its Local API setting.",
+            ))
+            return _failure(
+                outcome, paper_id, expected_status, message,
+                current_status=current_status, path=path,
+            )
+        if existing_key is not None and existing_key != identity.item.key:
+            return _failure(
+                DecisionOutcome.STATE_CONFLICT, paper_id, expected_status,
+                "Paper Zotero key conflicts with the unique DOI match; repair the linkage before marking.",
+                current_status=current_status, path=path,
+            )
+        frontmatter["zotero_key"] = identity.item.key
     frontmatter["status"] = target_status.value
     updated_contents = _serialize_document(frontmatter, state.body)
 
     try:
-        _replace_text_if_unchanged(
-            path,
-            updated_contents,
-            expected_contents=current_contents,
-        )
+        if is_mark:
+            action_read = mark_reads[path]
+            _replace_regular_text_at_identity(
+                path, updated_contents, expected_contents=action_read.contents,
+                expected_directory_identity=action_read.directory_identity,
+                expected_file_identity=action_read.file_identity,
+            )
+        else:
+            _replace_text_if_unchanged(path, updated_contents, expected_contents=current_contents)
     except _ContentChangedError:
         return _failure(
             DecisionOutcome.STATE_CONFLICT,
@@ -306,11 +432,17 @@ def _apply_decision(
             path=path,
         )
     except _CompareReadError as error:
+        if is_mark and isinstance(error.__cause__, FileNotFoundError):
+            return _failure(
+                DecisionOutcome.STATE_CONFLICT, paper_id, expected_status,
+                "Paper disappeared before marking could be written.",
+                current_status=current_status, path=path,
+            )
         return _failure(
             DecisionOutcome.IO_FAILURE,
             paper_id,
             expected_status,
-            f"cannot verify Paper before decision: {error}",
+            "Cannot verify Paper before marking." if is_mark else f"cannot verify Paper before decision: {error}",
             current_status=current_status,
             path=path,
         )
@@ -319,7 +451,7 @@ def _apply_decision(
             DecisionOutcome.IO_FAILURE,
             paper_id,
             expected_status,
-            f"cannot write Paper decision: {error}",
+            "Cannot write Paper marking." if is_mark else f"cannot write Paper decision: {error}",
             current_status=current_status,
             path=path,
         )

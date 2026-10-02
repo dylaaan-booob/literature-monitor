@@ -1,11 +1,13 @@
 """A2 uses only MockTransport, tmp_path and a fake OS credential backend."""
 
 from datetime import datetime, timedelta, timezone
+from collections.abc import Iterator
 from email.utils import format_datetime
 import hashlib
 import json
 import logging
 import os
+from pathlib import Path
 from urllib.parse import parse_qs
 
 import httpx
@@ -104,7 +106,7 @@ def prepared(**changes):
     return response(payload=payload)
 
 
-def client_for(post_responses, *, get_responses=None, observer=None, parent=PARENT):
+def client_for(post_responses, *, get_responses=None, observer=None, parent=PARENT, authorization_runtime=None):
     posts = iter(post_responses)
     gets = iter(get_responses) if get_responses is not None else None
     requests = []
@@ -123,7 +125,7 @@ def client_for(post_responses, *, get_responses=None, observer=None, parent=PARE
             raise value
         return value
 
-    return ZoteroWriteClient(parent, transport=httpx.MockTransport(handler)), requests
+    return ZoteroWriteClient(parent, authorization_runtime=authorization_runtime, transport=httpx.MockTransport(handler)), requests
 
 
 def posts(requests):
@@ -312,30 +314,38 @@ def test_credential_server_change_never_loads_old_or_new_entry(backend, local_fi
 
 def test_credential_current_server_only_loaded(backend, local_file):
     backend.remember(server=OTHER_SERVER)
-    client, requests = client_for([approved(False), created(), approved(False), response(payload={"exists": 1})])
+    client, requests = client_for([])
     with client:
         result = client.upload_pdf(local_file)
-    assert result.outcome is Upload.SUCCEEDED
+    assert result.authorization.outcome is Auth.REQUIRED
+    assert not posts(requests)
     assert all(account == SERVER for _, _, account in backend.calls)
     assert backend.values == {(credentials.SERVICE_NAME, OTHER_SERVER): SECRET}
 
 
-@pytest.mark.parametrize("remember", [False, True])
-def test_upload_complete_and_credential_consumption(backend, local_file, remember):
-    if remember:
-        backend.remember()
-        flow = [created(), prepared(), response(201), response(204)]
-    else:
-        flow = [approved(False), created(), approved(False, FRESH_SECRET), prepared(),
-                response(201), approved(False), response(204)]
+def test_upload_complete_with_remembered_authorization(backend, local_file, monkeypatch):
+    backend.remember()
+    flow = [created(), prepared(), response(201), response(204)]
     observed = []
     def inspect(request):
         if request.url.path == "/api/users/0/items":
             observed.extend(json.loads(request.content))
     client, requests = client_for(flow, observer=inspect)
     original = local_file.read_bytes()
-    with client:
+    request = client._request
+    streamed = []
+    def stream_request(method, url, **kwargs):
+        if url == UPLOAD_URL:
+            assert isinstance(kwargs['content'], Iterator)
+            streamed.append(True)
+        return request(method, url, **kwargs)
+    monkeypatch.setattr(client, '_request', stream_request)
+    def no_preload(path):
+        raise AssertionError('Upload must stream the opened file.')
+    with monkeypatch.context() as patch, client:
+        patch.setattr(Path, 'read_bytes', no_preload)
         result = client.upload_pdf(local_file)
+    assert streamed == [True]
     assert result.outcome is Upload.SUCCEEDED and result.stage is Stage.REGISTERED
     assert (result.parent_key, result.attachment_key, result.server_id) == (PARENT.key, ATTACHMENT, SERVER)
     assert not result.mutation_uncertain
@@ -354,14 +364,14 @@ def test_upload_complete_and_credential_consumption(backend, local_file, remembe
     assert standard[1].headers["If-None-Match"] == standard[2].headers["If-None-Match"] == "*"
     transfer = next(r for r in requests if r.url.path.startswith("/api/local/uploads/"))
     assert transfer.content == original
+    assert transfer.headers['Content-Length'] == str(len(original))
+    assert 'Transfer-Encoding' not in transfer.headers
     assert transfer.headers["Content-Type"] == "application/octet-stream"
     assert "Zotero-API-Key" not in transfer.headers and "Authorization" not in transfer.headers
     assert "Cookie" not in transfer.headers
     auth_posts = [r for r in posts(requests) if r.url.path == "/api/local/authorize"]
-    assert len(auth_posts) == (0 if remember else 3)
-    assert [r.headers["Zotero-API-Key"] for r in standard] == (
-        [SECRET] * 3 if remember else [SECRET, FRESH_SECRET, SECRET]
-    )
+    assert len(auth_posts) == 0
+    assert [r.headers["Zotero-API-Key"] for r in standard] == [SECRET] * 3
     assert not any(action == "set" for action, _, _ in backend.calls)
     assert local_file.read_bytes() == original
     assert_no_secrets(result)
@@ -381,12 +391,9 @@ def test_upload_exists_short_circuits_transfer_and_register(backend, local_file)
     assert len(posts(requests)) == 2
 
 
-@pytest.mark.parametrize("remembered", [False, True])
-def test_authorization_revoked_key_one_fresh_authorization_one_create_retry(backend, local_file, remembered):
-    if remembered:
-        backend.remember()
-    flow = ([] if remembered else [approved(False)]) + [response(401), approved(True, FRESH_SECRET),
-                                                         created(), response(payload={"exists": 1})]
+def test_authorization_revoked_key_one_fresh_authorization_one_create_retry(backend, local_file):
+    backend.remember()
+    flow = [response(401), approved(True, FRESH_SECRET), created(), response(payload={"exists": 1})]
     client, requests = client_for(flow)
     with client:
         result = client.upload_pdf(local_file)
@@ -397,8 +404,8 @@ def test_authorization_revoked_key_one_fresh_authorization_one_create_retry(back
     assert creates[0].content == creates[1].content
     assert [r.headers["Zotero-API-Key"] for r in creates] == [SECRET, FRESH_SECRET]
     assert backend.values[credentials.SERVICE_NAME, SERVER] == FRESH_SECRET
-    assert sum(action == "delete" for action, _, _ in backend.calls) == remembered
-    assert len([r for r in posts(requests) if r.url.path == "/api/local/authorize"]) == (1 if remembered else 2)
+    assert sum(action == "delete" for action, _, _ in backend.calls) == 1
+    assert len([r for r in posts(requests) if r.url.path == "/api/local/authorize"]) == 1
 
 
 @pytest.mark.parametrize("next_response,expected_auth", [
@@ -657,31 +664,34 @@ def test_upload_register_requires_204(backend, local_file, status):
 
 
 @pytest.mark.parametrize("phase", ["prepare", "register"])
-def test_upload_later_401_refreshes_only_the_rejected_write(backend, local_file, phase):
+def test_upload_later_401_stops_without_authorization_or_replay(backend, local_file, phase):
     backend.remember()
     start = [created()] if phase == "prepare" else [created(), prepared(), response(201)]
-    end = [response(payload={"exists": 1})] if phase == "prepare" else [response(204)]
-    client, requests = client_for(start + [response(401), approved(True, FRESH_SECRET)] + end)
+    client, requests = client_for(start + [response(401)])
     with client:
         result = client.upload_pdf(local_file)
-    assert result.outcome is Upload.SUCCEEDED
-    assert len([r for r in posts(requests) if r.url.path == "/api/users/0/items"]) == 1
-    retried = [r for r in posts(requests) if r.url.path == FILE_ENDPOINT][-2:]
-    assert retried[0].content == retried[1].content
-    assert retried[0].headers["If-None-Match"] == retried[1].headers["If-None-Match"] == "*"
+    assert result.outcome is Upload.PARTIAL_FAILURE and result.failure is Upload.AUTH_FAILURE
+    assert result.stage is (Stage.CHILD_CREATED if phase == "prepare" else Stage.BYTES_UPLOADED)
+    assert len(posts(requests)) == len(start) + 1
+    assert all(r.url.path != "/api/local/authorize" for r in posts(requests))
+    assert backend.values == {}
 
 
-def test_upload_one_time_consumed_after_failed_authenticated_write(backend, local_file):
-    client, requests = client_for([approved(False), response(400), approved(False, FRESH_SECRET),
-                                  created(), approved(False), response(payload={"exists": 1})])
+@pytest.mark.parametrize("failure", [response(400), response(401), httpx.ReadError(SECRET)])
+def test_upload_one_time_consumed_after_failed_authenticated_write(backend, local_file, failure):
+    client, requests = client_for([approved(False), failure])
     with client:
+        assert client.authorize().outcome is Auth.AUTHORIZED
         first = client.upload_pdf(local_file)
         second = client.upload_pdf(local_file)
-    assert first.outcome is Upload.API_FAILURE and second.outcome is Upload.SUCCEEDED
-    creates = [r for r in posts(requests) if r.url.path == "/api/users/0/items"]
-    assert [r.headers["Zotero-API-Key"] for r in creates] == [SECRET, FRESH_SECRET]
-    assert creates[0].headers["Zotero-Write-Token"] != creates[1].headers["Zotero-Write-Token"]
-    assert backend.values == {}
+    assert first.failure in (Upload.API_FAILURE, Upload.AUTH_FAILURE)
+    assert first.mutation_uncertain is isinstance(failure, httpx.HTTPError)
+    assert not second.mutation_uncertain
+    assert second.authorization.outcome is Auth.REQUIRED
+    assert second.stage is Stage.NO_CONFIRMED_MUTATION
+    assert len(posts(requests)) == 2 and backend.values == {}
+    assert_no_secrets(first)
+    assert_no_secrets(second)
 
 
 def test_upload_secret_logs_and_cookies_do_not_escape(backend, local_file, caplog):
@@ -715,8 +725,8 @@ def test_upload_sanitizes_transport_secrets_at_every_phase(backend, local_file, 
         flow = normal[:index] + [httpx.ReadError(SECRET + UPLOAD_URL)]
     client, _ = client_for(flow)
     with client:
-        result = client.upload_pdf(local_file)
-    assert result.outcome is not Upload.SUCCEEDED
+        result = client.authorize() if phase == "authorization" else client.upload_pdf(local_file)
+    assert result.outcome not in (Upload.SUCCEEDED, Auth.AUTHORIZED)
     assert_no_secrets(result, caplog)
 
 
@@ -736,6 +746,7 @@ def test_authorization_remembered_save_failure_prevents_create(backend, local_fi
     backend.fail = "set"
     client, requests = client_for([approved(True)])
     with client:
+        assert client.authorize().outcome is Auth.SECURE_STORE_FAILURE
         result = client.upload_pdf(local_file)
     assert result.outcome is Upload.AUTH_FAILURE
     assert result.authorization.outcome is Auth.SECURE_STORE_FAILURE
@@ -771,16 +782,22 @@ def test_upload_instance_probe_stops_before_next_phase(backend, local_file, phas
     assert len(posts(requests)) == len(successful_posts)
 
 
-def test_upload_one_time_transport_uncertainty_discards_key(backend, local_file):
-    client, requests = client_for([approved(False), httpx.ReadError(SECRET),
-                                  approved(False, FRESH_SECRET), response(403)])
-    with client:
-        first = client.upload_pdf(local_file)
-        second = client.upload_pdf(local_file)
-    assert first.mutation_uncertain and not second.mutation_uncertain
-    creates = [r for r in posts(requests) if r.url.path == "/api/users/0/items"]
-    assert [r.headers["Zotero-API-Key"] for r in creates] == [SECRET, FRESH_SECRET]
-    assert len(posts(requests)) == 4 and backend.values == {}
+def test_upload_one_time_shared_runtime_consumes_allow_and_preserves_partial_truth(backend, local_file):
+    runtime = credentials.ZoteroAuthorizationRuntime()
+    settings, auth_requests = client_for([approved(False)], authorization_runtime=runtime)
+    with settings:
+        assert settings.authorize().outcome is Auth.AUTHORIZED
+    writer, requests = client_for([created()], authorization_runtime=runtime)
+    with writer:
+        first = writer.upload_pdf(local_file)
+        second = writer.upload_pdf(local_file)
+    assert first.outcome is Upload.PARTIAL_FAILURE and first.stage is Stage.CHILD_CREATED
+    assert first.authorization.outcome is Auth.REQUIRED
+    assert second.authorization.outcome is Auth.REQUIRED
+    assert [r.url.path for r in posts(requests)] == ["/api/users/0/items"]
+    assert len(posts(auth_requests)) == 1
+    assert not any(action == "set" for action, _, _ in backend.calls)
+    assert backend.values == {}
 
 
 @pytest.mark.parametrize("size", [4 * 1024**3, 4 * 1024**3 + 1])
@@ -806,7 +823,7 @@ def test_a5_guard_rejects_401_before_new_authorization(backend,local_file,phase)
         contexts.append(context)
         return context.phase is not ZoteroWriteGuardPhase.BEFORE_AUTHORIZATION_RETRY
     with client:result=client.upload_pdf(local_file,guard=guard)
-    assert result.failure is Upload.GUARD_REJECTED
+    assert result.failure is (Upload.GUARD_REJECTED if phase == "create" else Upload.AUTH_FAILURE)
     assert result.stage is {'create':Stage.NO_CONFIRMED_MUTATION,'prepare':Stage.CHILD_CREATED,'register':Stage.BYTES_UPLOADED}[phase]
     assert result.outcome is (Upload.GUARD_REJECTED if phase=='create' else Upload.PARTIAL_FAILURE)
     assert all(r.url.path!='/api/local/authorize' for r in posts(requests))
@@ -833,7 +850,9 @@ def test_a5_guard_rechecks_after_fresh_authorization_before_replay(backend,local
 def test_a5_guard_rechecks_after_initial_authorization_before_create(backend,local_file):
     client,requests=client_for([approved(True)])
     def guard(context):return not posts(requests)
-    with client:result=client.upload_pdf(local_file,guard=guard)
+    with client:
+        assert client.authorize().outcome is Auth.AUTHORIZED
+        result=client.upload_pdf(local_file,guard=guard)
     assert result.outcome is Upload.GUARD_REJECTED and len(posts(requests))==1
     assert posts(requests)[0].url.path=='/api/local/authorize'
 
@@ -860,3 +879,44 @@ def test_a5_guard_applies_before_upload_key_bytes_write(backend,local_file):
     assert result.outcome is Upload.PARTIAL_FAILURE and result.failure is Upload.GUARD_REJECTED
     assert result.stage is Stage.CHILD_CREATED and len(posts(requests))==2
     assert all(r.url.path!= '/api/local/uploads/'+UPLOAD_SECRET for r in posts(requests))
+
+
+def test_one_time_allow_does_not_access_unavailable_os_store(backend, local_file):
+    backend.fail = 'get'
+    runtime = credentials.ZoteroAuthorizationRuntime()
+    settings, _ = client_for([approved(False)], authorization_runtime=runtime)
+    with settings:
+        assert settings.authorize().outcome is Auth.AUTHORIZED
+    writer, requests = client_for([created()], authorization_runtime=runtime)
+    with writer:
+        result = writer.upload_pdf(local_file)
+    assert result.stage is Stage.CHILD_CREATED
+    assert len(posts(requests)) == 1
+    assert result.authorization.outcome is Auth.SECURE_STORE_FAILURE
+    assert not any(action == 'set' for action, _, _ in backend.calls)
+    assert backend.values == {}
+
+
+def test_one_time_instance_observation_invalidates_cached_client_key(backend, local_file):
+    runtime = credentials.ZoteroAuthorizationRuntime()
+    client, requests = client_for([approved(False)], authorization_runtime=runtime)
+    with client:
+        assert client.authorize().outcome is Auth.AUTHORIZED
+        runtime.observe_instance(OTHER_SERVER)
+        # Returning to A does not resurrect its old process Allow.
+        result = client.upload_pdf(local_file)
+    assert result.authorization.outcome is Auth.REQUIRED
+    assert [r.url.path for r in posts(requests)] == ['/api/local/authorize']
+
+
+def test_remembered_401_refresh_to_one_time_allow_replays_once_then_stops(backend, local_file):
+    backend.remember()
+    client, requests = client_for([response(401), approved(False, FRESH_SECRET), created()])
+    with client:
+        result = client.upload_pdf(local_file)
+    assert result.outcome is Upload.PARTIAL_FAILURE and result.stage is Stage.CHILD_CREATED
+    assert result.authorization.outcome is Auth.REQUIRED
+    assert [r.url.path for r in posts(requests)] == [
+        '/api/users/0/items', '/api/local/authorize', '/api/users/0/items']
+    assert backend.values == {}
+    assert_no_secrets(result)

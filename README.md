@@ -12,6 +12,19 @@ implementation and independent reviews, final audit, release preparation,
 release transaction, and closeout are complete. Released package metadata is
 `0.5.0`.
 
+The current development source implements the unreleased v0.5.1 path. A0–A9
+implementation, independent final-audit Fix 1–3 review, full automated validation,
+and scoped live acquisition and actual Zotero file registration verification
+are complete under SPEC §36.14. The live audit verified normal Chrome,
+publisher→XMU, SmartLinks/Research, task-bound delayed blob attribution, private
+staging, `%PDF` validation, PUBLISHED qualification, Settings-owned remembered
+authorization, and a real registered PDF child. A separate institutional-path
+run naturally presented no human-verification challenge; it is recorded as
+`HUMAN_VERIFICATION_NOT_PRESENT`, with that branch not live-exercised and no
+challenge manufactured. Implementation acceptance and final audit are complete;
+release preparation remains. Package metadata stays `0.5.0`; the v0.5.1 release
+transaction and product closeout are not complete.
+
 v0.4.7 completes Journals Organization &
 Bulk Import while preserving the durable workflow model and compatibility
 boundaries. Its A0–A7 implementation, independent stage reviews, final
@@ -109,114 +122,112 @@ Paper Markdown remains the durable workflow state. The GUI does not add a
 workflow/execution database, persistent run history, heartbeat, SSE, WebSocket,
 queue, or another source of Paper decision state.
 
-### Add PDF to Zotero — released workflow
+### Add PDF to Zotero — current development source
 
-**Add PDF to Zotero** is released in v0.5.0 and is available in **In Zotero**
-Paper detail when the Paper has a valid DOI.
+The workflow below describes the current **v0.5.1 development source**. v0.5.1
+is not released; Python package metadata remains **0.5.0**.
 
-1. **Keep** a Paper.
-2. Use **Copy DOI** in Kept detail.
-3. Manually create or import the bibliographic item into Zotero **My Library**.
-4. Click **Mark in Zotero** to confirm that handoff.
-5. Open the Paper in the **In Zotero** view.
-6. Click **Add PDF to Zotero**.
-7. Complete institutional login/verification and Zotero authorization when
-   prompted.
+1. **Keep** a Paper and use **Copy DOI** in Kept detail.
+2. Manually create or import the bibliographic parent into Zotero **My Library**.
+3. Click **Mark in Zotero**. It requires one exact normalized-DOI match from a
+   complete My Library lookup and atomically writes `status: in_zotero` and the
+   verified `zotero_key`. Zero/multiple matches or incomplete reads leave Paper
+   unchanged. A wrong, stale, or conflicting existing non-null key fails; it is
+   never silently repaired. Mark does not create a parent or acquire a PDF.
+4. Set up Chrome companion and Zotero authorization as described below.
+5. Open the Paper in **In Zotero**, then click **Add PDF to Zotero**.
 
-**Mark in Zotero** is still only the manual `kept → in_zotero` workflow status
-transition. It does not create a Zotero parent item, check for a PDF, or start
-acquisition. **Add PDF to Zotero** is a separate action.
+#### Prerequisites and companion installation
 
-#### Prerequisites
-
-- **Zotero Desktop 10+**, running with Local API write support. In
+- **Zotero Desktop 10+**, running with Local API support. In Zotero
   **Settings → Advanced**, enable **Allow other applications on this computer
-  to communicate with Zotero**. Literature Monitor uses
-  `http://localhost:23119/api/`, API version 3, and My Library (`/users/0`).
-  Authorization comes from Zotero Desktop's local confirmation dialog; no
-  zotero.org/Web API token is needed.
-- **Google Chrome**, installed normally on this machine. Acquisition uses
-  Playwright's Google Chrome channel in a visible browser with a persistent
-  profile. `uv sync` installs the Python dependencies, not Google Chrome; a
-  bundled Chromium installation is not used by this workflow.
-- **Xiamen University institutional access**. The current integration uses XMU
-  Full Text Finder, OPID `45yels`, profile `s1215021.main.ftf`. It is specific to
-  this institution. VPN, gateway redirects, MFA, CAPTCHA, Cloudflare, and other
-  institution verification remain manual.
+  to communicate with Zotero**. The application uses the loopback Local API,
+  API version 3 and My Library (`/users/0`); no zotero.org token is needed.
+- **Normal Google Chrome 102+**, using your usual profile and institutional
+  session. There is no Playwright browser or dedicated Literature Monitor
+  profile, and no copying of cookies or passwords.
+- Install the standalone companion from this source checkout: open
+  `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and
+  select the repository-root **browser_companion/** folder. Pin it to the
+  toolbar to access current-task actions. No Node/npm or build step is needed.
+  Installing the Python wheel does **not** install the extension into Chrome;
+  keep a source checkout containing this folder. See
+  [companion installation and security](browser_companion/README.md).
+- **Xiamen University institutional access** is needed only for the explicit
+  XMU fallback. Its visible Full Text Finder adapter uses OPID `45yels`,
+  customer `s1215021`, group `main`, profile `ftf`.
 
-#### Zotero identity and existing PDFs
+#### Preflight and browser flow
 
-Acquisition uses an existing My Library parent with an **exact normalized DOI**.
-A stored `zotero_key` is checked against that DOI. A missing, stale, or wrong-DOI
-key triggers a complete My Library DOI lookup: zero exact matches fails; more
-than one requires manual duplicate resolution in Zotero; exactly one verifies
-the parent. An incomplete read cannot establish a unique match. Title, author,
-year, and fuzzy matching are not used. There is no automatic bibliographic
-item creation, Group Library support, Zotero Web API, or OAuth.
+Add PDF accepts an existing `in_zotero` Paper and freezes its normalized DOI,
+complete preferred PaperVersion, verified Zotero parent key and workspace into
+one task. An existing non-null `zotero_key` must match the DOI; it cannot fall
+back to another parent. A null/missing compatibility key may become the uniquely
+verified parent's key. Before opening Chrome, preflight inspects actual current
+Zotero attachments. An actual existing PDF is **PDF already attached**, a
+successful no-op; incomplete attachment metadata alone is insufficient.
 
-An actual existing Zotero PDF file returns **PDF already attached**, a successful
-no-op with no download or duplicate upload. Metadata for an incomplete attachment
-alone does not count as a stored PDF. Each explicit retry checks current Paper
-and Zotero state again, including attachments before upload. A failed upload
-may leave a partial attachment; inspect Zotero before retrying when the UI
-reports partial or uncertain state. Literature Monitor does not automatically
-delete those items.
+The task opens a secure loopback handoff in normal Chrome and the companion
+continues in that same tab. PUBLISHED starts at the canonical DOI/publisher;
+accepted manuscript/preprint targets need their frozen manifestation's direct
+URL. Complete login, CAPTCHA, MFA, Cloudflare or gateway verification yourself
+in the task tab; these waits do not mean the publisher path is exhausted and
+are not bypassed. Use the companion's task actions to continue.
 
-#### Authorization and institutional browser
+Only a PUBLISHED task can explicitly choose **Publisher path exhausted — try
+XMU** after the publisher path cannot provide the target version. XMU uses
+visible, structured **Full Text / SmartLink(s)** results in document/provider
+order. Multiple eligible choices require explicit selection. There is no
+private `/api/links` parsing or broad publisher scraping.
 
-The first write may show Zotero's authorization dialog. Choose one-time
-**Allow** or remembered **Always Allow**. One-time authorization stays only in
-the current process and may be consumed by a write. Remembered authorization
-uses the operating-system credential store, isolated by Zotero Server-ID, with
-no plaintext fallback. Revoked authorization or a 401 can request fresh
-authorization once; further failure ends the attempt. Authorization is bounded,
-and a 429 requires waiting for the retry boundary before another explicit attempt.
-Changing the workspace in Settings does not clear that boundary.
+For a landing-page PDF link, use **Arm next user download** in the task tab
+before clicking it within 10 seconds. For a verified EBSCO Research PDF Download
+click within that window, remote preparation may take longer: Chrome must start
+the download within 120 seconds of that click, with the same task, claimed tab,
+record, DOI and approved XMU category. Arm alone does not authorize later
+downloads. **Download current URL with Chrome** and
+**Check current download** are explicit task actions. Ambiguous or unprovable
+download attribution fails closed; not every PDF viewer download is supported.
+The user download stays untouched. The application validates a private temporary
+copy outside the project/workspace, then cleans only that copy.
 
-When needed, acquisition opens a visible, dedicated Chrome browser. Its
-persistent profile is machine-local application data selected by `platformdirs`,
-outside the repository and Paper workspace. It is separate from your ordinary
-Chrome profile and retains institutional session cookies, not acquisition
-history. Literature Monitor does not store institution passwords. If another
-Literature Monitor browser session has locked this profile, close that session
-before retrying.
+#### Version qualification and final write
 
-Sign in and complete any VPN/gateway redirect, MFA, CAPTCHA, Cloudflare, or
-institution verification manually in that browser. Literature Monitor does not
-bypass these checks. If the attempt ends with institutional authentication
-required, complete the manual access step when possible, then explicitly click
-**Add PDF to Zotero** again; there is no automatic retry loop.
+PDF bytes and DOI equality alone are insufficient. The actual artifact must
+qualify against the complete frozen preferred PaperVersion. A PUBLISHED target
+requires positive published-version evidence; explicit accepted manuscript/AAM
+or preprint evidence rejects it. Missing or ambiguous evidence fails closed.
+There is no **Attach anyway** or lower-version fallback.
 
-Eligible institution resolver full-text links are tried in their supplied
-order. Generic PDF discovery checks the response/download, PDF metadata, and
-explicit PDF links, validating actual bytes as a PDF before upload. The current
-first version has no publisher-specific fallback; not every journal or publisher
-will work.
+Before upload, the application rechecks the frozen key, DOI, Zotero Server-ID
+and actual PDFs. A newly attached PDF suppresses duplicate upload. It writes only
+a PDF child beneath the verified My Library parent, without editing parent
+bibliographic metadata. A partial or uncertain write can leave an attachment;
+inspect Zotero before starting another attempt. No automatic deletion or rollback
+is implied. Attachment provenance uses the canonical DOI URL, not signed/session
+URLs. Paper workflow status, notes and custom fields remain unchanged by Add PDF;
+no durable PDF path, acquisition queue or history is added.
 
-#### Current attempt and durable state
+#### Zotero authorization and the current task
 
-One **Add PDF** acquisition runs at a time. A second start receives a busy
-result and is not queued; you can continue navigating the Web UI while the
-attempt runs. Its presentation is process-local and is lost when Literature
-Monitor restarts. The next explicit attempt rechecks actual Paper/Zotero state.
-If Settings changes the workspace during an attempt, that attempt keeps its
-original workspace; the next attempt uses the saved workspace.
+Initial authorization belongs to Web **Settings → Advanced & Diagnostics →
+Zotero integration**. Acquisition does not initiate the first authorization
+dialog. One-time **Allow** is process-only; remembered authorization uses OS
+credential storage by Zotero Server-ID, with no plaintext fallback. A remembered
+401 replay is guarded and bounded to one eligible reauthorization/replay, with
+fresh identity/PDF checks. Rate limits remain shared across workspace changes.
 
-The four workflow statuses remain `candidate`, `rejected`, `kept`, and
-`in_zotero`. Acquisition success or failure does not change Paper `status` and
-adds no PDF workflow state. The only possible Paper metadata write is a safe
-null/missing `zotero_key` becoming the verified existing parent's key; an
-existing non-null key is preserved. That linkage may remain after a later
-failure. Notes, custom frontmatter, and unmanaged sections remain preserved.
+If a qualified PDF waits for authorization, authorize in Settings, then click
+**Continue after Zotero authorization**. The same frozen task and staged
+artifact resume, without rereading Paper or acquiring the PDF again.
 
-The GUI and Zotero Local API remain loopback-only. Acquisition writes only a
-PDF child attachment beneath the verified parent; it does not edit parent
-bibliographic metadata. Signed/proxy/session resolver URLs are not stored as
-durable provenance; attachment source metadata uses the canonical DOI URL.
-Temporary PDFs are outside the project/workspace and cleaned after use, with
-best-effort cleanup on failure. A process interruption may leave an orphan
-temporary file, which is not evidence of success. No Paper PDF path, PDF store,
-or acquisition history is retained.
+There is one process-local active task, no queue or history. Browser/auth waits
+do not hold a lifetime worker; the UI remains navigable. Workspace changes affect
+the next task. **Cancel acquisition** is available only before **ATTACHING** and
+the mutation gate. After the gate, cancellation is too late and implies no
+rollback. Restart loses the task and browser authority; start a new task that
+rechecks current Paper and Zotero state. Normal Chrome session recovery rules
+are documented in the companion README.
 
 #### Acquisition troubleshooting
 
@@ -224,14 +235,25 @@ or acquisition history is retained.
 | --- | --- |
 | Add PDF button absent | Open an `in_zotero` Paper with a valid DOI. |
 | Zotero unavailable / Local API 403 | Start Zotero and enable Local API access in Advanced settings. |
-| No exact DOI item | Manually add the bibliographic parent to My Library with the matching DOI. |
-| Duplicate exact DOI items | Resolve the duplicates manually in Zotero, then retry. |
+| No exact DOI item / duplicates | Add the matching My Library parent or resolve duplicates manually, then retry. |
+| Wrong/stale/conflicting key | Correct the Paper/Zotero linkage deliberately; it is not automatically repaired. |
 | PDF already attached | Successful no-op; no further upload is needed. |
-| Institutional login required | Complete manual login/verification in dedicated Chrome when possible, then retry explicitly. |
-| Dedicated browser unavailable/profile locked | Check Google Chrome installation and close a competing Literature Monitor browser session. |
-| Zotero authorization denied | Retry explicitly when ready to authorize in Zotero. |
-| Zotero authorization rate-limited | Wait for the authorization retry boundary. |
-| Partial/uncertain attachment | Inspect the item and attachments in Zotero before an explicit retry. |
+| Companion missing/not connected | Load the repo-root extension in normal Chrome; use **Retry companion connection** in the same handoff tab when offered. |
+| Normal Chrome could not open | Check Chrome installation and use Web **Open in Chrome again** for the same valid handoff. |
+| Institutional login/verification | Complete it in the same task tab, then continue using companion actions. |
+| Zotero authorization required | Authorize in Settings, then resume the same qualified artifact with **Continue after Zotero authorization**. |
+| Zotero authorization rate-limited | Wait for the shared retry boundary before another explicit authorization. |
+| Unqualified/ambiguous PDF | Obtain evidence for the exact target manifestation; there is no override or lower-version fallback. |
+| Partial/uncertain attachment | Inspect Zotero and its attachments before an explicit new attempt. |
+
+Automated checks and scoped live evidence remain distinct under SPEC §36.14.
+Fresh Local API inspection verified registered child `LJ6UV83V` under parent
+`ZHIST6EG` with an actual non-empty regular PDF file whose bytes equal the user
+Chrome download. The earlier incomplete child is retained and does not count
+as PDF success. Human-verification behavior remains required whenever a genuine
+challenge appears; environmental non-occurrence is recorded as not
+live-exercised under §36.14's conditional boundary. Further real writes or
+re-registration require explicit user authorization.
 
 ## Run a persistent monitor
 
@@ -935,5 +957,5 @@ uv run literature-monitor export-kept \
 ```
 
 The command does not call Zotero APIs or change Markdown state. After a
-successful downstream Zotero import, change the Paper status to `in_zotero`
-manually.
+successful downstream Zotero import, use Web **Mark in Zotero** to verify the
+exact DOI match and atomically record `in_zotero` with its `zotero_key`.

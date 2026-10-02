@@ -5,8 +5,10 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 import re
-from urllib.parse import urlsplit
+import stat
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -16,6 +18,17 @@ from literature_monitor.zotero_credentials import _without_secret_logs
 
 LOCAL_API_BASE = "http://localhost:23119/api"
 _ITEM_KEY = re.compile(r"[A-Z0-9]{8}")
+# Bibliographic types from https://api.zotero.org/itemTypes; used only by strict
+# acquisition reads, so unknown item types cannot authorize parent mutation.
+_BIBLIOGRAPHIC_TYPES = frozenset({
+    "artwork", "audioRecording", "bill", "blogPost", "book", "bookSection", "case",
+    "conferencePaper", "dataset", "dictionaryEntry", "document", "email",
+    "encyclopediaArticle", "film", "forumPost", "hearing", "instantMessage",
+    "interview", "journalArticle", "letter", "magazineArticle", "manuscript", "map",
+    "newspaperArticle", "patent", "podcast", "preprint", "presentation",
+    "radioBroadcast", "report", "computerProgram", "standard", "statute",
+    "tvBroadcast", "thesis", "videoRecording", "webpage",
+})
 
 
 class ZoteroReadOutcome(str, Enum):
@@ -49,6 +62,13 @@ class VerifiedZoteroItem:
 class ZoteroIdentityResult:
     outcome: ZoteroReadOutcome
     item: VerifiedZoteroItem | None
+    message: str
+
+
+@dataclass(frozen=True)
+class ZoteroInstanceResult:
+    outcome: ZoteroReadOutcome
+    server_id: str | None
     message: str
 
 
@@ -238,6 +258,15 @@ class ZoteroLocalClient:
                 raise _invalid("Zotero pagination did not continue the same My Library read.")
             url = next_url
 
+    def current_instance(self) -> ZoteroInstanceResult:
+        """Read the current Local API instance without authorization or item access."""
+        try:
+            with _without_secret_logs():
+                _, server_id = self._get(httpx.URL(LOCAL_API_BASE + "/"), None)
+            return ZoteroInstanceResult(ZoteroReadOutcome.VERIFIED, server_id, "Zotero Local API is reachable.")
+        except _ReadFailure as failure:
+            return ZoteroInstanceResult(failure.outcome, None, failure.message)
+
     def resolve_identity(
         self, doi: str, zotero_key: str | None = None,
     ) -> ZoteroIdentityResult:
@@ -283,9 +312,39 @@ class ZoteroLocalClient:
         except _ReadFailure as failure:
             return ZoteroIdentityResult(failure.outcome, None, failure.message)
 
+    def verify_parent_key(
+        self, doi: str, zotero_key: str, *, server_id: str | None = None,
+    ) -> ZoteroIdentityResult:
+        """Verify exactly this My Library parent; never enumerate a fallback (§36.4)."""
+        try:
+            normalized = normalize_doi(doi)
+        except ValueError:
+            normalized = None
+        if normalized is None:
+            return ZoteroIdentityResult(ZoteroReadOutcome.INVALID_DOI, None, "A normalized DOI is required.")
+        if not isinstance(zotero_key, str) or not _ITEM_KEY.fullmatch(zotero_key):
+            return ZoteroIdentityResult(ZoteroReadOutcome.INVALID_RESPONSE, None, "A valid Zotero parent key is required.")
+        try:
+            response, current_id = self._get(
+                httpx.URL(f"{LOCAL_API_BASE}/users/0/items/{zotero_key}"),
+                server_id, allow_missing=True,
+            )
+            if response.status_code == 404:
+                return ZoteroIdentityResult(ZoteroReadOutcome.NOT_FOUND, None, "The Zotero parent key no longer exists.")
+            item = _item(_json(response))
+            if (item.key != zotero_key or item.parent_key is not None
+                    or item.item_type not in _BIBLIOGRAPHIC_TYPES or not item.matches_doi(normalized)):
+                raise _invalid("The current Zotero parent does not match the frozen key and DOI.")
+            return ZoteroIdentityResult(
+                ZoteroReadOutcome.VERIFIED, VerifiedZoteroItem(item.key, normalized, current_id),
+                "Exact Zotero parent key and DOI verified.",
+            )
+        except _ReadFailure as failure:
+            return ZoteroIdentityResult(failure.outcome, None, failure.message)
+
     def _has_pdf_file(self, key: str, server_id: str) -> bool:
-        # The Local API supplies a file URL, never bytes. Do not follow it or let
-        # HTTP debug logging expose its filesystem location.
+        # Never follow the HTTP redirect or let debug logging expose its path.
+        # A file URL is only a location hint; inspect current storage below.
         with _without_secret_logs():
             try:
                 response, _ = self._get(
@@ -305,14 +364,24 @@ class ZoteroLocalClient:
             return False
         try:
             target = urlsplit(location)
-            if (target.scheme != "file" or target.netloc not in ("", "localhost")
+            if (not location.startswith("file://") or target.scheme != "file" or target.netloc not in ("", "localhost")
                     or not target.path.startswith("/") or len(target.path) <= 1
-                    or target.query or target.fragment
-                    or any(ord(char) < 32 for char in location)):
+                    or "?" in location or "#" in location
+                    or re.search(r"%(?![0-9a-fA-F]{2})", target.path)
+                    or any(ord(char) < 32 or ord(char) == 127 for char in location)):
+                raise ValueError
+            path = Path(unquote(target.path, errors="strict"))
+            if not path.is_absolute() or any(ord(char) < 32 or ord(char) == 127 for char in str(path)):
                 raise ValueError
         except ValueError:
             raise _invalid("Zotero returned an unreadable file redirect.") from None
-        return True
+        try:
+            current = path.stat(follow_symlinks=False)
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+        except OSError:
+            raise _ReadFailure(ZoteroReadOutcome.API_FAILURE, "Zotero attachment storage could not be inspected.") from None
+        return stat.S_ISREG(current.st_mode) and current.st_size > 0
 
     def inspect_attachments(self, parent: VerifiedZoteroItem) -> ZoteroAttachmentResult:
         """Complete child enumeration, then verify files; failure means unknown."""

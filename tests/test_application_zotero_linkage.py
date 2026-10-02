@@ -60,6 +60,12 @@ def state(path):
     return parsed
 
 
+def file_identities(path):
+    parent=path.parent.lstat();target=path.lstat()
+    return dict(expected_directory_identity=(parent.st_dev,parent.st_ino),
+                expected_file_identity=(target.st_dev,target.st_ino))
+
+
 def update(path, **changes):
     current = state(path)
     frontmatter = dict(current.frontmatter)
@@ -82,7 +88,7 @@ def test_linkage_changes_only_null_or_missing_key_and_preserves_complete_body(pa
     paper_path.write_bytes(contents.encode("utf-8"))
     before = state(paper_path)
 
-    result = link_paper_to_zotero(tmp_path, PAPER_ID, verified_identity())
+    result = link_paper_to_zotero(state(paper_path), verified_identity(), **file_identities(paper_path))
 
     after = state(paper_path)
     assert result.outcome is LinkageOutcome.LINKED
@@ -101,7 +107,7 @@ def test_linkage_changes_only_null_or_missing_key_and_preserves_complete_body(pa
 def test_existing_non_null_key_is_preserved_without_write(paper_path, tmp_path, key):
     update(paper_path, zotero_key=key)
     before = paper_path.read_bytes()
-    result = link_paper_to_zotero(tmp_path, PAPER_ID, verified_identity())
+    result = link_paper_to_zotero(state(paper_path), verified_identity(), **file_identities(paper_path))
     assert result.outcome is LinkageOutcome.ALREADY_LINKED
     assert paper_path.read_bytes() == before
 
@@ -110,7 +116,7 @@ def test_existing_non_null_key_is_preserved_without_write(paper_path, tmp_path, 
 def test_wrong_status_cannot_be_linked(paper_path, tmp_path, status):
     update(paper_path, status=status)
     before = paper_path.read_bytes()
-    result = link_paper_to_zotero(tmp_path, PAPER_ID, verified_identity())
+    result = link_paper_to_zotero(state(paper_path), verified_identity(), **file_identities(paper_path))
     assert result.outcome is LinkageOutcome.STATE_CONFLICT
     assert paper_path.read_bytes() == before
 
@@ -121,7 +127,7 @@ def test_current_paper_doi_must_still_match_verification(paper_path, tmp_path, d
     ids = dict(current.frontmatter["external_ids"], doi=doi)
     update(paper_path, doi=doi, external_ids=ids)
     before = paper_path.read_bytes()
-    result = link_paper_to_zotero(tmp_path, PAPER_ID, verified_identity())
+    result = link_paper_to_zotero(state(paper_path), verified_identity(), **file_identities(paper_path))
     assert result.outcome is LinkageOutcome.STATE_CONFLICT
     assert paper_path.read_bytes() == before
 
@@ -130,7 +136,7 @@ def test_doi_url_and_bare_doi_are_same_linkage_identity(paper_path, tmp_path):
     current = state(paper_path)
     url = "https://doi.org/10.5555/LINKAGE"
     update(paper_path, doi=url, external_ids=dict(current.frontmatter["external_ids"], doi=url))
-    assert link_paper_to_zotero(tmp_path, PAPER_ID, verified_identity()).outcome is LinkageOutcome.LINKED
+    assert link_paper_to_zotero(state(paper_path), verified_identity(), **file_identities(paper_path)).outcome is LinkageOutcome.LINKED
 
 
 @pytest.mark.parametrize("changes", [
@@ -140,147 +146,16 @@ def test_doi_url_and_bare_doi_are_same_linkage_identity(paper_path, tmp_path):
 def test_malformed_target_is_not_updated(paper_path, tmp_path, changes):
     update(paper_path, **changes)
     before = paper_path.read_bytes()
-    result = link_paper_to_zotero(tmp_path, PAPER_ID, verified_identity())
+    result = link_paper_to_zotero(state(paper_path), verified_identity(), **file_identities(paper_path))
     assert result.outcome is LinkageOutcome.INVALID_PAPER
     assert paper_path.read_bytes() == before
-
-
-def test_duplicate_uuid_locations_are_rejected(paper_path, tmp_path):
-    sibling = paper_path.with_name("duplicate.md")
-    sibling.write_bytes(paper_path.read_bytes())
-    before = {p: p.read_bytes() for p in (paper_path, sibling)}
-    result = link_paper_to_zotero(tmp_path, PAPER_ID, verified_identity())
-    assert result.outcome is LinkageOutcome.INVALID_PAPER
-    assert {p: p.read_bytes() for p in before} == before
-
-
-def test_missing_papers_directory_creates_nothing(tmp_path):
-    output = tmp_path / "missing"
-    result = link_paper_to_zotero(output, PAPER_ID, verified_identity())
-    assert result.outcome is LinkageOutcome.NOT_FOUND
-    assert not output.exists()
-
-
-def test_non_directory_papers_path_is_rejected(tmp_path):
-    path = tmp_path / "Papers"
-    path.write_bytes(b"User data")
-    result = link_paper_to_zotero(tmp_path, PAPER_ID, verified_identity())
-    assert result.outcome is LinkageOutcome.IO_FAILURE
-    assert path.read_bytes() == b"User data"
-
-
-@pytest.mark.parametrize("operation", ["stat", "scan"])
-def test_location_inspection_failure_is_structured_without_write(paper_path, tmp_path, monkeypatch, operation):
-    before = paper_path.read_bytes()
-    if operation == "stat":
-        original = Path.is_symlink
-
-        def fail(path):
-            if path == paper_path.parent:
-                raise PermissionError("SECRET error")
-            return original(path)
-
-        monkeypatch.setattr(Path, "is_symlink", fail)
-    else:
-        def fail(path, pattern):
-            raise PermissionError("SECRET error")
-
-        monkeypatch.setattr(Path, "glob", fail)
-    result = link_paper_to_zotero(tmp_path, PAPER_ID, verified_identity())
-    assert result.outcome is LinkageOutcome.IO_FAILURE
-    assert "SECRET" not in result.message
-    assert paper_path.read_bytes() == before
-
-
-@pytest.mark.parametrize("directory_link", [False, True])
-def test_symlink_directory_or_candidate_never_writes_outside_workspace(paper_path, tmp_path, directory_link):
-    output = tmp_path / "other-workspace"
-    output.mkdir()
-    if directory_link:
-        (output / "Papers").symlink_to(paper_path.parent)
-    else:
-        (output / "Papers").mkdir()
-        (output / "Papers" / "linked.md").symlink_to(paper_path)
-    before = paper_path.read_bytes()
-    result = link_paper_to_zotero(output, PAPER_ID, verified_identity())
-    assert result.outcome in {LinkageOutcome.IO_FAILURE, LinkageOutcome.INVALID_PAPER}
-    assert paper_path.read_bytes() == before
-
-
-@pytest.mark.parametrize("malformed", [False, True])
-def test_non_regular_or_unreadable_uuid_candidate_is_not_written(tmp_path, malformed):
-    papers = tmp_path / "Papers"
-    papers.mkdir()
-    path = papers / "unsafe.md"
-    if malformed:
-        path.write_bytes(b"---\ntype: paper\nid: [broken")
-        before = path.read_bytes()
-    else:
-        path.mkdir()
-    result = link_paper_to_zotero(tmp_path, PAPER_ID, verified_identity())
-    assert result.outcome is LinkageOutcome.INVALID_PAPER
-    if malformed:
-        assert path.read_bytes() == before
-    else:
-        assert path.is_dir()
-
-
-def test_unreadable_sibling_cannot_hide_a_duplicate_uuid(paper_path, tmp_path, monkeypatch):
-    sibling = paper_path.with_name("unreadable.md")
-    sibling.write_bytes(paper_path.read_bytes())
-    before = paper_path.read_bytes()
-    original = linkage.read_text_exact
-
-    def read(path):
-        if path == sibling:
-            raise PermissionError("SECRET details")
-        return original(path)
-
-    monkeypatch.setattr(linkage, "read_text_exact", read)
-    result = link_paper_to_zotero(tmp_path, PAPER_ID, verified_identity())
-    assert result.outcome is LinkageOutcome.IO_FAILURE
-    assert "SECRET" not in result.message
-    assert paper_path.read_bytes() == before
-
-
-@pytest.mark.parametrize("change", ["uuid", "disappear", "unreadable", "malformed"])
-def test_target_is_reread_after_relocation(paper_path, tmp_path, monkeypatch, change):
-    original = linkage.read_text_exact
-    reads = 0
-
-    def read(path):
-        nonlocal reads
-        reads += 1
-        if reads == 2:
-            if change == "uuid":
-                update(path, id="22222222-2222-4222-8222-222222222222")
-            elif change == "disappear":
-                path.unlink()
-            elif change == "malformed":
-                update(path, title=None)
-            else:
-                raise PermissionError("read denied")
-        return original(path)
-
-    before = paper_path.read_bytes()
-    monkeypatch.setattr(linkage, "read_text_exact", read)
-    result = link_paper_to_zotero(tmp_path, PAPER_ID, verified_identity())
-    expected = {
-        "uuid": LinkageOutcome.STATE_CONFLICT, "disappear": LinkageOutcome.STATE_CONFLICT,
-        "unreadable": LinkageOutcome.IO_FAILURE, "malformed": LinkageOutcome.INVALID_PAPER,
-    }
-    assert result.outcome is expected[change]
-    if change != "disappear":
-        assert state(paper_path).zotero_key is None
-    if change == "unreadable":
-        assert paper_path.read_bytes() == before
 
 
 @pytest.mark.parametrize("change", ["body", "status", "doi", "uuid", "key"])
 def test_complete_content_compare_preserves_concurrent_edit(paper_path, tmp_path, monkeypatch, change):
     concurrent = None
 
-    def edit_before_compare(path, updated, *, expected_contents):
+    def edit_before_compare(path, updated, *, expected_contents, **kwargs):
         nonlocal concurrent
         if change == "body":
             path.write_bytes((expected_contents + "\nConcurrent human note.\n").encode())
@@ -293,21 +168,21 @@ def test_complete_content_compare_preserves_concurrent_edit(paper_path, tmp_path
         else:
             update(path, zotero_key="NEWKEY01")
         concurrent = path.read_bytes()
-        safe_write.replace_text_if_unchanged(path, updated, expected_contents=expected_contents)
+        safe_write.replace_regular_text_at_identity(path, updated, expected_contents=expected_contents,**kwargs)
 
-    monkeypatch.setattr(linkage, "replace_text_if_unchanged", edit_before_compare)
-    result = link_paper_to_zotero(tmp_path, PAPER_ID, verified_identity())
+    monkeypatch.setattr(linkage, "replace_regular_text_at_identity", edit_before_compare)
+    result = link_paper_to_zotero(state(paper_path), verified_identity(), **file_identities(paper_path))
     assert result.outcome is LinkageOutcome.STATE_CONFLICT
     assert paper_path.read_bytes() == concurrent
 
 
 def test_disappearance_during_compare_is_conflict_without_recreation(paper_path, tmp_path, monkeypatch):
-    def disappear(path, updated, *, expected_contents):
+    def disappear(path, updated, *, expected_contents, **kwargs):
         path.unlink()
-        safe_write.replace_text_if_unchanged(path, updated, expected_contents=expected_contents)
+        safe_write.replace_regular_text_at_identity(path, updated, expected_contents=expected_contents,**kwargs)
 
-    monkeypatch.setattr(linkage, "replace_text_if_unchanged", disappear)
-    result = link_paper_to_zotero(tmp_path, PAPER_ID, verified_identity())
+    monkeypatch.setattr(linkage, "replace_regular_text_at_identity", disappear)
+    result = link_paper_to_zotero(state(paper_path), verified_identity(), **file_identities(paper_path))
     assert result.outcome is LinkageOutcome.STATE_CONFLICT
     assert not paper_path.exists()
 
@@ -315,11 +190,11 @@ def test_disappearance_during_compare_is_conflict_without_recreation(paper_path,
 def test_compare_read_failure_is_io_failure_without_write(paper_path, tmp_path, monkeypatch):
     before = paper_path.read_bytes()
 
-    def unreadable(path, updated, *, expected_contents):
+    def unreadable(path, updated, *, expected_contents, **kwargs):
         raise safe_write.CompareReadError("SECRET error")
 
-    monkeypatch.setattr(linkage, "replace_text_if_unchanged", unreadable)
-    result = link_paper_to_zotero(tmp_path, PAPER_ID, verified_identity())
+    monkeypatch.setattr(linkage, "replace_regular_text_at_identity", unreadable)
+    result = link_paper_to_zotero(state(paper_path), verified_identity(), **file_identities(paper_path))
     assert result.outcome is LinkageOutcome.IO_FAILURE
     assert "SECRET" not in result.message
     assert paper_path.read_bytes() == before
@@ -328,11 +203,11 @@ def test_compare_read_failure_is_io_failure_without_write(paper_path, tmp_path, 
 def test_atomic_write_failure_preserves_original_and_cleans_temp(paper_path, tmp_path, monkeypatch):
     before = paper_path.read_bytes()
 
-    def fail_replace(*args):
+    def fail_replace(*args,**kwargs):
         raise OSError("SECRET error")
 
     monkeypatch.setattr(safe_write.os, "replace", fail_replace)
-    result = link_paper_to_zotero(tmp_path, PAPER_ID, verified_identity())
+    result = link_paper_to_zotero(state(paper_path), verified_identity(), **file_identities(paper_path))
     assert result.outcome is LinkageOutcome.IO_FAILURE
     assert "SECRET" not in result.message
     assert paper_path.read_bytes() == before
@@ -347,20 +222,22 @@ def test_atomic_write_failure_preserves_original_and_cleans_temp(paper_path, tmp
 def test_failed_identity_resolution_cannot_mutate_paper(paper_path, tmp_path, outcome):
     before = paper_path.read_bytes()
     identity = ZoteroIdentityResult(outcome, None, "Failed read.")
-    result = link_paper_to_zotero(tmp_path, PAPER_ID, identity)
+    result = link_paper_to_zotero(state(paper_path), identity, **file_identities(paper_path))
     assert result.outcome is LinkageOutcome.UNVERIFIED
     assert paper_path.read_bytes() == before
 
 
-def test_read_identity_inspect_attachment_then_independently_link(paper_path, tmp_path):
+def test_read_identity_inspect_attachment_then_link_original_action_snapshot(paper_path, tmp_path):
     requests = []
+    actual_file = tmp_path / 'paper.pdf'
+    actual_file.write_bytes(b'nonempty existing attachment')
 
     def respond(request):
         requests.append(request)
         assert request.method == "GET"
         if request.url.path.endswith("/PDF00001/file"):
             return httpx.Response(302, headers={
-                "Zotero-Server-ID": SERVER, "Location": "file:///private/synthetic/paper.pdf",
+                "Zotero-Server-ID": SERVER, "Location": actual_file.as_uri(),
             })
         if request.url.path.endswith("/children"):
             return httpx.Response(200, json=[{
@@ -372,13 +249,83 @@ def test_read_identity_inspect_attachment_then_independently_link(paper_path, tm
             "key": KEY, "data": {"itemType": "journalArticle", "DOI": DOI},
         }], headers={"Zotero-Server-ID": SERVER, "Total-Results": "1", "Last-Modified-Version": "4"})
 
+    snapshot = state(paper_path)
     with ZoteroLocalClient(transport=httpx.MockTransport(respond)) as client:
         identity = client.resolve_identity(DOI)
         children = client.inspect_attachments(identity.item)
     assert children.has_pdf is True
     assert len(requests) == 3
     before = state(paper_path)
-    assert link_paper_to_zotero(tmp_path, PAPER_ID, identity).outcome is LinkageOutcome.LINKED
+    assert link_paper_to_zotero(snapshot, identity, **file_identities(paper_path)).outcome is LinkageOutcome.LINKED
     after = state(paper_path)
     assert after.frontmatter == dict(before.frontmatter, zotero_key=KEY)
     assert after.body == before.body
+
+
+@pytest.mark.parametrize('kind',['symlink','directory','fifo','missing'])
+def test_final_regular_compare_rejects_location_substitution(paper_path,tmp_path,monkeypatch,kind):
+    import os
+    snapshot=state(paper_path);original=paper_path.read_bytes();preserved=tmp_path/'preserved.md'
+    calls=[]
+    def substitute(path,contents,*,expected_contents,**kwargs):
+        calls.append(path)
+        assert expected_contents==snapshot.original
+        path.rename(preserved)
+        if kind=='symlink':path.symlink_to(preserved)
+        elif kind=='directory':
+            path.mkdir();(path/'sentinel').write_bytes(b'human object')
+        elif kind=='fifo':os.mkfifo(path)
+        safe_write.replace_regular_text_at_identity(path,contents,expected_contents=expected_contents,**kwargs)
+    monkeypatch.setattr(linkage,'replace_regular_text_at_identity',substitute)
+    result=link_paper_to_zotero(snapshot,verified_identity(),**file_identities(paper_path))
+    assert result.outcome is LinkageOutcome.STATE_CONFLICT and calls==[paper_path]
+    assert preserved.read_bytes()==original
+    assert state(preserved).zotero_key is None
+    if kind=='symlink':assert paper_path.is_symlink() and paper_path.read_bytes()==original
+    elif kind=='directory':assert (paper_path/'sentinel').read_bytes()==b'human object'
+    elif kind=='fifo':assert not paper_path.is_file()
+    else:assert not paper_path.exists()
+
+
+def test_linkage_uses_snapshot_without_semantic_read_or_parse(paper_path,monkeypatch):
+    snapshot=state(paper_path)
+    def forbidden(*args,**kwargs):raise AssertionError('Second semantic Paper read')
+    monkeypatch.setattr(Path,'read_bytes',forbidden)
+    result=link_paper_to_zotero(snapshot,verified_identity(),**file_identities(paper_path))
+    assert result.outcome is LinkageOutcome.LINKED
+    with paper_path.open('rb') as handle:
+        after=parse_paper_state(paper_path,handle.read().decode(),paper_path.parent.parent/'Authors')
+    assert after.zotero_key==KEY and after.body==snapshot.body
+
+
+def test_unsafe_papers_directory_after_snapshot_never_links_outside(paper_path,tmp_path):
+    snapshot=state(paper_path);before=paper_path.read_bytes();location=file_identities(paper_path)
+    directory=paper_path.parent;preserved=tmp_path/'outside';directory.rename(preserved)
+    directory.symlink_to(preserved,target_is_directory=True)
+    result=link_paper_to_zotero(snapshot,verified_identity(),**location)
+    assert result.outcome is LinkageOutcome.STATE_CONFLICT
+    assert (preserved/paper_path.name).read_bytes()==before
+
+
+@pytest.mark.parametrize('substitution',['parent_symlink','same_bytes_inode','different_directory'])
+def test_original_action_location_substitution_at_real_linkage_boundary(paper_path,tmp_path,monkeypatch,substitution):
+    snapshot=state(paper_path);location=file_identities(paper_path);original=paper_path.read_bytes()
+    preserved=tmp_path/'preserved-object';calls=[]
+    def substitute(path,contents,**kwargs):
+        calls.append(path)
+        assert kwargs['expected_contents']==snapshot.original
+        assert kwargs['expected_directory_identity']==location['expected_directory_identity']
+        assert kwargs['expected_file_identity']==location['expected_file_identity']
+        if substitution=='same_bytes_inode':path.rename(preserved);path.write_bytes(original)
+        else:
+            path.parent.rename(preserved)
+            if substitution=='parent_symlink':path.parent.symlink_to(preserved,target_is_directory=True)
+            else:path.parent.mkdir();path.write_bytes(original)
+        safe_write.replace_regular_text_at_identity(path,contents,**kwargs)
+    monkeypatch.setattr(linkage,'replace_regular_text_at_identity',substitute)
+    result=link_paper_to_zotero(snapshot,verified_identity(),**location)
+    assert result.outcome is LinkageOutcome.STATE_CONFLICT and calls==[paper_path]
+    moved=preserved if substitution=='same_bytes_inode' else preserved/paper_path.name
+    assert moved.read_bytes()==original and paper_path.read_bytes()==original
+    assert state(moved).zotero_key is None and state(paper_path).zotero_key is None
+    if substitution=='parent_symlink':assert paper_path.parent.is_symlink()

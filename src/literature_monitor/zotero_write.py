@@ -7,7 +7,7 @@ actual Zotero state before starting another attempt; this module never replays
 an uncertain create or claims rollback.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from enum import Enum
@@ -23,7 +23,8 @@ from typing import BinaryIO, Callable
 import httpx
 
 from .zotero_credentials import (
-    ZoteroCredentialStore, ZoteroCredentialStoreError, _without_secret_logs,
+    ZoteroAuthorizationRuntime, ZoteroCredentialStore, ZoteroCredentialStoreError,
+    _Credential, _without_secret_logs,
 )
 from .zotero_local import LOCAL_API_BASE, VerifiedZoteroItem
 
@@ -36,6 +37,7 @@ _FILENAME = "article.pdf"
 
 class ZoteroAuthorizationOutcome(str, Enum):
     AUTHORIZED = "authorized"
+    REQUIRED = "required"
     DENIED = "denied"
     RATE_LIMITED = "rate_limited"
     API_FAILURE = "api_failure"
@@ -59,6 +61,7 @@ class ZoteroAuthorizationResult:
     def message(self) -> str:
         return {
             ZoteroAuthorizationOutcome.AUTHORIZED: "Zotero write authorization granted.",
+            ZoteroAuthorizationOutcome.REQUIRED: "Authorize Zotero in Settings → Advanced & Diagnostics → Zotero integration.",
             ZoteroAuthorizationOutcome.DENIED: "Zotero write authorization denied.",
             ZoteroAuthorizationOutcome.RATE_LIMITED: "Zotero authorization rate limited.",
             ZoteroAuthorizationOutcome.API_FAILURE: "Zotero authorization unavailable.",
@@ -121,12 +124,6 @@ class ZoteroUploadResult:
         return "Zotero attachment upload did not start."
 
 
-@dataclass
-class _Credential:
-    key: str = field(repr=False)
-    remembered: bool
-
-
 class _WriteFailure(Exception):
     def __init__(self, outcome: ZoteroUploadOutcome, *, authorization=None, uncertain=False):
         super().__init__(outcome.value)
@@ -151,18 +148,19 @@ def _retry_after(value: str | None) -> float | None:
         return None
 
 
-class ZoteroWriteClient:
+class ZoteroAuthorizationClient:
     def __init__(
-        self, parent: VerifiedZoteroItem, *,
+        self, server_id: str, *,
+        authorization_runtime: ZoteroAuthorizationRuntime | None = None,
         credential_store: ZoteroCredentialStore | None = None,
         timeout: float = 10.0, transport: httpx.BaseTransport | None = None,
     ):
-        if not isinstance(parent, VerifiedZoteroItem):
-            raise TypeError("A verified Zotero parent is required.")
-        self.parent = parent
-        self._store = credential_store if credential_store is not None else ZoteroCredentialStore()
+        self.server_id = server_id
+        self._runtime = (authorization_runtime if authorization_runtime is not None
+                         else ZoteroAuthorizationRuntime(credential_store=credential_store))
         self._credential: _Credential | None = None
         self._instance_changed = False
+        self._reauthorized = False
         self._http = httpx.Client(
             timeout=timeout, transport=transport, trust_env=False, follow_redirects=False,
             headers={"Zotero-API-Version": "3", "Accept": "application/json"},
@@ -195,9 +193,10 @@ class ZoteroWriteClient:
         if not server_id or not server_id.strip():
             self._credential = None
             raise _WriteFailure(ZoteroUploadOutcome.INVALID_RESPONSE)
-        if server_id != self.parent.server_id:
+        if server_id != self.server_id:
             self._credential = None
             self._instance_changed = True
+            self._runtime.observe_instance(server_id)
             raise _WriteFailure(ZoteroUploadOutcome.SERVER_ID_MISMATCH)
 
     def _check_server(self) -> None:
@@ -205,11 +204,12 @@ class ZoteroWriteClient:
             raise _WriteFailure(ZoteroUploadOutcome.SERVER_ID_MISMATCH)
         response = self._request(
             "GET", LOCAL_API_BASE + "/",
-            headers={"Zotero-Server-ID": self.parent.server_id},
+            headers={"Zotero-Server-ID": self.server_id},
         )
         self._check_response_instance(response)
         if response.status_code != 200:
             raise _WriteFailure(ZoteroUploadOutcome.API_FAILURE)
+        self._runtime.observe_instance(self.server_id)
 
     @staticmethod
     def _json(response: httpx.Response):
@@ -226,19 +226,24 @@ class ZoteroWriteClient:
         self._credential = None
         try:
             self._check_server()
+            delay = self._runtime.retry_boundary.remaining()
+            if delay > 0:
+                return ZoteroAuthorizationResult(ZoteroAuthorizationOutcome.RATE_LIMITED,
+                    self.server_id, retry_after_seconds=delay)
             response = self._request(
                 "POST", LOCAL_API_BASE + "/local/authorize",
-                headers={"Zotero-Server-ID": self.parent.server_id},
+                headers={"Zotero-Server-ID": self.server_id},
                 json={"appName": "Literature Monitor"},
             )
             self._check_response_instance(response)
             if response.status_code == 403:
                 outcome = ZoteroAuthorizationOutcome.DENIED
             elif response.status_code == 429:
-                return ZoteroAuthorizationResult(
-                    ZoteroAuthorizationOutcome.RATE_LIMITED, self.parent.server_id,
-                    retry_after_seconds=_retry_after(response.headers.get("Retry-After")),
-                )
+                delay = _retry_after(response.headers.get("Retry-After"))
+                if delay is not None:
+                    self._runtime.retry_boundary.defer(delay)
+                return ZoteroAuthorizationResult(ZoteroAuthorizationOutcome.RATE_LIMITED,
+                    self.server_id, retry_after_seconds=delay)
             elif response.status_code != 200:
                 outcome = ZoteroAuthorizationOutcome.API_FAILURE
             else:
@@ -246,11 +251,10 @@ class ZoteroWriteClient:
                 key, remember = payload.get("key"), payload.get("remember")
                 if not isinstance(key, str) or not _KEY.fullmatch(key) or type(remember) is not bool:
                     raise _WriteFailure(ZoteroUploadOutcome.INVALID_RESPONSE)
-                if remember:
-                    self._store.save(self.parent.server_id, key)
+                self._runtime.establish(self.server_id, key, remembered=remember)
                 self._credential = _Credential(key, remember)
                 return ZoteroAuthorizationResult(
-                    ZoteroAuthorizationOutcome.AUTHORIZED, self.parent.server_id, remembered=remember,
+                    ZoteroAuthorizationOutcome.AUTHORIZED, self.server_id, remembered=remember,
                 )
         except ZoteroCredentialStoreError:
             outcome = ZoteroAuthorizationOutcome.SECURE_STORE_FAILURE
@@ -259,7 +263,7 @@ class ZoteroWriteClient:
                 ZoteroUploadOutcome.SERVER_ID_MISMATCH: ZoteroAuthorizationOutcome.SERVER_ID_MISMATCH,
                 ZoteroUploadOutcome.INVALID_RESPONSE: ZoteroAuthorizationOutcome.INVALID_RESPONSE,
             }.get(failure.outcome, ZoteroAuthorizationOutcome.API_FAILURE)
-        return ZoteroAuthorizationResult(outcome, self.parent.server_id)
+        return ZoteroAuthorizationResult(outcome, self.server_id)
 
     def _require_authorization(self, result: ZoteroAuthorizationResult) -> None:
         if result.outcome is ZoteroAuthorizationOutcome.AUTHORIZED:
@@ -273,32 +277,50 @@ class ZoteroWriteClient:
 
     def _credential_for_write(self) -> _Credential:
         self._check_server()  # Check before accessing even this instance's keyring entry.
-        if self._credential is None:
-            try:
-                key = self._store.load(self.parent.server_id)
-            except ZoteroCredentialStoreError:
-                self._require_authorization(ZoteroAuthorizationResult(
-                    ZoteroAuthorizationOutcome.SECURE_STORE_FAILURE, self.parent.server_id,
-                ))
-            if key is not None:
-                if not isinstance(key, str) or not _KEY.fullmatch(key):
-                    self._require_authorization(ZoteroAuthorizationResult(
-                        ZoteroAuthorizationOutcome.SECURE_STORE_FAILURE, self.parent.server_id,
-                    ))
-                self._credential = _Credential(key, True)
-            else:
-                self._require_authorization(self.authorize())
+        try:
+            credential = self._runtime.credential(self.server_id)
+        except ZoteroCredentialStoreError:
+            self._require_authorization(ZoteroAuthorizationResult(
+                ZoteroAuthorizationOutcome.SECURE_STORE_FAILURE, self.server_id,
+            ))
+        if credential is None:
+            self._require_authorization(ZoteroAuthorizationResult(
+                ZoteroAuthorizationOutcome.REQUIRED, self.server_id,
+            ))
+        if not isinstance(credential.key, str) or not _KEY.fullmatch(credential.key):
+            self._require_authorization(ZoteroAuthorizationResult(
+                ZoteroAuthorizationOutcome.SECURE_STORE_FAILURE, self.server_id,
+            ))
+        self._credential = credential
         return self._credential
+
+    def authorization_status(self) -> ZoteroAuthorizationResult:
+        """Read current authorization availability without opening a dialog."""
+        try:
+            credential = self._credential_for_write()
+            return ZoteroAuthorizationResult(ZoteroAuthorizationOutcome.AUTHORIZED,
+                self.server_id, remembered=credential.remembered)
+        except _WriteFailure as failure:
+            return failure.authorization or ZoteroAuthorizationResult(
+                ZoteroAuthorizationOutcome.SERVER_ID_MISMATCH if self._instance_changed
+                else ZoteroAuthorizationOutcome.API_FAILURE, self.server_id)
 
     def _invalidate(self, credential: _Credential) -> None:
         self._credential = None
-        if credential.remembered:
-            try:
-                self._store.delete(self.parent.server_id)
-            except ZoteroCredentialStoreError:
-                self._require_authorization(ZoteroAuthorizationResult(
-                    ZoteroAuthorizationOutcome.SECURE_STORE_FAILURE, self.parent.server_id,
-                ))
+        try:
+            self._runtime.invalidate(self.server_id, credential)
+        except ZoteroCredentialStoreError:
+            self._require_authorization(ZoteroAuthorizationResult(
+                ZoteroAuthorizationOutcome.SECURE_STORE_FAILURE, self.server_id,
+            ))
+
+
+class ZoteroWriteClient(ZoteroAuthorizationClient):
+    def __init__(self, parent: VerifiedZoteroItem, **kwargs):
+        if not isinstance(parent, VerifiedZoteroItem):
+            raise TypeError("A verified Zotero parent is required.")
+        self.parent = parent
+        super().__init__(parent.server_id, **kwargs)
 
     @staticmethod
     def _guard(guard, stage, attachment_key, phase=ZoteroWriteGuardPhase.BEFORE_WRITE) -> None:
@@ -322,7 +344,7 @@ class ZoteroWriteClient:
                 response = self._request(
                     "POST", LOCAL_API_BASE + path,
                     headers={
-                        **(headers or {}), "Zotero-Server-ID": self.parent.server_id,
+                        **(headers or {}), "Zotero-Server-ID": self.server_id,
                         "Zotero-API-Key": credential.key,
                     }, **kwargs,
                 )
@@ -331,6 +353,7 @@ class ZoteroWriteClient:
                 # later precondition/HTTP failure occurs. On uncertain transport,
                 # discard it too; there is no safe basis for reusing it.
                 if not credential.remembered:
+                    self._runtime.consume(self.server_id, credential)
                     self._credential = None
             try:
                 self._check_response_instance(response)
@@ -340,8 +363,10 @@ class ZoteroWriteClient:
             if response.status_code != 401:
                 return response
             self._invalidate(credential)
-            if attempt == 1:
+            if (attempt == 1 or not credential.remembered or self._reauthorized
+                    or stage is not ZoteroUploadStage.NO_CONFIRMED_MUTATION):
                 raise _WriteFailure(ZoteroUploadOutcome.AUTH_FAILURE)
+            self._reauthorized = True
             # A confirmed 401 cannot have created an item. Only this case gets
             # one fresh authorization/retry; kwargs retain the same write token.
             self._guard(guard, stage, attachment_key, ZoteroWriteGuardPhase.BEFORE_AUTHORIZATION_RETRY)
@@ -395,6 +420,7 @@ class ZoteroWriteClient:
         own partial attachment; rejection prevents further writes/dialogs.
         """
         stage = ZoteroUploadStage.NO_CONFIRMED_MUTATION
+        self._reauthorized = False
         attachment_key = None
         try:
             with Path(local_file).open("rb") as file:
@@ -440,7 +466,8 @@ class ZoteroWriteClient:
                     self._guard(guard, stage, attachment_key)
                     response = self._request(
                         "POST", url,
-                        headers={"Content-Type": content_type, "Zotero-Server-ID": self.parent.server_id},
+                        headers={"Content-Type": content_type, "Zotero-Server-ID": self.server_id,
+                                 "Content-Length": str(file_stat.st_size)},
                         content=self._file_chunks(file),
                     )
                     # The received bytes may already be temporary server state,
@@ -461,7 +488,7 @@ class ZoteroWriteClient:
                         raise _WriteFailure(ZoteroUploadOutcome.API_FAILURE)
                     stage = ZoteroUploadStage.REGISTERED
             return ZoteroUploadResult(
-                ZoteroUploadOutcome.SUCCEEDED, stage, self.parent.key, self.parent.server_id, attachment_key,
+                ZoteroUploadOutcome.SUCCEEDED, stage, self.parent.key, self.server_id, attachment_key,
             )
         except (OSError, ValueError):
             failure = _WriteFailure(ZoteroUploadOutcome.API_FAILURE)
@@ -472,7 +499,7 @@ class ZoteroWriteClient:
             if stage is not ZoteroUploadStage.NO_CONFIRMED_MUTATION else failure.outcome
         )
         return ZoteroUploadResult(
-            outcome, stage, self.parent.key, self.parent.server_id, attachment_key,
+            outcome, stage, self.parent.key, self.server_id, attachment_key,
             failure=failure.outcome, authorization=failure.authorization, mutation_uncertain=failure.uncertain,
         )
 

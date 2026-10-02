@@ -904,6 +904,130 @@ def test_lower_priority_rerun_preserves_effective_preferred_snapshot(
     assert not result.has_errors
 
 
+@pytest.mark.parametrize("lower_kind,higher_kind", [
+    (VersionKind.UNKNOWN, VersionKind.PREPRINT),
+    (VersionKind.UNKNOWN, VersionKind.ACCEPTED_MANUSCRIPT),
+    (VersionKind.UNKNOWN, VersionKind.JOURNAL_ONLINE),
+    (VersionKind.UNKNOWN, VersionKind.JOURNAL_FINAL),
+    (VersionKind.PREPRINT, VersionKind.ACCEPTED_MANUSCRIPT),
+    (VersionKind.PREPRINT, VersionKind.JOURNAL_ONLINE),
+    (VersionKind.PREPRINT, VersionKind.JOURNAL_FINAL),
+    (VersionKind.ACCEPTED_MANUSCRIPT, VersionKind.JOURNAL_ONLINE),
+    (VersionKind.ACCEPTED_MANUSCRIPT, VersionKind.JOURNAL_FINAL),
+    (VersionKind.JOURNAL_ONLINE, VersionKind.JOURNAL_FINAL),
+])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_same_version_kind_lifecycle_is_monotonic_and_idempotent(
+    tmp_path: Path,
+    lower_kind: VersionKind,
+    higher_kind: VersionKind,
+    reverse: bool,
+) -> None:
+    initial = paper("1a345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    durable_kind, incoming_kind = (
+        (higher_kind, lower_kind) if reverse else (lower_kind, higher_kind)
+    )
+    initial = initial.model_copy(update={
+        "versions": (initial.versions[0].model_copy(update={"kind": durable_kind}),),
+    })
+    first = materialize_papers((initial,), tmp_path)
+    path, = first.created_papers
+    incoming = initial.model_copy(update={
+        "versions": (initial.versions[0].model_copy(update={
+            "kind": incoming_kind,
+            "source": "DOI",
+            "identifier": "https://doi.org/10.5555/EXAMPLE",
+        }),),
+    })
+
+    result = materialize_papers((incoming,), tmp_path)
+
+    assert not result.issues
+    assert not result.created_papers
+    assert result.updated_papers == (() if reverse else (path,))
+    values = frontmatter(path.read_text())
+    expected_version = initial.versions[0].model_copy(update={"kind": higher_kind})
+    assert values["versions"] == [expected_version.model_dump(mode="json")]
+    assert values["preferred_version"] == initial.preferred_version.model_dump(mode="json")
+    stable_bytes = path.read_bytes()
+
+    rerun = materialize_papers((incoming,), tmp_path)
+
+    assert not rerun.issues and not rerun.updated_papers
+    assert path.read_bytes() == stable_bytes
+
+
+@pytest.mark.parametrize("kind", list(VersionKind))
+def test_same_version_kind_evidence_does_not_rewrite_paper(
+    tmp_path: Path, kind: VersionKind,
+) -> None:
+    initial = paper("1a345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    initial = initial.model_copy(update={
+        "versions": (initial.versions[0].model_copy(update={"kind": kind}),),
+    })
+    first = materialize_papers((initial,), tmp_path)
+    path, = first.created_papers
+    original = path.read_bytes()
+
+    result = materialize_papers((initial,), tmp_path)
+
+    assert not result.issues and not result.updated_papers
+    assert path.read_bytes() == original
+
+
+def test_kind_upgrade_reselects_preferred_and_preserves_durable_workflow(
+    tmp_path: Path,
+) -> None:
+    initial = paper("1a345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    online = initial.versions[0].model_copy(update={"kind": VersionKind.JOURNAL_ONLINE})
+    newer_online = online.model_copy(update={
+        "source": "openalex", "identifier": "W999", "date": date(2026, 9, 18),
+    })
+    initial = initial.model_copy(update={
+        "versions": (online, newer_online),
+        "preferred_version": VersionRef(
+            source=newer_online.source, identifier=newer_online.identifier,
+        ),
+        "journal_issns": ("0006-341X", "1541-0420"),
+    })
+    first = materialize_papers((initial,), tmp_path)
+    path, = first.created_papers
+    edited = (
+        path.read_text()
+        .replace("status: candidate", "status: in_zotero\ncustom_field:\n  nested: retained")
+        .replace("zotero_key: null", "zotero_key: ZOT123")
+        .replace("## Notes\n", "## Notes\n\nHuman note.\n\n## Custom\n\nKeep this.\n")
+    )
+    path.write_text(edited, encoding="utf-8")
+    before = frontmatter(edited)
+    final = online.model_copy(update={"kind": VersionKind.JOURNAL_FINAL})
+    incoming = initial.model_copy(update={
+        "id": UUID("1b345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        "versions": (final,),
+        "preferred_version": VersionRef(source=final.source, identifier=final.identifier),
+    })
+
+    result = materialize_papers((incoming,), tmp_path)
+
+    assert not result.has_errors and not result.created_papers
+    assert result.updated_papers == (path,)
+    contents = path.read_text()
+    values = frontmatter(contents)
+    assert values["versions"] == [
+        final.model_dump(mode="json"), newer_online.model_dump(mode="json"),
+    ]
+    assert values["preferred_version"] == incoming.preferred_version.model_dump(mode="json")
+    for field in ("id", "status", "zotero_key", "journal_issns", "sources", "external_ids", "custom_field"):
+        assert values[field] == before[field]
+    assert "## Notes\n\nHuman note.\n\n## Custom\n\nKeep this.\n" in contents
+    stable_bytes = path.read_bytes()
+
+    rerun = materialize_papers((incoming,), tmp_path)
+
+    assert not rerun.issues and not rerun.updated_papers
+    assert path.read_bytes() == stable_bytes
+
+
 def test_version_enrichment_and_conflict_are_nonfatal_warnings(
     tmp_path: Path,
 ) -> None:
@@ -918,20 +1042,29 @@ def test_version_enrichment_and_conflict_are_nonfatal_warnings(
     enriched = manifestation(
         "1b345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         title="Versioned",
-        kind=VersionKind.JOURNAL_FINAL,
+        kind=VersionKind.JOURNAL_ONLINE,
         version_source="doi",
         version_identifier="10.5555/version",
         version_date=date(2026, 9, 10),
     )
+    enriched = enriched.model_copy(update={
+        "versions": (PaperVersion.model_validate(enriched.versions[0].model_dump() | {
+            "url": "https://example.org/online.pdf",
+        }),),
+    })
     first = materialize_papers((initial,), tmp_path)
-    materialize_papers((enriched,), tmp_path)
+    enrichment = materialize_papers((enriched,), tmp_path)
+    assert not enrichment.has_errors
+    enriched_version = frontmatter(first.created_papers[0].read_text())["versions"][0]
+    assert enriched_version == enriched.versions[0].model_dump(mode="json")
     conflicting = enriched.model_copy(
         update={
             "versions": (
-                enriched.versions[0].model_copy(
-                    update={
-                        "kind": VersionKind.ACCEPTED_MANUSCRIPT,
+                PaperVersion.model_validate(
+                    enriched.versions[0].model_dump() | {
+                        "kind": VersionKind.JOURNAL_FINAL,
                         "date": date(2026, 9, 11),
+                        "url": "https://example.org/final.pdf",
                     }
                 ),
             )
@@ -944,12 +1077,25 @@ def test_version_enrichment_and_conflict_are_nonfatal_warnings(
     version = values["versions"][0]  # type: ignore[index]
     assert version["kind"] == "journal_final"
     assert version["date"] == "2026-09-10"
-    assert len(result.issues) >= 2
+    assert version["url"] == "https://example.org/online.pdf"
+    assert len(result.issues) == 2
     assert all(
         issue.severity is MaterializationIssueSeverity.WARNING
         for issue in result.issues
     )
     assert not result.has_errors
+
+    weaker = conflicting.model_copy(update={"versions": (conflicting.versions[0].model_copy(
+        update={"kind": VersionKind.ACCEPTED_MANUSCRIPT},
+    ),)})
+    stable_bytes = first.created_papers[0].read_bytes()
+
+    ignored = materialize_papers((weaker,), tmp_path)
+
+    assert not ignored.has_errors and not ignored.updated_papers
+    assert len(ignored.issues) == 2
+    assert all(issue.severity is MaterializationIssueSeverity.WARNING for issue in ignored.issues)
+    assert first.created_papers[0].read_bytes() == stable_bytes
 
 
 def test_title_fallback_requires_author_note_stable_evidence(

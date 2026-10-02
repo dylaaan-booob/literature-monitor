@@ -321,8 +321,16 @@ def inspect(*replies):
 CHILD_PATH = f"/users/0/items/{PARENT}/children"
 
 
-def stored_file(**headers):
-    return response(None, status=302, Location="file:///private/SENTINEL_FILE_PATH/paper.pdf", **headers)
+def stored_file(path=None, **headers):
+    location = path.as_uri() if path is not None else "file:///private/SENTINEL_FILE_PATH/paper.pdf"
+    return response(None, status=302, Location=location, **headers)
+
+
+@pytest.fixture
+def actual_file(tmp_path):
+    path = tmp_path / 'SENTINEL_FILE_PATH paper.pdf'
+    path.write_bytes(b'nonempty existing attachment')
+    return path
 
 
 @pytest.mark.parametrize("children,has_pdf", [
@@ -331,20 +339,20 @@ def stored_file(**headers):
     ([attachment()], True),
     ([item("NOTE0001", item_type="note", parentItem=PARENT), attachment("HTML0001", "text/html"), attachment()], True),
 ])
-def test_pdf_existence_requires_current_metadata_and_confirmed_file(children, has_pdf):
-    result, requests = inspect(page(children, path=CHILD_PATH), *([stored_file()] if has_pdf else []))
+def test_pdf_existence_requires_current_metadata_and_confirmed_file(children, has_pdf, actual_file):
+    result, requests = inspect(page(children, path=CHILD_PATH), *([stored_file(actual_file)] if has_pdf else []))
     assert result.outcome is ZoteroReadOutcome.CHECKED
     assert result.has_pdf is has_pdf
     assert len(requests) == (2 if has_pdf else 1)
     assert requests[0].url.path == "/api" + CHILD_PATH
 
 
-def test_child_pagination_is_completed_even_after_finding_pdf():
+def test_child_pagination_is_completed_even_after_finding_pdf(actual_file):
     children = [attachment(f"FILE{i:04d}", "application/pdf" if i == 0 else "text/html") for i in range(100)]
     result, requests = inspect(
         page(children, total=101, next_start=100, path=CHILD_PATH, version="9"),
         page([attachment("LAST0001", "text/html")], total=101, path=CHILD_PATH, version="9"),
-        stored_file(),
+        stored_file(actual_file),
     )
     assert result.outcome is ZoteroReadOutcome.CHECKED
     assert result.has_pdf is True
@@ -385,10 +393,10 @@ def test_child_read_failure_is_unknown_pdf_existence(reply, outcome):
     assert "SECRET" not in result.message
 
 
-def test_complete_attachment_result_exposes_ordered_pdf_child_keys():
+def test_complete_attachment_result_exposes_ordered_pdf_child_keys(actual_file):
     children=[attachment(f'FILE{i:04d}', 'application/pdf' if i in {0,99} else 'text/html') for i in range(100)]
     result,_=inspect(page(children,total=101,next_start=100,path=CHILD_PATH),page([attachment('LAST0001')],total=101,path=CHILD_PATH),
-        stored_file(), response(None,status=404), stored_file())
+        stored_file(actual_file), response(None,status=404), stored_file(actual_file))
     assert result.outcome is ZoteroReadOutcome.CHECKED and result.has_pdf is True
     assert result.pdf_keys==('FILE0000','FILE0099','LAST0001')
     assert result.pdf_file_keys==('FILE0000','LAST0001')
@@ -401,7 +409,7 @@ def test_failed_attachment_enumeration_never_exposes_partial_pdf_keys():
     assert result.pdf_file_keys==()
 
 
-@pytest.mark.parametrize("missing", [response(None, status=404), response(None, status=302, Location="false")])
+@pytest.mark.parametrize("missing", [response(None, status=404), response(None, status=302, Location="false"), stored_file()])
 def test_metadata_only_pdf_child_is_not_a_stored_pdf(missing):
     result, requests = inspect(page([attachment()], path=CHILD_PATH), missing)
     assert result.outcome is ZoteroReadOutcome.CHECKED
@@ -423,6 +431,10 @@ def test_metadata_only_pdf_child_is_not_a_stored_pdf(missing):
     (response(None, status=302, Location="file:relative/SENTINEL_FILE_PATH"), ZoteroReadOutcome.INVALID_RESPONSE),
     (response(None, status=302, Location="file:///"), ZoteroReadOutcome.INVALID_RESPONSE),
     (response(None, status=302, Location="file:///private/SENTINEL_FILE_PATH?secret=x"), ZoteroReadOutcome.INVALID_RESPONSE),
+    (response(None, status=302, Location="file:///private/SENTINEL_FILE_PATH#secret"), ZoteroReadOutcome.INVALID_RESPONSE),
+    (response(None, status=302, Location="file:///private/SENTINEL_FILE_PATH%00"), ZoteroReadOutcome.INVALID_RESPONSE),
+    (response(None, status=302, Location="file:///private/SENTINEL_FILE_PATH%0a"), ZoteroReadOutcome.INVALID_RESPONSE),
+    (response(None, status=302, Location="file:///private/SENTINEL_FILE_PATH%zz"), ZoteroReadOutcome.INVALID_RESPONSE),
     (response(None, status=200), ZoteroReadOutcome.INVALID_RESPONSE),
 ])
 def test_unreliable_file_state_is_unknown_and_sanitized(reply, outcome):
@@ -433,14 +445,14 @@ def test_unreliable_file_state_is_unknown_and_sanitized(reply, outcome):
     assert len(requests) == 2
 
 
-def test_file_read_failure_after_confirmed_file_is_still_unknown():
+def test_file_read_failure_after_confirmed_file_is_still_unknown(actual_file):
     result, _ = inspect(page([attachment(), attachment("PDF00002")], path=CHILD_PATH),
-        stored_file(), response(None, status=500))
+        stored_file(actual_file), response(None, status=500))
     assert result.outcome is ZoteroReadOutcome.API_FAILURE and result.has_pdf is None
     assert result.pdf_file_keys == ()
 
 
-def test_file_location_is_not_followed_exposed_or_logged(caplog):
+def test_file_location_is_not_followed_exposed_or_logged(caplog, actual_file, monkeypatch):
     import logging
 
     transport = ReadTransport(page([attachment()], path=CHILD_PATH))
@@ -448,9 +460,114 @@ def test_file_location_is_not_followed_exposed_or_logged(caplog):
     def handler(request):
         if request.url.path.endswith("/file"):
             logging.getLogger("httpcore.http11").debug("Location: %s", "SENTINEL_FILE_PATH")
-            return stored_file()
+            return stored_file(actual_file)
         return respond(request)
+    def no_bytes(path):
+        raise AssertionError('Existence inspection must not read bytes.')
+    monkeypatch.setattr(type(actual_file), 'open', no_bytes)
     with caplog.at_level(logging.DEBUG), ZoteroLocalClient(transport=httpx.MockTransport(handler)) as client:
         result = client.inspect_attachments(VerifiedZoteroItem(PARENT, DOI, SERVER))
     assert result.has_pdf is True
     assert "SENTINEL_FILE_PATH" not in caplog.text + repr(result)
+
+
+@pytest.mark.parametrize('kind', ['missing', 'empty', 'directory', 'symlink'])
+def test_file_location_requires_nonempty_regular_storage(tmp_path, actual_file, kind):
+    path = tmp_path / 'SENTINEL_FILE_PATH.pdf'
+    if kind == 'empty': path.touch()
+    if kind == 'directory': path.mkdir()
+    if kind == 'symlink': path.symlink_to(actual_file)
+    result, _ = inspect(page([attachment()], path=CHILD_PATH), stored_file(path))
+    assert result.outcome is ZoteroReadOutcome.CHECKED and result.has_pdf is False
+    assert result.pdf_keys == ('PDF00001',) and result.pdf_file_keys == ()
+    assert str(path) not in repr(result)
+
+
+@pytest.mark.parametrize('failure', [PermissionError, OSError])
+def test_storage_inspection_failure_is_unknown_and_sanitized(actual_file, monkeypatch, caplog, failure):
+    original = type(actual_file).stat
+    def failed_stat(path, *, follow_symlinks=True):
+        if path == actual_file:
+            assert follow_symlinks is False
+            raise failure('SENTINEL_FILE_PATH')
+        return original(path, follow_symlinks=follow_symlinks)
+    monkeypatch.setattr(type(actual_file), 'stat', failed_stat)
+    result, _ = inspect(page([attachment()], path=CHILD_PATH), stored_file(actual_file))
+    assert result.outcome is ZoteroReadOutcome.API_FAILURE and result.has_pdf is None
+    assert result.pdf_file_keys == ()
+    assert 'SENTINEL_FILE_PATH' not in repr(result) + caplog.text
+
+
+def verify_key(*replies, key=PARENT, doi=DOI, server_id=None):
+    transport=ReadTransport(*replies)
+    with ZoteroLocalClient(transport=transport) as client:
+        result=client.verify_parent_key(doi,key,server_id=server_id)
+    assert transport.closed and not transport.replies
+    return result,transport.requests
+
+
+@pytest.mark.parametrize('bound',[None,SERVER])
+def test_strict_parent_verifies_exact_key_normalized_doi_and_instance(bound):
+    result,requests=verify_key(response(item(doi=' HTTPS://DOI.ORG/10.5555/PAPER ')),server_id=bound)
+    assert result.outcome is ZoteroReadOutcome.VERIFIED
+    assert result.item==VerifiedZoteroItem(PARENT,DOI,SERVER)
+    assert len(requests)==1 and requests[0].url.path=='/api/users/0/items/'+PARENT
+    assert requests[0].headers.get('Zotero-Server-ID')==bound
+
+
+@pytest.mark.parametrize('reply,outcome',[
+    (response(None,status=404),ZoteroReadOutcome.NOT_FOUND),
+    (response(item(doi='10.5555/wrong')),ZoteroReadOutcome.INVALID_RESPONSE),
+    (response(item(doi=None)),ZoteroReadOutcome.INVALID_RESPONSE),
+    (response(item(item_type='attachment')),ZoteroReadOutcome.INVALID_RESPONSE),
+    (response(item(item_type='note')),ZoteroReadOutcome.INVALID_RESPONSE),
+    (response(item(item_type='annotation')),ZoteroReadOutcome.INVALID_RESPONSE),
+    (response(item(item_type='inventedType')),ZoteroReadOutcome.INVALID_RESPONSE),
+    (response(item(parentItem='OTHER001')),ZoteroReadOutcome.INVALID_RESPONSE),
+    (response(item('OTHER001')),ZoteroReadOutcome.INVALID_RESPONSE),
+    (response({'key':PARENT,'data':{}}),ZoteroReadOutcome.INVALID_RESPONSE),
+    (response(b'not-json'),ZoteroReadOutcome.INVALID_RESPONSE),
+    (response(item(),server=None),ZoteroReadOutcome.INVALID_RESPONSE),
+    (response(item(),server='changed-instance'),ZoteroReadOutcome.SERVER_ID_MISMATCH),
+    (response(None,status=412),ZoteroReadOutcome.SERVER_ID_MISMATCH),
+    (response(None,status=500),ZoteroReadOutcome.API_FAILURE),
+    (httpx.ConnectError('SENTINELsecret'),ZoteroReadOutcome.API_FAILURE),
+])
+def test_strict_parent_failure_never_enumerates_doi_fallback(reply,outcome):
+    result,requests=verify_key(reply,server_id=SERVER)
+    assert result.outcome is outcome and result.item is None
+    assert len(requests)==1 and requests[0].url.path=='/api/users/0/items/'+PARENT
+    assert 'SENTINEL' not in result.message
+
+
+@pytest.mark.parametrize('key',[None,'','stale',' PARENT01 ','parent01','../../local/authorize',[],42])
+def test_strict_malformed_parent_key_performs_no_read(key):
+    result,requests=verify_key(key=key)
+    assert result.outcome is ZoteroReadOutcome.INVALID_RESPONSE and not requests
+
+
+@pytest.mark.parametrize('doi',[None,'',[],42])
+def test_strict_invalid_doi_performs_no_read(doi):
+    result,requests=verify_key(doi=doi)
+    assert result.outcome is ZoteroReadOutcome.INVALID_DOI and not requests
+
+
+@pytest.mark.parametrize('server,status,verified', [
+    ('status-instance', 200, True), (None, 200, False), (' ', 200, False),
+    ('status-instance', 403, False), ('status-instance', 412, False),
+])
+def test_read_only_current_instance_status(server, status, verified):
+    import httpx
+    from literature_monitor.zotero_local import ZoteroLocalClient, ZoteroReadOutcome
+    requests = []
+    def respond(request):
+        requests.append(request)
+        assert request.method == 'GET' and request.url.path == '/api/'
+        assert 'Zotero-API-Key' not in request.headers
+        headers = {'Zotero-Server-ID': server} if server is not None else {}
+        return httpx.Response(status, headers=headers, json={'private': 'STATUS_SENTINEL_SECRET'})
+    with ZoteroLocalClient(transport=httpx.MockTransport(respond)) as client:
+        result = client.current_instance()
+    assert (result.outcome is ZoteroReadOutcome.VERIFIED) is verified
+    assert result.server_id == (server if verified else None)
+    assert len(requests) == 1 and 'STATUS_SENTINEL_SECRET' not in repr(result)

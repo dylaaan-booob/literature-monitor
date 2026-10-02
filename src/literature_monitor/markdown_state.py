@@ -799,14 +799,8 @@ def merge_versions(
             merged[key] = candidate
             continue
         updates: dict[str, Any] = {}
-        if current.kind is VersionKind.UNKNOWN and candidate.kind is not VersionKind.UNKNOWN:
+        if _VERSION_PRIORITY[candidate.kind] > _VERSION_PRIORITY[current.kind]:
             updates["kind"] = candidate.kind
-        elif (
-            current.kind is not VersionKind.UNKNOWN
-            and candidate.kind is not VersionKind.UNKNOWN
-            and current.kind is not candidate.kind
-        ):
-            warnings.append(f"version {key[0]}:{key[1]} has conflicting known kinds")
         for field in ("date", "url"):
             old = getattr(current, field)
             new = getattr(candidate, field)

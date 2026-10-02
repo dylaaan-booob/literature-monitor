@@ -14,8 +14,30 @@
     {% if acquisition_owns_attempt %}
       <p><strong>PDF acquisition in progress</strong> · {{ acquisition_stage_label }}</p>
       {% if acquisition_human_auth %}
-        <p>Complete institutional login or verification manually in the dedicated browser, then start a new attempt.</p>
+        <p>Complete institutional login or verification in the same normal Chrome task tab, then continue there.</p>
       {% endif %}
+      {% if acquisition_zotero_auth %}
+        <p>Authorize in Settings → Advanced &amp; Diagnostics → Zotero integration, then continue this same task.</p>
+        <a href="/settings#advanced-diagnostics">Open Zotero integration Settings</a>
+      {% endif %}
+      {% if acquisition_open_retry_available %}
+        <p>Normal Chrome could not be opened. Check its installation and retry opening this same task.</p>
+      {% endif %}
+      {% for action, label, available in [
+        ('open-retry', 'Open in Chrome again', acquisition_open_retry_available),
+        ('resume', 'Continue after Zotero authorization', acquisition_resume_available),
+        ('cancel', 'Cancel acquisition', acquisition_cancel_available)] %}
+        {% if available %}
+          <form method="post" action="/papers/{{ acquisition_paper_id }}/acquisition/{{ action }}"
+                hx-post="/papers/{{ acquisition_paper_id }}/acquisition/{{ action }}"
+                hx-target="#acquisition-panel" hx-swap="outerHTML">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="attempt_id" value="{{ acquisition_attempt_id }}">
+            <input type="hidden" name="view" value="{{ acquisition_view }}">
+            <button type="submit">{{ label }}</button>
+          </form>
+        {% endif %}
+      {% endfor %}
     {% elif not acquisition_message %}
       <p>Another PDF acquisition is already in progress.</p>
     {% endif %}
@@ -23,6 +45,9 @@
     <p><strong>{{ acquisition_stage_label }}</strong></p>
     <p>{{ acquisition_result.message }}</p>
     {% if acquisition_recovery %}<p>{{ acquisition_recovery }}</p>{% endif %}
+    {% if acquisition_result.recovery.value == "ZOTERO_AUTHORIZATION" %}
+      <a href="/settings#advanced-diagnostics">Open Zotero integration Settings</a>
+    {% endif %}
   {% elif acquisition_unexpected %}
     <p class="notice error">PDF acquisition stopped because of an unexpected internal error. Start a new attempt after checking Zotero.</p>
   {% endif %}

@@ -1,19 +1,18 @@
-"""Synchronous user-triggered acquisition service (SPEC §§35.2–35.11)."""
+"""Bounded acquisition preflight/commit (SPEC §§36.3–36.7)."""
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
-import time
-from uuid import UUID
+import os
+import stat
+from uuid import UUID, uuid4
 
 from literature_monitor.identifiers import normalize_doi
-from literature_monitor.institutional_resolver import ResolverOutcome, XmuInstitutionalResolver
-from literature_monitor.markdown_state import parse_paper_state
-from literature_monitor.models import WorkflowStatus
-from literature_monitor.pdf_acquisition import GenericPdfAcquirer, PdfAcquisitionOutcome
-from literature_monitor.safe_write import read_text_exact
-from literature_monitor.zotero_local import ZoteroLocalClient, ZoteroReadOutcome
+from literature_monitor.markdown_state import PaperMarkdownState, normalize_version_key, parse_paper_state
+from literature_monitor.models import PaperVersion, VersionKind, WorkflowStatus
+from literature_monitor.zotero_credentials import AuthorizationRetryBoundary, ZoteroAuthorizationRuntime
+from literature_monitor.zotero_local import VerifiedZoteroItem, ZoteroLocalClient, ZoteroReadOutcome
 from literature_monitor.zotero_write import (
     ZoteroAuthorizationOutcome, ZoteroUploadOutcome, ZoteroUploadStage,
     ZoteroWriteClient, ZoteroWriteGuardPhase,
@@ -28,6 +27,13 @@ class AcquisitionStage(str, Enum):
     RESOLVING = "RESOLVING"
     WAITING_FOR_INSTITUTION_AUTH = "WAITING_FOR_INSTITUTION_AUTH"
     DISCOVERING_PDF = "DISCOVERING_PDF"
+    OPENING_CHROME = "OPENING_CHROME"
+    HANDOFF = "HANDOFF"
+    BROWSER_ACTION = "BROWSER_ACTION"
+    RESOLVER_CHOICE = "RESOLVER_CHOICE"
+    VALIDATING_PDF = "VALIDATING_PDF"
+    WAITING_FOR_ZOTERO_AUTH = "WAITING_FOR_ZOTERO_AUTH"
+    CANCELLED = "CANCELLED"
     ATTACHING = "ATTACHING"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
@@ -48,6 +54,7 @@ class AcquisitionOutcome(str, Enum):
     RESOLVER_FAILURE = "RESOLVER_FAILURE"
     UPLOAD_FAILURE = "UPLOAD_FAILURE"
     INTERNAL_FAILURE = "INTERNAL_FAILURE"
+    CANCELLED = "CANCELLED"
 
 
 class AcquisitionRecovery(str, Enum):
@@ -84,23 +91,66 @@ class AcquisitionResult:
             AcquisitionOutcome.AUTH_REQUIRED: "Human authorization or institutional verification is required before retrying.",
             AcquisitionOutcome.NO_ELIGIBLE_CANDIDATES: "Resolver returned no eligible full-text candidates.",
             AcquisitionOutcome.NO_VALID_PDF: "No validated PDF was acquired.",
-            AcquisitionOutcome.BROWSER_UNAVAILABLE: "Dedicated browser unavailable; check Chrome and the profile lock.",
+            AcquisitionOutcome.BROWSER_UNAVAILABLE: "Normal Chrome unavailable; check Chrome installation.",
             AcquisitionOutcome.RESOLVER_FAILURE: "Institutional resolver failed; retry later.",
             AcquisitionOutcome.UPLOAD_FAILURE: "PDF upload did not complete; inspect Zotero before retrying.",
             AcquisitionOutcome.INTERNAL_FAILURE: "Acquisition stopped because of an unexpected internal error.",
+            AcquisitionOutcome.CANCELLED: "Acquisition cancelled before Zotero content mutation.",
         }[self.outcome]
         if self.mutation_uncertain or self.upload_stage in (ZoteroUploadStage.CHILD_CREATED, ZoteroUploadStage.BYTES_UPLOADED):
             message += " A partial or uncertain attachment may remain in Zotero."
         if self.recovery is AcquisitionRecovery.RATE_LIMITED:
             message += " Honor the authorization retry boundary."
+        if self.recovery is AcquisitionRecovery.ZOTERO_AUTHORIZATION:
+            message += " Authorize in Settings → Advanced & Diagnostics → Zotero integration."
         return message
 
 
+class AcquisitionClass(str, Enum):
+    PUBLISHED = "PUBLISHED"
+    ACCEPTED_MANUSCRIPT = "ACCEPTED_MANUSCRIPT"
+    PREPRINT = "PREPRINT"
+
+
+_ACQUISITION_CLASSES = {
+    VersionKind.JOURNAL_FINAL: AcquisitionClass.PUBLISHED,
+    VersionKind.JOURNAL_ONLINE: AcquisitionClass.PUBLISHED,
+    VersionKind.ACCEPTED_MANUSCRIPT: AcquisitionClass.ACCEPTED_MANUSCRIPT,
+    VersionKind.PREPRINT: AcquisitionClass.PREPRINT,
+}
+
+
 @dataclass(frozen=True)
-class _Paper:
+class AcquisitionTask:
+    """Process-local identity; continuations must never rebuild it from Paper."""
+
+    task_id: UUID
     paper_id: UUID
     doi: str
-    zotero_key: str | None
+    zotero_key: str
+    target_version: PaperVersion
+    acquisition_class: AcquisitionClass
+    server_id: str
+
+    @property
+    def parent(self) -> VerifiedZoteroItem:
+        return VerifiedZoteroItem(self.zotero_key, self.doi, self.server_id)
+
+
+@dataclass(frozen=True)
+class PreparedAcquisition:
+    task: AcquisitionTask
+    linkage_completed: bool
+
+
+@dataclass(frozen=True)
+class _PaperAction:
+    state: PaperMarkdownState
+    doi: str
+    target_version: PaperVersion
+    acquisition_class: AcquisitionClass
+    directory_identity: tuple[int, int]
+    file_identity: tuple[int, int]
 
 
 @dataclass
@@ -110,95 +160,124 @@ class _Attempt:
     upload_stage: ZoteroUploadStage | None = None
 
 
-class AuthorizationRetryBoundary:
-    """Transient monotonic authorization limit, shareable across workspaces."""
-
-    def __init__(self, *, clock: Callable[[], float] = time.monotonic):
-        self._clock = clock
-        self._not_before = 0.0
-
-    def remaining(self) -> float:
-        return max(0.0, self._not_before - self._clock())
-
-    def defer(self, delay: float) -> None:
-        self._not_before = max(self._not_before, self._clock() + delay)
-
-
-def _read_paper(output_dir: Path, paper_id: UUID, expected_doi: str | None = None) -> _Paper | None:
-    """UUID relocation and current safe read; no submitted path or cached state."""
+def _read_paper(output_dir: Path, paper_id: UUID) -> _PaperAction | None:
+    """One UUID scan/action snapshot, with no-follow regular candidate reads."""
     papers = output_dir / "Papers"
-    if papers.is_symlink() or not papers.is_dir():
-        return None
-    matches = []
-    for path in sorted(papers.glob("*.md")):
-        if path.is_symlink() or not path.is_file():
-            continue
-        state = parse_paper_state(path, read_text_exact(path), output_dir / "Authors")
-        if state is not None and state.paper_id == paper_id:
-            matches.append(path)
+    directory = os.open(papers, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        opened_directory = os.fstat(directory)
+        directory_identity = (opened_directory.st_dev, opened_directory.st_ino)
+        matches: list[tuple[PaperMarkdownState, tuple[int, int]]] = []
+        for name in sorted(os.listdir(directory)):
+            if not name.endswith(".md"):
+                continue
+            path = papers / name
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            try:
+                opened = os.fstat(descriptor)
+                if not stat.S_ISREG(opened.st_mode):
+                    return None
+                with os.fdopen(descriptor, "rb") as handle:
+                    descriptor = None
+                    contents = handle.read().decode("utf-8")
+                located = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                if not stat.S_ISREG(located.st_mode) or (located.st_dev, located.st_ino) != (opened.st_dev, opened.st_ino):
+                    return None
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+            state = parse_paper_state(path, contents, output_dir / "Authors")
+            if state is not None:
+                if state.paper_id is None:
+                    return None  # An unreadable identity could hide a duplicate.
+                if state.paper_id == paper_id:
+                    matches.append((state, (opened.st_dev, opened.st_ino)))
+        located_directory = papers.lstat()
+        if (not stat.S_ISDIR(located_directory.st_mode)
+                or (located_directory.st_dev, located_directory.st_ino) != (opened_directory.st_dev, opened_directory.st_ino)):
+            return None
+    finally:
+        os.close(directory)
     if len(matches) != 1:
         return None
-    path = matches[0]
-    if papers.is_symlink() or path.is_symlink() or not path.is_file():
-        return None
-    state = parse_paper_state(path, read_text_exact(path), output_dir / "Authors")
-    if (state is None or state.paper_id != paper_id or state.problems or not state.updateable
-            or state.frontmatter is None or state.body is None or state.status is not WorkflowStatus.IN_ZOTERO):
+    state, file_identity = matches[0]
+    if (state.problems or not state.updateable or state.frontmatter is None or state.body is None
+            or state.status is not WorkflowStatus.IN_ZOTERO or state.preferred_version is None):
         return None
     doi = normalize_doi(state.external_ids.doi) if state.external_ids is not None else None
-    if doi is None or (expected_doi is not None and doi != expected_doi):
+    if doi is None:
         return None
-    return _Paper(paper_id, doi, state.zotero_key)
+    preferred = normalize_version_key(state.preferred_version.source, state.preferred_version.identifier)
+    versions = [version for version in state.versions if normalize_version_key(version.source, version.identifier) == preferred]
+    if len(versions) != 1:
+        return None
+    target = versions[0]
+    qualification = _ACQUISITION_CLASSES.get(target.kind)
+    if qualification is None:
+        return None
+    return _PaperAction(state, doi, target, qualification, directory_identity, file_identity)
 
 
 class AcquisitionService:
-    """Own one synchronous chain; the separate coordinator supplies serialization."""
+    """Prepare once and commit qualified bytes without rereading Paper."""
 
-    def __init__(self, output_dir: Path, *, resolver: XmuInstitutionalResolver, pdf_acquirer: GenericPdfAcquirer,
-                 authorization_retry_boundary: AuthorizationRetryBoundary | None = None):
+    def __init__(self, output_dir: Path, *,
+                 authorization_retry_boundary: AuthorizationRetryBoundary | None = None,
+                 authorization_runtime: ZoteroAuthorizationRuntime | None = None):
         self._output_dir = Path(output_dir)
-        self._resolver = resolver
-        self._pdf_acquirer = pdf_acquirer
-        # Retry-After enforcement only, never acquisition timing/history.
-        self._authorization_retry_boundary = (
-            authorization_retry_boundary if authorization_retry_boundary is not None else AuthorizationRetryBoundary()
-        )
+        self._authorization_runtime = (authorization_runtime if authorization_runtime is not None
+                                       else ZoteroAuthorizationRuntime(retry_boundary=authorization_retry_boundary))
+        self._authorization_retry_boundary = self._authorization_runtime.retry_boundary
 
-    def acquire(self, paper_id: UUID, *, stage_callback: Callable[[AcquisitionStage], None] | None = None) -> AcquisitionResult:
+    def prepare(self, paper_id: UUID, *, stage_callback=None) -> PreparedAcquisition | AcquisitionResult:
         if not isinstance(paper_id, UUID):
             raise TypeError("A Paper UUID is required.")
         attempt = _Attempt()
-        def stage(value):
-            if stage_callback is not None:
-                stage_callback(value)
         try:
-            result = self._acquire(paper_id, stage, attempt)
+            return self._prepare(paper_id, stage_callback or (lambda value: None), attempt)
         except Exception:
-            result = AcquisitionResult(paper_id, AcquisitionOutcome.INTERNAL_FAILURE,
-                AcquisitionRecovery.CHECK_ZOTERO if attempt.writing else AcquisitionRecovery.RETRY,
-                linkage_completed=attempt.linked, upload_stage=attempt.upload_stage, mutation_uncertain=attempt.writing)
-        terminal = (
-            AcquisitionStage.WAITING_FOR_INSTITUTION_AUTH if result.recovery is AcquisitionRecovery.INSTITUTION_LOGIN
-            else AcquisitionStage.SUCCEEDED if result.outcome in (AcquisitionOutcome.SUCCEEDED, AcquisitionOutcome.PDF_ALREADY_ATTACHED)
-            else AcquisitionStage.FAILED
-        )
-        stage(terminal)
-        return result
+            return AcquisitionResult(paper_id, AcquisitionOutcome.INTERNAL_FAILURE,
+                AcquisitionRecovery.CHECK_ZOTERO, linkage_completed=attempt.linked)
 
-    def _acquire(self, paper_id, stage, attempt) -> AcquisitionResult:
+    def authorization_status(self, task: AcquisitionTask):
+        from literature_monitor.zotero_write import ZoteroAuthorizationClient
+        with ZoteroAuthorizationClient(task.server_id, authorization_runtime=self._authorization_runtime) as client:
+            return client.authorization_status()
+
+    def commit(self, task: AcquisitionTask, qualified: 'QualifiedPdf', *, linkage_completed=False,
+               mutation_allowed: Callable[[], bool] | None = None) -> AcquisitionResult:
+        from literature_monitor.version_qualification import QualifiedPdf
+        if not isinstance(task, AcquisitionTask):
+            raise TypeError('A frozen acquisition task is required.')
+        attempt = _Attempt(linked=linkage_completed)
+        if (not isinstance(task, AcquisitionTask) or not isinstance(qualified, QualifiedPdf)
+                or qualified.artifact.task_id != task.task_id
+                or qualified.acquisition_class is not task.acquisition_class
+                or not qualified.artifact.validate()):
+            return AcquisitionResult(task.paper_id, AcquisitionOutcome.NO_VALID_PDF,
+                AcquisitionRecovery.CHECK_ZOTERO, linkage_completed=linkage_completed)
+        try:
+            return self._upload(task, qualified.artifact.path, attempt,
+                validate=qualified.artifact.validate, mutation_allowed=mutation_allowed)
+        except Exception:
+            return AcquisitionResult(task.paper_id, AcquisitionOutcome.INTERNAL_FAILURE,
+                AcquisitionRecovery.CHECK_ZOTERO, linkage_completed=attempt.linked,
+                upload_stage=attempt.upload_stage, mutation_uncertain=attempt.writing)
+
+    def _prepare(self, paper_id, stage, attempt) -> PreparedAcquisition | AcquisitionResult:
         def result(outcome, recovery=AcquisitionRecovery.NONE, **kwargs):
             return AcquisitionResult(paper_id, outcome, recovery, linkage_completed=attempt.linked, **kwargs)
-        def current(doi=None):
-            try:
-                return _read_paper(self._output_dir, paper_id, doi)
-            except (OSError, UnicodeError, ValueError):
-                return None
         stage(AcquisitionStage.LOCATING_ZOTERO)
-        paper = current()
+        try:
+            paper = _read_paper(self._output_dir, paper_id)
+        except (OSError, UnicodeError, ValueError):
+            paper = None
         if paper is None:
             return result(AcquisitionOutcome.INELIGIBLE, AcquisitionRecovery.CHECK_PAPER)
         with ZoteroLocalClient() as local:
-            identity = local.resolve_identity(paper.doi, paper.zotero_key)
+            key = paper.state.frontmatter.get("zotero_key")
+            identity = (local.resolve_identity(paper.doi) if key is None
+                        else local.verify_parent_key(paper.doi, key))
             if identity.outcome is not ZoteroReadOutcome.VERIFIED or identity.item is None:
                 outcome = {ZoteroReadOutcome.NOT_FOUND: AcquisitionOutcome.ZOTERO_NOT_FOUND,
                            ZoteroReadOutcome.DUPLICATE: AcquisitionOutcome.ZOTERO_DUPLICATE}.get(identity.outcome, AcquisitionOutcome.ZOTERO_FAILURE)
@@ -206,91 +285,86 @@ class AcquisitionService:
             parent = identity.item
             if parent.normalized_doi != paper.doi:
                 return result(AcquisitionOutcome.ZOTERO_FAILURE, AcquisitionRecovery.CHECK_ZOTERO)
-            paper = current(parent.normalized_doi)
-            if paper is None:
-                return result(AcquisitionOutcome.CONFLICT, AcquisitionRecovery.CHECK_PAPER)
-            if paper.zotero_key is None:
-                linkage = link_paper_to_zotero(self._output_dir, paper_id, identity)
+            if key is not None and parent.key != key:
+                return result(AcquisitionOutcome.ZOTERO_FAILURE, AcquisitionRecovery.CHECK_ZOTERO)
+            if key is None:
+                verified = local.verify_parent_key(paper.doi, parent.key, server_id=parent.server_id)
+                if verified.outcome is not ZoteroReadOutcome.VERIFIED or verified.item != parent:
+                    return result(AcquisitionOutcome.ZOTERO_FAILURE, AcquisitionRecovery.CHECK_ZOTERO)
+                linkage = link_paper_to_zotero(
+                    paper.state, identity, expected_directory_identity=paper.directory_identity,
+                    expected_file_identity=paper.file_identity,
+                )
                 if linkage.outcome is not LinkageOutcome.LINKED:
                     return result(AcquisitionOutcome.CONFLICT, AcquisitionRecovery.CHECK_PAPER)
-                attempt.linked = linkage.outcome is LinkageOutcome.LINKED
+                attempt.linked = True
             stage(AcquisitionStage.CHECKING_ATTACHMENT)
             attachments = local.inspect_attachments(parent)
             if attachments.outcome is not ZoteroReadOutcome.CHECKED or type(attachments.has_pdf) is not bool:
                 return result(AcquisitionOutcome.ZOTERO_FAILURE, AcquisitionRecovery.CHECK_ZOTERO)
+            task = AcquisitionTask(
+                task_id=uuid4(), paper_id=paper_id, doi=paper.doi, zotero_key=parent.key,
+                target_version=paper.target_version, acquisition_class=paper.acquisition_class,
+                server_id=parent.server_id,
+            )
             if attachments.has_pdf:
                 return result(AcquisitionOutcome.PDF_ALREADY_ATTACHED)
             delay = self._authorization_retry_boundary.remaining()
             if delay > 0:
                 return result(AcquisitionOutcome.UPLOAD_FAILURE, AcquisitionRecovery.RATE_LIMITED, retry_after_seconds=delay)
-            stage(AcquisitionStage.RESOLVING)
-            resolved = self._resolver.resolve(paper.doi)
-            if resolved.outcome is not ResolverOutcome.RESOLVED:
-                outcome, recovery = {
-                    ResolverOutcome.AUTH_REQUIRED: (AcquisitionOutcome.AUTH_REQUIRED, AcquisitionRecovery.INSTITUTION_LOGIN),
-                    ResolverOutcome.NO_ELIGIBLE_CANDIDATES: (AcquisitionOutcome.NO_ELIGIBLE_CANDIDATES, AcquisitionRecovery.RETRY),
-                    ResolverOutcome.BROWSER_UNAVAILABLE: (AcquisitionOutcome.BROWSER_UNAVAILABLE, AcquisitionRecovery.CHECK_BROWSER),
-                }.get(resolved.outcome, (AcquisitionOutcome.RESOLVER_FAILURE, AcquisitionRecovery.RETRY))
-                return result(outcome, recovery)
-            stage(AcquisitionStage.DISCOVERING_PDF)
-            acquired = self._pdf_acquirer.acquire(resolved.candidates)
-            if acquired.outcome is not PdfAcquisitionOutcome.ACQUIRED or acquired.pdf is None:
-                if acquired.pdf is not None:
-                    acquired.pdf.cleanup()
-                outcome, recovery = {
-                    PdfAcquisitionOutcome.AUTH_REQUIRED: (AcquisitionOutcome.AUTH_REQUIRED, AcquisitionRecovery.INSTITUTION_LOGIN),
-                    PdfAcquisitionOutcome.BROWSER_UNAVAILABLE: (AcquisitionOutcome.BROWSER_UNAVAILABLE, AcquisitionRecovery.CHECK_BROWSER),
-                }.get(acquired.outcome, (AcquisitionOutcome.NO_VALID_PDF, AcquisitionRecovery.RETRY))
-                return result(outcome, recovery)
-            with acquired.pdf as pdf:
-                def revalidate(own_child=None):
-                    if current(parent.normalized_doi) is None:
-                        return result(AcquisitionOutcome.CONFLICT, AcquisitionRecovery.CHECK_PAPER)
-                    verified = local.resolve_identity(parent.normalized_doi, parent.key)
-                    if verified.outcome is not ZoteroReadOutcome.VERIFIED or verified.item != parent:
+            return PreparedAcquisition(task, attempt.linked)
+
+    def _upload(self, task, path, attempt, *, validate=None, mutation_allowed=None):
+        def result(outcome, recovery=AcquisitionRecovery.NONE, **kwargs):
+            return AcquisitionResult(task.paper_id, outcome, recovery, linkage_completed=attempt.linked, **kwargs)
+        with ZoteroLocalClient() as local:
+            def revalidate(own_child=None):
+                verified = local.verify_parent_key(task.doi, task.zotero_key, server_id=task.server_id)
+                if verified.outcome is not ZoteroReadOutcome.VERIFIED or verified.item != task.parent:
+                    return result(AcquisitionOutcome.CONFLICT, AcquisitionRecovery.CHECK_ZOTERO)
+                checked = local.inspect_attachments(task.parent)
+                if checked.outcome is not ZoteroReadOutcome.CHECKED or type(checked.has_pdf) is not bool:
+                    return result(AcquisitionOutcome.ZOTERO_FAILURE, AcquisitionRecovery.CHECK_ZOTERO)
+                if own_child is not None:
+                    if own_child not in checked.pdf_keys or any(key != own_child for key in checked.pdf_file_keys):
                         return result(AcquisitionOutcome.CONFLICT, AcquisitionRecovery.CHECK_ZOTERO)
-                    checked = local.inspect_attachments(parent)
-                    if checked.outcome is not ZoteroReadOutcome.CHECKED or type(checked.has_pdf) is not bool:
-                        return result(AcquisitionOutcome.ZOTERO_FAILURE, AcquisitionRecovery.CHECK_ZOTERO)
-                    # Reads/auth dialogs may have allowed a Paper edit meanwhile.
-                    if current(parent.normalized_doi) is None:
-                        return result(AcquisitionOutcome.CONFLICT, AcquisitionRecovery.CHECK_PAPER)
-                    if own_child is not None:
-                        if own_child not in checked.pdf_keys or any(key != own_child for key in checked.pdf_file_keys):
-                            return result(AcquisitionOutcome.CONFLICT, AcquisitionRecovery.CHECK_ZOTERO)
-                    elif checked.has_pdf:
-                        return result(AcquisitionOutcome.PDF_ALREADY_ATTACHED)
-                    return None
-                failure = revalidate()
-                if failure is not None:
-                    return failure
-                stage(AcquisitionStage.ATTACHING)
-                guard_failure, retried = None, False
-                def guard(context):
-                    nonlocal guard_failure, retried
-                    attempt.upload_stage = context.stage
-                    if context.phase is ZoteroWriteGuardPhase.BEFORE_AUTHORIZATION_RETRY:
-                        if retried:
-                            guard_failure = result(AcquisitionOutcome.UPLOAD_FAILURE, AcquisitionRecovery.CHECK_ZOTERO)
-                            return False
-                        retried = True
-                    guard_failure = revalidate(context.attachment_key)
-                    return guard_failure is None
-                with ZoteroWriteClient(parent) as writer:
-                    attempt.writing = True
-                    uploaded = writer.upload_pdf(pdf.path, guard=guard)
-                    attempt.upload_stage = uploaded.stage
-                if guard_failure is not None:
-                    return replace(guard_failure, upload_stage=uploaded.stage, mutation_uncertain=uploaded.mutation_uncertain)
-                if uploaded.outcome is ZoteroUploadOutcome.SUCCEEDED:
-                    return result(AcquisitionOutcome.SUCCEEDED, upload_stage=uploaded.stage)
-                authorization = uploaded.authorization
-                if authorization is not None and authorization.outcome is ZoteroAuthorizationOutcome.RATE_LIMITED:
-                    delay = authorization.retry_after_seconds
-                    if delay is not None:
-                        self._authorization_retry_boundary.defer(delay)
-                    return result(AcquisitionOutcome.UPLOAD_FAILURE, AcquisitionRecovery.RATE_LIMITED,
-                                  upload_stage=uploaded.stage, retry_after_seconds=delay, mutation_uncertain=uploaded.mutation_uncertain)
-                recovery = AcquisitionRecovery.ZOTERO_AUTHORIZATION if uploaded.outcome is ZoteroUploadOutcome.AUTH_FAILURE else AcquisitionRecovery.CHECK_ZOTERO
-                return result(AcquisitionOutcome.UPLOAD_FAILURE, recovery, upload_stage=uploaded.stage,
-                              mutation_uncertain=uploaded.mutation_uncertain)
+                elif checked.has_pdf:
+                    return result(AcquisitionOutcome.PDF_ALREADY_ATTACHED)
+                return None
+            failure = revalidate()
+            if failure is not None:
+                return failure
+            guard_failure, retried = None, False
+            def guard(context):
+                nonlocal guard_failure, retried
+                attempt.upload_stage = context.stage
+                if context.phase is ZoteroWriteGuardPhase.BEFORE_AUTHORIZATION_RETRY:
+                    if retried:
+                        guard_failure = result(AcquisitionOutcome.UPLOAD_FAILURE, AcquisitionRecovery.CHECK_ZOTERO)
+                        return False
+                    retried = True
+                if (validate is not None and not validate()) or (mutation_allowed is not None and not mutation_allowed()):
+                    guard_failure = result(AcquisitionOutcome.CONFLICT, AcquisitionRecovery.CHECK_ZOTERO)
+                    return False
+                guard_failure = revalidate(context.attachment_key)
+                return guard_failure is None
+            with ZoteroWriteClient(task.parent, authorization_runtime=self._authorization_runtime) as writer:
+                attempt.writing = True
+                uploaded = writer.upload_pdf(path, guard=guard)
+                attempt.upload_stage = uploaded.stage
+            if guard_failure is not None:
+                return replace(guard_failure, upload_stage=uploaded.stage, mutation_uncertain=uploaded.mutation_uncertain)
+            if uploaded.outcome is ZoteroUploadOutcome.SUCCEEDED:
+                return result(AcquisitionOutcome.SUCCEEDED, upload_stage=uploaded.stage)
+            authorization = uploaded.authorization
+            if authorization is not None and authorization.outcome is ZoteroAuthorizationOutcome.RATE_LIMITED:
+                delay = authorization.retry_after_seconds
+                return result(AcquisitionOutcome.UPLOAD_FAILURE, AcquisitionRecovery.RATE_LIMITED,
+                              upload_stage=uploaded.stage, retry_after_seconds=delay, mutation_uncertain=uploaded.mutation_uncertain)
+            if (authorization is not None and authorization.outcome is ZoteroAuthorizationOutcome.REQUIRED
+                    and uploaded.stage is ZoteroUploadStage.NO_CONFIRMED_MUTATION):
+                return result(AcquisitionOutcome.AUTH_REQUIRED, AcquisitionRecovery.ZOTERO_AUTHORIZATION,
+                              upload_stage=uploaded.stage, mutation_uncertain=uploaded.mutation_uncertain)
+            recovery = AcquisitionRecovery.ZOTERO_AUTHORIZATION if uploaded.failure is ZoteroUploadOutcome.AUTH_FAILURE else AcquisitionRecovery.CHECK_ZOTERO
+            return result(AcquisitionOutcome.UPLOAD_FAILURE, recovery, upload_stage=uploaded.stage,
+                          mutation_uncertain=uploaded.mutation_uncertain)

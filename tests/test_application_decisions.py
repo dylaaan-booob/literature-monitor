@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import inspect
+import os
+import stat
 from datetime import date, datetime, timezone
 from pathlib import Path
 from uuid import UUID
 
 import pytest
+import httpx
 import yaml
 
 import literature_monitor.application.decisions as decisions
@@ -31,9 +34,70 @@ from literature_monitor.models import (
     WorkflowStatus,
 )
 from literature_monitor.safe_write import ContentChangedError
+from literature_monitor.zotero_local import LOCAL_API_BASE, ZoteroLocalClient
+import literature_monitor.zotero_credentials as zotero_credentials
 
 
 NOW = datetime(2026, 9, 22, 10, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def forbid_unconfigured_zotero_access(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden():
+        pytest.fail("Ineligible/local-only decisions must not contact Zotero")
+    monkeypatch.setattr(decisions, "_ZoteroLocalClient", forbidden)
+    monkeypatch.setattr(zotero_credentials, "_os_backend", forbidden)
+
+
+@pytest.fixture
+def zotero_reads(monkeypatch: pytest.MonkeyPatch):
+    clients = []
+
+    def configure(*responses):
+        pending = list(responses)
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            assert request.method == "GET"
+            assert request.url.path == "/api/users/0/items"
+            assert request.url.params["itemType"] == "-attachment"
+            assert request.headers["Zotero-API-Version"] == "3"
+            assert "Zotero-API-Key" not in request.headers and "Authorization" not in request.headers
+            assert pending, "Unexpected Zotero request"
+            response = pending.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        def factory():
+            client = ZoteroLocalClient(transport=httpx.MockTransport(respond))
+            clients.append(client)
+            return client
+
+        monkeypatch.setattr(decisions, "_ZoteroLocalClient", factory)
+        return requests
+
+    yield configure
+    assert all(client._http.is_closed for client in clients)
+
+
+def zotero_item(key="PARENT01", doi="10.5555/decision", item_type="journalArticle"):
+    return {"key": key, "data": {"key": key, "itemType": item_type, "DOI": doi}}
+
+
+def library_page(items=(), *, total=None, next_start=None, server="local-instance", version="4"):
+    headers = {"Total-Results": str(len(items) if total is None else total)}
+    if server is not None:
+        headers["Zotero-Server-ID"] = server
+    if version is not None:
+        headers["Last-Modified-Version"] = version
+    if next_start is not None:
+        headers["Link"] = (
+            f'<{LOCAL_API_BASE}/users/0/items?format=json&include=data&limit=100'
+            f'&start={next_start}&itemType=-attachment>; rel="next"'
+        )
+    return httpx.Response(200, json=list(items), headers=headers)
 
 
 def write_paper(
@@ -134,14 +198,17 @@ def test_successful_transitions_change_only_workflow_status(
     expected: WorkflowStatus,
     target: WorkflowStatus,
     tmp_path: Path,
+    zotero_reads,
 ) -> None:
     paper_id = UUID("11111111-1111-4111-8111-111111111111")
     path = write_paper(
         tmp_path,
         paper_id,
         status=initial,
-        zotero_key="ZOT-KEEP",
+        zotero_key="PARENT01",
     )
+    if action is mark_paper_in_zotero:
+        zotero_reads(library_page([zotero_item()]))
     before_frontmatter, before_body = document_parts(path)
 
     result = action(tmp_path, paper_id, expected)  # type: ignore[operator]
@@ -223,15 +290,19 @@ def test_only_three_public_decision_actions_exist() -> None:
         )
 
 
-def test_unknown_uuid_returns_not_found_without_writes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("action,status", [
+    (keep_paper, WorkflowStatus.CANDIDATE),
+    (mark_paper_in_zotero, WorkflowStatus.KEPT),
+])
+def test_unknown_uuid_returns_not_found_without_writes(tmp_path: Path, action, status) -> None:
     existing_id = UUID("33333333-3333-4333-8333-333333333333")
-    path = write_paper(tmp_path, existing_id)
+    path = write_paper(tmp_path, existing_id, status=status)
     before = path.read_bytes()
 
-    result = keep_paper(
+    result = action(
         tmp_path,
         UUID("33333333-3333-4333-8333-444444444444"),
-        WorkflowStatus.CANDIDATE,
+        status,
     )
 
     assert result.outcome is DecisionOutcome.NOT_FOUND
@@ -729,9 +800,11 @@ def test_decision_result_matches_authoritative_parser_after_update(
     (reject_paper, WorkflowStatus.CANDIDATE, WorkflowStatus.REJECTED),
     (mark_paper_in_zotero, WorkflowStatus.KEPT, WorkflowStatus.IN_ZOTERO),
 ])
-def test_status_only_decisions_preserve_valid_or_malformed_raw_attribution(tmp_path, attribution, action, initial, target):
+def test_decisions_preserve_valid_or_malformed_raw_attribution(tmp_path, attribution, action, initial, target, zotero_reads):
     paper_id = UUID("16161616-1616-4616-8616-161616161616")
-    path = write_paper(tmp_path, paper_id, status=initial, zotero_key="ZOT123")
+    path = write_paper(tmp_path, paper_id, status=initial, zotero_key="PARENT01")
+    if action is mark_paper_in_zotero:
+        zotero_reads(library_page([zotero_item()]))
     replace_frontmatter(path, journal_issns=attribution, custom_field={"nested": ["retain", 3]})
     path.write_text(path.read_text() + "\nHuman note.\n\n## Custom\n\nPreserve this.\n")
     before, body_before = document_parts(path)
@@ -742,3 +815,385 @@ def test_status_only_decisions_preserve_valid_or_malformed_raw_attribution(tmp_p
     before.pop("status")
     after.pop("status")
     assert before == after and body_before == body_after
+
+
+@pytest.mark.parametrize("existing_key", [None, "missing", "PARENT01"])
+def test_mark_atomically_persists_unique_key_and_status_preserving_all_other_content(
+    tmp_path, monkeypatch, zotero_reads, existing_key,
+):
+    paper_id = UUID("17171717-1717-4717-8717-171717171717")
+    path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
+    values, body = document_parts(path)
+    if existing_key == "missing":
+        values.pop("zotero_key")
+    else:
+        values["zotero_key"] = existing_key
+    values["doi"] = " HTTPS://DOI.ORG/10.5555/DECISION "
+    values["external_ids"]["doi"] = values["doi"]
+    values["custom_field"] = {"nested": ["retain", 3]}
+    values["journal_issns"] = ["0006-341X"]
+    body += "\n## Notes\n\nHuman note.\n\n### Child\nKeep child.\n\n## Custom\nKeep all.\n"
+    path.write_text("---\n" + yaml.safe_dump(values, sort_keys=False) + "---" + body)
+    before, before_body = document_parts(path)
+    requests = zotero_reads(
+        library_page([zotero_item(doi="10.5555/DECISION")], total=2, next_start=1),
+        library_page([zotero_item("OTHER001", doi="10.5555/other")], total=2),
+    )
+    replace = decisions._replace_regular_text_at_identity
+    original_directory, original_file = path.parent.stat(), path.stat()
+    writes = []
+
+    def record_atomic(target, contents, *, expected_contents, **identities):
+        assert document_parts(path)[0]["status"] == "kept"
+        assert document_parts(path)[0].get("zotero_key") == before.get("zotero_key")
+        replacement = yaml.safe_load(contents.split("---", 2)[1])
+        assert replacement["status"] == "in_zotero" and replacement["zotero_key"] == "PARENT01"
+        assert identities['expected_directory_identity'] == (original_directory.st_dev, original_directory.st_ino)
+        assert identities['expected_file_identity'] == (original_file.st_dev, original_file.st_ino)
+        writes.append(contents)
+        replace(target, contents, expected_contents=expected_contents, **identities)
+
+    monkeypatch.setattr(decisions, "_replace_regular_text_at_identity", record_atomic)
+
+    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+
+    assert result.outcome is DecisionOutcome.UPDATED and len(writes) == 1
+    assert result.current_status is WorkflowStatus.KEPT
+    assert result.resulting_status is WorkflowStatus.IN_ZOTERO
+    after, after_body = document_parts(path)
+    assert after.pop("status") == "in_zotero" and after.pop("zotero_key") == "PARENT01"
+    before.pop("status")
+    before.pop("zotero_key", None)
+    assert after == before and after_body == before_body
+    assert len(requests) == 2 and requests[1].headers["Zotero-Server-ID"] == "local-instance"
+
+
+@pytest.mark.parametrize("existing_key", [None, "PARENT01"])
+@pytest.mark.parametrize("failure", [
+    "no_match", "duplicate", "incomplete", "invalid_json", "invalid_item",
+    "missing_server", "missing_version", "changed_server", "unavailable",
+])
+def test_mark_zotero_verification_failure_preserves_complete_paper(
+    tmp_path, zotero_reads, existing_key, failure,
+):
+    paper_id = UUID("18181818-1818-4818-8818-181818181818")
+    path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT, zotero_key=existing_key)
+    before = path.read_bytes()
+    expected = DecisionOutcome.ZOTERO_FAILURE
+    if failure == "no_match":
+        replies = [library_page()]
+        expected = DecisionOutcome.ZOTERO_NOT_FOUND
+    elif failure == "duplicate":
+        replies = [
+            library_page([zotero_item()], total=2, next_start=1),
+            library_page([zotero_item("PARENT02", doi="HTTPS://DOI.ORG/10.5555/DECISION")], total=2),
+        ]
+        expected = DecisionOutcome.ZOTERO_DUPLICATE
+    elif failure == "incomplete":
+        replies = [library_page([zotero_item()], total=2)]
+    elif failure == "invalid_json":
+        replies = [httpx.Response(200, content=b"secret-invalid-payload", headers={
+            "Zotero-Server-ID": "local-instance", "Last-Modified-Version": "4", "Total-Results": "1",
+        })]
+    elif failure == "invalid_item":
+        replies = [library_page([{"secret": "unreadable-item"}])]
+    elif failure == "missing_server":
+        replies = [library_page([zotero_item()], server=None)]
+    elif failure == "missing_version":
+        replies = [library_page([zotero_item()], version=None)]
+    elif failure == "changed_server":
+        replies = [
+            library_page([zotero_item()], total=2, next_start=1),
+            library_page([zotero_item("OTHER001")], total=2, server="different-instance"),
+        ]
+    else:
+        replies = [httpx.ConnectError("secret-error-details")]
+    requests = zotero_reads(*replies)
+
+    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+
+    assert result.outcome is expected and result.resulting_status is None
+    assert path.read_bytes() == before and requests
+    assert "secret" not in result.message and "unreadable-item" not in result.message
+
+
+@pytest.mark.parametrize("key", ["WRONG001", "STALE001"])
+def test_mark_never_replaces_non_null_conflicting_key(tmp_path, zotero_reads, key):
+    paper_id = UUID("19191919-1919-4919-8919-191919191919")
+    path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT, zotero_key=key)
+    before = path.read_bytes()
+    requests = zotero_reads(library_page([zotero_item()]))
+
+    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+
+    assert result.outcome is DecisionOutcome.STATE_CONFLICT
+    assert result.resulting_status is None and path.read_bytes() == before
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("doi", [None, "", "   ", 123])
+def test_mark_invalid_doi_fails_before_zotero(tmp_path, doi):
+    paper_id = UUID("20202020-2020-4020-8020-202020202020")
+    path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
+    values, _ = document_parts(path)
+    replace_frontmatter(path, doi=doi, external_ids={**values["external_ids"], "doi": doi})
+    before = path.read_bytes()
+
+    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+
+    assert result.outcome is DecisionOutcome.INVALID_PAPER and path.read_bytes() == before
+
+
+@pytest.mark.parametrize("key", ["", " ", "short", "parent01", " PARENT01 ", 123, {"key": "PARENT01"}])
+def test_mark_malformed_non_null_key_fails_before_zotero(tmp_path, key):
+    paper_id = UUID("21212121-2121-4121-8121-212121212121")
+    path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
+    replace_frontmatter(path, zotero_key=key)
+    before = path.read_bytes()
+
+    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+
+    assert result.outcome is DecisionOutcome.INVALID_PAPER and path.read_bytes() == before
+
+
+@pytest.mark.parametrize("mode", [
+    "duplicate", "unreadable", "symlink", "non_regular", "unsafe_sibling", "malformed",
+])
+def test_mark_unsafe_paper_location_fails_before_zotero(tmp_path, monkeypatch, mode):
+    paper_id = UUID("22222222-2222-4222-8222-222222222222")
+    path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
+    before = path.read_bytes()
+    if mode == "duplicate":
+        path.with_name("duplicate.md").write_bytes(before)
+    elif mode == "unreadable":
+        sibling = path.with_name("unreadable.md")
+        sibling.write_bytes(b"\xff")
+    elif mode == "symlink":
+        target = tmp_path / "outside.md"
+        path.rename(target)
+        path.symlink_to(target)
+    elif mode == "non_regular":
+        path.unlink()
+        path.mkdir()
+    elif mode == "unsafe_sibling":
+        path.with_name("unsafe.md").mkdir()
+    else:
+        replace_frontmatter(path, title=None)
+        before = path.read_bytes()
+
+    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+
+    assert result.outcome in (DecisionOutcome.INVALID_PAPER, DecisionOutcome.IO_FAILURE)
+    assert result.resulting_status is None
+    if mode == "non_regular":
+        assert path.is_dir()
+    else:
+        assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("change", ["edit", "disappear"])
+def test_mark_compare_replace_conflict_never_retries_or_partially_updates(
+    tmp_path, monkeypatch, zotero_reads, change,
+):
+    paper_id = UUID("23232323-2323-4323-8323-232323232323")
+    path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
+    before = path.read_text()
+    zotero_reads(library_page([zotero_item()]))
+    replace = decisions._replace_regular_text_at_identity
+    calls = []
+
+    def race(target, contents, *, expected_contents, **identities):
+        assert expected_contents == before
+        calls.append(contents)
+        if change == "edit":
+            path.write_text(before + "\nConcurrent edit.\n")
+        else:
+            path.unlink()
+        replace(target, contents, expected_contents=expected_contents, **identities)
+
+    monkeypatch.setattr(decisions, "_replace_regular_text_at_identity", race)
+
+    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+
+    assert result.outcome is DecisionOutcome.STATE_CONFLICT and len(calls) == 1
+    assert result.resulting_status is None
+    if change == "edit":
+        assert path.read_text() == before + "\nConcurrent edit.\n"
+        values, _ = document_parts(path)
+        assert values["status"] == "kept" and values["zotero_key"] is None
+    else:
+        assert not path.exists()
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "directory"])
+def test_mark_target_becoming_unsafe_during_zotero_read_never_mutates(
+    tmp_path, monkeypatch, zotero_reads, replacement,
+):
+    paper_id = UUID("24242424-2424-4424-8424-242424242424")
+    path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
+    before = path.read_bytes()
+    zotero_reads(library_page([zotero_item()]))
+    resolve = ZoteroLocalClient.resolve_identity
+    outside = tmp_path / "outside.md"
+
+    def replace_target(client, doi, zotero_key=None):
+        identity = resolve(client, doi, zotero_key)
+        path.unlink()
+        if replacement == "symlink":
+            outside.write_bytes(before)
+            path.symlink_to(outside)
+        else:
+            path.mkdir()
+        return identity
+
+    monkeypatch.setattr(ZoteroLocalClient, "resolve_identity", replace_target)
+
+    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+
+    assert result.outcome is DecisionOutcome.STATE_CONFLICT
+    if replacement == "symlink":
+        assert path.is_symlink() and outside.read_bytes() == before
+    else:
+        assert path.is_dir() and not list(path.iterdir())
+
+
+def test_mark_local_read_error_is_sanitized_and_does_not_contact_zotero(tmp_path, monkeypatch):
+    paper_id = UUID("25252525-2525-4525-8525-252525252525")
+    path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
+    before = path.read_bytes()
+
+    def unreadable(target, directory):
+        raise PermissionError("secret-filesystem-detail")
+
+    monkeypatch.setattr(decisions, "_read_mark_candidate", unreadable)
+
+    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+
+    assert result.outcome is DecisionOutcome.IO_FAILURE
+    assert "secret" not in result.message and path.read_bytes() == before
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "directory", "fifo", "missing"])
+def test_mark_final_compare_boundary_rejects_location_substitution(
+    tmp_path, monkeypatch, zotero_reads, replacement,
+):
+    paper_id = UUID("26262626-2626-4626-8626-262626262626")
+    path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
+    original = path.read_bytes()
+    preserved = tmp_path / "preserved-paper.md"
+    requests = zotero_reads(library_page([zotero_item()]))
+    compare = decisions._replace_regular_text_at_identity
+    calls = []
+
+    def substitute_at_compare(target, contents, *, expected_contents, **identities):
+        assert target == path and path.is_file() and not path.is_symlink()
+        assert expected_contents.encode("utf-8") == original and len(requests) == 1
+        path.rename(preserved)
+        if replacement == "symlink":
+            path.symlink_to(preserved)
+        elif replacement == "directory":
+            path.mkdir()
+            (path / "sentinel").write_bytes(b"replacement directory content")
+        elif replacement == "fifo":
+            os.mkfifo(path)
+        calls.append(contents)
+        compare(target, contents, expected_contents=expected_contents, **identities)
+
+    monkeypatch.setattr(decisions, "_replace_regular_text_at_identity", substitute_at_compare)
+
+    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+
+    assert result.outcome is DecisionOutcome.STATE_CONFLICT and len(calls) == 1
+    assert result.resulting_status is None and preserved.read_bytes() == original
+    preserved_fields, _ = document_parts(preserved)
+    assert preserved_fields["status"] == "kept" and preserved_fields["zotero_key"] is None
+    if replacement == "symlink":
+        assert path.is_symlink() and path.read_bytes() == original
+    elif replacement == "directory":
+        assert path.is_dir() and (path / "sentinel").read_bytes() == b"replacement directory content"
+    elif replacement == "fifo":
+        assert stat.S_ISFIFO(path.lstat().st_mode)
+    else:
+        assert not path.exists()
+    assert not any(
+        b"status: in_zotero" in candidate.read_bytes()
+        for candidate in path.parent.glob("*.md")
+        if not candidate.is_symlink() and stat.S_ISREG(candidate.lstat().st_mode)
+    )
+
+
+def test_mark_uses_readable_identity_without_any_write_authorization(tmp_path, monkeypatch, zotero_reads):
+    from literature_monitor import zotero_credentials, zotero_write
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Mark must not access write authorization')
+    monkeypatch.setattr(zotero_credentials, '_os_backend', forbidden)
+    for operation in ('credential', 'establish', 'invalidate'):
+        monkeypatch.setattr(zotero_credentials.ZoteroAuthorizationRuntime, operation, forbidden)
+    monkeypatch.setattr(zotero_write.ZoteroAuthorizationClient, 'authorize', forbidden)
+    paper_id = UUID('27272727-2727-4727-8727-272727272727')
+    path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
+    requests = zotero_reads(library_page([zotero_item()]))
+    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+    assert result.outcome is DecisionOutcome.UPDATED
+    after, _ = document_parts(path)
+    assert after['status'] == 'in_zotero' and after['zotero_key'] == 'PARENT01'
+    assert requests and all(r.method == 'GET' for r in requests)
+
+
+@pytest.mark.parametrize('replacement', ['file', 'papers_directory'])
+def test_mark_rejects_same_bytes_at_replaced_original_location(tmp_path, monkeypatch, zotero_reads, replacement):
+    paper_id = UUID('28282828-2828-4828-8828-282828282828')
+    path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
+    original = path.read_bytes()
+    original_file = path.stat()
+    original_directory = path.parent.stat()
+    requests = zotero_reads(library_page([zotero_item()]))
+    resolve = ZoteroLocalClient.resolve_identity
+    locate = decisions._locate_paper
+    read = decisions._read_mark_candidate
+    compare = decisions._replace_regular_text_at_identity
+    locations = []
+    reads = []
+    comparisons = []
+    preserved = tmp_path / 'preserved-paper.md'
+    def locate_once(*args, **kwargs):
+        locations.append(args[1])
+        return locate(*args, **kwargs)
+    def read_once(target, directory):
+        reads.append(target)
+        return read(target, directory)
+    def compare_once(target, contents, *, expected_contents, **identities):
+        comparisons.append(target)
+        assert expected_contents.encode('utf-8') == original
+        assert identities['expected_directory_identity'] == (original_directory.st_dev, original_directory.st_ino)
+        assert identities['expected_file_identity'] == (original_file.st_dev, original_file.st_ino)
+        return compare(target, contents, expected_contents=expected_contents, **identities)
+    def replace_during_lookup(client, doi, zotero_key=None):
+        nonlocal preserved
+        identity = resolve(client, doi, zotero_key)
+        if replacement == 'file':
+            path.rename(preserved)
+        else:
+            moved = tmp_path / 'original-Papers'
+            path.parent.rename(moved)
+            preserved = moved / path.name
+            path.parent.mkdir()
+            assert path.parent.stat().st_ino != original_directory.st_ino
+        path.write_bytes(original)
+        assert path.stat().st_ino != original_file.st_ino
+        return identity
+    monkeypatch.setattr(decisions, '_locate_paper', locate_once)
+    monkeypatch.setattr(decisions, '_read_mark_candidate', read_once)
+    monkeypatch.setattr(decisions, '_replace_regular_text_at_identity', compare_once)
+    monkeypatch.setattr(ZoteroLocalClient, 'resolve_identity', replace_during_lookup)
+    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+    assert result.outcome is DecisionOutcome.STATE_CONFLICT
+    assert result.resulting_status is None
+    assert locations == [paper_id] and len(requests) == 1
+    assert reads == comparisons == [path]
+    assert all(request.method == 'GET' for request in requests)
+    assert preserved.read_bytes() == path.read_bytes() == original
+    for unchanged in (preserved, path):
+        fields, _ = document_parts(unchanged)
+        assert fields['status'] == 'kept' and fields['zotero_key'] is None
+    assert not list(path.parent.glob('.*.tmp'))

@@ -1,0 +1,29 @@
+<section id="zotero-integration" class="panel"{% if zotero_instance is not defined %} hx-get="/settings/zotero" hx-trigger="load" hx-swap="outerHTML"{% endif %}>
+  <h2>Zotero integration</h2>
+  {% if zotero_instance is not defined %}
+    <p>Checking Zotero Desktop and write authorization…</p>
+  {% elif not zotero_instance.server_id %}
+    <p class="warning">{{ zotero_instance.message }}</p>
+    <p>Open Zotero Desktop and enable its Local API, then refresh status.</p>
+  {% else %}
+    <p>Zotero Local API is reachable. Server-ID: <code>{{ zotero_instance.server_id }}</code></p>
+    {% if zotero_authorization.outcome.value == 'authorized' %}
+      {% if zotero_authorization.remembered %}
+        <p>Remembered write authorization is available through the OS credential store.</p>
+      {% else %}
+        <p>One-time Allow is ready for this process. It is consumed by write authentication.</p>
+      {% endif %}
+    {% else %}
+      <p class="warning">{{ zotero_authorization.message }}</p>
+    {% endif %}
+    {% if zotero_retry_remaining > 0 %}
+      <p class="warning">Authorization is temporarily rate limited. Wait before trying again.</p>
+    {% endif %}
+    <form method="post" action="/settings/zotero/authorize" hx-post="/settings/zotero/authorize" hx-target="#zotero-integration" hx-swap="outerHTML">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit"{% if zotero_retry_remaining > 0 %} disabled{% endif %}>Authorize Zotero writes</button>
+    </form>
+    <p>Choose one-time Allow or remembered authorization in Zotero’s dialog. Institutional browser login is separate.</p>
+  {% endif %}
+  <a href="/settings/zotero" hx-get="/settings/zotero" hx-target="#zotero-integration" hx-swap="outerHTML">Refresh status</a>
+</section>

@@ -12,8 +12,10 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+import httpx
 from fastapi.testclient import TestClient
 
+import literature_monitor.application.decisions as decisions
 import literature_monitor.web.app as web_app
 from literature_monitor.application.decisions import (
     DecisionOutcome,
@@ -26,6 +28,7 @@ from literature_monitor.application.workspace import (
     WorkspaceSnapshot,
 )
 from literature_monitor.config import load_config
+from literature_monitor.markdown_state import parse_paper_state
 from literature_monitor.materialize import render_paper_markdown
 from literature_monitor.models import (
     Author,
@@ -40,6 +43,7 @@ from literature_monitor.models import (
     Workflow,
 )
 from literature_monitor.web.app import create_app
+from literature_monitor.zotero_local import ZoteroLocalClient
 
 
 def write_valid_config(tmp_path: Path) -> tuple[Path, Path]:
@@ -1089,6 +1093,76 @@ def test_web_zotero_export_is_removed(tmp_path, monkeypatch):
     assert not hasattr(web_app, "export_kept_papers")
     assert not hasattr(web_app, "_export_context")
     assert not (Path(web_app.__file__).parent / "templates/fragments/zotero_export.html").exists()
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_mark_route_verifies_zotero_and_refreshes_real_workspace_without_false_navigation(
+    tmp_path, monkeypatch, duplicate,
+):
+    config_path, output_dir = write_valid_config(tmp_path)
+    papers_dir = output_dir / "Papers"
+    papers_dir.mkdir(parents=True)
+    paths = []
+    for ordinal in (1, 2):
+        version = PaperVersion(
+            source="doi", identifier=f"10.5555/mark-{ordinal}", kind=VersionKind.JOURNAL_FINAL,
+        )
+        paper = CanonicalPaper(
+            id=UUID(int=ordinal), metadata=CanonicalMetadata(title=f"Kept {ordinal}", journal="Biometrics"),
+            external_ids=ExternalIds(doi=version.identifier), authors=(Author(name="Ada Author"),),
+            versions=(version,), preferred_version=VersionRef(source=version.source, identifier=version.identifier),
+            workflow=Workflow(status=WorkflowStatus.KEPT, discovered_at=datetime(2026, 9, 20, tzinfo=timezone.utc),
+                              zotero_key="PARENT01" if ordinal == 1 else None),
+        )
+        path = papers_dir / f"{ordinal}.md"
+        path.write_text(render_paper_markdown(paper, ("ada-author",)))
+        paths.append(path)
+    before = {path: path.read_bytes() for path in paths}
+    requests = []
+    clients = []
+
+    def respond(request):
+        requests.append(request)
+        assert request.method == "GET" and request.url.path == "/api/users/0/items"
+        assert "Zotero-API-Key" not in request.headers and "Authorization" not in request.headers
+        keys = ["PARENT01", "PARENT02"] if duplicate else ["PARENT01"]
+        return httpx.Response(200, headers={
+            "Zotero-Server-ID": "local-instance", "Last-Modified-Version": "4", "Total-Results": str(len(keys)),
+        }, json=[{"key": key, "data": {
+            "key": key, "itemType": "journalArticle", "DOI": "HTTPS://DOI.ORG/10.5555/MARK-1",
+        }} for key in keys])
+
+    def factory():
+        client = ZoteroLocalClient(transport=httpx.MockTransport(respond))
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(decisions, "_ZoteroLocalClient", factory)
+    with TestClient(create_app(config_path), base_url="http://localhost") as client:
+        page = client.get("/", params={"view": "kept", "paper": str(UUID(int=1))})
+        response = client.post(f"/papers/{UUID(int=1)}/mark-in-zotero", data={
+            "csrf_token": csrf_from_html(page.text), "expected_status": "kept", "view": "kept", "position": "0",
+        })
+        in_zotero = client.get("/fragments/workspace", params={"view": "in-zotero"})
+
+    assert response.status_code == 200 and len(requests) == 1
+    assert all(client._http.is_closed for client in clients)
+    state = parse_paper_state(paths[0], paths[0].read_text(), output_dir / "Authors")
+    assert state is not None and state.updateable
+    if duplicate:
+        assert state.status is WorkflowStatus.KEPT
+        assert {path: path.read_bytes() for path in paths} == before
+        assert "Multiple exact DOI matches" in response.text
+        assert selected_id(response.text) == str(UUID(int=1))
+        assert 'data-selection-stepped="false"' in response.text
+        assert listed_ids(in_zotero.text) == []
+    else:
+        assert state.status is WorkflowStatus.IN_ZOTERO and state.zotero_key == "PARENT01"
+        assert paths[1].read_bytes() == before[paths[1]]
+        assert listed_ids(response.text) == [str(UUID(int=2))]
+        assert selected_id(response.text) == str(UUID(int=2))
+        assert 'data-selection-stepped="true"' in response.text
+        assert listed_ids(in_zotero.text) == [str(UUID(int=1))]
 
 
 def test_settings_get_is_recoverable_editor(tmp_path: Path) -> None:

@@ -1,0 +1,4 @@
+body { width: 300px; margin: 16px; font: 14px/1.5 system-ui, sans-serif; }
+h1 { font-size: 17px; }
+button { display: block; width: 100%; margin: 8px 0; padding: 8px; text-align: left; cursor: pointer; }
+[hidden] { display: none !important; }

@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.5.0 is the current/latest released and completed baseline
+**Status:** Active; v0.5.0 is the latest released version; v0.5.1 is the current unreleased development source (§36), with implementation acceptance and final audit complete under the conditional live-verification boundary in §36.14
 
-**Stage:** v0.5.0 released / closeout complete (§24.16); package metadata `0.5.0`
+**Stage:** v0.5.0 released / closeout complete (§24.16); package metadata remains `0.5.0`. v0.5.1 A0–A9 implementation, independent final-audit Fix 1–3 review, full automated validation, scoped live acquisition, and actual Zotero child file registration verification are complete. Release preparation is the remaining stage; the v0.5.1 release transaction and product closeout are not complete
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 ---
@@ -2796,6 +2796,8 @@ v0.4.6 is released and complete. Its §33 implementation and A0–A3 independent
 
 R0–R3, v0.2.1 lexical search, v0.3.0 Review Inbox, v0.3.1 Prefix / Proximity search, v0.3.2 Persistent Monitor Definition, v0.3.3 Pre-GUI Correctness Hardening, v0.4.0 Python Local Web UI, v0.4.1 Runtime Progress, Activity, ETA, and Inactivity Feedback, v0.4.2 Provider Reliability, Coverage, and Explicit Cache Reuse, v0.4.3 Retrieval Efficiency & Revision-Validated Provider Evidence, v0.4.4 Crossref Elapsed-Aware Pacing & Partial Provider Evidence Semantics, v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace, v0.4.6 GUI Cleanup — Advanced & Diagnostics + Kept Copy DOI, v0.4.7 Journals Organization & Bulk Import, and v0.5.0 Institutional PDF Acquisition to Existing Zotero Item are completed release history. v0.5.0 is the current released and completed baseline.
 
+v0.5.1 Version-Qualified Institutional PDF Acquisition via Normal Chrome is the current unreleased development source governed by §36. A0–A9 implementation, independent final-audit Fix 1–3 review, full automated validation, scoped normal-Chrome/XMU acquisition, and actual Zotero child file registration verification are complete. Implementation acceptance and final audit are complete under §36.14's conditional live-verification boundary. A scoped real run explicitly sought human verification, but no genuine challenge naturally appeared; `HUMAN_VERIFICATION_NOT_PRESENT` records that environmental non-occurrence, not a live continuation pass or an implementation failure. No challenge was manufactured. Release preparation is the remaining stage; the v0.5.1 release transaction and product closeout are not complete. v0.5.0 remains the latest released version and package metadata remains `0.5.0`. The limited §36 supersede boundary governs v0.5.1 development while historical release and acceptance facts remain unchanged.
+
 The v0.4.4 release and closeout are complete, following §24.12. Its §31 implementation, independent stage reviews, and final independent audit are complete; the §23.17 acceptance scenarios have been demonstrated.
 
 v0.4.5 Candidate Eligibility, Warning Semantics & Scrollable Master-Detail Workspace implementation, A1–A6 independent stage reviews, §23.18 acceptance, and full automated verification are complete. The A6 desktop/mobile manual Web smoke passed, and separate independent desktop/mobile browser verification passed during the final integration audit. §32 remains its historical authoritative behavior contract, subject to the narrow v0.4.6 Web presentation supersede boundary in §33.1. Release preparation, release transaction, and closeout are complete (§24.13); its released package metadata is `0.4.5`.
@@ -4013,3 +4015,200 @@ The implemented contract retains the following observable behavior and preservat
 Network-independent behavior tests cover the relevant failure and concurrency cases. Mocks alone do not demonstrate authenticated institutional browser resolution, actual Local API authorization, or PDF upload/storage. The actual live validation levels are reported separately in §23.21: authenticated XMU resolver access and ordered candidates were observed; successful PDF retrieval, actual Zotero authorization/child creation/upload/registration, and full live end-to-end acquisition remain undemonstrated.
 
 A0 originally changed only `SPEC.md`. A1–A7 implementation and independent reviews are complete; the final audit and final release validation passed. The independently reviewed release-preparation commit changed only package/Provider User-Agent identity, matching tests, current-state documentation, and the known §35.6 credential comment reference; it did not modify `list.md`. Afterward, the user-approved grouped `list.md` was committed unchanged as `413b2505b8cab4d74bd5e6e43f4c9ec5aee6815c` (`Update grouped journal list`) and included in the v0.5.0 release tag. It is repository configuration, not an acquisition runtime change or Python package payload. `monitor.yaml`, `src/.obsidian/`, and `workspace/` remained untouched and local-only. The release-preparation commit, annotated tag creation, main/tag pushes, GitHub Release, and documentation closeout are complete (§24.16), without changing this behavior contract. Historical v0.4.7 text remains accurate. v0.5.0 is released.
+
+---
+
+## 36. v0.5.1 Version-Qualified Institutional PDF Acquisition via Normal Chrome Contract
+
+This is the authoritative v0.5.1 behavior contract for the current unreleased development source. A0–A9 implementation and independent final-audit Fix 1–3 review are complete; §36.14 records completed implementation acceptance and final audit at their actual automated and scoped live verification levels. v0.5.0 remains the latest released version and package metadata remains `0.5.0`. Release preparation remains; the v0.5.1 release transaction and product closeout are not complete.
+
+The completed scoped live audit exercised normal Chrome, publisher→XMU, SmartLinks/Research, task-bound delayed blob download attribution, private staging, `%PDF` validation, PUBLISHED qualification, and Settings-owned remembered authorization. An explicitly authorized fresh task successfully created, uploaded, and registered child `LJ6UV83V` under verified parent `ZHIST6EG`; a fresh complete Local API inspection confirmed a real non-empty regular PDF file whose bytes equal the user Chrome download. The earlier incomplete child remains untouched and is not counted as actual PDF success. The separate human-verification attempt and its environmental boundary are recorded in §36.14. Further real writes or re-registration require explicit user authorization.
+
+### 36.1 Authority and limited supersede boundary
+
+For v0.5.1, §36 supersedes only conflicting current acquisition, `Mark in Zotero`, browser, authorization, resolver, staging, cancellation, and acquisition-coordinator behavior in §35 and earlier clauses. In particular, this replaces status-only Mark in Zotero (§§25.5, 34.7, 35.2), stale/wrong non-null key fallback (§§35.3–35.4), repeated acquisition Paper rereads/full-state writer guards (§§35.2, 35.4, 35.6), dedicated persistent Playwright/Chrome acquisition (§35.7), private EBSCO `/api/links` resolution (§35.7), temporary-download ownership (§35.9), and lifetime thread-oriented acquisition waiting (§35.10). §36.5 adds only monotonic version-kind enrichment for an existing normalized version identity; it changes neither version identity nor canonicalization policy.
+
+§35 and all earlier version-specific acceptance and release/closeout text remain historically accurate facts about those versions, including §§23.21 and 24.16. They do not assert that v0.5.1 behavior existed in v0.5.0. For v0.5.1 development, a conflicting historical statement does not override §36. The narrow existing-parent PDF-write permission in §35.1 continues under the replacement contract here; broader integration exclusions remain applicable.
+
+All unrelated discovery, retrieval, Provider, canonicalization, Journal, Group, Obsidian, Run, workflow, and export contracts remain unchanged. Keep/Reject retain their existing safe status-only decisions. Copy DOI, CLI `export-kept`, Markdown ownership/preservation, Web loopback/Host/CSRF security, and the monitor pipeline remain unchanged except for the expressly permitted Mark/linkage and version-kind enrichment below. Acquisition remains a separate user action, outside the discovery pipeline and Obsidian presentation.
+
+### 36.2 Durable workflow and verified Mark in Zotero
+
+The durable workflow statuses remain exactly:
+
+```text
+candidate
+rejected
+kept
+in_zotero
+```
+
+`Mark in Zotero` remains a user-triggered `kept → in_zotero` transition after downstream import. It must perform a complete exact normalized DOI lookup in Zotero Desktop **My Library**, even when the Paper already has a key. Use the existing domain DOI normalization for both Paper and actual Zotero item DOI metadata; no title/fuzzy match or arbitrary search-text match establishes identity. Uniqueness requires complete readable enumeration with the stable library revision, Server-ID, pagination, and count guarantees retained from v0.5.0.
+
+Locate and safely read the requested Paper by workspace-local UUID using the decision safety boundary. Missing/ambiguous/duplicate UUIDs, unreadable candidates that prevent safe location, unsafe symlinks/non-regular files, malformed/non-updateable Paper state, invalid DOI, or a status other than `kept` cause zero Paper mutation. Zero DOI matches, multiple matches, unavailable/unreadable/incomplete Zotero state, or an unverifiable Server-ID also cause zero Paper mutation. Never select an arbitrary duplicate or create a bibliographic item to rescue the action.
+
+Exactly one verified non-attachment bibliographic DOI match permits **one compare-and-replace Paper update**, atomically writing both:
+
+```yaml
+status: in_zotero
+zotero_key: <verified key>
+```
+
+A missing/null key or an existing key equal to the verified key is compatible. A non-null wrong, stale, malformed, or conflicting key causes failure with zero Paper mutation; DOI lookup must not silently replace it. Preserve every unrelated frontmatter field and the complete body, including notes and unknown fields. Compare the complete current file against the safe read used to prepare this single update; concurrent modification or disappearance returns conflict, with neither field partially written and no reread-and-overwrite retry. This action performs no Zotero content write and does not start Add PDF. `in_zotero` remains the user's confirmed linkage state and does not require a PDF.
+
+### 36.3 One safe action read and immutable acquisition identity
+
+`Add PDF to Zotero` remains available only for an `in_zotero` Paper with a valid normalized DOI and a qualified preferred version. A request supplies the Paper UUID, not an authoritative filesystem path or browser-supplied metadata. Start from **one safe fail-closed Paper action read**: locate uniquely within the workspace and read/parse a complete authoritative snapshot. Duplicate UUIDs, unreadable candidate files that prevent establishing unique safe identity, unsafe symlinks/non-regular files, malformed requested Paper, invalid DOI, or invalid preferred-version structure refuse acquisition before browser work or Zotero content mutation.
+
+`preferred_version` must resolve to exactly one normalized entry in `versions`. Missing, zero-match, ambiguous/multiple-match, or structurally invalid preferred/version data fails closed. Retain the complete resolved `PaperVersion` (kind, source, identifier, URL, date, and any other version evidence carried by that entry), rather than reducing qualification to the Paper DOI. Use the existing normalized version identity rules; DOI equality alone does not establish the expected version.
+
+Freeze one immutable process-local task from this action snapshot and the Zotero preflight/linkage result. It contains at least:
+
+| Task field | Required meaning |
+| --- | --- |
+| `task_id` | Unique identity of this attempt. |
+| `paper_id` | Workspace-local Paper UUID from the safe action read. |
+| normalized DOI | Frozen domain-normalized Paper DOI. |
+| `zotero_key` | Verified current My Library parent key, after any permitted legacy linkage. |
+| complete target `PaperVersion` | Exactly the resolved preferred entry, with its full evidence. |
+| derived acquisition class | Qualification derived from that entry, not DOI alone. |
+| bound Zotero Server-ID | Instance verified by preflight; cannot switch during this task. |
+| stage | Current process-local stage. |
+| handoff token/digest | Current one-time handoff capability or its validation digest, never durable state. |
+| task-owned browser tab identity | Bound on claim; unset before handoff is claimed. |
+| browser evidence | Observations attributable to that task/tab. |
+| staged PDF artifact | Validated application-owned artifact, unset until staging succeeds. |
+| terminal result | Unset until completion, failure, or cancellation. |
+
+The qualified identity and expected version remain immutable. Event transitions replace immutable task snapshots to advance stage/evidence/artifact/result fields for the **same** `task_id`; they do not select a new Paper or version. Unavailable fields begin unset rather than being invented. A legacy linkage compare checks the original action bytes (§36.4); this is not a second semantic Paper action read. After construction, browser continuations, authorization waits/replay, and the writer do not relocate, reparse, or rebuild full Paper state. The final commit check is Zotero-only (§36.6). Later Paper edits do not silently retarget the frozen attempt; a different target requires a new user-triggered action.
+
+`JOURNAL_FINAL` and `JOURNAL_ONLINE` (durable `journal_final` / `journal_online`) derive the `PUBLISHED` acquisition class. Accepted-manuscript and preprint targets, when explicitly selected by the existing preferred-version policy, retain their own version qualification. `UNKNOWN` / `unknown` is not automatically eligible and cannot be treated as published based on DOI presence. There is no automatic lower-version fallback if the frozen target is unobtainable.
+
+### 36.4 Legacy missing-key compatibility
+
+An existing `in_zotero` Paper with a genuinely missing/null `zotero_key` may receive one exact-DOI compatibility linkage during its first Add PDF attempt. Complete My Library enumeration must establish exactly one DOI-matched bibliographic parent under the current Server-ID. Unreadable/incomplete state, zero/multiple matches, or malformed/non-null key data does not authorize linkage.
+
+Prepare only `zotero_key: null/missing → verified key` from the original safe action read and perform one complete-content compare-and-replace before freezing the linked task. Preserve status, all unrelated frontmatter, versions, and the body. A comparison/location conflict aborts the attempt without overwrite or Zotero content mutation. A successfully completed linkage may remain if acquisition later fails or is cancelled; it records identity, not PDF success. Once the key is durable, subsequent attempts verify it rather than repeating compatibility linkage.
+
+A non-null conflicting, stale/not-found, wrong-DOI, or malformed key is never auto-repaired or bypassed through DOI fallback. Every acquisition, including a legacy-linked attempt, verifies the **current key plus actual parent DOI** against Zotero before browser work. Manual repair is required for a non-null conflict.
+
+### 36.5 Durable version-kind lifecycle
+
+Evidence for the same existing normalized version identity may monotonically enrich its durable kind, for example `JOURNAL_ONLINE → JOURNAL_FINAL`. The existing preferred-version priority supplies the kind ordering; lower incoming kind evidence must not downgrade an already durable higher kind. Unknown/weaker evidence must not erase a known higher kind. Preserve other discovered versions, provenance, and user-managed Paper content, and keep reruns idempotent.
+
+This does not redefine normalized version identity, merge distinct versions merely because they share a DOI, invent an unseen version, or add migration-only durable state. A task already frozen from an earlier action keeps its expected version; later kind enrichment applies to future actions.
+
+### 36.6 Zotero preflight and final commit check
+
+Retain Zotero Desktop Local API, API version 3, `/users/0` My Library, complete readable enumeration, stable `Last-Modified-Version`, pagination/count validation, and actual-file attachment inspection. Verify the current parent key, actual normalized parent DOI, and Server-ID, then inspect its **actual current PDF attachments before opening Chrome**, including the handoff page. An actual PDF produces terminal successful `PDF_ALREADY_ATTACHED` without Chrome navigation, download, or duplicate upload. Metadata-only incomplete attachment records are not actual PDF success. Failed/incomplete inspection is not evidence of absence.
+
+Immediately before the first Zotero content mutation, repeat a **Zotero-only final commit check** against the task's frozen key/DOI/Server-ID and current actual PDF attachments. Do not substitute a full Paper-state writer guard or repeated Paper action read. A parent identity mismatch, instance change, or unreadable/incomplete Zotero state prevents mutation. A PDF added by another actor during browser/authentication work returns `PDF_ALREADY_ATTACHED` and suppresses upload. A Server-ID change ends the attempt; a new explicit attempt must bind the new instance.
+
+Only a validated staged artifact that passes §36.11 and the final check may reach `ZoteroWriteClient`. Retain current Server-ID on every write, writer write-token/revision guards, and the existing same-Server-ID HTTP 412 operation-failure distinction. Parent bibliographic metadata is never changed. A retry after restart or uncertain completion starts with fresh current Zotero preflight; browser/download leftovers cannot prove success.
+
+### 36.7 Settings-owned Zotero write authorization
+
+Initial write authorization belongs in **Settings → Advanced & Diagnostics → Zotero integration**, using the official Local API authorization flow. Add PDF uses authorization established there; missing authorization offers that Settings action before mutation. Mark in Zotero needs readable verified identity, not PDF-write authorization. Authorization and browser institutional authentication remain separate.
+
+Offer the existing one-time **Allow** and remembered authorization modes. A one-time Allow credential lives only in current process memory, bound to the current Server-ID, and must not be assumed reusable after a write consumes/invalidates it. A remembered credential lives only in the OS credential store, partitioned by Zotero Server-ID. No plaintext fallback is permitted; unavailable secure storage must not persist the credential elsewhere. No credential enters project/workspace files, monitor YAML, Paper state, app-data files, logs, browser handoff, or companion state.
+
+A **confirmed remembered-credential 401 before mutation** may cause at most one fresh authorization and at most one guarded replay. Before replay, repeat the Zotero-only final commit check in §36.6; a newly existing PDF suppresses replay, and an identity/Server-ID mismatch aborts it. Further denial/401 terminates without a prompt loop. This exception does not move initial authorization back into acquisition or permit replay after a partial/uncertain mutation. Retain process-wide authorization 429/`Retry-After` limits across workspace changes, Server-ID isolation, write-token guards, partial-write handling, and mutation-uncertainty reporting.
+
+### 36.8 Normal Chrome and browser companion ownership
+
+Use the user's **normal Chrome profile/session**. Do not start a dedicated Playwright browser or profile. Cloudflare, CAPTCHA, institution login, and MFA stay in normal Chrome and require the user's action, with continuation on the same task/tab after the human step. No bypass is permitted. Literature Monitor must not request, inspect, copy, export, or persist browser cookies or store institution passwords.
+
+The browser companion is a standalone repository artifact **outside the Python package**. It owns only browser handoff, navigation, observation, and download coordination. Version policy, task qualification, Zotero identity, Zotero authorization, and all Zotero writes remain application responsibilities. The companion receives no Zotero write credential. Initial distribution may use documented unpacked-extension installation; extension internals and other packaging choices are not frozen here.
+
+Zotero Connector remains independent and may supply its normal proxy behavior in Chrome. Literature Monitor must not call, fork, modify, or control it.
+
+### 36.9 Secure one-time browser handoff
+
+Open a loopback handoff page under the existing local Web security boundary. A high-entropy one-time task secret appears **only in the URL fragment**, never in the path or query. The fragment is excluded from the handoff-page HTTP request; the secret must not enter HTTP request/access logs, error logs, or durable state. Never forward the secret to DOI/publisher/resolver destinations. The authorized claim exchange must not log the capability.
+
+Each task may be claimed once, binding it to one task-owned Chrome tab. Successful claim consumes/invalidates the initial secret; subsequent events must be authenticated and attributable to the claimed task/tab without reusing the handoff secret. Repeated claims and unrelated tabs, navigations, or downloads cannot advance, supply evidence/artifacts to, or complete the task. Terminal completion, cancellation, and application restart invalidate any outstanding secret and task/event authority. Late events for invalidated tasks are ignored.
+
+If the companion is absent, leave the handoff page visible with setup guidance and retain the current task until claim, cancellation, or termination. Do not fall back to Playwright. Endpoint layout, event transport, extension internals, and capability representation beyond these security properties remain implementation choices.
+
+### 36.10 Publisher-first navigation and narrow XMU fallback
+
+Attempt direct DOI/publisher access first, in the task-owned normal Chrome tab. Only when a `PUBLISHED` target is unobtainable there may acquisition fall back to **Xiamen University Full Text Finder**, using the existing XMU institutional context (`45yels`, `s1215021.main.ftf`). Login/verification waits do not themselves prove that the target is unobtainable; offer human continuation on the same task.
+
+Replace private `/api/links` interception with a narrow adapter for normal-browser **Full Text / SmartLink** choices. The visible institutional resolver remains holdings/routing authority. Preserve resolver ordering for unambiguous eligible choices; ambiguous choices permit explicit user selection in the same browser task. Do not infer an authoritative candidate from arbitrary anchors or substitute research-tool, SearchEngines, Other, or DocumentDelivery links. Candidate failure may continue eligible choices without changing the expected version.
+
+No private EBSCO `/api/links` interception/call is part of v0.5.1 acquisition. This is neither general EBSCO integration nor generic publisher scraping, a publisher routing table, DOI-prefix routing, or a holdings cache. The resolver cannot authorize an arbitrary lower-version fallback, and an exhausted path returns a useful current-task failure.
+
+### 36.11 Download ownership, private staging, and version validation
+
+`chrome.downloads.download()` is an optimization. User-initiated publisher/PDF-viewer downloads are a supported first-class fallback. Both paths must be attributable to the claimed task-owned tab and converge on the same validation/staging boundary; unrelated downloads cannot be adopted. Literature Monitor never deletes user-owned Chrome downloads, including after success, failure, or cancellation.
+
+Treat browser-reported local paths as untrusted. Verify task/download ownership and safe source identity when reading; reject path substitution, symlinks, non-regular files, unavailable/incomplete downloads, and invalid or oversized artifacts. Apply a finite enforced size limit before accepting bytes; the numeric limit remains an implementation choice. Copy accepted bytes into an **application-owned private staging artifact outside project/workspace**, with race-safe source handling. Validate the staged bytes themselves, including mandatory `%PDF`; filenames, Content-Type, browser success, and HTTP 200 are insufficient. HTML/login/error responses or invalid/non-PDF artifacts must not reach the writer. Staging must not create a second durable PDF store or acquisition history.
+
+Before any Zotero content mutation, validate the staged artifact and its task-bound browser evidence against the **complete frozen expected PaperVersion and derived acquisition class**. Identity and byte-format validation alone do not prove version qualification. Missing, ambiguous, or conflicting evidence must fail closed rather than attach an unqualified file. A `PUBLISHED` target with explicit accepted-manuscript/AAM or preprint evidence must fail version validation, even if DOI matches and bytes are a PDF. Do not silently attach a lower version or expose an `Attach anyway` control.
+
+Acceptance example: for DOI `10.5705/ss.202024.0215`, if the frozen target is `JOURNAL_FINAL`/`PUBLISHED` and the browser/PDF evidence explicitly identifies the available file as an accepted author manuscript, reject that file before Zotero mutation. The same rule applies to any explicit-AAM case; this example establishes neither live retrieval evidence nor a DOI-specific production exception.
+
+Only the staged, byte-validated, version-qualified artifact may be passed to `ZoteroWriteClient`. Use canonical DOI source metadata and preserve the existing sensitive-URL/provenance restrictions. Clean up task-owned staging after terminal outcomes, with best-effort cleanup after failure/interruption; never delete the user's source download. Orphan staging/download files after restart are not recoverable task authority.
+
+### 36.12 Event-driven coordinator, cancellation, and truthful outcomes
+
+Retain exactly **one active acquisition per process**, independent of the monitor `RunCoordinator`; a concurrent start returns busy without queueing. No queue, batch, durable acquisition history, or generic background-job framework is introduced. Browser events advance immutable snapshots of the same process-local task. Browser/user/authentication waits must not hold a worker thread blocked for the lifetime of the attempt. Bounded API/file work may use ordinary execution resources while the Web UI and observational polling remain responsive.
+
+Stages may describe preflight, handoff, browser/authentication wait, staging/validation, `ATTACHING`, and terminal results. They are current-task presentation only, never durable workflow statuses. An application restart loses the task and invalidates its capabilities; do not reconstruct it from browser tabs, downloads, staging leftovers, or persisted history. All terminal paths release the active slot and invalidate task event authority.
+
+**Cancel is available only before the first Zotero content mutation.** Entering `ATTACHING` / the mutation gate disables Cancel. Serialize cancellation and gate entry so a cancellation accepted before the gate prevents all Zotero writes and ignores late browser/download events; a request after gate entry cannot claim cancellation or rollback. A successful earlier legacy Paper linkage may remain (§36.4). Cancellation cleans only task-owned staging/capabilities, leaving user downloads intact.
+
+After mutation begins, retain truthful `CHILD_CREATED` / `BYTES_UPLOADED` partial-failure reporting and existing mutation-uncertainty guarantees. Do not report rollback, clean failure with zero writes, or automatically replay when child creation/upload/registration may have occurred. A later explicit retry must inspect actual Zotero state first. Failures and human-action results remain acquisition action results, separate from Workspace issues and Run diagnostics, without workflow/status changes or durable PDF status/path/history.
+
+### 36.13 Replacement cleanup and explicit exclusions
+
+After the replacement path is implemented and complete, remove the obsolete Playwright acquisition/resolver implementation instead of retaining it as a fallback. Remove `playwright` and `platformdirs` dependencies only if no remaining production consumer exists. A0 specifies this cleanup only; it does not remove code/dependencies, add a companion, alter package version, or implement later work.
+
+v0.5.1 excludes:
+
+- automatic bibliographic Zotero item creation, parent metadata updates, Group Libraries, Zotero Web API/OAuth, direct SQLite, and a Zotero plugin;
+- Zotero Connector fork/modification/calls/control;
+- cookie requests/inspection/copying/export/persistence, institution password storage, and plaintext remembered credentials;
+- Cloudflare/CAPTCHA/MFA/institutional-verification or paywall bypass;
+- generic publisher scraping, publisher/DOI-prefix routing tables, general EBSCO integration, and private `/api/links` acquisition;
+- arbitrary lower-version fallback, `Attach anyway`, and a PDF reader/version manager;
+- durable PDF status/path/history, new workflow states, queue/batch/history, and a generic background-job framework;
+- automatic Mark in Zotero, acquisition for candidate/kept/rejected Papers, and candidate-pipeline PDF acquisition;
+- unrelated Provider/discovery/retrieval/canonicalization/Journal/Group/Obsidian/Run/export refactors.
+
+### 36.14 Required acceptance and verification boundary
+
+The following remain **required acceptance criteria** for v0.5.1. The verification boundary and current acceptance record below distinguish executable tests from scoped live evidence; they do not assert that these behaviors existed in v0.5.0:
+
+| Area | Required observable acceptance |
+| --- | --- |
+| Atomic Mark in Zotero | One complete exact-DOI My Library match atomically writes `status` and verified `zotero_key` in one compare-and-replace; unrelated frontmatter/body remain intact. Zero/multiple matches, unreadable/incomplete Zotero, invalid DOI, unsafe Paper/UUID/location, and wrong status produce zero Paper writes and no Zotero content writes. |
+| Conflicting keys and compare-write | Non-null wrong/stale/conflicting/malformed keys remain unchanged for both Mark and Add PDF. Concurrent Paper edits/disappearance during Mark or compatibility linkage return conflict with no partial write, overwrite, or continued upload. |
+| Legacy compatibility | One exact-DOI missing/null-key linkage is allowed for an existing `in_zotero` Paper; it preserves all other content. Later attempts verify the durable key plus DOI. No non-null fallback repair occurs. |
+| Version lifecycle | Same normalized identity upgrades `JOURNAL_ONLINE → JOURNAL_FINAL`; lower/unknown incoming evidence cannot downgrade it. Other versions/identity rules and human content remain intact, with no migration-only state. |
+| One-read frozen task | One safe Paper action read supplies immutable UUID/DOI/full target version; duplicate UUIDs, unreadable candidates, unsafe files, malformed Paper/DOI/versions fail closed. Continuations/final writer checks do not reread/reparse full Paper state or retarget after edits. |
+| Preferred-version qualification | Preferred resolves to exactly one normalized `versions` entry; zero/ambiguous/malformed matches fail. Both journal kinds derive `PUBLISHED`; UNKNOWN is ineligible and no lower-version fallback occurs. |
+| Zotero preflight | Current key/actual DOI/Server-ID and actual complete attachment state are verified before Chrome. Existing actual PDF returns successful `PDF_ALREADY_ATTACHED` with no handoff/Chrome/download/upload; metadata-only partial children do not count. |
+| Handoff security | A high-entropy fragment-only secret is absent from the handoff-page HTTP request, HTTP request/access logs, and destination URLs. Exactly one claim binds one task/tab and consumes the secret; duplicate claims and unrelated tab/download events cannot affect the task. Terminal/cancel/restart invalidates capability/event authority. |
+| Normal Chrome and missing companion | The user's normal Chrome session is used; no dedicated Playwright browser/profile starts. Missing companion leaves setup guidance visible without fallback. Companion owns only handoff/navigation/observation/download and receives no Zotero write credential. |
+| Navigation/resolver | Direct DOI/publisher precedes XMU fallback, available only for an unobtainable PUBLISHED target. Narrow normal-browser Full Text/SmartLink choices support explicit ambiguous-choice selection; no private `/api/links` interception/call, generic scraping, routing tables, or Connector control occurs. |
+| Human verification continuation | Whenever a genuine Cloudflare/CAPTCHA/institution-login/MFA or equivalent challenge naturally appears, the user completes it manually in normal Chrome; successful continuation keeps the same acquisition task, claimed tab, and frozen expected version. No bypass or cookie inspection/copying occurs. This product behavior remains required; live exercise follows the conditional boundary below. |
+| Downloads and staging | Automatic download optimization and user-initiated publisher/PDF-viewer downloads converge on task-bound private staging. User-owned source downloads survive success/failure/cancel. Unrelated downloads, path substitution, symlinks/non-regular files, incomplete/oversized/non-PDF artifacts are rejected; staged `%PDF` validation precedes writer access. |
+| Published versus lower version | Valid PDF bytes with matching DOI and explicit AAM/preprint evidence fail for a PUBLISHED task before mutation, including the §36.11 example. Ambiguous qualification fails closed; no `Attach anyway` or DOI-specific production rule exists. |
+| Final duplicate suppression | A PDF appearing during browser/auth waits suppresses upload at the Zotero-only final check. Parent/DOI/Server-ID mismatch and incomplete inspection prevent writes without a full-state Paper guard. |
+| Settings authorization modes | Initial authorization is in Settings Advanced & Diagnostics Zotero integration. One-time Allow is process-only; remembered credentials use only the OS store partitioned by Server-ID; unavailable storage has no plaintext fallback. Instance/429 limits remain enforced. |
+| Guarded 401 replay | Confirmed remembered-credential 401 before mutation permits one fresh authorization and one replay after repeated Zotero-only final check; newly attached PDF suppresses replay. Further denial/401, changed instance/identity, and partial/uncertain mutation cannot trigger replay. |
+| Cancellation and writer truth | Accepted pre-gate Cancel prevents all Zotero writes; racing gate entry has a single truthful outcome. ATTACHING disables Cancel; after-gate cancellation cannot imply rollback. Server-ID/write-token/412 guards, CHILD_CREATED/BYTES_UPLOADED partial failures, and mutation uncertainty remain truthful. |
+| Coordinator and persistence | Only one active attempt per process; events advance the same task while browser/user waits hold no lifetime-blocked worker. UI/polling remain responsive; terminal paths free the slot. Restart loses the task without reconstruction, durable PDF state, queue, batch, or history. |
+| Replacement cleanup | Completed replacement removes obsolete Playwright acquisition/resolver code, with no fallback. `playwright`/`platformdirs` are removed when unused by remaining production consumers and retained only when such a consumer exists. |
+| Regression and live verification | Run the full automated suite for implementation, including meaningful network-independent tests of identity/version/staging/cancellation/concurrency/writer failures and existing workflow preservation. Separately perform and report explicitly scoped live normal-Chrome companion/handoff, publisher-first/XMU fallback, human-verification continuation subject to the conditional boundary below, download/staging, Settings Local API authorization, and actual Zotero child creation/upload/registration verification. Report each exercised path, environment, outcome, and unverified boundary; mocks or historical v0.5.0 browser evidence do not establish those live results. |
+
+Live exercise of human-verification continuation is conditional on a genuine challenge naturally appearing during a scoped run. If one appears, successful manual completion and continuation on the same task/claimed tab/frozen expected version are required; inability to continue is an acceptance failure. The no-bypass, no-cookie-access, and authentication boundaries in §§36.8–36.10 remain mandatory.
+
+If a scoped real run reaches the relevant institutional browser path without a genuine challenge, record `HUMAN_VERIFICATION_NOT_PRESENT` and report this branch as **not live-exercised**, never as a live pass. Do not manufacture a challenge by clearing cookies, forcing logout, changing credentials, or manipulating session state. External challenge non-occurrence is not by itself a release blocker, provided meaningful network-independent executable tests cover human-required detection/reporting, `WAITING_FOR_INSTITUTION_AUTH` presentation, authenticated same-task/tab event authority, waits without a lifetime-blocked worker, later browser observations continuing under that authority, rejection of invalid task/tab events, and cancellation before the mutation gate. This conditional live boundary does not relax the required product behavior.
+
+**Current acceptance record (2026-10-02):** A0–A9 implementation and independent final-audit Fix 1–3 review are complete. Independent automated validation passed: shipped worker simulation 174 cases, shipped content adapters 101 cases, full pytest with Node runtime 3356 passed / 0 skipped / 2 existing warnings, `uv lock --check`, `git diff --check`, and offline build. Scoped normal-Chrome/XMU/download/staging/qualification and actual Zotero registration verification are complete: parent `ZHIST6EG`, registered child `LJ6UV83V`, fresh complete Local API `has_pdf=true` with that child in `pdf_file_keys`, an actual non-empty regular PDF file, and registered bytes equal to the user Chrome download. Add PDF did not mutate Paper content, and live verification did not mutate source files.
+
+The separate human-verification run used Paper `38f516c6-885d-4882-8c00-bd2c207c078d`, DOI `10.1287/ijoc.2024.0765.cd`, and verified parent `YLF7MWNU`. Normal Mark in Zotero changed only the owned status/key fields. Fresh task `20fa032b-0ada-40ad-b392-ca74a9b1b66c`, claimed tab `522718311`, and frozen journal-online/PUBLISHED version survived publisher-first navigation and explicit XMU → SmartLinks → EBSCO Research navigation. No genuine login/CAPTCHA/Cloudflare/MFA challenge naturally appeared: `HUMAN_VERIFICATION_NOT_PRESENT`; real human-step continuation was not live-exercised. No challenge was manufactured, cookies inspected/copied, sessions manipulated, or verification bypass used. Normal cancellation occurred before mutation; parent metadata remained unchanged, no child was created, and actual PDF remained absent. Together with the executable human-wait/continuation coverage, this satisfies the conditional acceptance boundary. Implementation acceptance and final audit are complete; release preparation remains, and v0.5.1 remains unreleased with release transaction and product closeout incomplete.
+
+The browser companion's standalone installation/use documentation, replacement cleanup, and regression tests are present in the current development source. The initial A0 task changed only this specification. Package names, class names beyond the already required writer boundary, endpoint layout, transport, extension internals, staging size limit, and other nonessential implementation choices remain unfrozen.

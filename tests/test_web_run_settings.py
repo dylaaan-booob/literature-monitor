@@ -2054,7 +2054,7 @@ def test_grouped_settings_web_validate_save_preserves_visible_assignment(health_
     )
 
 
-def test_advanced_is_collapsed_read_only_sibling_of_settings_editor(
+def test_advanced_is_collapsed_sibling_with_zotero_health_and_run(
     health_config: Path,
 ) -> None:
     app = create_app(health_config)
@@ -2067,7 +2067,9 @@ def test_advanced_is_collapsed_read_only_sibling_of_settings_editor(
     assert advanced is not None
     assert "open" not in advanced.group(1)
     assert re.search(r'</form>\s*</section>\s*<details id="advanced-diagnostics"', text)
-    assert not re.search(r'<(?:form|input|select|textarea|button)\b', advanced.group(2))
+    assert 'Zotero integration' in advanced.group(2)
+    assert 'hx-get="/settings/zotero"' in advanced.group(2)
+    assert 'Current run' in advanced.group(2)
     assert 'hx-get="/fragments/workspace-health"' in advanced.group(2)
     assert 'hx-trigger="settingsSaved from:body"' in advanced.group(2)
 
@@ -3064,3 +3066,185 @@ const swap = (tree, top = 419, event = null) => {
     result = subprocess.run([node], input=preamble + "const RESPONSES = " + json.dumps(responses) + ";\n" + harness,
                             text=True, capture_output=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.fixture
+def zotero_settings(health_config, monkeypatch):
+    """Real HTTP clients/runtime, synthetic Local API and fake OS backend only."""
+    from types import SimpleNamespace
+    import httpx
+    import logging
+    from literature_monitor import zotero_credentials as credentials
+    from literature_monitor.zotero_local import ZoteroLocalClient
+    from literature_monitor.zotero_write import ZoteroAuthorizationClient
+
+    s = SimpleNamespace(server='settings-instance-A', remember=False, status=200,
+                        requests=[], values={}, calls=[], fail=None, response_server=None, probe_status=200,
+                        secret='SETTINGSSENTINELSECRET'.ljust(32, '0'))
+    class Backend:
+        def record(self, action, service, server):
+            s.calls.append((action, service, server))
+            logging.getLogger("keyring").warning("backend key %s", s.secret)
+            if s.fail == action:
+                raise RuntimeError(s.secret + ' private backend details')
+        def get_password(self, service, server):
+            self.record('get', service, server)
+            return s.values.get((service, server))
+        def set_password(self, service, server, key):
+            self.record('set', service, server)
+            s.values[service, server] = key
+        def delete_password(self, service, server):
+            self.record('delete', service, server)
+            s.values.pop((service, server), None)
+    def respond(request):
+        s.requests.append(request)
+        logging.getLogger("httpx").warning("private Local API payload %s", s.secret)
+        headers = {'Zotero-Server-ID': s.server}
+        assert request.url.host == 'localhost' and request.url.port == 23119
+        assert 'Cookie' not in request.headers and 'Authorization' not in request.headers
+        if request.method == 'GET':
+            assert request.url.path == '/api/'
+            return httpx.Response(s.probe_status, headers=headers, json={'private': s.secret})
+        assert request.method == 'POST' and request.url.path == '/api/local/authorize'
+        assert request.headers['Zotero-Server-ID'] == s.server
+        assert 'Zotero-API-Key' not in request.headers
+        assert json.loads(request.content) == {'appName': 'Literature Monitor'}
+        headers.update({'Retry-After': '30'})
+        if s.response_server is not None:
+            headers['Zotero-Server-ID'] = s.response_server
+        return httpx.Response(s.status, headers=headers, json={'key': s.secret, 'remember': s.remember})
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(credentials, '_os_backend', Backend)
+    monkeypatch.setattr(web_app, 'ZoteroLocalClient', lambda: ZoteroLocalClient(transport=transport))
+    monkeypatch.setattr(web_app, 'ZoteroAuthorizationClient', lambda server, **kwargs:
+                        ZoteroAuthorizationClient(server, transport=transport, **kwargs))
+    s.app = create_app(health_config)
+    s.config = health_config
+    s.post = lambda client, **data: client.post('/settings/zotero/authorize',
+        data={'csrf_token': s.app.state.csrf_token, **data})
+    return s
+
+
+def test_zotero_settings_get_and_status_are_read_only(zotero_settings):
+    s = zotero_settings
+    with TestClient(s.app, base_url='http://localhost') as client:
+        page = client.get('/settings')
+        assert 'Zotero integration' in page.text and not s.requests
+        status = client.get('/settings/zotero')
+    assert status.status_code == 200 and s.server in status.text
+    assert 'Authorize Zotero writes' in status.text
+    assert 'name="csrf_token"' in status.text
+    assert 'Settings → Advanced &amp; Diagnostics → Zotero integration' in status.text
+    assert all(r.method == 'GET' for r in s.requests)
+    assert s.secret not in page.text + status.text + repr(status.headers)
+
+
+@pytest.mark.parametrize('mode', ['missing_csrf', 'wrong_csrf', 'get', 'host'])
+def test_zotero_settings_authorization_requires_post_csrf_and_local_host(zotero_settings, mode):
+    s = zotero_settings
+    with TestClient(s.app, base_url='http://localhost') as client:
+        if mode == 'get':
+            result = client.get('/settings/zotero/authorize')
+            assert result.status_code == 405
+        else:
+            data = {} if mode == 'missing_csrf' else {'csrf_token': 'wrong'}
+            headers = {}
+            if mode == 'host':
+                data = {'csrf_token': s.app.state.csrf_token}
+                headers = {'Host': 'untrusted.example'}
+            result = client.post('/settings/zotero/authorize', data=data, headers=headers)
+            assert result.status_code == (400 if mode == 'host' else 403)
+    assert not s.requests and not s.calls
+
+
+@pytest.mark.parametrize('remember', [False, True])
+def test_zotero_settings_explicit_action_uses_verified_instance_and_runtime_only(zotero_settings, remember, caplog):
+    from literature_monitor.zotero_credentials import SERVICE_NAME
+    s = zotero_settings; s.remember = remember
+    before = {p: p.read_bytes() for p in s.config.parent.rglob('*') if p.is_file()}
+    with TestClient(s.app, base_url='http://localhost') as client:
+        authorized = s.post(client, server_id='forged-instance')
+        status = client.get('/settings/zotero')
+        s.app = create_app(s.config)
+        with TestClient(s.app, base_url='http://localhost') as fresh:
+            restarted = fresh.get('/settings/zotero')
+    assert authorized.status_code == 200
+    label = 'Remembered write authorization is available' if remember else 'One-time Allow is ready'
+    assert label in authorized.text and label in status.text
+    assert ('Remembered write authorization is available' in restarted.text) is remember
+    if not remember:
+        assert 'Authorize Zotero writes' in restarted.text and 'One-time Allow is ready' not in restarted.text
+    assert len([r for r in s.requests if r.method == 'POST']) == 1
+    assert s.values == ({(SERVICE_NAME, s.server): s.secret} if remember else {})
+    assert all(service == SERVICE_NAME and server == s.server for _, service, server in s.calls)
+    assert sum(action == 'set' for action, _, _ in s.calls) == int(remember)
+    assert before == {p: p.read_bytes() for p in s.config.parent.rglob('*') if p.is_file()}
+    assert s.secret not in authorized.text + status.text + restarted.text + caplog.text + repr(authorized.headers)
+
+
+@pytest.mark.parametrize('remember', [False, True])
+def test_zotero_settings_instance_change_never_reuses_prior_authorization(zotero_settings, remember):
+    s = zotero_settings; s.remember = remember
+    with TestClient(s.app, base_url='http://localhost') as client:
+        s.post(client)
+        s.server = 'settings-instance-B'; s.calls.clear()
+        changed = client.get('/settings/zotero')
+        assert s.server in changed.text
+        assert 'One-time Allow is ready' not in changed.text
+        assert 'Remembered write authorization is available' not in changed.text
+        assert all(server == s.server for _, _, server in s.calls)
+        if not remember:
+            s.server = 'settings-instance-A'
+            assert 'One-time Allow is ready' not in client.get('/settings/zotero').text
+
+
+@pytest.mark.parametrize('action', ['get', 'set'])
+def test_zotero_settings_secure_store_failure_is_sanitized_without_fallback(zotero_settings, action, caplog):
+    s = zotero_settings; s.fail = action; s.remember = True
+    before = {p: p.read_bytes() for p in s.config.parent.rglob('*') if p.is_file()}
+    with TestClient(s.app, base_url='http://localhost') as client:
+        result = s.post(client) if action == 'set' else client.get('/settings/zotero')
+        again = client.get('/settings/zotero')
+    assert 'OS credential store' in result.text and 'OS credential store' in again.text
+    assert 'Remembered write authorization is available' not in result.text + again.text
+    assert 'One-time Allow is ready' not in result.text + again.text
+    assert s.values == {}
+    assert s.secret not in result.text + again.text + caplog.text
+    assert 'private backend details' not in result.text + again.text
+    assert before == {p: p.read_bytes() for p in s.config.parent.rglob('*') if p.is_file()}
+
+
+@pytest.mark.parametrize('status,label', [(403, 'denied'), (429, 'rate limited')])
+def test_zotero_settings_denial_and_rate_limit_do_not_loop(zotero_settings, status, label):
+    s = zotero_settings; s.status = status
+    with TestClient(s.app, base_url='http://localhost') as client:
+        result = s.post(client)
+        assert label in result.text
+        if status == 429:
+            repeated = s.post(client)
+            assert 'disabled' in repeated.text and 'rate limited' in repeated.text
+    assert not s.values
+    assert len([r for r in s.requests if r.method == 'POST']) == 1
+    assert s.secret not in result.text
+
+
+def test_zotero_settings_changed_instance_during_dialog_saves_nothing(zotero_settings):
+    s = zotero_settings; s.remember = True; s.response_server = 'settings-instance-B'
+    with TestClient(s.app, base_url='http://localhost') as client:
+        result = s.post(client)
+    assert 'instance changed' in result.text
+    assert not s.values and not s.calls
+    assert s.secret not in result.text
+
+
+@pytest.mark.parametrize('status', [403, 500])
+def test_zotero_settings_unavailable_cannot_read_credentials_or_authorize(zotero_settings, status):
+    s = zotero_settings; s.probe_status = status
+    with TestClient(s.app, base_url='http://localhost') as client:
+        observed = client.get('/settings/zotero')
+        action = s.post(client)
+    assert 'enable its Local API' in observed.text + action.text
+    assert 'Authorize Zotero writes' not in observed.text + action.text
+    assert all(r.method == 'GET' for r in s.requests)
+    assert not s.calls and not s.values
+    assert s.secret not in observed.text + action.text
