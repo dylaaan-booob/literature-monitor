@@ -175,7 +175,7 @@ def test_client_uses_versioned_encoded_doi_endpoint_and_polite_headers() -> None
     assert parsed.path == "/v1/works/10.1002%2F%28abc%29%2Fx"
     assert parse_qs(parsed.query) == {"mailto": ["monitor@example.com"]}
     assert request.headers["Accept"] == "application/json"
-    assert request.headers["User-Agent"] == "literature-monitor/0.5.1"
+    assert request.headers["User-Agent"] == "literature-monitor/0.5.2"
     assert request.extensions["timeout"]["read"] == 17
 
 
@@ -1870,7 +1870,7 @@ def test_a5_manifest_and_doi_batches_use_repeated_filters_and_same_pool() -> Non
         assert query["mailto"] == "a@example.com"
         assert "|" not in query["filter"]
         assert not {"query", "keyword_expression", "abstract"}.intersection(query)
-        assert request.headers["User-Agent"] == "literature-monitor/0.5.1"
+        assert request.headers["User-Agent"] == "literature-monitor/0.5.2"
 
 
 @pytest.mark.parametrize("code", [301, 308])

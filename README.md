@@ -11,10 +11,13 @@ safely updates durable Paper and Author Markdown, and exports kept papers.
 This main-branch source checkout contains the **v0.5.2 development implementation**
 under SPEC §37. A0–A5 implementation and independent stage reviews are complete;
 the final independent integration audit is complete, with automated validation
-passing at the verified scope recorded in SPEC §37.10. v0.5.2 release preparation
-and release have not occurred. No v0.5.2 live browser/Zotero verification is
-claimed; historical v0.5.1 evidence does not establish it.
-Python package metadata and Provider User-Agent identities remain **0.5.1**.
+passing at the verified scope recorded in SPEC §37.10. This release-preparation
+tree uses Python package metadata and Provider User-Agent identities **0.5.2**
+(§24.18). v0.5.1 remains the latest released version; **v0.5.2 is unreleased**.
+Independent release-preparation review, its commit, final clean-export
+release-commit validation, and the release transaction remain pending.
+No v0.5.2 live browser/Zotero verification is claimed; historical v0.5.1 evidence
+does not establish it.
 An installed v0.5.1 distribution follows its released contract, while the current
 source instructions below follow §37.
 
@@ -154,7 +157,8 @@ queue, or another source of Paper decision state.
 ### Add PDF to Zotero — current v0.5.2 development workflow
 
 This section describes the current source implementation under SPEC §37.
-The latest released baseline and package metadata remain **v0.5.1 / 0.5.1**;
+The latest released baseline remains **v0.5.1**; this prepared source uses
+package metadata **0.5.2** and remains unreleased;
 its historical live verification is recorded separately below. The standalone
 browser companion is installed from the source repository.
 

@@ -33,7 +33,7 @@ host permissions 限于两个 HTTP loopback host、`https://resolver.ebsco.com/*
 
 ## 当前源码与已发布基线
 
-当前源码是 SPEC §37 下的 **v0.5.2 development** 实现，Python package metadata 保持 **0.5.1**；**v0.5.1 是最新已发布版本**。v0.5.2 A0–A5 实现及独立阶段审查已完成，最终独立集成审计已完成，自动验证的实际范围见 SPEC §37.10（审查环境无 Node，未独立执行 JS runtime/content suites）。发布准备和发布未进行；不声明 v0.5.2 live companion/Zotero 验证。Web Add PDF 通过 installed normal Chrome 打开 handoff，不使用 dedicated profile、headless 或 Playwright，没有 production Playwright fallback。Python wheel 不会安装此独立扩展；请保留包含 browser_companion/ 的源码目录。
+当前源码是 SPEC §37 下的 **v0.5.2 development** 实现，处于发布准备，Python package metadata 为 **0.5.2**，companion manifest 独立版本保持 **0.1.0**；**v0.5.1 是最新已发布版本**。v0.5.2 A0–A5 实现及独立阶段审查已完成，最终独立集成审计已完成，自动验证的实际范围见 SPEC §37.10（审查环境无 Node，未独立执行 JS runtime/content suites）。独立发布准备审查、准备提交、最终 clean-export release-commit 验证和发布流程待完成（§24.18）；v0.5.2 未发布；不声明 v0.5.2 live companion/Zotero 验证。Web Add PDF 通过 installed normal Chrome 打开 handoff，不使用 dedicated profile、headless 或 Playwright，没有 production Playwright fallback。Python wheel 不会安装此独立扩展；请保留包含 browser_companion/ 的源码目录。
 
 ## DOI-bound 当前任务流程
 
