@@ -10,6 +10,28 @@ const RECORD = 'https://research.ebsco.com/c/context7/search/details/record8';
 const REDIRECT = 'https://resolver.ebsco.com/redirect?' + new URLSearchParams({
   rft_id: 'info:doi/' + DOI, 'x-opid': '45yels', customer: 's1215021', group: 'main', profile: 'ftf'});
 
+function executeHandoff(url, exchange = (message, reply) => reply({ok: true}), options = {}) {
+  const messages = [], events = [];
+  const window = {location: {href: url}};
+  window.top = options.subframe ? {} : window;
+  window.history = {replaceState: (state, title, cleanUrl) => {
+    assert.equal(state, null); assert.equal(title, '');
+    events.push({type: 'scrub', url: cleanUrl});
+    window.location.href = cleanUrl;
+    options.scrub?.(cleanUrl);
+  }};
+  const runtime = {lastError: undefined, sendMessage: (message, reply) => {
+    const snapshot = structuredClone(message);
+    messages.push(snapshot); events.push({type: 'message', message: snapshot});
+    exchange(message, reply, window);
+  }};
+  const context = vm.createContext({window, chrome: {runtime}, URL});
+  for (const script of ['handoff_protocol.js', 'handoff_content.js']) {
+    vm.runInContext(fs.readFileSync(path.join(root, script), 'utf8'), context, {filename: script});
+  }
+  return {window, runtime, messages, events};
+}
+
 class Element {
   constructor(tag, own = '', attrs = {}, children = []) {
     this.tag = tag; this.own = own; this.attrs = attrs; this.children = children;
@@ -58,7 +80,7 @@ class Element {
   getClientRects() { return !this.hasRects || this.closest('[hidden]') || this.style.display === 'none' ? [] : [{}]; }
 }
 const e = (...args) => new Element(...args);
-function execute(script, url, body, authority = {task_id: TASK, doi: DOI}, runtimeSend = null) {
+function execute(script, url, body, authority = {task_id: TASK, doi: DOI, navigation_epoch: 1}, runtimeSend = null) {
   const messages = [], timers = [], handlers = {}, observers = [];
   const cancelledTimers = new Set(), frames = [];
   let now = Date.now(), contextRequests = 0;
@@ -133,10 +155,37 @@ function recordFixture() {
 }
 function runContentCases() {
   let cases = 0;
+  const clean = 'http://localhost:8765/browser-handoff/' + TASK;
+  const initial = clean + '#' + 'i'.repeat(43);
+  {
+    const h = executeHandoff(initial);
+    assert.equal(h.window.location.href, clean);
+    assert.deepEqual(h.events.map(event => event.type), ['message', 'scrub', 'message']);
+    assert.deepEqual(h.messages, [{type: 'claim_handoff', handoffUrl: initial}, {type: 'activate_handoff'}]);
+    cases++;
+  }
+  {
+    const h = executeHandoff(clean);
+    assert.deepEqual(h.messages, [{type: 'activate_handoff'}]);
+    assert.equal(h.events.length, 1); cases++;
+  }
+  for (const mode of ['denied', 'last_error', 'navigated']) {
+    let callback;
+    const h = executeHandoff(initial, (message, reply) => { callback = reply; });
+    if (mode === 'last_error') h.runtime.lastError = {message: 'Unavailable'};
+    if (mode === 'navigated') h.window.location.href = 'https://publisher.example/';
+    callback({ok: mode !== 'denied'});
+    assert.equal(h.messages.length, 1); assert.equal(h.events.length, 1); cases++;
+  }
+  for (const [url, options] of [[initial, {subframe: true}],
+    ['https://publisher.example/browser-handoff/' + TASK, {}], [clean + '#bad', {}],
+    [clean + '#', {}], [clean + '?query=1', {}]]) {
+    assert.equal(executeHandoff(url, undefined, options).messages.length, 0); cases++;
+  }
   for (const mode of ['valid', 'wrong_doi', 'missing_doi', 'aam', 'preprint', 'missing_journal',
     'missing_issue', 'missing_volume', 'missing_source_year', 'missing_publication_metadata', 'missing_modal_year', 'online_first',
     'abstract_preprint', 'abstract_aam', 'other_type', 'wrong_year', 'html_selected', 'hidden_pdf_label', 'untrusted', 'unclaimed',
-    'unrelated_path', 'other_origin', 'record_changed', 'hidden_record', 'modal_hides_record', 'styled_radio']) {
+    'unrelated_path', 'other_origin', 'record_changed', 'hidden_record', 'modal_hides_record', 'styled_radio', 'disabled_pdf', 'disabled_button', 'hidden_button', 'multiple_pdf', 'no_epoch', 'untrusted_entry']) {
     const f = recordFixture();
     if (mode === 'wrong_doi') f.doi.own = '10.9999/wrong';
     if (mode === 'missing_doi') f.doi.own = '';
@@ -157,13 +206,20 @@ function runContentCases() {
     }
     if (mode === 'wrong_year') f.year.own = '2025';
     if (mode === 'html_selected') f.radio.checked = false;
+    if (mode === 'disabled_pdf') f.radio.disabled = true;
+    if (mode === 'disabled_button') f.button.disabled = true;
+    if (mode === 'hidden_button') f.button.attrs.hidden = '';
+    if (mode === 'multiple_pdf') {
+      const other = e('input', '', {...f.radio.attrs}); other.labels = [f.label];
+      other.parentElement = f.body; f.body.children.push(other);
+    }
     if (mode === 'hidden_pdf_label') f.label.attrs.hidden = '';
     if (mode === 'hidden_record') f.article.attrs['aria-hidden'] = 'true';
     if (mode === 'styled_radio') f.radio.style.opacity = '0';
     const url = mode === 'unrelated_path' ? RECORD.replace('details', 'results')
       : mode === 'other_origin' ? RECORD.replace('research.ebsco.com', 'publisher.example') : RECORD;
-    const h = execute('ebsco_record_content.js', url, f.body, mode === 'unclaimed' ? {ok: false} : undefined);
-    h.click(f.entry);
+    const h = execute('ebsco_record_content.js', url, f.body, mode === 'unclaimed' ? {ok: false} : mode === 'no_epoch' ? {task_id: TASK, doi: DOI} : undefined);
+    h.click(f.entry, mode !== 'untrusted_entry');
     if (mode === 'record_changed') f.doi.own = '10.9999/changed';
     if (mode === 'modal_hides_record') f.article.attrs['aria-hidden'] = 'true';
     h.click(f.button, mode !== 'untrusted');
@@ -176,6 +232,7 @@ function runContentCases() {
       assert.equal(evidence[0].record.doi, DOI); // injected descendant DOI ignored
       assert.deepEqual(Object.keys(evidence[0].record), ['doi']);
       assert.equal(evidence[0].pageUrl, RECORD);
+      assert.equal(evidence[0].navigation_epoch, 1);
       assert.equal(evidence[0].manifestation, undefined);
     }
     cases++;
@@ -423,5 +480,5 @@ function runContentCases() {
   }
   return cases;
 }
-module.exports = {runContentCases, recordFixture, RECORD, REDIRECT, execute, e};
+module.exports = {runContentCases, recordFixture, RECORD, REDIRECT, execute, executeHandoff, e};
 if (require.main === module) process.stdout.write(`Shipped content adapters: ${runContentCases()} cases passed. Synthetic DOM only.\n`);

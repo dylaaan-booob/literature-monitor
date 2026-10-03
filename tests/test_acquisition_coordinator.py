@@ -28,6 +28,30 @@ DOI = '10.5555/test'
 TARGET = 'https://publisher.example/file.pdf'
 SECRET = 'SENTINEL_CREDENTIAL https://proxy.example/?signature=SECRET'
 
+class FakeLeaseTimer:
+    def __init__(self, interval, function, args=()):
+        self.interval, self.function, self.args = interval, function, args
+        self.started = self.cancelled = self.daemon = False
+
+    def start(self):
+        self.started = True
+
+    def cancel(self):
+        self.cancelled = True
+
+    def fire(self):
+        # A cancelled callback may already be waiting for the coordinator lock.
+        self.function(*self.args)
+
+
+@pytest.fixture(autouse=True)
+def lease_timers(monkeypatch):
+    timers = []
+    def timer(*args, **kwargs):
+        value = FakeLeaseTimer(*args, **kwargs); timers.append(value); return value
+    monkeypatch.setattr(coordination.threading, 'Timer', timer)
+    return timers
+
 
 class ControlledService:
     def __init__(self, output_dir=None):
@@ -79,7 +103,7 @@ class ControlledService:
 
 
 @pytest.fixture
-def scenario(tmp_path, monkeypatch):
+def scenario(tmp_path, monkeypatch, lease_timers):
     real_thread = threading.Thread
     workers = []
     def thread(**kwargs):
@@ -94,7 +118,7 @@ def scenario(tmp_path, monkeypatch):
     launches = []
     coordinator = AcquisitionCoordinator(service, launcher=launches.append)
     s = SimpleNamespace(c=coordinator, service=service, workers=workers, launches=launches,
-                        source=source, root=root, options=options, real_thread=real_thread)
+                        source=source, root=root, options=options, real_thread=real_thread, timers=lease_timers)
     yield s
     service.prepare_release.set(); service.commit_release.set()
     for worker in workers:
@@ -123,13 +147,16 @@ def start_browser(s):
     return s
 
 
-def ready(s):
+def ready(s, *, committed=True):
     claimed = s.c.registry.claim(str(s.task.task_id), s.initial, TAB)
     assert claimed is not None
     s.capability = claimed.event_capability
     event = dispatch(s, 'tab_ready', {})
     assert event.command['type'] == 'START'
     assert event.command['plan'] == coordination.navigation_plan(s.task).message()
+    assert s.c.snapshot().stage is Stage.HANDOFF
+    if committed:
+        dispatch(s, 'navigation_state', {'identity': {'scheme': 'https:', 'host': 'publisher.example'}, 'route': 'direct'})
     return event
 
 
@@ -190,6 +217,101 @@ def test_preflight_exits_before_browser_wait_and_secret_stays_private(scenario, 
     assert all(not worker.is_alive() for worker in s.workers)
 
 
+def test_duplicate_tab_ready_returns_frozen_start_without_resetting_attempt(scenario):
+    s = start_browser(scenario)
+    first = ready(s)
+    dispatch(s, 'human_action_needed', {'route': 'direct'})
+    before = s.c.snapshot()
+    attempt = s.c._active
+    task = attempt.task
+    capability = s.capability
+    for _ in range(2):
+        replay = dispatch(s, 'tab_ready', {})
+        assert replay.command == first.command
+        assert s.c.snapshot() == before
+        assert s.c._active is attempt and attempt.task is task
+        assert attempt.tab_binding == TAB and s.capability == capability
+    assert len(s.workers) == 1 and len(s.service.calls) == 1
+    assert len(s.launches) == 1 and not s.service.commits
+
+
+def test_ready_only_binds_tab_and_duplicate_preserves_handoff(scenario):
+    s = start_browser(scenario)
+    first = ready(s, committed=False)
+    before = s.c.snapshot()
+    assert s.c._active.tab_binding == TAB
+    assert not s.c._active.open_failed and s.c._active.browser_identity is None
+    assert dispatch(s, 'tab_ready', {}).command == first.command
+    assert s.c.snapshot() == before
+    dispatch(s, 'navigation_state', {'identity': {'scheme': 'https:', 'host': 'publisher.example'}, 'route': 'direct'})
+    committed = s.c.snapshot()
+    assert committed.stage is Stage.BROWSER_ACTION
+    assert committed.browser_identity == ('https:', 'publisher.example')
+    assert dispatch(s, 'tab_ready', {}).command == first.command
+    assert s.c.snapshot() == committed
+
+
+@pytest.mark.parametrize('payload', [
+    {}, {'identity': {'scheme': 'https:', 'host': 'publisher.example'}, 'route': 'xmu'},
+    {'identity': {'scheme': 'file:', 'host': 'publisher.example'}, 'route': 'direct'},
+    {'identity': {'scheme': 'https:', 'host': 'publisher.example/path'}, 'route': 'direct'},
+    {'identity': {'scheme': 'https:', 'host': 'publisher.example', 'url': 'extra'}, 'route': 'direct'},
+    {'identity': [], 'route': 'direct'},
+    {'identity': {'scheme': 'https:', 'host': 'publisher.example'}, 'route': 'direct', 'extra': True},
+])
+def test_invalid_first_navigation_cannot_advance_handoff(scenario, payload):
+    s = start_browser(scenario)
+    ready(s, committed=False)
+    before = s.c.snapshot()
+    dispatch(s, 'navigation_state', payload)
+    assert s.c.snapshot() == before
+
+
+@pytest.mark.parametrize('kind,payload', [
+    ('publisher_fallback_request', {}), ('user_download_request', {}),
+    ('human_action_needed', {'route': 'direct'}), ('publisher_state', {'state': 'exhausted'}),
+    ('resolver_choices', {'choices': []}), ('download_candidate', None),
+])
+def test_browser_actions_before_first_commit_fail_closed(scenario, kind, payload):
+    s = start_browser(scenario)
+    ready(s, committed=False)
+    before = s.c.snapshot()
+    event = dispatch(s, kind, download_payload(s) if payload is None else payload)
+    assert event is None or event.command is None
+    assert s.c.snapshot() == before and not s.service.commits
+
+
+def test_subsequent_committed_navigation_updates_identity_and_route(scenario):
+    s = start_browser(scenario)
+    ready(s)
+    assert dispatch(s, 'publisher_fallback_request', {}).command['type'] == 'PUBLISHER_EXHAUSTED'
+    dispatch(s, 'navigation_state', {'identity': {'scheme': 'https:', 'host': 'resolver.ebsco.com'}, 'route': 'xmu'})
+    assert s.c.snapshot().stage is Stage.BROWSER_ACTION
+    assert s.c.snapshot().browser_identity == ('https:', 'resolver.ebsco.com')
+    dispatch(s, 'navigation_state', {'identity': {'scheme': 'https:', 'host': 'research.ebsco.com'}, 'route': 'xmu'})
+    assert s.c.snapshot().browser_identity == ('https:', 'research.ebsco.com')
+
+
+@pytest.mark.parametrize('route', ['direct', 'xmu'])
+def test_pending_fallback_route_is_confirmed_or_superseded_by_committed_navigation(scenario, route):
+    s = start_browser(scenario); ready(s)
+    dispatch(s, 'publisher_fallback_request', {})
+    assert s.c._active.route == 'direct' and s.c._active.fallback_pending
+    pending = s.c.snapshot()
+    assert dispatch(s, 'publisher_fallback_request', {}).command is None
+    dispatch(s, 'navigation_state', {'identity': {'scheme': 'file:', 'host': 'invalid'}, 'route': 'xmu'})
+    assert s.c.snapshot() == pending and s.c._active.fallback_pending
+    dispatch(s, 'navigation_state', {'identity': {'scheme': 'https:', 'host': 'actual.example'}, 'route': route})
+    assert s.c.snapshot().stage is Stage.BROWSER_ACTION
+    assert s.c.snapshot().browser_identity == ('https:', 'actual.example')
+    assert s.c._active.route == route and not s.c._active.fallback_pending
+    if route == 'direct':
+        user = s.c.snapshot()
+        dispatch(s, 'navigation_state', {'identity': {'scheme': 'https:', 'host': 'resolver.ebsco.com'}, 'route': 'xmu'})
+        assert s.c.snapshot() == user, 'superseded fallback is no longer authorized'
+        assert dispatch(s, 'publisher_fallback_request', {}).command['type'] == 'PUBLISHER_EXHAUSTED'
+
+
 @pytest.mark.parametrize('outcome', [Outcome.PDF_ALREADY_ATTACHED, Outcome.INELIGIBLE, Outcome.CONFLICT, Outcome.ZOTERO_FAILURE])
 def test_terminal_preflight_never_issues_handoff_or_launch(scenario, outcome):
     s = scenario; s.service.result = AcquisitionResult(ID, outcome)
@@ -233,6 +355,7 @@ def test_explicit_fallback_and_current_resolver_choice_without_arbitrary_url(sce
     s = start_browser(scenario); ready(s)
     command = dispatch(s,'publisher_fallback_request',{}).command
     assert command == {'task_id':str(s.task.task_id),'type':'PUBLISHER_EXHAUSTED'}
+    dispatch(s, 'navigation_state', {'identity': {'scheme': 'https:', 'host': 'resolver.ebsco.com'}, 'route': 'xmu'})
     choices = [dict(id=i,category=category,label=label) for i,(category,label) in enumerate([('FullText','Provider A'),('SmartLinks','Provider B')])]
     dispatch(s,'resolver_choices',{'choices':choices})
     snapshot = s.c.snapshot()
@@ -284,6 +407,61 @@ def test_direct_download_without_observed_doi_commits_staged_artifact(scenario):
     assert s.c.snapshot().result.outcome is Outcome.SUCCEEDED
     assert s.service.content_posts == 1 and s.service.commits[0][1].task_id == s.task.task_id
     assert list(s.root.iterdir()) == [] and s.source.exists()
+
+
+@pytest.mark.parametrize('phase', ['staging', 'authorization', 'attaching'])
+def test_unacknowledged_download_outcome_replay_stages_and_commits_once(scenario, monkeypatch, phase):
+    s = start_browser(scenario); ready(s)
+    original = coordination.stage_download
+    entered, release = threading.Event(), threading.Event()
+    stage_calls = []
+    def stage(evidence, **options):
+        stage_calls.append(evidence.download_id)
+        if phase == 'staging':
+            entered.set(); assert release.wait(5)
+        return original(evidence, **options)
+    monkeypatch.setattr(coordination, 'stage_download', stage)
+    if phase == 'authorization':
+        s.service.auth = Auth.REQUIRED
+    if phase == 'attaching':
+        s.service.commit_release.clear()
+    payload = download_payload(s)
+    try:
+        # Treat this accepted registry response as lost. Replay the same frozen
+        # browser payload while real staging/authorization/commit is ongoing.
+        assert dispatch(s, 'download_candidate', payload) is not None
+        if phase == 'staging':
+            assert entered.wait(5) and s.c.snapshot().stage is Stage.VALIDATING_PDF
+        elif phase == 'authorization':
+            join_workers(s)
+            assert s.c.snapshot().stage is Stage.WAITING_FOR_ZOTERO_AUTH
+        else:
+            assert s.service.commit_entered.wait(5) and s.c.snapshot().stage is Stage.ATTACHING
+        snapshot = s.c.snapshot()
+        replay = dispatch(s, 'download_candidate', payload)
+        assert replay is not None and replay.command is None
+        assert s.c.snapshot() == snapshot and stage_calls == [7]
+        if phase == 'authorization':
+            s.service.auth = Auth.AUTHORIZED
+            assert s.c.resume(ID, snapshot.attempt_id) is Action.ACCEPTED
+    finally:
+        release.set(); s.service.commit_release.set(); join_workers(s)
+    assert s.c.snapshot().result.outcome is Outcome.SUCCEEDED
+    assert stage_calls == [7] and len(s.service.commits) == 1 and s.service.content_posts == 1
+    # Completed task authority is gone: a still-unacknowledged replay is denied.
+    assert dispatch(s, 'download_candidate', payload) is None
+    assert stage_calls == [7] and s.source.exists() and list(s.root.iterdir()) == []
+
+
+@pytest.mark.parametrize('reason', ['ambiguous_download_ownership', 'download_unavailable'])
+def test_unacknowledged_terminal_download_outcome_replay_cannot_repeat_transition(scenario, reason):
+    s = start_browser(scenario); ready(s)
+    assert dispatch(s, 'browser_path_failure', {'reason': reason}) is not None
+    snapshot = s.c.snapshot()
+    assert snapshot.status is Status.FINISHED
+    assert dispatch(s, 'browser_path_failure', {'reason': reason}) is None
+    assert s.c.snapshot() == snapshot and not s.service.commits
+    assert s.source.exists() and list(s.root.iterdir()) == []
 
 
 def test_event_handler_returns_while_staging_is_still_blocked(scenario, monkeypatch):
@@ -506,7 +684,7 @@ def test_cancel_preserves_completed_legacy_linkage(scenario):
     assert s.c.snapshot().result.linkage_completed and s.service.content_posts==0
 
 
-@pytest.mark.parametrize('reason',['navigation_failed','download_unavailable','ambiguous_download_ownership'])
+@pytest.mark.parametrize('reason',['navigation_failed','download_unavailable','ambiguous_download_ownership','task_tab_closed'])
 def test_browser_failure_is_terminal_without_workflow_or_zotero_write(scenario,reason):
     s=start_browser(scenario);ready(s)
     dispatch(s,'browser_path_failure',{'reason':reason})
@@ -528,6 +706,7 @@ def test_approved_command_failure_terminalizes_the_pretransition(scenario,comman
     if command in {'PUBLISHER_EXHAUSTED','CHOOSE'}:
         assert dispatch(s,'publisher_fallback_request',{}).command['type']=='PUBLISHER_EXHAUSTED'
     if command=='CHOOSE':
+        dispatch(s, 'navigation_state', {'identity': {'scheme': 'https:', 'host': 'resolver.ebsco.com'}, 'route': 'xmu'})
         dispatch(s,'resolver_choices',{'choices':[dict(id=i,category='FullText',label=f'Provider {i}') for i in range(2)]})
         assert dispatch(s,'resolver_choice_request',{'choice_id':1}).command['type']=='CHOOSE'
     if command=='DOWNLOAD_CURRENT':
@@ -549,3 +728,141 @@ def test_approved_command_failure_terminalizes_the_pretransition(scenario,comman
     assert dispatch(s,'tab_ready',{}) is None and dispatch(s,'browser_path_failure',{'reason':reason}) is None
     assert s.c.start(OTHER).outcome is Start.STARTED
     join_workers(s)
+
+
+def test_browser_lease_is_one_shot_initialized_when_authority_opens(scenario):
+    s = scenario
+    def launch(value):
+        assert s.c.snapshot().stage is Stage.OPENING_CHROME
+        timer = s.c._active.browser_timer
+        assert timer.interval == 1800 and timer.started and timer.daemon
+        assert s.c.registry.status(str(value.task_id)) is not None
+    s.c._launcher = launch
+    start_browser(s)
+    assert len(s.timers) == 1 and s.c._active.browser_timer is s.timers[0]
+
+
+def test_authenticated_liveness_refreshes_even_rejected_business_payload(scenario):
+    s = start_browser(scenario); ready(s)
+    before = s.c.snapshot(); old = s.c._active.browser_timer
+    assert dispatch(s, 'navigation_state', {'invalid': 'business payload'}) is not None
+    current = s.c._active.browser_timer
+    assert old.cancelled and current is not old and current.started
+    assert s.c.snapshot() == before
+    old.fire(); assert s.c.snapshot() == before
+    current.fire(); assert s.c.snapshot().result.recovery is Recovery.CHECK_BROWSER
+
+
+@pytest.mark.parametrize('changes', [
+    {'capability': 'x'*43}, {'capability': None}, {'tab_binding': 'tab-99'},
+    {'task_id': str(OTHER)}, {'event_type': 'malformed event'}, {'payload': []},
+])
+def test_invalid_browser_envelope_does_not_refresh_lease(scenario, changes):
+    s = start_browser(scenario); ready(s)
+    current = s.c._active.browser_timer
+    envelope = dict(task_id=str(s.task.task_id), capability=s.capability, tab_binding=TAB,
+                    event_type='tab_ready', payload={}) | changes
+    assert s.c.registry.receive_event(**envelope, on_event=s.c.handle_event) is None
+    assert s.c._active.browser_timer is current and not current.cancelled
+
+
+@pytest.mark.parametrize('stage', [Stage.OPENING_CHROME, Stage.HANDOFF, Stage.BROWSER_ACTION,
+    Stage.RESOLVING, Stage.WAITING_FOR_INSTITUTION_AUTH, Stage.RESOLVER_CHOICE])
+def test_browser_lease_expiry_releases_every_browser_stage_without_polling(scenario, stage):
+    s = start_browser(scenario); ready(s)
+    attempt = s.c._active; s.c._stage(attempt, stage); timer = attempt.browser_timer
+    timer.fire()
+    ended = s.c.snapshot()
+    assert ended.status is Status.FINISHED and ended.stage is Stage.FAILED
+    assert ended.result.outcome is Outcome.NO_VALID_PDF and ended.result.recovery is Recovery.CHECK_BROWSER
+    assert not ended.result.mutation_uncertain and s.c._active is None
+    assert s.c.registry.status(str(s.task.task_id)) is None and timer.cancelled
+    assert dispatch(s, 'tab_ready', {}) is None
+    timer.fire(); assert s.c.snapshot() == ended
+    assert s.c.start(OTHER).outcome is Start.STARTED; join_workers(s)
+    replacement = s.c.snapshot(); timer.fire(); assert s.c.snapshot() == replacement
+    assert not s.service.commits and s.source.exists()
+
+
+@pytest.mark.parametrize('first', ['event', 'expiry'])
+def test_lease_and_authenticated_activity_serialize_under_registry_lock(scenario, first):
+    s = start_browser(scenario); ready(s)
+    timer = s.c._active.browser_timer; entered = threading.Event(); results = []
+    def contender():
+        entered.set()
+        if first == 'event': timer.fire()
+        else: results.append(dispatch(s, 'tab_ready', {}))
+    with s.c._lock:
+        thread = s.real_thread(target=contender); thread.start(); assert entered.wait(5)
+        if first == 'event': assert dispatch(s, 'tab_ready', {}) is not None
+        else: timer.fire()
+    thread.join(5); assert not thread.is_alive()
+    if first == 'event':
+        assert s.c.snapshot().status is Status.RUNNING and s.c._active.browser_timer is not timer
+    else:
+        assert results == [None] and s.c.snapshot().status is Status.FINISHED
+
+
+@pytest.mark.parametrize('phase', ['staging', 'authorization', 'attaching'])
+def test_candidate_retires_lease_before_staging_authorization_or_writer(scenario, monkeypatch, phase):
+    s = start_browser(scenario); ready(s)
+    timer = s.c._active.browser_timer; entered = threading.Event(); release = threading.Event()
+    real_stage = coordination.stage_download
+    if phase == 'staging':
+        def stage(*args, **kwargs):
+            entered.set(); assert release.wait(5); return real_stage(*args, **kwargs)
+        monkeypatch.setattr(coordination, 'stage_download', stage)
+    elif phase == 'authorization':
+        s.service.auth = Auth.REQUIRED
+        s.service.auth_hook = lambda: (entered.set(), release.wait(5))
+    else:
+        s.service.commit_release.clear(); entered = s.service.commit_entered
+    try:
+        assert dispatch(s, 'download_candidate', download_payload(s)) is not None
+        assert entered.wait(5)
+        attempt = s.c._active; before = s.c.snapshot()
+        assert attempt.browser_timer is None and timer.cancelled
+        timer.fire(); assert s.c.snapshot() == before and s.c._active is attempt
+        # A tab-close event after browser stages cannot cancel staging or a writer.
+        assert dispatch(s, 'browser_path_failure', {'reason': 'task_tab_closed'}) is not None
+        assert s.c.snapshot() == before
+        if phase == 'attaching': assert s.c.cancel(ID, before.attempt_id) is Action.TOO_LATE
+    finally:
+        release.set(); s.service.commit_release.set(); join_workers(s)
+    if phase == 'authorization':
+        assert s.c.snapshot().stage is Stage.WAITING_FOR_ZOTERO_AUTH
+        timer.fire(); assert s.c.snapshot().stage is Stage.WAITING_FOR_ZOTERO_AUTH
+    else:
+        assert s.c.snapshot().result.outcome is Outcome.SUCCEEDED
+        before = s.c.snapshot(); timer.fire(); assert s.c.snapshot() == before
+
+
+def test_lease_winning_first_rejects_late_candidate_before_staging(scenario):
+    s = start_browser(scenario); ready(s); timer = s.c._active.browser_timer
+    timer.fire(); ended = s.c.snapshot()
+    assert dispatch(s, 'download_candidate', download_payload(s)) is None
+    assert s.c.snapshot() == ended and not s.service.commits and s.source.exists()
+
+
+@pytest.mark.parametrize('activated', [False, True])
+def test_task_tab_close_terminates_claimed_authority_including_pre_activation(scenario, activated):
+    s = start_browser(scenario)
+    if activated: ready(s)
+    else:
+        s.capability = s.c.registry.claim(str(s.task.task_id), s.initial, TAB).event_capability
+    timer = s.c._active.browser_timer
+    assert dispatch(s, 'browser_path_failure', {'reason': 'task_tab_closed'}) is not None
+    ended = s.c.snapshot(); assert ended.result.recovery is Recovery.CHECK_BROWSER
+    assert s.c._active is None and s.c.registry.status(str(s.task.task_id)) is None
+    assert dispatch(s, 'browser_path_failure', {'reason': 'task_tab_closed'}) is None
+    timer.fire(); assert s.c.snapshot() == ended
+
+
+def test_cancelled_attempt_stale_lease_and_fresh_process_cannot_restore_authority(scenario):
+    s = start_browser(scenario); ready(s); timer = s.c._active.browser_timer
+    assert s.c.cancel(ID, s.c.snapshot().attempt_id) is Action.ACCEPTED
+    ended = s.c.snapshot(); timer.fire(); assert s.c.snapshot() == ended
+    fresh = AcquisitionCoordinator(s.service, launcher=s.launches.append)
+    assert fresh.snapshot().status is Status.IDLE and fresh._active is None
+    assert fresh.registry.status(str(s.task.task_id)) is None
+    assert fresh.registry.receive_event(str(s.task.task_id), s.capability, TAB, 'tab_ready', {}, on_event=fresh.handle_event) is None

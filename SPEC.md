@@ -1,11 +1,11 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.5.2 is RELEASED and the latest released/completed baseline, with package metadata `0.5.2`. §37 is the current DOI-first behavior contract; historical v0.5.1 release/live and post-release maintenance evidence remain separate
+**Status:** Active; v0.5.2 is RELEASED and the latest released/completed baseline, with package metadata `0.5.2`. v0.5.3 Browser Companion v2 implementation and automated acceptance are complete under §38, with no known substantive implementation finding remaining. Scoped live normal-Chrome verification has passed at the partial boundary recorded in §38.13; actual v0.5.3 target-PDF staging and Zotero registration remain unverified. Release preparation, release and tag remain incomplete. §37 remains authoritative for unaffected DOI-first behavior; historical release/live and maintenance evidence remain separate
 
-**Stage:** v0.5.2 A0–A5 implementation, independent stage reviews, final integration audit and release-preparation review are complete. Implementation commit is `f48574869969534daec589e124c6979011b5cbb5`; release-preparation commit/release HEAD is `d180c18aa853e4483a7d110d39bdfb8aca6860f8`. Prepared-tree validation is recorded in §24.18; the separate final clean-export full validation was explicitly skipped by user choice and is not claimed as completed. Annotated tag, main/tag pushes and GitHub Release are complete. Package metadata and Provider User-Agent identities are `0.5.2`; no new v0.5.2 live browser/Zotero verification is claimed
+**Stage:** v0.5.3 implementation, A0–A5 independent stage reviews, A6 automated integration/acceptance audit and final code/behavior audit are complete, including independently reviewed closed-claim storage-fault and fresh-handoff activation fixes. Scoped live normal-Chrome handoff/navigation/termination validation has passed; live verification remains partial with the residual boundaries in §38.13. The implementation is not yet committed; release preparation, release and tag remain incomplete. Package/Provider identities remain `0.5.2` and companion remains `0.1.0`; v0.5.2 remains the latest released/completed baseline. The completed v0.5.2 baseline remains: A0–A5 implementation, independent stage reviews, final integration audit and release-preparation review are complete. Implementation commit is `f48574869969534daec589e124c6979011b5cbb5`; release-preparation commit/release HEAD is `d180c18aa853e4483a7d110d39bdfb8aca6860f8`. Prepared-tree validation is recorded in §24.18; the separate final clean-export full validation was explicitly skipped by user choice and is not claimed as completed. Annotated tag, main/tag pushes and GitHub Release are complete for v0.5.2. Package metadata and Provider User-Agent identities remain `0.5.2`; no new v0.5.2 live browser/Zotero verification is claimed
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
-**Current contract:** Apply §37's explicit supersede boundary to conflicting identity, version, Markdown, Provider-state and acquisition clauses below. Unaffected requirements remain applicable; superseded model descriptions and version-specific acceptance/release evidence describe their historical baselines, not v0.5.2 requirements
+**Current contract:** §38 is the authoritative current v0.5.3 browser/acquisition lifecycle development contract, superseding conflicting earlier browser lifecycle, download ownership, popup and browser-evidence descriptions. §37's explicit supersede boundary continues to govern unaffected DOI-first identity, Provider behavior, current Paper schema, single-manifestation and Zotero parent identity. §36's staging, Zotero authorization/write safety, cancellation gate and partial-write semantics remain applicable wherever not superseded by §§37–38. Historical §§24, 36.14 and 37.10 acceptance, release and verification records retain their original version-specific meaning and do not establish v0.5.3 acceptance
 
 ---
 
@@ -4389,3 +4389,139 @@ A0–A5 implementation and independent stage reviews are complete. The final ind
 No v0.5.2 live browser/Zotero mutation verification is claimed. Historical v0.5.1 live evidence remains historical and does not establish v0.5.2 live success. Required live behavior remains subject to verification and reporting at its actual scope; the automated audit above does not close that boundary.
 
 Implementation commit `f48574869969534daec589e124c6979011b5cbb5` (`Implement v0.5.2 DOI-first workflow`) contains the reviewed implementation and audit closeout. Release-preparation review/commit and the release transaction are complete at release HEAD `d180c18aa853e4483a7d110d39bdfb8aca6860f8` (§24.18). v0.5.2 is RELEASED and the latest released baseline, with package metadata and Provider User-Agent identities `0.5.2`. Prepared-tree evidence, this independent implementation audit and exact-HEAD artifact-integrity checks remain distinct. The separate final clean-export full validation was explicitly skipped by user choice and is not claimed as completed; no new v0.5.2 live browser/Zotero verification is claimed.
+
+---
+
+## 38. v0.5.3 Browser Companion v2 — Current Development Contract
+
+### 38.1 Authority, preserved boundaries and development status
+
+§38 is the authoritative current v0.5.3 browser/acquisition lifecycle development contract. It supersedes conflicting earlier Browser Companion lifecycle, navigation confirmation, download ownership, popup and browser-evidence requirements, including related clauses and acceptance requirements in §§36.8–36.14 and 37.8–37.9. It does not supersede §37's DOI-first identity, Provider behavior, current Paper schema, single-manifestation model or Zotero parent identity. Unaffected §36 staging, authorization, writer safety, cancellation and partial-write requirements continue to apply.
+
+v0.5.2 remains the latest released/completed baseline, with package/Provider identities `0.5.2` and companion manifest `0.1.0`. v0.5.3 remains in development before release: implementation, A0–A6 reviews/automated acceptance and the final code/behavior audit are complete, with no known substantive implementation defect. Scoped normal-Chrome handoff/navigation/termination validation has passed at its actually exercised boundary (§38.13). Actual v0.5.3 target-PDF staging, Zotero registration and the listed environment-dependent live branches remain unverified. The implementation is not yet committed; release preparation, release, tag, pushes and GitHub Release remain incomplete. Historical release/verification records, especially §§24, 36.14 and 37.10, retain their original baseline meaning; they are not v0.5.3 evidence.
+
+Retain the user's normal Chrome profile/session and the narrow MV3 Browser Companion. The companion owns only handoff, navigation, observation and download coordination. The application owns acquisition task identity, normalized DOI identity, Zotero parent/key/Server-ID authority, staging qualification, authorization and all Zotero writes. BrowserHandoffRegistry retains one-time fragment capability, separate event capability, exact task/tab binding and terminal invalidation. No browser authority may retarget the frozen application identity.
+
+Preserve private staging, path/symlink/race protection, PDF byte validation, frozen Zotero identity, duplicate suppression, authorization boundaries, the atomic mutation gate, writer guards and truthful partial-write semantics. This contract does not redesign `pdf_staging.py` or Zotero writer safety; unaffected discovery/monitor and human-managed Markdown behavior remain unchanged.
+
+### 38.2 Two-phase handoff and capability secrecy
+
+The required handoff sequence is:
+
+```text
+claim → fragment scrub → activation
+```
+
+The initial fragment capability is usable only for the one-time claim. After successful claim, remove the URL fragment before the content script sends an independent activation. Claim and activation must not remain implicitly coupled by the same asynchronous continuation. Session authority must be successfully saved in `chrome.storage.session` before activation/START can proceed.
+
+The initial capability must not appear in activation, publisher/resolver URLs or subsequent browser events; subsequent events use the separate event authority. Preserve its exclusion from handoff-page HTTP requests, HTTP request/access logs, error logs and durable state; the authorized claim exchange must not log it. If the server consumes the claim but the session-authority save fails, still clear the fragment, execute no START and never reuse the consumed capability.
+
+### 38.3 Idempotent activation and START recovery
+
+Duplicate activation and duplicate `tab_ready` are safe for the same active task/claimed tab. For every legitimate `tab_ready`, the application may return the same frozen START plan. A lost START reply is recoverable through popup `Retry companion connection`, which sends activation again without reclaiming the capability, rebinding the tab, reinitializing acquisition context or overwriting download/navigation state. Repeated START handling must preserve that same context and state.
+
+After MV3 worker restart, existing `storage.session` authority permits recovery of the same task. Application restart still terminates the process-local acquisition and invalidates its authority; extension state cannot reconstruct it.
+
+### 38.4 Navigation lifecycle and application stage
+
+Commanded navigation follows `pending → committed`. Persist the intended pending navigation in `chrome.storage.session` **before** calling `chrome.tabs.update()`. Neither a successful update Promise nor a successful START command proves commitment. The claimed task tab's top-level `webNavigation.onCommitted` is the authoritative document-transition confirmation. Navigation failure, including a rejected `tabs.update()`, revokes the corresponding pending state.
+
+Pending navigation must survive worker suspend/restart through session state. Stale committed events cannot overwrite a newer navigation epoch. User navigation in the claimed task tab updates the current epoch from the actual committed top-level navigation; an epoch change invalidates old generic arms and provider actions. Unrelated-tab navigation never changes the task. Do not infer commitment from command/reply timing or allow an immediate onCommitted event to escape the pending/commit lifecycle.
+
+Claim, activation, `tab_ready`, START and pending navigation all leave the application in `HANDOFF`. Only the first legitimate committed task-tab navigation received by the application advances it to `BROWSER_ACTION`.
+
+### 38.5 Browser task authority and termination
+
+The claimed task tab is the sole browser task authority; never migrate authority automatically to another tab. Closing it before a compatible download candidate has been frozen immediately terminates browser acquisition and releases the application's single-acquisition slot. After candidate freeze, task-tab closure does not cancel that exact download ID's completion, staging or commit.
+
+Extension reload/disable, Chrome crash and other failures unable to report a terminal event converge through an application-side **finite inactivity lease**, targeting approximately 30 minutes. This lease is abnormal-recovery control, not durable/product workflow state. Do not rely on a lifetime worker, permanently waiting thread, service-worker keep-alive hack, alarm-driven acquisition runner or generic job framework. Application restart reconstructs no acquisition from tabs, downloads, session state or staging orphans. Terminal paths invalidate authority and release the active slot subject to the preserved mutation-gate/partial-write semantics (§38.12).
+
+### 38.6 Transient download ownership state
+
+Companion runtime must represent at least the following in transient `chrome.storage.session` state:
+
+| State | Required meaning |
+| --- | --- |
+| Task owner | Exact `taskId`, claimed `tabId`, application origin and event capability. |
+| Navigation | Committed navigation, optional pending navigation and current navigation epoch/time. |
+| Download expectation | None, a generic user arm, or a trusted provider action. |
+| Observations | Bounded exact-ID observed downloads eligible for later reconciliation. |
+| Candidate | At most one frozen compatible candidate. |
+| Ambiguity | Only after multiple actual compatible download candidates. |
+
+Do not introduce a durable acquisition DB, history or queue, or move active acquisition/history into `storage.local`. Exact state encoding and other nonessential implementation choices remain open.
+
+### 38.7 Generic publisher download attribution
+
+Retain a short-lived explicit generic arm, such as popup `Capture next PDF download`, scoped to the current task and navigation epoch. Chrome DownloadItem has no reliable initiating-tab identity; an empty referrer or detached file URL does not authorize adoption of arbitrary downloads. Generic HTTP/blob downloads without sufficient attribution evidence continue to fail closed.
+
+An unrelated download neither consumes the arm nor becomes a candidate. The arm ends only on timeout, navigation-epoch change, compatible candidate claim or real ambiguity. Other tabs on the same or a related origin are not ambiguity: remove the same-origin competitor-tab rule. Ambiguity requires at least two actual download IDs satisfying current-task attribution conditions; the second compatible candidate deterministically fails ambiguous rather than selecting either file automatically.
+
+### 38.8 Exact-ID download reconciliation
+
+When `downloads.onCreated` metadata is incomplete, the companion may register a bounded transient exact download ID. Subsequent `downloads.onChanged` must reread DownloadItem and reevaluate ownership only for that observed exact ID. An observation may be removed once its ID is demonstrably incompatible with the current task. Do not scan Downloads history without bounds or use a latest/recent-download heuristic.
+
+Only a compatible task-attributed candidate may freeze and proceed through completion to staging. Observed DOI, if present, must match the frozen normalized task DOI; mismatch is rejected before staging or Zotero mutation. Missing observed DOI does not manufacture identity or relax attribution. Delete `Check current download` once reliable onChanged reconciliation is established.
+
+### 38.9 EBSCO provider-action ownership
+
+Retain the existing narrow EBSCO Research content adapter. A trusted user final PDF **Download** click establishes a provider-action expectation itself, without a preceding generic arm. Bind it to the exact active task, claimed tab, exact current Research record, task DOI, visible PDF selection, trusted final click and current navigation epoch/time.
+
+Provider evidence retains `action_time` and `attribution = ebsco_pdf_action`; no independent `arm_time` is required. Keep the existing approximately 120-second provider preparation window finite, including delayed/blob downloads. Wrong task/tab/record/DOI, non-PDF actions, stale actions and ambiguous candidates cannot enter staging. A matching DOI or label alone cannot establish provider-action authority.
+
+### 38.10 Popup operations and manual verification
+
+The popup is the sole human Browser Companion operation entry point. Remove production dependence on `chrome.action.onClicked`, because the manifest uses `default_popup`. Retain only operations with actual task semantics: `Retry companion connection`, generic `Capture next PDF download`, an optional current-URL Chrome download optimization if still required by the existing safety model, explicit `Publisher path exhausted — try XMU`, and resolver choice.
+
+Remove `Check current download` under §38.8, the manual `Login or verification needed` declaration, old version/selected-version wording and redundant operations recoverable through automatic lifecycle events. Institution login, CAPTCHA and MFA remain direct user actions in the same normal Chrome task tab, without bypass or cookie access. A login/verification wait does not establish publisher exhaustion.
+
+### 38.11 Permission model and exclusions
+
+Preserve the current narrow manifest permission model and transient `chrome.storage.session`. Do not add `<all_urls>`, optional broad host permissions, `cookies`, `scripting`, `webRequest`, DNR or a generic publisher content script.
+
+Do not add publisher scraping, DOI-prefix routing tables, a publisher adapter framework, Zotero Connector integration, Playwright/headless/dedicated Chrome fallback, durable acquisition history, batch/queue acquisition, automatic bibliographic Zotero item creation or PDF content/version comparison. Provider, canonicalization, Paper identity and monitor redesign are outside this contract.
+
+### 38.12 XMU, staging and Zotero preservation
+
+Direct DOI/publisher access remains first. XMU fallback requires **explicit publisher exhaustion**; login waits never trigger fallback automatically. Preserve existing institutional resolver eligibility/order and require explicit user choice among multiple eligible resolver providers. Zotero Connector remains independent.
+
+The existing private staged artifact → guarded Zotero commit contract remains unchanged, including duplicate suppression, frozen parent/key/DOI/Server-ID, authorization and writer guards. Preserve candidate-staging/Cancel races and the atomic Cancel/mutation-gate competition. Once the mutation gate is entered, task-tab closure, lease expiry or Cancel cannot imply rollback or bypass the authorized write flow; report confirmed partial writes and mutation uncertainty truthfully. Literature Monitor never deletes the user's Chrome download, on any browser terminal, success, failure or cancellation path.
+
+### 38.13 Required implementation acceptance and verification boundary
+
+The following are **v0.5.3 implementation acceptance requirements**. Current implementation and verification evidence is recorded separately below:
+
+| Area | Required observable acceptance |
+| --- | --- |
+| Fresh handoff and secrecy | Claim → scrub → activation → `tab_ready` → START → pending → committed → `BROWSER_ACTION`; initial capability secrecy, separate event authority and no START/reuse after consumed-claim session-save failure. |
+| MV3 and reply recovery | Worker restart between claim/activation and pending/commit; duplicate activation/`tab_ready` and lost START reply recovery preserve the same task/tab, authority and navigation/download context. |
+| Navigation | Pending persistence before `tabs.update()`, immediate onCommitted race, HANDOFF until valid commit, failed-navigation rollback, pending recovery, stale-event rejection, user-navigation epoch updates and unrelated-tab isolation. |
+| Termination | Task-tab close before freeze terminates/releases the slot; close after freeze preserves exact-ID completion/staging/commit. Finite inactivity lease converges unreported browser failures; application restart reconstructs no acquisition. |
+| Popup and permissions | Unchanged narrow manifest permissions, no production `chrome.action.onClicked`, recovery through popup, removal of redundant/manual-login/version operations and `Check current download` after reconciliation. |
+| Generic arm | Task/epoch-scoped finite arm; unrelated downloads preserve the arm and user file; epoch change invalidates expectations; same-origin tabs alone are not ambiguous; second actual compatible candidate deterministically fails ambiguous. |
+| Reconciliation and rejection | Incomplete onCreated metadata reconciles through exact-ID onChanged; bounded observations, no latest-download/history scanning, rejection of insufficient generic HTTP/blob attribution and observed DOI mismatch before staging/mutation. |
+| EBSCO | Trusted final PDF click works without a generic arm; exact task/tab/Research record/DOI, visible PDF selection, trusted click, epoch and `action_time` evidence are required without `arm_time`. Delayed/blob downloads within the finite preparation window are attributable; wrong/stale/non-PDF/ambiguous actions fail before staging. |
+| XMU and human verification | Publisher-first and explicit exhaustion, no fallback from login wait, unchanged resolver semantics/explicit provider choice, and normal manual login/CAPTCHA/MFA continuation on the same claimed tab. |
+| Staging and writer safety | Actual private staging boundary, PDF bytes and path/symlink/race protection; unchanged duplicate suppression, frozen identity, authorization, writer guards, cancellation competition and truthful partial-write/uncertainty behavior. Browser terminal paths never delete user downloads or imply post-gate rollback. |
+
+Final v0.5.3 verification must report distinct evidence for Python automated tests, JavaScript runtime/content tests **executed with an actual JS runtime**, synthetic evidence, scoped live normal-Chrome handoff/navigation, generic manual-download ownership where feasible, XMU/EBSCO where feasible, the actual staging boundary, and actual Zotero registration. Report the exercised environment, path and outcome for each, with any unverified live boundary explicitly identified, especially absent actual Zotero registration. Synthetic evidence or Python-only checks do not establish JavaScript execution or live browser/staging/Zotero success.
+
+Keep §36.14's conditional live human-verification boundary: if a genuine challenge appears, verify manual same-task/tab continuation; if none appears, report `HUMAN_VERIFICATION_NOT_PRESENT` and the branch as not live-exercised, without manufacturing a challenge. Historical v0.5.1/v0.5.2 automated, live, staging or Zotero records cannot be relabeled as v0.5.3 verification.
+
+**Current v0.5.3 implementation and verification record (before commit/release)**
+
+Implementation and A0–A5 independent reviews are complete; A6 automated integration/acceptance and the final code/behavior audit passed. The closed-claim storage-fault fix and live-found fresh-handoff activation fix also passed independent review. No known substantive implementation defect remains; documentation closeout was the final audit's sole remaining commit-readiness finding.
+
+| Evidence category | Executed environment, path and result |
+| --- | --- |
+| Automated | Actual Node v24.21.0 executed all 8 shipped JS syntax checks, worker simulation **461 passed** (including activation source/current-tab **21**) and content adapters **120 passed**. Targeted browser pytest: **419 passed**; full pytest with required Node PATH: **3280 passed**, with 2 existing dependency deprecation warnings. `uv lock --check` and `git diff --check`: PASS. JS Chrome/DOM simulations and Python tests remain automated/synthetic evidence. |
+| Scoped live normal Chrome | Normal Chrome **154.0.8037.93**, current unpacked companion **0.1.0**: fresh automatic claim → scrub → activation after the fix passed without Retry, followed by same claimed tab continuation, committed publisher navigation and application `BROWSER_ACTION`. Current popup operations/removals passed. An earlier naturally stalled handoff exercised popup Retry recovery. Pre-freeze task-tab close released the single slot and a later acquisition started. |
+| Direct publisher and TEST_FORCED_XMU | Authorized DOI `10.1093/jrsssb/qkag124` reached the correct Oxford article with no current full-text access; `10.1080/01621459.2026.2731119` reached the correct Taylor & Francis article showing Get Access. TEST_FORCED_XMU reached the real resolver for both, but returned no eligible FullText/SmartLinks candidate and no EBSCO Research route. Resolver entry does not establish genuine publisher exhaustion or successful full-text retrieval. |
+| Automated only | MV3/reply/storage/lease races, exact-ID generic ownership/reconciliation/rejection, EBSCO provider-action ownership, post-freeze task-tab close and staging/writer safety passed executable tests; these paths were not live-exercised in this v0.5.3 run. |
+| Residual live boundaries | No target PDF was available from the two authorized current test paths: no actual target-PDF DownloadItem, v0.5.3 private staging or Zotero PDF-child registration occurred. EBSCO trusted final PDF action, successful XMU → eligible provider routing and post-freeze close were not live-exercised. No genuine challenge appeared: `HUMAN_VERIFICATION_NOT_PRESENT`; manual challenge continuation remains not live-exercised. |
+
+These are explicit residual verification boundaries accepted for this final audit; they do not convert synthetic checks or unexercised branches into live PASS claims. Historical v0.5.1/v0.5.2 staging/Zotero success remains evidence only for those baselines.
+
+Current scope note: v0.5.3 retains manual institutional login/CAPTCHA/MFA in the same claimed normal-Chrome task tab; login waits do not establish publisher exhaustion. Proactive/automatic institutional authentication is deferred to a future version.
+
+v0.5.2 remains the latest RELEASED/completed baseline. Package/Provider identities remain `0.5.2`, companion manifest remains `0.1.0`; v0.5.3 implementation commit, release preparation, release, tag, pushes and GitHub Release remain incomplete.

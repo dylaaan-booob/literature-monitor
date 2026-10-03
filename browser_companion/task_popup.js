@@ -15,7 +15,7 @@ async function action(name, choiceId = null) {
   } finally { pending = false; }
 }
 
-for (const name of ["ready", "arm", "download", "check", "fallback", "human"]) {
+for (const name of ["ready", "arm", "download", "fallback"]) {
   document.getElementById(name).addEventListener("click", () => { void action(name); });
 }
 
@@ -24,13 +24,12 @@ for (const name of ["ready", "arm", "download", "check", "fallback", "human"]) {
     const reply = await chrome.runtime.sendMessage({type: "task_ui"});
     if (!reply?.ok) { status.textContent = "Open the claimed Literature Monitor task tab first."; return; }
     document.getElementById("actions").hidden = false;
+    document.getElementById("ready").hidden = !reply.can_retry;
     const task = reply.task;
     if (!task) { status.textContent = "Retry connection on this handoff tab if needed."; return; }
-    status.textContent = task.ambiguous ? "Browser actions are unavailable. Continue in Literature Monitor." : "Use only this task tab for the selected version.";
+    status.textContent = task.ambiguous ? "Browser actions are unavailable. Continue in Literature Monitor." : "Use only this task tab for the current DOI.";
     document.getElementById("browser-actions").hidden = task.ambiguous;
-    document.getElementById("ready").hidden = true;
     document.getElementById("fallback").hidden = !task.can_fallback;
-    document.getElementById("check").hidden = !task.candidate;
     for (const choice of task.choices) {
       const button = document.createElement("button");
       button.type = "button";

@@ -153,13 +153,19 @@ Paper Markdown remains the durable workflow state. The GUI does not add a
 workflow/execution database, persistent run history, heartbeat, SSE, WebSocket,
 queue, or another source of Paper decision state.
 
-### Add PDF to Zotero — current v0.5.2 workflow
+### Add PDF to Zotero — current v0.5.3 development workflow
 
-This section describes the current source implementation under SPEC §37.
-The latest released baseline and package metadata are **v0.5.2 / 0.5.2**.
-Historical v0.5.1 live verification is recorded separately below and does not
-establish new v0.5.2 live verification. The standalone
-browser companion is installed from the source repository.
+The current source browser/acquisition lifecycle follows SPEC §38 for
+**v0.5.3 development**. Unaffected DOI-first identity, Provider, Paper,
+single-manifestation and Zotero parent behavior remain under §37; unaffected
+staging, authorization, writer, cancellation and partial-write safety remain
+under §36. The latest RELEASED/completed baseline and package metadata remain
+**v0.5.2 / 0.5.2**; the companion remains **0.1.0**, installed from the source
+repository. Implementation and automated acceptance are complete; scoped live
+normal-Chrome handoff/navigation/termination passed. Actual v0.5.3 target-PDF
+staging and Zotero registration remain unverified; the evidence boundaries are
+recorded in SPEC §38.13. Release preparation/release/tag remain incomplete.
+Historical v0.5.1 live verification below remains historical.
 
 1. **Keep** a Paper and use **Copy DOI** in Kept detail.
 2. Manually create or import the bibliographic parent into Zotero **My Library**.
@@ -204,9 +210,11 @@ incomplete attachment metadata alone is insufficient.
 The task opens a secure loopback handoff in normal Chrome and the companion
 continues in that same tab. START carries only `task_id`, `doi`, and `direct_url`;
 navigation begins at `https://doi.org/<normalized-doi>` with URL-safe encoding.
-Complete login, CAPTCHA, MFA, Cloudflare or gateway verification yourself in the
-task tab. These waits do not mean the publisher path is exhausted and are not
-bypassed. Use the companion's task actions to continue.
+Complete institutional login, CAPTCHA, MFA, Cloudflare or gateway verification
+yourself in the **same claimed task tab**. These waits do not mean the publisher
+path is exhausted and are not bypassed. v0.5.3 does not automate institutional
+authentication; proactive/automatic authentication improvements are deferred
+to a future version. Use the companion's task actions to continue.
 
 Choose **Publisher path exhausted — try XMU** only after explicitly confirming
 that the publisher path cannot provide the current DOI's PDF. XMU fallback uses
@@ -215,16 +223,23 @@ structured **Full Text / SmartLink(s)** results in document/provider order.
 Multiple eligible choices require explicit selection. There is no private
 `/api/links` parsing or broad publisher scraping.
 
-For a landing-page PDF link, use **Arm next user download** in the task tab
-before clicking it within 10 seconds. For a verified EBSCO Research PDF Download
-click within that window, remote preparation may take longer: Chrome must start
-the download within 120 seconds of that click, with the same task, claimed tab,
-record, DOI and approved XMU category. Arm alone does not authorize later
-downloads. **Download current URL with Chrome** and
-**Check current download** are explicit task actions. Ambiguous or unprovable
-download attribution fails closed; not every PDF viewer download is supported.
-The user download stays untouched. The application validates a private temporary
-copy outside the project/workspace, then cleans only that copy.
+For a generic publisher/landing-page PDF link, use **Capture next PDF download**
+in the task tab, then perform the intended PDF download within 10 seconds.
+This short arm is bound to the task and current navigation epoch. Incomplete
+metadata is reconciled automatically for observed exact download IDs; there is
+no manual download recheck operation.
+
+For an approved EBSCO Research route, no generic Capture/arm is required.
+A trusted, visible final **PDF Download** click establishes the provider-action
+expectation for the same task, claimed tab, record, DOI and current navigation
+epoch. Its approximately 120-second preparation window is measured from
+`action_time`, allowing delayed/blob downloads under that contract.
+
+**Download current URL with Chrome** remains available where supported.
+Ambiguous or unprovable attribution fails closed; not every PDF viewer download
+is supported. The user's Chrome download is never deleted. The application
+validates a private temporary copy outside the project/workspace, then cleans
+only that copy.
 
 #### Staging and final write
 

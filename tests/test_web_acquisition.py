@@ -44,6 +44,16 @@ OTHER = UUID(int=2)
 SECRETS = ('SENTINEL_API_KEY', 'SENTINEL_COOKIE', 'https://publisher.example/?signature=SENTINEL_SIGNED',
            'https://proxy.example/SENTINEL_SESSION', 'SENTINEL_UPLOAD_KEY', '/private/SENTINEL_FILE.pdf')
 
+@pytest.fixture(autouse=True)
+def lease_timers(monkeypatch):
+    from test_acquisition_coordinator import FakeLeaseTimer
+    from literature_monitor.web import acquisition_coordinator as coordination
+    timers = []
+    def timer(*args, **kwargs):
+        value = FakeLeaseTimer(*args, **kwargs); timers.append(value); return value
+    monkeypatch.setattr(coordination.threading, 'Timer', timer)
+    return timers
+
 
 def forbidden(*args, **kwargs):
     pytest.fail('Web presentation must not call external acquisition systems')
@@ -570,6 +580,8 @@ def test_real_authorization_429_boundary_survives_settings_a_b_a_until_expiry(sc
             'task_id':str(task.task_id),'capability':capability,'tab_binding':'tab-42','event_type':kind,'payload':payload})
         ready=event('tab_ready',{})
         assert ready.status_code==200 and ready.json()['command']['plan']==active.plan.message()
+        assert coordinator.snapshot().stage is Stage.HANDOFF
+        assert event('navigation_state', {'identity': {'scheme': 'https:', 'host': 'publisher.example'}, 'route': 'direct'}).status_code==204
         source=tmp_path/'user-download.pdf';source.write_bytes(b'%PDF-1.7\nsynthetic actual staged bytes')
         payload=web_download(SimpleNamespace(task=task),source)
         assert event('download_candidate',payload).status_code==204
@@ -621,6 +633,7 @@ def browser_scenario(scenario, monkeypatch):
             message=dict(task_id=str(s.task.task_id),capability=s.capability,tab_binding='tab-42',event_type=kind,payload=payload)
             message.update(changes);return client.post('/browser-handoff/events',json=message)
         s.event=event
+        s.commit=lambda: s.event('navigation_state', {'identity': {'scheme': 'https:', 'host': 'publisher.example'}, 'route': 'direct'})
         def action(name,**changes):
             data=dict(csrf_token=app.state.csrf_token,attempt_id=str(s.attempt_id),view='in-zotero');data.update(changes)
             return client.post(f'/papers/{ID}/acquisition/{name}',data=data)
@@ -651,6 +664,10 @@ def test_actual_add_pdf_uses_the_event_driven_normal_chrome_handoff(browser_scen
     assert 'capability' not in reply.text and s.capability not in reply.text+repr(reply.headers)
     assert reply.headers['Cache-Control']=='no-store'
     assert len(s.workers)==1 and not s.workers[0].is_alive()
+    assert s.app.state.acquisition_coordinator.snapshot().stage is Stage.HANDOFF
+    assert 'Waiting for the browser companion' in s.client.get(f'/fragments/acquisition/{ID}').text
+    assert s.commit().status_code==204
+    assert s.app.state.acquisition_coordinator.snapshot().stage is Stage.BROWSER_ACTION
     page=s.client.get(f'/fragments/acquisition/{ID}')
     assert 'Cancel acquisition' in page.text and 'Publisher/browser action required' in page.text
     assert 'dedicated' not in page.text and 'start a new attempt' not in page.text
@@ -666,18 +683,30 @@ def test_commands_require_current_event_authority(browser_scenario,changes):
 
 
 def test_human_and_resolver_waits_remain_active_with_no_worker(browser_scenario):
-    s=browser_scenario;s.start();s.claim();s.event('tab_ready',{})
+    s=browser_scenario;s.start();s.claim();s.event('tab_ready',{});s.commit()
     s.event('human_action_needed',{'route':'direct'})
     page=s.client.get(f'/fragments/acquisition/{ID}')
     assert 'same normal Chrome task tab' in page.text and 'Cancel acquisition' in page.text
     assert len(s.workers)==1 and not s.workers[0].is_alive()
     assert s.event('publisher_fallback_request',{}).json()['command']['type']=='PUBLISHER_EXHAUSTED'
+    s.event('navigation_state', {'identity': {'scheme': 'https:', 'host': 'resolver.ebsco.com'}, 'route': 'xmu'})
     s.event('resolver_choices',{'choices':[{'id':0,'category':'FullText','label':'A'}, {'id':1,'category':'SmartLinks','label':'B'}]})
     assert s.app.state.acquisition_coordinator.snapshot().stage is Stage.RESOLVER_CHOICE
     assert 'Choose a resolver provider' in s.client.get(f'/fragments/acquisition/{ID}').text
     rejected=s.event('resolver_choice_request',{'choice_id':0,'url':'https://arbitrary.example/'})
     assert rejected.status_code==204 and 'command' not in rejected.text
     assert s.event('resolver_choice_request',{'choice_id':1}).json()['command']=={'task_id':str(s.task.task_id),'type':'CHOOSE','choice_id':1}
+
+
+def test_user_commit_supersedes_pending_fallback_through_authenticated_web_events(browser_scenario):
+    s = browser_scenario; s.start(); s.claim(); s.event('tab_ready', {}); s.commit()
+    assert s.event('publisher_fallback_request', {}).json()['command']['type'] == 'PUBLISHER_EXHAUSTED'
+    response = s.event('navigation_state', {'identity': {'scheme': 'https:', 'host': 'unrelated.example'}, 'route': 'direct'})
+    assert response.status_code == 204
+    snapshot = s.app.state.acquisition_coordinator.snapshot()
+    assert snapshot.stage is Stage.BROWSER_ACTION and snapshot.browser_identity == ('https:', 'unrelated.example')
+    assert s.app.state.acquisition_coordinator._active.route == 'direct'
+    assert not s.app.state.acquisition_coordinator._active.fallback_pending
 
 
 @pytest.mark.parametrize('action',['cancel','resume','open-retry'])
@@ -701,7 +730,7 @@ def test_wrong_current_task_actions_and_trusted_host_fail_closed(browser_scenari
 
 
 def test_cancel_ui_invalidates_authority_and_terminal_refresh(browser_scenario):
-    s=browser_scenario;s.start();s.claim();s.event('tab_ready',{})
+    s=browser_scenario;s.start();s.claim();s.event('tab_ready',{});s.commit()
     response=s.action('cancel')
     assert response.status_code==200 and 'cancelled before Zotero content mutation' in response.text
     assert response.headers['HX-Trigger-After-Swap']=='acquisitionCompleted'
@@ -731,7 +760,7 @@ def test_missing_zotero_authorization_settings_resume_uses_same_artifact(browser
     import httpx
     from literature_monitor.zotero_local import ZoteroInstanceResult, ZoteroReadOutcome
     from literature_monitor.zotero_write import ZoteroAuthorizationClient, ZoteroAuthorizationOutcome
-    s=browser_scenario;s.start();s.claim();s.event('tab_ready',{})
+    s=browser_scenario;s.start();s.claim();s.event('tab_ready',{});s.commit()
     service=s.services[0];runtime=s.app.state.zotero_authorization
     class Store:
         key=None
@@ -770,7 +799,7 @@ def test_missing_zotero_authorization_settings_resume_uses_same_artifact(browser
 
 
 def test_attaching_hides_cancel_and_crafted_cancel_is_too_late(browser_scenario,tmp_path):
-    s=browser_scenario;s.start();s.claim();s.event('tab_ready',{})
+    s=browser_scenario;s.start();s.claim();s.event('tab_ready',{});s.commit()
     service=s.services[0];service.commit_release.clear()
     source=tmp_path/'chrome.pdf';source.write_bytes(b'%PDF-synthetic')
     try:
@@ -782,3 +811,58 @@ def test_attaching_hides_cancel_and_crafted_cancel_is_too_late(browser_scenario,
         assert 'cancelled before' not in response.text
     finally:service.commit_release.set();s.join()
     assert service.content_posts==1
+
+
+@pytest.mark.parametrize('activated', [False, True])
+def test_task_tab_close_releases_web_slot_revokes_status_and_is_idempotent(browser_scenario, activated):
+    s = browser_scenario; s.start(); s.claim()
+    coordinator = s.app.state.acquisition_coordinator
+    if activated: s.event('tab_ready', {}); s.commit()
+    old_task = s.task.task_id; timer = coordinator._active.browser_timer; before = s.path.read_bytes()
+    assert s.event('browser_path_failure', {'reason': 'task_tab_closed'}).status_code == 204
+    ended = coordinator.snapshot()
+    assert ended.status is Status.FINISHED and ended.result.recovery is Recovery.CHECK_BROWSER
+    assert not ended.result.mutation_uncertain and coordinator._active is None
+    assert s.client.get(f'/browser-handoff/{old_task}').status_code == 404
+    assert s.event('browser_path_failure', {'reason': 'task_tab_closed'}).status_code == 403
+    timer.fire(); assert coordinator.snapshot() == ended
+    assert s.path.read_bytes() == before and not s.services[0].commits
+    s.start(); assert coordinator.snapshot().status is Status.RUNNING
+    timer.fire(); assert coordinator.snapshot().task_id == s.task.task_id
+
+
+def test_inactivity_timer_releases_web_slot_without_ui_polling(browser_scenario):
+    s = browser_scenario; s.start(); coordinator = s.app.state.acquisition_coordinator
+    old_task = s.task.task_id; before = s.path.read_bytes()
+    # No browser claim, event or acquisition-fragment polling drives expiry.
+    coordinator._active.browser_timer.fire()
+    ended = coordinator.snapshot()
+    assert ended.status is Status.FINISHED and ended.result.recovery is Recovery.CHECK_BROWSER
+    assert s.client.get(f'/browser-handoff/{old_task}').status_code == 404
+    assert s.path.read_bytes() == before and not s.services[0].commits
+    s.start(); assert coordinator.snapshot().status is Status.RUNNING
+
+
+def test_http_activity_refreshes_lease_only_after_registry_authentication(browser_scenario):
+    s = browser_scenario; s.start(); s.claim(); s.event('tab_ready', {})
+    coordinator = s.app.state.acquisition_coordinator; current = coordinator._active.browser_timer
+    assert s.event('tab_ready', {}, capability='x'*43).status_code == 403
+    assert s.event('tab_ready', {}, tab_binding='tab-99').status_code == 403
+    assert s.client.get(f'/browser-handoff/{s.task.task_id}').status_code == 200
+    assert s.client.get('/').status_code == 200
+    assert coordinator._active.browser_timer is current and not current.cancelled
+    before = coordinator.snapshot()
+    assert s.event('navigation_state', {'invalid': 'business payload'}).status_code == 204
+    assert coordinator._active.browser_timer is not current and current.cancelled
+    current.fire(); assert coordinator.snapshot() == before
+
+
+def test_fresh_app_does_not_reconstruct_active_handoff_or_lease(browser_scenario):
+    s = browser_scenario; s.start(); s.claim(); s.event('tab_ready', {})
+    old = s.app.state.acquisition_coordinator; task = s.task.task_id
+    fresh = web.create_app(s.config)
+    with TestClient(fresh, base_url='http://localhost:8765') as client:
+        assert fresh.state.acquisition_coordinator.snapshot().status is Status.IDLE
+        assert fresh.state.acquisition_coordinator._active is None
+        assert client.get(f'/browser-handoff/{task}').status_code == 404
+    assert old.snapshot().status is Status.RUNNING

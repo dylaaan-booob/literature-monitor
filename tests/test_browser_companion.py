@@ -169,7 +169,7 @@ def test_exact_claim_response_and_secret_not_returned_to_content():
     assert 'eventCapability' not in CONTENT and 'event_capability' not in CONTENT
     claim_listener = WORKER.split('busy = true;\n  (async () => {', 1)[1].split('const browserAcquisition', 1)[0]
     responses = re.findall(r'sendResponse\(([^;]+)\);', claim_listener)
-    assert responses == ['{ok: result?.claimed === true}', '{ok: false}']
+    assert responses == ['{ok: claimed}']
 
 
 def test_initial_secret_is_discarded_before_session_state():
@@ -187,14 +187,14 @@ def test_session_restoration_is_minimal_and_worker_only():
     assert 'setAccessLevel({accessLevel: "TRUSTED_CONTEXTS"})' in WORKER
     assert 'chrome.storage' not in CONTENT
     fields = re.search(r'const SESSION_FIELDS = (\[.*?\]);', WORKER).group(1)
-    assert json.loads(fields) == ['eventCapability', 'origin', 'readyDelivered', 'tabId', 'taskId']
+    assert json.loads(fields) == ['eventCapability', 'origin', 'tabId', 'taskId']
     assert set(re.findall(r'chrome\.storage\.(\w+)', WORKER)) == {'session'}
     restoration = WORKER.split('async function loadState()', 1)[1].split('function trustedSender', 1)[0]
     for check in (
         'chrome.storage.session.get(STATE_KEY)', 'if (state === undefined) return null',
         'Object.keys(state).sort().join(",") !== SESSION_FIELDS.join(",")',
         'validTaskId(state.taskId)', 'validOrigin(state.origin)', 'tabBinding(state.tabId)',
-        'validCapability(state.eventCapability)', 'typeof state.readyDelivered !== "boolean"',
+        'validCapability(state.eventCapability)',
         'chrome.storage.session.remove(STATE_KEY)',
     ):
         assert check in restoration
@@ -203,11 +203,10 @@ def test_session_restoration_is_minimal_and_worker_only():
 
 def test_one_frozen_owner_and_no_silent_retarget_or_reclaim():
     assert 'state.tabId === owner.tabId && state.taskId === owner.taskId && state.origin === owner.origin' in WORKER
-    assert 'if (matchesOwner(existing, owner)) return {claimed: true, freshState: null}' in WORKER
-    assert 'if (!state || !matchesOwner(state, {...page, tabId: tab.id})) return' in WORKER
+    assert 'if (matchesOwner(existing, owner)) return {claimed: true}' in WORKER
+    assert '!state || !matchesOwner(state, owner)' in WORKER
     assert WORKER.count('postJson(handoff.origin, CLAIM_PATH,') == 1
-    toolbar = WORKER.split('chrome.action.onClicked.addListener', 1)[1]
-    assert 'claimHandoff' not in toolbar and 'parseInitialUrl' not in toolbar
+    assert 'chrome.action.onClicked' not in SCRIPTS
 
 
 def test_mismatched_owner_resolves_old_authority_before_new_claim():
@@ -268,7 +267,7 @@ def test_old_status_failure_keeps_state_and_new_fragment_retryable():
     assert 'return null' in failed
     assert 'chrome.storage' not in failed and 'postJson(' not in failed
     assert 'if (!await retireInactiveAuthority(existing)) return null' in WORKER
-    assert 'sendResponse({ok: result?.claimed === true})' in WORKER
+    assert 'sendResponse({ok: claimed})' in WORKER
     # False acknowledgements retain the page's unconsumed initial URL for reload.
     assert CONTENT.index('result?.ok !== true) return') < CONTENT.index('cleanUrl.hash = ""')
 
@@ -277,7 +276,7 @@ def test_stale_retirement_does_not_depend_on_old_tab_lifecycle():
     check = WORKER.split('async function authorityStatus(state)', 1)[1].split('async function retireCurrentAuthority', 1)[0]
     assert set(re.findall(r'state\.(\w+)', check)) == {'origin', 'taskId'}
     assert 'tabId' not in check and 'parsePageUrl' not in check
-    assert 'chrome.tabs' not in check and 'onRemoved' not in WORKER
+    assert 'chrome.tabs' not in check and 'onRemoved' not in check
     assert check.count('fetch(') == 1
 
 
@@ -290,18 +289,17 @@ def test_documented_sequential_recovery_is_fail_closed():
 def test_ready_is_authenticated_and_only_explicitly_retried():
     ready = WORKER.split('async function sendReady(state)', 1)[1].split('async function claimHandoff', 1)[0]
     for check in (
-        'if (state.readyDelivered) return true', 'emitEvent(state, "tab_ready", {})',
-        'current.readyDelivered = true', 'current.eventCapability !== state.eventCapability',
+        'emitEvent(state, "tab_ready", {})', 'current.eventCapability !== state.eventCapability',
     ):
         assert check in ready
-    assert WORKER.count('await sendReady(') == 3  # Fresh claim, popup gesture, toolbar fallback.
-    assert 'if (freshState)' in WORKER and 'await sendReady(freshState)' in WORKER
+    assert 'readyDelivered' not in WORKER and 'freshState' not in WORKER
+    assert 'activate_handoff' in CONTENT and 'activate_handoff' in WORKER
     emitter = WORKER.split('async function emitEvent', 1)[1].split('async function sendReady', 1)[0]
     for check in ('postJson(state.origin, EVENT_PATH,', 'capability: state.eventCapability',
-                  'response.status === 403', 'chrome.storage.session.remove(STATE_KEY)',
+                  'response.status === 403', 'retireCurrentAuthority(state)',
                   'reply = eventReply(response, state.taskId)'):
         assert check in emitter
-    assert 'chrome.action.onClicked.addListener' in WORKER
+    assert 'chrome.action.onClicked' not in SCRIPTS
     assert 'controller.abort(), 10000' in WORKER and 'clearTimeout(timer)' in WORKER
     assert '|| busy' in WORKER and 'busy = false' in WORKER
     assert not re.search(r'setInterval|\bwhile\s*\(|\bfor\s*\(', WORKER)
@@ -309,7 +307,7 @@ def test_ready_is_authenticated_and_only_explicitly_retried():
 
 def test_consumed_fragment_is_scrubbed_even_if_session_save_fails():
     assert 'chrome.storage.session.remove(STATE_KEY).catch(() => {})' in WORKER
-    assert 'return {claimed: true, freshState: null}' in WORKER
+    assert 'return {claimed: true}' in WORKER
     assert 'result?.ok !== true' in CONTENT
     assert 'window.location.href !== initialUrl' in CONTENT
     assert 'cleanUrl.hash = ""' in CONTENT
@@ -329,8 +327,8 @@ def test_installation_and_guidance_are_truthful():
                  'https://doi.org/<normalized-doi>', 'PUBLISHER_EXHAUSTED',
                  'publisher 已明确 exhausted', 'recordEvidence', 'ebsco_pdf_action',
                  '10 秒', '120 秒', 'navigation epoch', 'stage_download', 'StagedPdf',
-                 'v0.5.2 是最新已发布版本', 'v0.5.2 released',
-                 'Python package metadata 为 **0.5.2**',
+                 'v0.5.2 是最新已发布版本', 'v0.5.3 development',
+                 'Python package metadata 保持 **0.5.2**',
                  '历史 v0.5.1 证据不建立 v0.5.2 live 验证'):
         assert term in README
     template = (ROOT / 'src/literature_monitor/web/templates/browser_handoff.html').read_text()
@@ -345,7 +343,8 @@ def test_a7_commands_bind_to_session_tab_not_a_supplied_tab():
     assert 'tabId: owner.tabId' in ACQUISITION
     assert 'chrome.tabs.update(ctx.tabId, {url})' in ACQUISITION
     assert 'chrome.tabs.create' not in SCRIPTS
-    assert 'details.tabId !== ctx.tabId' in ACQUISITION
+    writer = ACQUISITION.split('async function save', 1)[1].split('async function reconcileNavigation', 1)[0]
+    assert 'event.tabId !== owner.tabId' in writer
     assert 'sender.tab?.id !== ctx.tabId' in ACQUISITION
     assert 'capability: state.eventCapability, event_type: eventType, payload' in WORKER
     emitter = WORKER.split('async function emitEvent', 1)[1].split('async function sendReady', 1)[0]
@@ -356,11 +355,11 @@ def test_a7_commands_bind_to_session_tab_not_a_supplied_tab():
 
 
 def test_a7_frozen_doi_route_and_explicit_exhaustion_fallback():
-    assert 'navigationUrl: plan.direct_url' in ACQUISITION
+    assert 'navigationUrl: null' in ACQUISITION
     assert 'return navigate(ctx, plan.direct_url)' in ACQUISITION
     assert 'status !== "exhausted" || ctx.candidate' in ACQUISITION
     assert 'acquisition_class' not in ACQUISITION
-    assert 'navigate(ctx, AcquisitionProtocol.resolverUrl(ctx.plan.doi))' in ACQUISITION
+    assert 'navigate(ctx, AcquisitionProtocol.resolverUrl(ctx.plan.doi),' in ACQUISITION
     assert 'value.direct_url !== doiUrl(value.doi)' in ACQUISITION_PROTOCOL
     assert 'target_version' not in ACQUISITION_PROTOCOL
     assert '"human_required"' in ACQUISITION
@@ -405,41 +404,41 @@ def test_a7_download_ownership_is_conservative_and_bound():
     for check in ('started - ctx.navigationTime <= ARM_WINDOW_MS',
                   '[item.url, item.finalUrl].includes(ctx.navigationUrl)',
                   '[ctx.navigationUrl, ctx.previousUrl].includes(item.referrer)',
-                  'chrome.tabs.get(ctx.tabId)', 'chrome.tabs.query({url: origins})',
-                  'competitors.some(t => t.id !== ctx.tabId)',
-                  'ctx.candidate && ctx.candidate.id !== item.id',
-                  'ambiguous_download_ownership', 'overlappingDownload = true',
+                  'chrome.tabs.get(ctx.tabId)',
+                  'next.candidate && next.candidate.id !== downloadChange.id',
+                  'ambiguous_download_ownership',
                   'candidate.ownership === "extension_id"',
                   'item.byExtensionId !== chrome.runtime.id', 'ctx.candidate?.id !== id'):
         assert check in ACQUISITION
-    assert 'ctx.navigationTime = Date.now()' in ACQUISITION
+    assert 'navigationTime: Date.now()' in ACQUISITION
     assert 'tab.id !== ctx.tabId' in ACQUISITION
     assert 'chrome.downloads.search({id})' in ACQUISITION
     assert 'chrome.downloads.search({})' not in ACQUISITION
+    assert 'overlappingDownload' not in ACQUISITION
+    assert 'chrome.tabs.query({url:' not in ACQUISITION
 
 
 def test_fix1_landing_download_requires_explicit_trusted_arm():
     arm = ACQUISITION.split('async function armUserDownload', 1)[1].split('async function navigationFailed', 1)[0]
-    for check in ('tab.id !== ctx.tabId', 'tab.incognito', 'ctx.ambiguous || ctx.candidate',
+    for check in ('tab.id !== ctx.tabId', 'tab.incognito', 'ctx.ambiguous || ctx.downloadReported || ctx.downloadOutcome || ctx.candidate',
                   'tab.url !== ctx.navigationUrl', 'chrome.tabs.get(ctx.tabId)',
                   'liveTab.id !== ctx.tabId', 'liveTab.url !== ctx.navigationUrl',
-                  'ctx.userArm = {navigationUrl: ctx.navigationUrl, armedAt: Date.now()}'):
+                  'navigationEpoch: ctx.navigationEpoch', 'navigationUrl: ctx.navigationUrl, armedAt: Date.now()'):
         assert check in arm
     assert 'ctx.navigationTime =' not in arm
-    assert 'chrome.action.onClicked.addListener(tab => { void guarded(() => armUserDownload(tab))' in ACQUISITION
+    assert 'chrome.action.onClicked' not in ACQUISITION
     assert 'armUserDownload' not in ACQUISITION.split('chrome.runtime.onMessage.addListener', 1)[1]
-    source = ACQUISITION.split('async function uniqueTaskSource', 1)[1].split('async function created', 1)[0]
+    source = ACQUISITION.split('async function uniqueTaskSource', 1)[1].split('function downloadExpectation', 1)[0]
     # article -> file.pdf is eligible only through a matching, explicitly armed
     # referrer (SPA/root-referrer tolerance is limited to approved EBSCO blobs);
     # an unarmed referrer cannot satisfy the exact-source alternative.
     for check in ('const exactSource = !blob && !armedOnly && [item.url, item.finalUrl].includes(ctx.navigationUrl)',
-                  'const armedSource = arm && arm.navigationUrl === ctx.navigationUrl',
+                  'const armedSource = arm && arm.navigationEpoch === ctx.navigationEpoch && arm.navigationUrl === ctx.navigationUrl',
                   'item.referrer === arm.navigationUrl', 'started >= arm.armedAt',
                   'started - arm.armedAt <= ARM_WINDOW_MS', 'if (!exactSource && !armedSource) return null',
                   'useArm ? tab.url !== arm.navigationUrl',
                   'item.byExtensionId && item.byExtensionId !== chrome.runtime.id',
-                  'AcquisitionProtocol.downloadTransport(item)',
-                  'transport.url, transport.finalUrl, item.referrer', 'competitors.some(t => t.id !== ctx.tabId)'):
+                  'AcquisitionProtocol.downloadTransport(item)'):
         assert check in source
     assert 'item.tabId' not in source
     assert not any(term in source for term in ('filename', 'mime', 'downloads.search'))
@@ -450,14 +449,17 @@ def test_fix1_arm_is_consumed_and_frozen_for_completion():
     for check in ('value.ambiguous', 'value.userArm.navigationUrl !== value.navigationUrl',
                   'Date.now() - value.userArm.armedAt > ARM_WINDOW_MS', 'value.userArm = null', 'await save(value)'):
         assert check in context
-    assert 'recordEvidence: null, userArm: null' in ACQUISITION
-    navigation = ACQUISITION.split('async function observeNavigation', 1)[1].split('async function armUserDownload', 1)[0]
-    assert 'ctx.userArm = null' in navigation
-    created = ACQUISITION.split('async function created', 1)[1].split('async function download', 1)[0]
-    assert 'navigationTime: proof.navigationTime, userArm: proof.userArm' in created
-    assert created.count('ctx.userArm = null') == 3  # Reject, ambiguity, adoption.
-    assert created.index('ctx.userArm = null;', created.index('ctx.candidate = {id: item.id')) < created.index('await completed(item.id)')
-    complete = ACQUISITION.split('async function completed', 1)[1].split('async function checkDownload', 1)[0]
+    assert 'recordEvidence: null, providerAction: null, userArm: null' in ACQUISITION
+    committed = ACQUISITION.split('if (commit !== null)', 1)[1].split('} else {', 1)[0]
+    assert 'recordEvidence: null, providerAction: null, userArm: null' in committed
+    observation = ACQUISITION.split('async function observeDownload', 1)[1].split('async function created', 1)[0]
+    assert 'navigationTime: proof.navigationTime, expectation' in observation
+    assert 'userArm: proof.userArm' in observation
+    assert 'ctx.userArm = null' not in observation
+    writer = ACQUISITION.split('async function save', 1)[1].split('async function reconcileNavigation', 1)[0]
+    assert 'next.candidate = structuredClone(downloadChange.candidate)' in writer
+    assert 'next.userArm = null' in writer
+    complete = ACQUISITION.split('async function completed', 1)[1].split('async function reconcileDownloadOutcome', 1)[0]
     assert 'candidate.userArm && ctx.navigationUrl !== candidate.navigationUrl' in complete
     assert 'item, candidate.userArm, Boolean(candidate.userArm), candidate.providerAction' in complete
     assert 'navigation_time: candidate.navigationTime' in complete
@@ -514,7 +516,7 @@ def test_fix2_visible_rows_or_eligible_headed_groups_remain_supported():
 def test_a7_only_complete_candidates_and_no_user_download_mutation():
     for check in ('item.state === "interrupted"', 'item.exists === false',
                   'if (item.state !== "complete") return', 'Number.isSafeInteger(item.fileSize)',
-                  'state: "complete"', '"download_candidate", payload',
+                  'state: "complete"', 'eventType: downloadChange.type === "complete" ? "download_candidate" : "browser_path_failure"',
                   'AcquisitionProtocol.boundedPayload(payload)',
                   'chrome.downloads.download({url: ctx.navigationUrl, saveAs: true, conflictAction: "uniquify"})'):
         assert check in ACQUISITION
@@ -522,7 +524,7 @@ def test_a7_only_complete_candidates_and_no_user_download_mutation():
         assert forbidden not in ACQUISITION
     for retired in ('version_labels', 'manifestation', 'target_version', 'versionEvidence'):
         assert retired not in ACQUISITION
-    assert 'sanitizedIdentity(url)' in ACQUISITION
+    assert 'sanitizedIdentity(ctx.navigationUrl)' in ACQUISITION
     assert '{scheme: new URL(safe).protocol, host: new URL(safe).hostname}' in ACQUISITION_PROTOCOL
 
 
@@ -567,7 +569,7 @@ def test_a8_popup_is_extension_owned_and_uses_only_real_claimed_tab():
         assert check in WORKER
     for forbidden in ('eventCapability','capability','navigationUrl','localStorage','fetch(','.innerHTML'):
         assert forbidden not in POPUP
-    for action in ('arm','download','fallback','choose','human'):
+    for action in ('arm','download','fallback','choose'):
         assert '"'+action+'"' in POPUP
     user=ACQUISITION.split('async function userAction',1)[1].split('async function executeCommand',1)[0]
     assert 'live.url !== ctx.navigationUrl' in user
@@ -585,8 +587,11 @@ def test_returned_commands_require_app_liveness_and_fixed_failure_reporting():
     assert 'capability: state.eventCapability, event_type: "browser_path_failure"' in emitter
     assert '"download_unavailable" : "navigation_failed"' in emitter
     navigation=ACQUISITION.split('async function navigate',1)[1].split('async function start',1)[0]
-    assert navigation.index('chrome.tabs.update') < navigation.index('return save(ctx,')
-    assert 'await save(ctx)' not in navigation
+    assert navigation.index('ctx.pendingNavigation = pending') < navigation.index('await save(ctx)') < navigation.index('chrome.tabs.update')
+    assert 'clearPending(ctx, pending)' in navigation
+    start = ACQUISITION.split('async function observeNavigationStart', 1)[1].split('async function observeNavigation', 1)[0]
+    assert 'navigationStart:' in start
+    assert 'emit(' not in start and 'ctx.navigationUrl =' not in start
 
 
 def test_a8_shipped_worker_with_simulated_chrome_and_network():
@@ -605,8 +610,14 @@ def test_a8_shipped_worker_with_simulated_chrome_and_network():
         assert result.returncode==0,result.stderr
     result=subprocess.run([node,str(ROOT/'tests/browser_companion_runtime.cjs')],capture_output=True,text=True,timeout=10)
     assert result.returncode==0,result.stderr
-    assert '175 cases passed. No browser/network used.' in result.stdout
-    assert 'Shipped content adapters: 104 cases passed.' in result.stdout
+    assert 'Shipped worker simulation:' in result.stdout
+    assert 'Shipped content adapters:' in result.stdout
+    assert 'Generic download observation:' in result.stdout
+    assert 'Download outcome delivery:' in result.stdout
+    assert 'No-arm provider action:' in result.stdout
+    assert 'Task tab close:' in result.stdout
+    assert 'Two-phase handoff:' in result.stdout
+    assert 'Navigation sequence association:' in result.stdout
 
 
 def test_live_fix_record_adapter_is_narrow_and_keeps_navigation_http_only():
@@ -633,13 +644,28 @@ def test_verified_provider_preparation_uses_separate_explicit_clocks():
     assert 'const ARM_WINDOW_MS = 10000' in ACQUISITION
     assert 'const PROVIDER_PREPARATION_WINDOW_MS = 120000' in ACQUISITION
     action = ACQUISITION.split('async function ebscoMessage', 1)[1].split('async function resolverMessage', 1)[0]
-    assert 'message.action_time - arm.armedAt > ARM_WINDOW_MS' in action
+    assert 'ctx.userArm' not in action and 'armedAt' not in action
+    assert 'message.navigation_epoch !== ctx.navigationEpoch' in action
+    assert 'Date.now() - message.action_time > ACTION_MESSAGE_WINDOW_MS' in action
     assert 'storeRecordEvidence(ctx, evidence, providerAction)' in action
-    source = ACQUISITION.split('async function uniqueTaskSource', 1)[1].split('async function created', 1)[0]
-    assert 'blob && verifiedProviderAction' in source
-    assert 'started - providerAction.actionTime <= PROVIDER_PREPARATION_WINDOW_MS' in source
+    source = ACQUISITION.split('async function uniqueTaskSource', 1)[1].split('function downloadExpectation', 1)[0]
+    assert 'verifiedProviderAction(ctx, providerAction, evidence)' in source
+    assert 'started - providerAction.actionTime > PROVIDER_PREPARATION_WINDOW_MS' in source
     assert 'started - arm.armedAt <= ARM_WINDOW_MS' in source
     assert 'payload.attribution = "ebsco_pdf_action"' in ACQUISITION
-    assert 'payload.arm_time = candidate.providerAction.armedAt' in ACQUISITION
+    assert 'arm_time' not in ACQUISITION
+    assert 'provider_action' in ACQUISITION
     assert 'payload.action_time = candidate.providerAction.actionTime' in ACQUISITION
     assert 'payload.navigation_time = candidate.providerAction.navigationTime' in ACQUISITION
+
+
+def test_a4_popup_removes_redundant_operations_and_keeps_content_human_wait():
+    html = (ARTIFACT / 'task_popup.html').read_text()
+    for removed in ('Check current download', 'Login or verification needed', 'selected version'):
+        assert removed not in html + POPUP
+    assert 'Capture next PDF download' in html
+    assert 'checkDownload' not in ACQUISITION
+    user = ACQUISITION.split('async function userAction', 1)[1].split('async function executeCommand', 1)[0]
+    assert 'action === "check"' not in user and 'action === "human"' not in user
+    assert '"check"' not in POPUP and '"human"' not in POPUP
+    assert 'human_action_needed' in ACQUISITION

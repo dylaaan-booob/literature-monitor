@@ -7,10 +7,13 @@ importScripts("acquisition_runtime.js");
 const STATE_KEY = "claimedHandoff";
 const CLAIM_PATH = "/browser-handoff/claim";
 const EVENT_PATH = "/browser-handoff/events";
-const SESSION_FIELDS = ["eventCapability", "origin", "readyDelivered", "tabId", "taskId"];
+const SESSION_FIELDS = ["eventCapability", "origin", "tabId", "taskId"];
 let busy = false;
+let activation = null;
+// The claim mutex bounds this to one transition; capabilities stay out of it.
+let claiming = null;
 
-// MV3 suspension loses globals; only the post-claim authority survives in RAM.
+// MV3 suspension loses globals; post-claim authority survives in session storage.
 async function loadState() {
   await chrome.storage.session.setAccessLevel({accessLevel: "TRUSTED_CONTEXTS"});
   const values = await chrome.storage.session.get(STATE_KEY);
@@ -21,8 +24,7 @@ async function loadState() {
       !BrowserHandoffProtocol.validTaskId(state.taskId) ||
       !BrowserHandoffProtocol.validOrigin(state.origin) ||
       !BrowserHandoffProtocol.tabBinding(state.tabId) ||
-      !BrowserHandoffProtocol.validCapability(state.eventCapability) ||
-      typeof state.readyDelivered !== "boolean") {
+      !BrowserHandoffProtocol.validCapability(state.eventCapability)) {
     await chrome.storage.session.remove(STATE_KEY);
     throw new Error("Companion session is unavailable.");
   }
@@ -64,6 +66,7 @@ async function retireCurrentAuthority(state) {
   const current = await loadState();
   if (!current || !matchesOwner(current, state) || current.eventCapability !== state.eventCapability) return false;
   await chrome.storage.session.remove(STATE_KEY);
+  await browserAcquisition.retireDownloads(state);
   await badge(state.tabId, "X");
   return true;
 }
@@ -112,23 +115,27 @@ function eventReply(response, taskId) {
   } catch { return null; }
 }
 
-async function emitEvent(state, eventType, payload) {
+async function emitEvent(state, eventType, payload, downloadOutcome = false) {
   if (busy) return false;
   let reply;
   busy = true;
   try {
     const current = await loadState();
     if (!current || !matchesOwner(current, state) || current.eventCapability !== state.eventCapability) return false;
+    if (!downloadOutcome && await browserAcquisition.isTabClosed(current)) return false;
     const response = await postJson(state.origin, EVENT_PATH, {
       task_id: state.taskId, tab_binding: BrowserHandoffProtocol.tabBinding(state.tabId),
       capability: state.eventCapability, event_type: eventType, payload
     });
     if (response.status === 403) {
-      await chrome.storage.session.remove(STATE_KEY);
-      await badge(state.tabId, "X");
+      await retireCurrentAuthority(state);
       return false;
     }
     reply = eventReply(response, state.taskId);
+    if (reply && !reply.command && eventType === "browser_path_failure" && payload.reason === "task_tab_closed") {
+      await retireCurrentAuthority(state);
+      return true;
+    }
     if (reply?.command) {
       // One non-secret check per returned command, never a polling loop. Local
       // session state alone cannot prove that application-side Cancel lost.
@@ -140,6 +147,13 @@ async function emitEvent(state, eventType, payload) {
     }
   } finally {
     busy = false;
+    // Navigation is a single coalesced session state, not a generic event queue.
+    // Its own delivery handles newer commits; other POSTs wake a blocked report.
+    if (eventType !== "navigation_state") void browserAcquisition.reconcileNavigation();
+    // Outcome delivery never wakes itself after an uncertain response. Another
+    // POST releasing the mutex, or worker restart, provides a bounded retry.
+    if (!downloadOutcome) void browserAcquisition.reconcileDownloadOutcome();
+    if (eventType !== "browser_path_failure" || payload.reason !== "task_tab_closed") void browserAcquisition.reconcileTerminal();
   }
   if (!reply) return false;
   // Execute only after releasing the network mutex: bounded commands can emit
@@ -148,6 +162,7 @@ async function emitEvent(state, eventType, payload) {
   if (!current || !matchesOwner(current, state) || current.eventCapability !== state.eventCapability) return false;
   if (!reply.command) return true;
   if (await browserAcquisition.executeCommand(reply.command, state.taskId)) return true;
+  if (await browserAcquisition.isTabClosed(state)) return false;
   // Chrome rejected an approved operation. Terminalize with the existing fixed
   // vocabulary, and disable local reuse even if that one failure POST is lost.
   try {
@@ -168,18 +183,36 @@ async function emitEvent(state, eventType, payload) {
 }
 
 async function sendReady(state) {
-  if (state.readyDelivered) return true;
   if (!await emitEvent(state, "tab_ready", {})) return false;
-  if (busy) return false;
-  busy = true;
-  try {
-    const current = await loadState();
-    if (!current || !matchesOwner(current, state) || current.eventCapability !== state.eventCapability) return false;
-    current.readyDelivered = true;
-    await chrome.storage.session.set({[STATE_KEY]: current});
-    await badge(state.tabId, "");
-    return true;
-  } finally { busy = false; }
+  const current = await loadState();
+  if (!current || !matchesOwner(current, state) || current.eventCapability !== state.eventCapability) return false;
+  await badge(state.tabId, "");
+  return true;
+}
+
+async function activateHandoff(owner) {
+  if (!owner) return false;
+  if (claiming && matchesOwner(claiming, owner)) return false;
+  const state = await loadState();
+  if (!state || !matchesOwner(state, owner) || await browserAcquisition.isTabClosed(state)) return false;
+  // Coalesce only overlapping activations, including START execution after the
+  // network mutex is released. A later retry always sends tab_ready again.
+  if (activation && matchesOwner(activation.state, state) &&
+      activation.state.eventCapability === state.eventCapability) return activation.promise;
+  const pending = {state, promise: sendReady(state)};
+  activation = pending;
+  try { return await pending.promise; }
+  finally { if (activation === pending) activation = null; }
+}
+
+async function activateFromDocument(owner) {
+  // History API scrubbing can leave MessageSender.url at the original document
+  // URL. Source identity is already trusted; only Chrome's current tab proves scrub.
+  const tab = await chrome.tabs.get(owner.tabId);
+  if (!tab || tab.id !== owner.tabId || tab.incognito === true) return false;
+  const page = BrowserHandoffProtocol.parseActivationUrl(tab.url);
+  if (!page || !matchesOwner({...page, tabId: tab.id}, owner)) return false;
+  return activateHandoff(owner);
 }
 
 async function claimHandoff(message, sender) {
@@ -189,11 +222,12 @@ async function claimHandoff(message, sender) {
   try {
     const owner = trustedSender(sender);
     if (!owner || owner.origin !== handoff.origin || owner.taskId !== handoff.taskId) return null;
+    claiming = {taskId: owner.taskId, tabId: owner.tabId, origin: owner.origin, closed: false};
     const existing = await loadState();
     if (existing) {
       // Recover a lost content-script acknowledgement, without another claim
-      // or another automatic ready event.
-      if (matchesOwner(existing, owner)) return {claimed: true, freshState: null};
+      // or activation before the document scrubs its fragment.
+      if (matchesOwner(existing, owner)) return {claimed: true};
       // A mismatched owner may claim only after the old server record is gone.
       // Otherwise no new claim is sent and the page keeps its initial fragment.
       if (!await retireInactiveAuthority(existing)) return null;
@@ -216,18 +250,18 @@ async function claimHandoff(message, sender) {
       handoff.capability = "";
     }
     const state = {taskId: handoff.taskId, tabId: owner.tabId, origin: handoff.origin,
-                   eventCapability: reply.event_capability, readyDelivered: false};
+                   eventCapability: reply.event_capability};
     try {
       await chrome.storage.session.set({[STATE_KEY]: state});
     } catch {
       // The server consumed the initial capability even if session storage
-      // failed. Scrub its fragment, discard local authority and require recovery.
+      // failed. Scrub its fragment and discard local authority; activation fails closed.
       await chrome.storage.session.remove(STATE_KEY).catch(() => {});
       await badge(owner.tabId, "X");
-      return {claimed: true, freshState: null};
+      return {claimed: true};
     }
     await badge(owner.tabId, "!");
-    return {claimed: true, freshState: state};
+    return {claimed: true, freshOwner: owner};
   } finally {
     handoff.capability = "";
     handoff = null;
@@ -243,6 +277,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     popupMessage(message).then(sendResponse, () => sendResponse({ok: false}));
     return true;
   }
+  if (message?.type === "activate_handoff") {
+    const owner = trustedSender(sender);
+    if (Object.keys(message).join(",") !== "type" || !owner) {
+      sendResponse({ok: false}); return false;
+    }
+    activateFromDocument(owner).then(ok => sendResponse({ok}), () => sendResponse({ok: false}));
+    return true;
+  }
   if (message === null || typeof message !== "object" || Array.isArray(message) ||
       Object.keys(message).sort().join(",") !== "handoffUrl,type" || message.type !== "claim_handoff" || busy) {
     sendResponse({ok: false});
@@ -250,19 +292,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   busy = true;
   (async () => {
-    let responded = false;
-    let freshState = null;
+    let claimed = false;
+    let releaseClaim = true;
     try {
       const result = await claimHandoff(message, sender);
-      responded = true;
-      sendResponse({ok: result?.claimed === true});
-      freshState = result?.freshState;
-    } catch {
-      if (!responded) sendResponse({ok: false});
-    } finally { busy = false; }
-    if (freshState) {
-      try { await sendReady(freshState); } catch { /* Explicit retry remains available. */ }
+      claimed = result?.claimed === true;
+      // Removal may have preceded the session write. Keep the mutex and the
+      // transition marker until the same A5 terminal is committed, never expose
+      // the late claim as activatable authority for an already-closed tab.
+      if (claiming?.closed && result?.freshOwner) {
+        if (!await browserAcquisition.persistClosedClaim(result.freshOwner)) {
+          // This mutex still exclusively owns the just-created authority. No
+          // replacement can be claimed, so removal needs no fallible reread.
+          try { await chrome.storage.session.remove(STATE_KEY); }
+          catch {
+            // With persistence unavailable, retain the closed marker/mutex.
+            // No retry loop; process disappearance falls back to the app lease.
+            releaseClaim = false;
+          }
+        }
+      } else if (claiming?.closed) {
+        // Recovery of an existing owner keeps its normal pre/post-freeze path.
+        const state = await loadState();
+        if (state && matchesOwner(state, claiming)) {
+          await browserAcquisition.tabRemoved(state.tabId);
+          if (!await browserAcquisition.isTabClosed(state)) await retireCurrentAuthority(state);
+        }
+      }
+    } catch { /* No authority or protocol detail crosses the acknowledgement. */ }
+    finally {
+      if (releaseClaim) {
+        claiming = null;
+        busy = false;
+        void browserAcquisition.reconcileNavigation();
+        void browserAcquisition.reconcileDownloadOutcome();
+        void browserAcquisition.reconcileTerminal();
+      }
     }
+    // A content script can activate synchronously from this acknowledgement.
+    sendResponse({ok: claimed});
   })();
   return true;
 });
@@ -270,6 +338,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 const browserAcquisition = BrowserAcquisitionRuntime.create({
   loadAuthority: loadState,
   emitAuthenticated: emitEvent
+});
+// A locally committed epoch is synchronized only after its authenticated POST.
+// One recovery attempt on worker wake; no timers, polling or keep-alive.
+chrome.tabs.onRemoved.addListener(tabId => {
+  if (claiming?.tabId === tabId) claiming.closed = true;
+  void browserAcquisition.tabRemoved(tabId);
+});
+void browserAcquisition.reconcileTerminal().finally(() => {
+  void browserAcquisition.reconcileNavigation().finally(() => {
+    void browserAcquisition.reconcileClosedDownload().finally(() => { void browserAcquisition.reconcileDownloadOutcome(); });
+  });
 });
 
 async function popupMessage(message) {
@@ -282,27 +361,16 @@ async function popupMessage(message) {
   if (!state || !tab || tab.id !== state.tabId || tab.incognito) return {ok: false};
   if (message.type === "task_ui") {
     const task = await browserAcquisition.taskUi(state.taskId);
-    return {ok: true, task}; // No capability, URL, path or application credential.
+    const page = BrowserHandoffProtocol.parseActivationUrl(tab.url);
+    // No capability, URL, path or application credential crosses the popup reply.
+    return {ok: true, task, can_retry: Boolean(page && matchesOwner(state, {...page, tabId: tab.id}))};
   }
-  if (!["ready", "arm", "download", "check", "fallback", "choose", "human"].includes(message.action) ||
+  if (!["ready", "arm", "download", "fallback", "choose"].includes(message.action) ||
       (message.action !== "choose" && message.choice_id !== null) ||
       (message.action === "choose" && (!Number.isSafeInteger(message.choice_id) || message.choice_id < 0 || message.choice_id >= 6))) return {ok: false};
   if (message.action === "ready") {
-    const page = BrowserHandoffProtocol.parsePageUrl(tab.url);
-    return {ok: Boolean(page && matchesOwner(state, {...page, tabId: tab.id}) && await sendReady(state))};
+    const page = BrowserHandoffProtocol.parseActivationUrl(tab.url);
+    return {ok: await activateHandoff(page ? {...page, tabId: tab.id} : null)};
   }
   return {ok: await browserAcquisition.userAction(state.taskId, message.action, message.choice_id, tab)};
 }
-
-// Kept as a finite ready retry for hosts without a popup; the packaged popup
-// supplies the same gesture explicitly along with the bounded task actions.
-chrome.action.onClicked.addListener(async (tab) => {
-  if (busy || !BrowserHandoffProtocol.tabBinding(tab.id) || tab.incognito === true) return;
-  try {
-    const page = BrowserHandoffProtocol.parsePageUrl(tab.url);
-    if (!page) return;
-    const state = await loadState();
-    if (!state || !matchesOwner(state, {...page, tabId: tab.id})) return;
-    await sendReady(state);
-  } catch { /* No polling or queue; retry is an explicit human gesture. */ }
-});

@@ -168,24 +168,29 @@ def test_blob_without_referrer_retains_explicit_arm_origin_evidence(task):
 
 def provider_action_payload(task):
     return blob_payload(task) | {
-        'attribution': 'ebsco_pdf_action', 'arm_time': 2000, 'action_time': 3000,
+        'attribution': 'ebsco_pdf_action', 'ownership': 'provider_action', 'action_time': 3000,
         'start_time': 27000,
     }
 
 
-def test_verified_provider_action_accepts_delayed_start_with_explicit_clocks(task):
+@pytest.mark.parametrize('action_time', [3000, 200000])
+def test_verified_provider_action_accepts_delayed_start_with_explicit_clocks(task, action_time):
     evidence = download_evidence(AuthenticatedBrowserEvent(task.task_id, 'tab-12',
-        'download_candidate', provider_action_payload(task)), task, 'tab-12')
-    assert evidence.ownership == 'user_arm' and evidence.attribution == 'ebsco_pdf_action'
-    assert (evidence.navigation_time, evidence.arm_time, evidence.action_time, evidence.start_time) == (1000, 2000, 3000, 27000)
+        'download_candidate', provider_action_payload(task) | {
+            'action_time': action_time, 'start_time': action_time + 24000,
+        }), task, 'tab-12')
+    assert evidence.ownership == 'provider_action' and evidence.attribution == 'ebsco_pdf_action'
+    assert (evidence.navigation_time, evidence.action_time, evidence.start_time) == (1000, action_time, action_time + 24000)
+    assert not hasattr(evidence, "arm_time")
 
 
 @pytest.mark.parametrize('changes', [
     {'attribution': 'other'}, {'action_time': None}, {'action_time': True},
-    {'action_time': '3000'}, {'action_time': 1999}, {'arm_time': -1},
-    {'arm_time': True}, {'arm_time': 999}, {'action_time': 12001},
+    {'action_time': '3000'}, {'action_time': 999}, {'arm_time': -1},
+    {'arm_time': True}, {'arm_time': 999}, {'arm_time': 2000}, {'ownership': 'user_arm'},
     {'start_time': 2999}, {'start_time': 123001}, {'route': 'direct', 'category': ''},
     {'category': 'Other'}, {'provider_record_url': None}, {'observed_doi': None},
+    {'provider_record_url': RECORD_URL + 'other'}, {'observed_doi': '10.1000/wrong'},
     {'download_origin': 'https://other.example'},
     {'referrer': 'https://research.ebsco.com/'}, {'file_size': 0}, {'state': 'in_progress'},
     {'unexpected': 'field'},
@@ -196,8 +201,8 @@ def test_provider_action_rejects_incomplete_or_unbounded_proof(task, changes):
             'download_candidate', provider_action_payload(task) | changes), task, 'tab-12')
 
 
-@pytest.mark.parametrize('missing', ['arm_time', 'action_time'])
-def test_provider_action_requires_both_timestamps(task, missing):
+@pytest.mark.parametrize('missing', ['action_time', 'attribution', 'provider_record_url', 'observed_doi'])
+def test_provider_action_requires_action_and_record_evidence(task, missing):
     body = provider_action_payload(task); del body[missing]
     with pytest.raises(BrowserEvidenceError):
         download_evidence(AuthenticatedBrowserEvent(task.task_id, 'tab-12',
@@ -242,5 +247,6 @@ def test_python_accepts_actual_shipped_worker_provider_payload():
     evidence = download_evidence(AuthenticatedBrowserEvent(frozen.task_id, 'tab-42',
         'download_candidate', body), frozen, 'tab-42')
     assert evidence.attribution == 'ebsco_pdf_action'
-    assert evidence.navigation_time < evidence.arm_time < evidence.action_time < evidence.start_time
+    assert evidence.navigation_time < evidence.action_time < evidence.start_time
+    assert "arm_time" not in body and evidence.ownership == "provider_action"
     assert evidence.start_time - evidence.action_time == 24000

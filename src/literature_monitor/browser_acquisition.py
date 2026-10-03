@@ -117,7 +117,6 @@ class BrowserDownloadEvidence:
     download_origin: str | None = field(default=None, repr=False)
     provider_record_url: str | None = field(default=None, repr=False)
     attribution: str | None = None
-    arm_time: int | None = None
     action_time: int | None = None
 
 
@@ -127,7 +126,7 @@ DOWNLOAD_FIELDS = frozenset({
     'navigation_time', 'start_time', 'state', 'observed_doi',
 })
 BLOB_DOWNLOAD_FIELDS = DOWNLOAD_FIELDS | {'transport_kind', 'download_origin', 'provider_record_url'}
-PROVIDER_ACTION_FIELDS = BLOB_DOWNLOAD_FIELDS | {'attribution', 'arm_time', 'action_time'}
+PROVIDER_ACTION_FIELDS = BLOB_DOWNLOAD_FIELDS | {'attribution', 'action_time'}
 ARM_WINDOW_MS = 10_000
 PROVIDER_PREPARATION_WINDOW_MS = 120_000
 
@@ -162,14 +161,13 @@ def download_evidence(event: AuthenticatedBrowserEvent, task: AcquisitionTask,
         if p['file_size'] == 0:
             raise ValueError
         if provider_action:
-            if (type(p['arm_time']) is not int or type(p['action_time']) is not int
-                    or not 0 <= p['navigation_time'] <= p['arm_time'] <= p['action_time']
-                    or p['action_time'] - p['arm_time'] > ARM_WINDOW_MS
+            if (type(p['action_time']) is not int
+                    or not 0 <= p['navigation_time'] <= p['action_time']
                     or not 0 <= p['start_time'] - p['action_time'] <= PROVIDER_PREPARATION_WINDOW_MS):
                 raise ValueError
         elif not 0 <= p['start_time'] - p['navigation_time'] <= ARM_WINDOW_MS:
             raise ValueError
-        if p['route'] not in {'direct', 'xmu'} or p['ownership'] not in ({'user_arm'} if blob else {'extension_id', 'task_navigation'}):
+        if p['route'] not in {'direct', 'xmu'} or p['ownership'] not in ({'provider_action'} if provider_action else {'user_arm'} if blob else {'extension_id', 'task_navigation'}):
             raise ValueError
         if p['route'] == 'xmu' and p['category'] not in {'FullText', 'SmartLinks'}:
             raise ValueError
@@ -181,7 +179,7 @@ def download_evidence(event: AuthenticatedBrowserEvent, task: AcquisitionTask,
         if p['referrer']:
             safe_runtime_url(p['referrer'])
         if blob:
-            # The worker proves an explicit same-tab arm; only its HTTPS origin
+            # The worker proves a same-tab generic arm or provider action; its HTTPS origin
             # crosses A5. Never accept a raw blob token or fake landing URL.
             origin = safe_runtime_url(p['download_origin'])
             navigation = urlsplit(p['navigation_url'])
@@ -212,7 +210,7 @@ def download_evidence(event: AuthenticatedBrowserEvent, task: AcquisitionTask,
             p['url'], p['final_url'], p['referrer'], p['mime'], p['total_bytes'], p['file_size'],
             p['category'], p['navigation_time'], p['start_time'], observed_doi,
             transport_kind='blob' if blob else 'http', download_origin=p.get('download_origin'),
-            provider_record_url=p.get('provider_record_url'), attribution=p.get('attribution'), arm_time=p.get('arm_time'),
+            provider_record_url=p.get('provider_record_url'), attribution=p.get('attribution'),
             action_time=p.get('action_time'))
     except (ValueError, TypeError, KeyError, AttributeError):
         raise BrowserEvidenceError('Invalid task-bound download evidence.') from None

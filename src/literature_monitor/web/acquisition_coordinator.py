@@ -17,6 +17,8 @@ from literature_monitor.zotero_write import ZoteroAuthorizationOutcome
 from .browser_handoff import BrowserHandoffRegistry, HandoffLaunch
 from .chrome_launcher import launch_normal_chrome
 
+_BROWSER_LEASE_SECONDS = 1800
+
 
 class AcquisitionCoordinatorStatus(str, Enum):
     IDLE = 'IDLE'
@@ -88,8 +90,11 @@ class _Attempt:
     gate_entered: bool = False
     open_failed: bool = False
     route: str = 'direct'
+    fallback_pending: bool = False
     choices: tuple[ResolverChoice, ...] = ()
     browser_identity: tuple[str, str] | None = None
+    browser_timer: threading.Timer | None = None
+    browser_generation: int = 0
 
 
 _BROWSER_STAGES = {AcquisitionStage.OPENING_CHROME, AcquisitionStage.HANDOFF,
@@ -173,7 +178,29 @@ class AcquisitionCoordinator:
         with self._lock:
             if self._active is attempt:
                 attempt.stage = stage
+                if stage not in _BROWSER_STAGES:
+                    self._cancel_browser_lease(attempt)
                 self._publish(attempt)
+
+    def _cancel_browser_lease(self, attempt):
+        attempt.browser_generation += 1
+        if attempt.browser_timer is not None:
+            attempt.browser_timer.cancel()
+            attempt.browser_timer = None
+
+    def _refresh_browser_lease(self, attempt):
+        self._cancel_browser_lease(attempt)
+        timer = threading.Timer(_BROWSER_LEASE_SECONDS, self._expire_browser_lease,
+                                args=(attempt, attempt.browser_generation))
+        timer.daemon = True
+        attempt.browser_timer = timer
+        timer.start()
+
+    def _expire_browser_lease(self, attempt, generation):
+        with self._lock:
+            if (self._active is attempt and attempt.browser_generation == generation
+                    and attempt.stage in _BROWSER_STAGES and not attempt.gate_entered):
+                self._failure(attempt, AcquisitionOutcome.NO_VALID_PDF, AcquisitionRecovery.CHECK_BROWSER)
 
     def _prepare(self, attempt):
         prepared = attempt.service.prepare(attempt.paper_id, stage_callback=lambda value: self._stage(attempt, value))
@@ -189,6 +216,7 @@ class AcquisitionCoordinator:
             attempt.plan = navigation_plan(attempt.task)
             attempt.launch = self.registry.issue(attempt.task.task_id, port=attempt.port)
             attempt.stage = AcquisitionStage.OPENING_CHROME
+            self._refresh_browser_lease(attempt)
             self._publish(attempt)
         self._open(attempt)
 
@@ -230,6 +258,7 @@ class AcquisitionCoordinator:
             attempt.open_failed = False
             attempt.stage = AcquisitionStage.OPENING_CHROME
             try:
+                self._refresh_browser_lease(attempt)
                 self._spawn(attempt, self._open, 'open')
             except BaseException as error:
                 self._finish(attempt, error=error)
@@ -251,6 +280,7 @@ class AcquisitionCoordinator:
     def _finish(self, attempt, result=None, *, error=None):
         if self._active is not attempt:
             return
+        self._cancel_browser_lease(attempt)
         if result is not None and (not isinstance(result, AcquisitionResult) or result.paper_id != attempt.paper_id):
             error, result = ValueError('Invalid acquisition result.'), None
         if error is not None:
@@ -286,16 +316,24 @@ class AcquisitionCoordinator:
                 return None
             if attempt.stage not in _BROWSER_STAGES:
                 return None
+            # Registry authenticates the bounded envelope under this same RLock.
+            # Current-task liveness counts even if business validation rejects it.
+            self._refresh_browser_lease(attempt)
             payload = event.payload
             def command(kind, **fields):
                 return {'task_id': str(attempt.task.task_id), 'type': kind, **fields}
+            if (event.event_type == 'browser_path_failure' and payload == {'reason': 'task_tab_closed'}
+                    and re.fullmatch(r'tab-\d{1,16}', event.tab_binding)):
+                # Claim may have succeeded before activation/tab_ready arrived.
+                self._failure(attempt, recovery=AcquisitionRecovery.CHECK_BROWSER)
+                return None
             if event.event_type == 'tab_ready':
                 if payload or not re.fullmatch(r'tab-\d{1,16}', event.tab_binding):
                     return None
                 if attempt.tab_binding is None:
                     attempt.tab_binding = event.tab_binding
                     attempt.open_failed = False
-                    attempt.stage = AcquisitionStage.BROWSER_ACTION
+                    attempt.stage = AcquisitionStage.HANDOFF
                     self._publish(attempt)
                 # Lost reply recovery sends the same frozen plan; companion START
                 # is idempotent for an already-running identical task.
@@ -303,21 +341,29 @@ class AcquisitionCoordinator:
             if attempt.tab_binding is None:
                 return None
             kind = event.event_type
+            # Until the first committed task-tab navigation, only navigation or
+            # terminal failure can advance a claimed handoff.
+            if attempt.browser_identity is None and kind not in {'navigation_state', 'browser_path_failure'}:
+                return None
             if kind == 'navigation_state':
                 identity = payload.get('identity')
-                if (set(payload) == {'identity', 'route'} and payload['route'] == attempt.route and type(identity) is dict
+                if (set(payload) == {'identity', 'route'}
+                        and (payload['route'] == attempt.route or (attempt.fallback_pending and payload['route'] == 'xmu'))
+                        and type(identity) is dict
                         and set(identity) == {'scheme', 'host'} and isinstance(identity['scheme'], str) and identity['scheme'] in {'http:', 'https:'}
                         and isinstance(identity['host'], str) and re.fullmatch(r'[A-Za-z0-9.-]{1,253}', identity['host'])):
                     attempt.browser_identity = identity['scheme'], identity['host']
+                    attempt.route = payload['route']
+                    attempt.fallback_pending = False
                     attempt.stage = AcquisitionStage.BROWSER_ACTION
             elif kind == 'human_action_needed' and payload == {'route': attempt.route}:
                 attempt.stage = AcquisitionStage.WAITING_FOR_INSTITUTION_AUTH
             elif kind == 'publisher_state' and set(payload) == {'state'} and isinstance(payload['state'], str) and payload['state'] in {'accessible', 'human_required', 'exhausted'}:
                 attempt.stage = AcquisitionStage.WAITING_FOR_INSTITUTION_AUTH if payload['state'] == 'human_required' else AcquisitionStage.BROWSER_ACTION
             elif kind == 'publisher_fallback_request' and payload == {}:
-                if attempt.route != 'direct':
+                if attempt.route != 'direct' or attempt.fallback_pending:
                     return None
-                attempt.route = 'xmu'
+                attempt.fallback_pending = True
                 attempt.stage = AcquisitionStage.RESOLVING
                 self._publish(attempt)
                 return command('PUBLISHER_EXHAUSTED')
@@ -349,7 +395,8 @@ class AcquisitionCoordinator:
                     'navigation_failed', 'resolver_not_ready',
                     'resolver_choice_overflow', 'no_visible_eligible_choices', 'ambiguous_download_ownership', 'download_unavailable'}):
                     outcome = (AcquisitionOutcome.NO_ELIGIBLE_CANDIDATES if payload['reason'] == 'no_visible_eligible_choices'
-                               else AcquisitionOutcome.RESOLVER_FAILURE if attempt.route == 'xmu' else AcquisitionOutcome.NO_VALID_PDF)
+                               else AcquisitionOutcome.RESOLVER_FAILURE if attempt.route == 'xmu' or attempt.fallback_pending
+                               else AcquisitionOutcome.NO_VALID_PDF)
                     self._failure(attempt, outcome, AcquisitionRecovery.CHECK_BROWSER)
                 return None
             elif kind == 'download_candidate':
@@ -362,6 +409,7 @@ class AcquisitionCoordinator:
                     self._failure(attempt)
                     return None
                 attempt.stage = AcquisitionStage.VALIDATING_PDF
+                self._cancel_browser_lease(attempt)
                 try:
                     self._spawn(attempt, lambda active: self._stage_download(active, evidence), 'staging')
                 except BaseException as error:

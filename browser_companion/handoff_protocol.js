@@ -44,6 +44,11 @@ const BrowserHandoffProtocol = (() => {
     return {...page, capability};
   }
 
+  function parseActivationUrl(value) {
+    const page = parsePageUrl(value);
+    return page && !value.includes("#") ? page : null;
+  }
+
   function validOrigin(value) {
     const url = loopbackUrl(typeof value === "string" ? value + "/" : value);
     return url !== null && url.origin === value && url.pathname === "/" && url.hash === "";
@@ -53,5 +58,5 @@ const BrowserHandoffProtocol = (() => {
     return Number.isSafeInteger(tabId) && tabId >= 0 ? `tab-${tabId}` : null;
   }
 
-  return Object.freeze({validTaskId, validCapability, parsePageUrl, parseInitialUrl, validOrigin, tabBinding});
+  return Object.freeze({validTaskId, validCapability, parsePageUrl, parseInitialUrl, parseActivationUrl, validOrigin, tabBinding});
 })();

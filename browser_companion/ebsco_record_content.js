@@ -41,7 +41,8 @@
   }
 
   chrome.runtime.sendMessage({type: "ebsco_context"}, context => {
-    if (chrome.runtime.lastError || !context?.doi) return;
+    if (chrome.runtime.lastError || !context?.doi || !Number.isSafeInteger(context.navigation_epoch) ||
+        context.navigation_epoch < 1) return;
     let captured = null;
     document.addEventListener("click", event => {
       if (!event.isTrusted || !AcquisitionProtocol.sameEbscoRecordPage(window.location.href, pageUrl)) return;
@@ -57,13 +58,14 @@
       // earlier visible entry observation only while its exact DOM is unchanged.
       const observed = captured;
       if (!observed || !observed.node.isConnected || text(observed.node) !== observed.text ||
-          document.querySelectorAll(METADATA).length !== 1 || observed.fields.doi !== context.doi) return;
+          document.querySelectorAll(METADATA).length !== 1 ||
+          document.querySelectorAll(METADATA)[0] !== observed.node || observed.fields.doi !== context.doi) return;
       const pdfs = [...document.querySelectorAll(PDF)].filter(node => node.checked && !node.disabled &&
         !node.closest('[hidden], [inert], [aria-hidden="true"]') &&
         [...node.labels].some(label => visible(label) && /^PDF(?:\b|[（(])/i.test(text(label))));
       if (pdfs.length !== 1) return;
       chrome.runtime.sendMessage({type: "ebsco_pdf_action", task_id: context.task_id, pageUrl,
-        action_time: Date.now(), record: observed.fields}, () => { void chrome.runtime.lastError; });
+        navigation_epoch: context.navigation_epoch, action_time: Date.now(), record: observed.fields}, () => { void chrome.runtime.lastError; });
     }, true);
   });
 })();
