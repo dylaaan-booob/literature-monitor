@@ -8,7 +8,35 @@ safely updates durable Paper and Author Markdown, and exports kept papers.
 
 ## Current released baseline
 
-**v0.5.2 is released and the latest completed baseline**, with Python package
+**v0.5.3 is RELEASED and the latest released/completed baseline**, with Python
+package metadata and OpenAlex/Crossref Provider User-Agent identities **0.5.3**.
+Browser Companion v2 follows SPEC §38; the standalone source-installed companion
+manifest remains **0.1.0**. Unaffected DOI-first behavior remains under §37.
+
+The reviewed implementation is committed at `21547260157f121a1efd2a5e8f930fad5f26959f`;
+the independently reviewed preparation commit/release HEAD is
+`4a2595e56bfcfb7d845216c5161e978628d3a71a`. Final exact-release-HEAD clean-export validation,
+offline wheel/sdist build and isolated installed-wheel smoke passed. The
+annotated `v0.5.3` tag, main/tag pushes and
+[GitHub Release v0.5.3](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.5.3) are complete.
+Exactly two release assets are attached and their authoritative SHA-256 digests
+match the final validated artifacts (SPEC §24.19). Post-release documentation
+closeout is a separate change to documentation and its static status assertion
+after the tag; the tag remains on the release HEAD.
+
+Scoped normal-Chrome fresh handoff/navigation, popup recovery and pre-freeze
+termination/slot release were live-verified. The two selected current-access
+paths yielded no target PDF; actual v0.5.3 target-PDF staging and Zotero
+registration remain unverified. EBSCO final action, eligible XMU full-text
+routing, post-freeze close and manual challenge continuation were not
+live-exercised; `HUMAN_VERIFICATION_NOT_PRESENT` (SPEC §38.13). Institutional
+authentication remains manual in the same claimed task tab; proactive/automatic
+authentication remains future scope. Historical evidence below remains tied to
+its original release baseline.
+
+### Historical v0.5.2 release and evidence
+
+**v0.5.2 was released and the latest completed baseline at its closeout**, with Python package
 metadata and Provider User-Agent identities **0.5.2**. It implements the DOI-first
 contract in SPEC §37. A0–A5 implementation, independent stage reviews, final
 integration audit and release-preparation review are complete. The annotated tag,
@@ -19,18 +47,6 @@ The separate final clean-export full validation was explicitly skipped by user
 choice. Prior implementation/final-audit/prepared-tree evidence and release
 artifact-integrity checks remain distinct. No new v0.5.2 live browser/Zotero
 verification is claimed; historical v0.5.1 evidence does not establish it.
-
-### Current v0.5.3 release preparation — unreleased
-
-The reviewed Browser Companion v2 implementation is committed at
-`21547260157f121a1efd2a5e8f930fad5f26959f` (`Implement v0.5.3 Browser Companion v2`).
-The prepared source uses Python package metadata and OpenAlex/Crossref Provider
-User-Agent identities **0.5.3**; the independent companion manifest remains
-**0.1.0**. v0.5.2 remains the latest RELEASED/completed baseline; v0.5.3 is
-unreleased. Release preparation is prepared and validated (SPEC §24.19).
-Independent release-preparation review and the preparation commit remain pending, as do the
-release transaction, tag, pushes and GitHub Release (SPEC §24.19).
-Scoped live evidence and residual boundaries remain as recorded in §38.13.
 
 ### Historical v0.5.1 release and live evidence
 
@@ -165,20 +181,20 @@ Paper Markdown remains the durable workflow state. The GUI does not add a
 workflow/execution database, persistent run history, heartbeat, SSE, WebSocket,
 queue, or another source of Paper decision state.
 
-### Add PDF to Zotero — current v0.5.3 development workflow
+### Add PDF to Zotero — current v0.5.3 workflow
 
 The current source browser/acquisition lifecycle follows SPEC §38 for
-**v0.5.3 development**. Unaffected DOI-first identity, Provider, Paper,
+**v0.5.3**. Unaffected DOI-first identity, Provider, Paper,
 single-manifestation and Zotero parent behavior remain under §37; unaffected
 staging, authorization, writer, cancellation and partial-write safety remain
-under §36. The latest RELEASED/completed baseline remains **v0.5.2**;
-prepared source package/Provider identities are **0.5.3**. The companion remains
-**0.1.0**, installed from the source repository. Implementation is committed and
-automated acceptance is complete; scoped live normal-Chrome
+under §36. The latest RELEASED/completed baseline is **v0.5.3**, with
+package/Provider identities **0.5.3**. The companion remains **0.1.0**, installed
+from the source repository. Implementation, independent reviews, automated
+acceptance, final exact-release-HEAD validation and the release transaction are
+complete (SPEC §24.19); scoped live normal-Chrome
 handoff/navigation/termination passed. Actual v0.5.3 target-PDF staging and
 Zotero registration remain unverified; the evidence boundaries are recorded in
-SPEC §38.13. Release preparation is prepared and validated; independent
-preparation review/commit and release/tag/push/GitHub Release remain pending.
+SPEC §38.13.
 Historical v0.5.1 live verification below remains historical.
 
 1. **Keep** a Paper and use **Copy DOI** in Kept detail.
