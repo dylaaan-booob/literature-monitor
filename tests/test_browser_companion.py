@@ -329,7 +329,7 @@ def test_installation_and_guidance_are_truthful():
                  'https://doi.org/<normalized-doi>', 'PUBLISHER_EXHAUSTED',
                  'publisher 已明确 exhausted', 'recordEvidence', 'ebsco_pdf_action',
                  '10 秒', '120 秒', 'navigation epoch', 'stage_download', 'StagedPdf',
-                 'v0.5.1 是最新已发布版本', 'v0.5.2 development',
+                 'v0.5.2 是最新已发布版本', 'v0.5.2 released',
                  'Python package metadata 为 **0.5.2**',
                  '历史 v0.5.1 证据不建立 v0.5.2 live 验证'):
         assert term in README

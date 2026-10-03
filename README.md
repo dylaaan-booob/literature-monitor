@@ -6,24 +6,23 @@ secondary discovery and bibliographic evidence, consolidates provider evidence
 before local keyword filtering, canonicalizes retained DOI-bound papers,
 safely updates durable Paper and Author Markdown, and exports kept papers.
 
-## Current development and released baseline
+## Current released baseline
 
-This main-branch source checkout contains the **v0.5.2 development implementation**
-under SPEC §37. A0–A5 implementation and independent stage reviews are complete;
-the final independent integration audit is complete, with automated validation
-passing at the verified scope recorded in SPEC §37.10. This release-preparation
-tree uses Python package metadata and Provider User-Agent identities **0.5.2**
-(§24.18). v0.5.1 remains the latest released version; **v0.5.2 is unreleased**.
-Independent release-preparation review, its commit, final clean-export
-release-commit validation, and the release transaction remain pending.
-No v0.5.2 live browser/Zotero verification is claimed; historical v0.5.1 evidence
-does not establish it.
-An installed v0.5.1 distribution follows its released contract, while the current
-source instructions below follow §37.
+**v0.5.2 is released and the latest completed baseline**, with Python package
+metadata and Provider User-Agent identities **0.5.2**. It implements the DOI-first
+contract in SPEC §37. A0–A5 implementation, independent stage reviews, final
+integration audit and release-preparation review are complete. The annotated tag,
+main/tag pushes and [GitHub Release v0.5.2](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.5.2)
+are complete at release HEAD `d180c18` (SPEC §24.18).
+
+The separate final clean-export full validation was explicitly skipped by user
+choice. Prior implementation/final-audit/prepared-tree evidence and release
+artifact-integrity checks remain distinct. No new v0.5.2 live browser/Zotero
+verification is claimed; historical v0.5.1 evidence does not establish it.
 
 ### Historical v0.5.1 release and live evidence
 
-v0.5.1 is the latest released and completed baseline, with
+v0.5.1 was the released and completed baseline at its closeout, with
 package metadata `0.5.1` and normal-Chrome PDF acquisition governed by SPEC §36. A0–A9
 implementation, independent final-audit Fix 1–3 review, full automated validation,
 and scoped live acquisition and actual Zotero file registration verification
@@ -154,12 +153,12 @@ Paper Markdown remains the durable workflow state. The GUI does not add a
 workflow/execution database, persistent run history, heartbeat, SSE, WebSocket,
 queue, or another source of Paper decision state.
 
-### Add PDF to Zotero — current v0.5.2 development workflow
+### Add PDF to Zotero — current v0.5.2 workflow
 
 This section describes the current source implementation under SPEC §37.
-The latest released baseline remains **v0.5.1**; this prepared source uses
-package metadata **0.5.2** and remains unreleased;
-its historical live verification is recorded separately below. The standalone
+The latest released baseline and package metadata are **v0.5.2 / 0.5.2**.
+Historical v0.5.1 live verification is recorded separately below and does not
+establish new v0.5.2 live verification. The standalone
 browser companion is installed from the source repository.
 
 1. **Keep** a Paper and use **Copy DOI** in Kept detail.
