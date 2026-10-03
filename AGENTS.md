@@ -4,7 +4,7 @@
 
 - This file applies only to this repository and its descendants.
 - Global `AGENTS.md` instructions still govern general communication, autonomy, safety, and engineering practice. This file supplements them with project-specific constraints; it does not replace or restate them.
-- `SPEC.md` is the source of truth for product behavior, MVP scope, acceptance criteria, and the boundary between system-managed and human-managed data. If code, documentation, plans, or assumptions conflict with `SPEC.md`, follow `SPEC.md` unless the user explicitly changes the specification.
+- `SPEC.md` is the source of truth for product behavior, MVP scope, acceptance criteria, and the boundary between system-managed and human-managed data. §37 is the current v0.5.2 development contract; follow its explicit supersede boundary while preserving historical release evidence. If code, documentation, plans, or assumptions conflict with `SPEC.md`, follow `SPEC.md` unless the user explicitly changes the specification.
 - Do not duplicate the full specification in code comments or secondary planning documents. Reference the relevant `SPEC.md` section instead.
 
 ## Scope and product constraints
@@ -13,15 +13,16 @@
 - `list.md` is the source of truth for the supplied venue whitelist. For the MVP, only its Journals section is in scope; the Conferences section must not be implemented or treated as discovery input.
 - Keep discovery/retrieval journal-whitelist-first, with ISSN/EISSN as the preferred venue identity. OpenAlex is the primary discovery provider; Crossref is the secondary discovery and bibliographic-evidence provider. Semantic Scholar is not part of the supported production retrieval pipeline. Global keyword-first discovery and publisher scraping remain excluded.
 - Isolate provider failures so successful evidence from other providers, journals, or requests remains usable. Consolidate available provider evidence before local keyword filtering decides inclusion.
-- Preserve the internal UUID as canonical identity, use conservative evidence-based deduplication, retain discovered versions, and never invent missing metadata.
+- Use normalized DOI as the only supported canonical work identity under `SPEC.md` §37. Provider records contribute metadata/provenance to one Paper per DOI; do not merge different DOIs or maintain persistent manifestation/version state. Preserve workspace-local UUIDs for durable Paper references and never invent missing metadata.
 - Treat Paper Markdown as durable user-facing workflow state. Preserve human-controlled status, unknown frontmatter fields, notes, and other human-authored sections during reruns.
 - Keep disposable caches and indexes reconstructible. Do not introduce a mandatory second source of truth for workflow state.
-- Do not add excluded MVP features such as conference monitoring, publisher scraping, global keyword-first discovery, LLM ranking or summarization, a GUI/web/Obsidian plugin, PDF acquisition, or custom Zotero ingestion unless the user first changes scope.
+- Do not add features outside the current `SPEC.md` scope, such as conference monitoring, publisher scraping, global keyword-first discovery, LLM ranking or summarization, an Obsidian plugin, or custom bibliographic Zotero ingestion. Keep the existing local Web adapter and user-triggered PDF acquisition within their specified boundaries.
 - Do not freeze programming language, package layout, CLI names, cache format, export format, or other non-blocking implementation details before the task that requires that decision.
 
 ## Engineering constraints
 
 - Prefer the smallest clear implementation that satisfies the current `SPEC.md` acceptance criteria. Add dependencies, abstractions, retries, persistence, or compatibility layers only when a current requirement or observed failure justifies them.
+- Follow §37's disposable-data boundary for older Paper and Provider-state schemas; do not add Paper schema migration/legacy repair or row-preserving Provider-state v1/v2 migration.
 - Make metadata updates idempotent and isolate partial source failures so successful records remain usable.
 - Keep machine-managed writes narrowly targeted and explicitly test preservation of user-managed Markdown content whenever that behavior is touched.
 - Respect upstream licenses and notices. Do not copy code whose license is absent or incompatible with the repository's chosen licensing obligations.

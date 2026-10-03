@@ -16,7 +16,6 @@ from literature_monitor.application.candidate_eligibility import (
     scope_dispute_diagnostic,
 )
 from literature_monitor.application.crossref_retrieval import CrossrefRetrieval
-from literature_monitor.application.openalex_retrieval import hydrate_retained_openalex_versions
 from literature_monitor.application.provider_state import (
     STATE_FILENAME, ProviderState, ProviderStateStatus,
     read_provider_state, replace_invalid_provider_state, update_provider_state,
@@ -164,8 +163,6 @@ class ProviderStateUsage:
     crossref_reused: int = 0
     crossref_refreshed: int = 0
     crossref_new: int = 0
-    openalex_versions_reused: int = 0
-    openalex_versions_hydrated: int = 0
 
 
 @dataclass(frozen=True)
@@ -768,19 +765,6 @@ def _execute_canonical_core(
                 detail=f"{len(retained_clusters)} matched clusters",
             ),
         )
-        retained_refs = {item.provenance for item in retained_evidence if item.provenance.provider == "openalex"}
-        versions = hydrate_retained_openalex_versions(
-            openalex_client,
-            tuple(record for record in openalex.records if record.provenance in retained_refs),
-            version_state=historical_state.openalex_versions,
-            progress_callback=progress_callback,
-        )
-        hints = {record.provenance: record.to_evidence().version_hints for record in versions.records}
-        retained_evidence = tuple(
-            item.model_copy(update={"version_hints": hints[item.provenance]})
-            if item.provenance in hints else item for item in retained_evidence
-        )
-        issues.extend(_openalex_issue(issue) for issue in versions.issues)
         crossref_kinds = {
             doi: kind
             for result in (discovery, retrieval)
@@ -792,8 +776,6 @@ def _execute_canonical_core(
             crossref_reused=sum(kind == "reused" for kind in crossref_kinds.values()),
             crossref_refreshed=sum(kind == "refreshed" for kind in crossref_kinds.values()),
             crossref_new=sum(kind == "new" for kind in crossref_kinds.values()),
-            openalex_versions_reused=len(set(versions.reused_work_ids)),
-            openalex_versions_hydrated=len(set(versions.hydrated_work_ids)),
         )
         canonicalization = canonicalize_records(retained_evidence)
         _emit_activity(
@@ -826,7 +808,6 @@ def _execute_canonical_core(
                 len(openalex.issues)
                 + len(crossref.issues)
                 + len(retrieval.issues)
-                + len(versions.issues)
             ),
         )
         return _CanonicalCoreResult(
@@ -839,7 +820,7 @@ def _execute_canonical_core(
             outcome=_run_outcome(warnings, errors),
             statistics=statistics,
             coverage=coverage,
-            pending_state=ProviderState(crossref_execution.pending_changes, versions.pending_changes),
+            pending_state=ProviderState(crossref_records=crossref_execution.pending_changes),
             state_usage=usage,
             diagnostics=tuple(diagnostics),
         )

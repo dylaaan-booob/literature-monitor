@@ -31,7 +31,6 @@ from literature_monitor.models import (
     DomainModel,
     EvidenceDate,
     EvidenceDateKind,
-    EvidenceRelation,
     ExternalIds,
     MetadataSource,
     NonEmptyStr,
@@ -147,15 +146,6 @@ class CrossrefWorkRecord(DomainModel):
                     day=item.day,
                 )
                 for item in self.dates
-            ),
-            relations=tuple(
-                EvidenceRelation(
-                    relation_type=item.relation_type,
-                    id_type=item.id_type,
-                    identifier=item.identifier,
-                    asserted_by=item.asserted_by,
-                )
-                for item in self.relations
             ),
             supplements=supplements,
         )

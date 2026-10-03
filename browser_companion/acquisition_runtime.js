@@ -14,7 +14,7 @@ const BrowserAcquisitionRuntime = (() => {
     const snapshots = new WeakMap();
     let mutationTail = Promise.resolve();
     const MUTABLE_FIELDS = ["route", "publisherState", "navigationUrl", "previousUrl", "navigationTime",
-      "category", "choices", "candidate", "ambiguous", "versionEvidence", "userArm"];
+      "category", "choices", "candidate", "ambiguous", "recordEvidence", "userArm"];
     async function context() {
       const owner = await loadAuthority();
       const value = (await chrome.storage.session.get(KEY))[KEY];
@@ -24,14 +24,14 @@ const BrowserAcquisitionRuntime = (() => {
       const record = (await chrome.storage.session.get(RECORD_KEY))[RECORD_KEY];
       if (record?.taskId === value.taskId && record.tabId === value.tabId && record.origin === value.origin &&
           record.evidence.recordUrl === value.navigationUrl) {
-        value.versionEvidence = record.evidence;
+        value.recordEvidence = record.evidence;
         const arm = value.userArm || value.candidate?.userArm;
         if (verifiedProviderAction(value, record.providerAction, arm, record.evidence)) {
           value.providerAction = record.providerAction;
           if (value.candidate?.userArm) value.candidate.providerAction = record.providerAction;
         }
         if (value.candidate?.userArm && value.candidate.navigationUrl === record.evidence.recordUrl) {
-          value.candidate.versionEvidence = record.evidence;
+          value.candidate.recordEvidence = record.evidence;
         }
       }
       if (overlappingDownload) value.ambiguous = true;
@@ -66,7 +66,7 @@ const BrowserAcquisitionRuntime = (() => {
         const next = before ? latest : structuredClone(ctx);
         const moved = before && next.navigationUrl !== before.navigationUrl;
         if (moved && !Object.hasOwn(changes, "navigationUrl") &&
-            ["candidate", "versionEvidence", "userArm"].some(key => Object.hasOwn(changes, key))) return false;
+            ["candidate", "recordEvidence", "userArm"].some(key => Object.hasOwn(changes, key))) return false;
         // A browser navigation may have advanced again while a commanded
         // tabs.update was being accepted. Do not restore its earlier URL.
         if (navigationAccepted && moved && next.navigationUrl !== ctx.navigationUrl) {
@@ -120,7 +120,7 @@ const BrowserAcquisitionRuntime = (() => {
       const ctx = {taskId: owner.taskId, tabId: owner.tabId, origin: owner.origin, plan,
         route: "direct", publisherState: "accessible", navigationUrl: plan.direct_url,
         previousUrl: "", navigationTime: Date.now(), category: "", choices: [],
-        candidate: null, ambiguous: false, versionEvidence: null, userArm: null};
+        candidate: null, ambiguous: false, recordEvidence: null, userArm: null};
       return navigate(ctx, plan.direct_url);
     }
 
@@ -134,11 +134,8 @@ const BrowserAcquisitionRuntime = (() => {
         if (!await save(ctx)) return false;
         return emit(ctx, "publisher_state", {state: status});
       }
-      if (ctx.plan.acquisition_class !== "PUBLISHED") {
-        return emit(ctx, "browser_path_failure", {reason: "exact_manifestation_unavailable"});
-      }
       ctx.route = "xmu";
-      ctx.versionEvidence = null;
+      ctx.recordEvidence = null;
       if (!await navigate(ctx, AcquisitionProtocol.resolverUrl(ctx.plan.doi))) return false;
       return emit(ctx, "publisher_state", {state: status});
     }
@@ -151,26 +148,9 @@ const BrowserAcquisitionRuntime = (() => {
       return true;
     }
 
-    async function recordVersionEvidence(taskId, value) {
-      const ctx = await context();
-      if (!ctx || ctx.taskId !== taskId || !AcquisitionProtocol.versionEvidence(value) ||
-          !value.manifestation || Object.keys(value.manifestation).length !== 5 ||
-          !["source", "identifier", "kind", "url", "date"].every(key => value.manifestation[key] === ctx.plan.target_version[key]) ||
-          (value.observed_doi !== null && value.observed_doi !== ctx.plan.doi)) return false;
-      // Internal boundary: only validated provider evidence supplies labels.
-      // Frozen kind, MIME and Full Text category are not labels.
-      if (value.recordUrl) {
-        // Keep the record observation separate from download state so an
-        // onCreated interleave cannot overwrite either side's pending evidence.
-        return storeRecordEvidence(ctx, value);
-      }
-      ctx.versionEvidence = structuredClone(value);
-      return save(ctx);
-    }
-
     function sameTaskRecord(ctx, url) {
       return ctx.route === "xmu" && ctx.publisherState === "exhausted" &&
-        ctx.plan.acquisition_class === "PUBLISHED" && ["FullText", "SmartLinks"].includes(ctx.category) &&
+        ["FullText", "SmartLinks"].includes(ctx.category) &&
         AcquisitionProtocol.sameEbscoRecordPage(ctx.navigationUrl, url);
     }
 
@@ -183,16 +163,13 @@ const BrowserAcquisitionRuntime = (() => {
         Number.isSafeInteger(proof.actionTime) && proof.armedAt >= ctx.navigationTime &&
         proof.actionTime >= proof.armedAt && proof.actionTime - proof.armedAt <= ARM_WINDOW_MS &&
         proof.actionTime <= Date.now() && evidence?.recordUrl === proof.recordUrl &&
-        evidence.actionTime === proof.actionTime && evidence.observed_doi === ctx.plan.doi &&
-        JSON.stringify(evidence.version_labels) === '["published"]' &&
-        AcquisitionProtocol.versionEvidence(evidence) &&
-        ["source", "identifier", "kind", "url", "date"].every(key => evidence.manifestation?.[key] === ctx.plan.target_version[key]);
+        evidence.actionTime === proof.actionTime && evidence.observed_doi === ctx.plan.doi;
     }
 
     async function ebscoMessage(message, sender) {
       const ctx = await context();
       if (!ctx || ctx.route !== "xmu" || ctx.publisherState !== "exhausted" ||
-          ctx.plan.acquisition_class !== "PUBLISHED" || !["FullText", "SmartLinks"].includes(ctx.category) ||
+          !["FullText", "SmartLinks"].includes(ctx.category) ||
           ctx.ambiguous || sender.id !== chrome.runtime.id || sender.frameId !== 0 ||
           sender.tab?.id !== ctx.tabId || !sameTaskRecord(ctx, sender.url)) return {ok: false};
       const tab = await chrome.tabs.get(ctx.tabId);
@@ -209,13 +186,9 @@ const BrowserAcquisitionRuntime = (() => {
           !arm || arm.navigationUrl !== ctx.navigationUrl || !Number.isSafeInteger(message.action_time) ||
           message.action_time < arm.armedAt || message.action_time - arm.armedAt > ARM_WINDOW_MS ||
           message.action_time > Date.now() || Date.now() - message.action_time > ARM_WINDOW_MS ||
-          !record || Object.keys(record).sort().join(",") !== "document_type,doi,issue,journal,volume,year" ||
-          record.doi !== ctx.plan.doi || record.document_type !== "Article" ||
-          typeof record.journal !== "string" || !record.journal.trim() || record.journal.length > 200 ||
-          !Number.isSafeInteger(record.year) || record.year < 1900 || record.year > 2099 ||
-          !/^\d{1,4}$/.test(record.volume) || !/^\d{1,4}$/.test(record.issue)) return {ok: false};
-      const evidence = {manifestation: ctx.plan.target_version, observed_doi: record.doi,
-        version_labels: ["published"], recordUrl: ctx.navigationUrl, actionTime: message.action_time};
+          !record || Object.keys(record).join(",") !== "doi" ||
+          record.doi !== ctx.plan.doi) return {ok: false};
+      const evidence = {observed_doi: record.doi, recordUrl: ctx.navigationUrl, actionTime: message.action_time};
       const providerAction = {taskId: ctx.taskId, tabId: ctx.tabId, origin: ctx.origin,
         doi: ctx.plan.doi, recordUrl: ctx.navigationUrl, navigationTime: ctx.navigationTime,
         armedAt: arm.armedAt, actionTime: message.action_time};
@@ -225,7 +198,7 @@ const BrowserAcquisitionRuntime = (() => {
       const current = await context();
       if (!current || current.taskId !== ctx.taskId || current.tabId !== ctx.tabId ||
           !verifiedProviderAction(current, providerAction, current.userArm || current.candidate?.userArm,
-            current.versionEvidence)) return {ok: false};
+            current.recordEvidence)) return {ok: false};
       if (current.candidate?.userArm) {
         await completed(current.candidate.id);
       }
@@ -234,7 +207,7 @@ const BrowserAcquisitionRuntime = (() => {
 
     async function resolverMessage(message, sender) {
       const ctx = await context();
-      if (!ctx || ctx.route !== "xmu" || ctx.plan.acquisition_class !== "PUBLISHED" ||
+      if (!ctx || ctx.route !== "xmu" ||
           sender.id !== chrome.runtime.id || sender.frameId !== 0 || sender.tab?.id !== ctx.tabId ||
           !AcquisitionProtocol.resolverContext(sender.url, ctx.plan.doi)) return {ok: false};
       if (message.type === "resolver_context") return {task_id: ctx.taskId, doi: ctx.plan.doi};
@@ -278,7 +251,7 @@ const BrowserAcquisitionRuntime = (() => {
           !Number.isSafeInteger(choiceId) || choiceId < 0 || !ctx.choices[choiceId] || ctx.candidate) return false;
       const choice = ctx.choices[choiceId];
       ctx.category = choice.category;
-      ctx.versionEvidence = null;
+      ctx.recordEvidence = null;
       return navigate(ctx, choice.target);
     }
 
@@ -293,7 +266,7 @@ const BrowserAcquisitionRuntime = (() => {
       if (url === ctx.navigationUrl) {
         if (ctx.route === "xmu") {
           ctx.navigationTime = Date.now();
-          ctx.versionEvidence = null;
+          ctx.recordEvidence = null;
           ctx.userArm = null;
           await save(ctx);
         }
@@ -302,7 +275,7 @@ const BrowserAcquisitionRuntime = (() => {
       ctx.previousUrl = ctx.navigationUrl;
       ctx.navigationUrl = url;
       ctx.navigationTime = Date.now();
-      ctx.versionEvidence = null; // Evidence never carries across a new document.
+      ctx.recordEvidence = null; // Evidence never carries across a new document.
       ctx.userArm = null;
       if (!await save(ctx)) return;
       await emit(ctx, "navigation_state", {identity: AcquisitionProtocol.sanitizedIdentity(url), route: ctx.route});
@@ -318,10 +291,10 @@ const BrowserAcquisitionRuntime = (() => {
       const liveTab = await chrome.tabs.get(ctx.tabId);
       if (liveTab.id !== ctx.tabId || liveTab.incognito || (liveTab.url !== ctx.navigationUrl && !sameTaskRecord(ctx, liveTab.url))) return false;
       // A human toolbar gesture opens one short attribution window for a
-      // publisher/PDF-viewer download; it does not invent version evidence.
+      // publisher/PDF-viewer download.
       if (ctx.route === "xmu") {
         await chrome.storage.session.remove(RECORD_KEY);
-        ctx.versionEvidence = null;
+        ctx.recordEvidence = null;
       }
       ctx.userArm = {navigationUrl: ctx.navigationUrl, armedAt: Date.now()};
       if (!await save(ctx)) return false;
@@ -345,7 +318,7 @@ const BrowserAcquisitionRuntime = (() => {
     }
 
     async function uniqueTaskSource(ctx, item, arm = ctx.userArm, armedOnly = false,
-        providerAction = ctx.providerAction, evidence = ctx.versionEvidence) {
+        providerAction = ctx.providerAction, evidence = ctx.recordEvidence) {
       const started = Date.parse(item.startTime);
       const transport = AcquisitionProtocol.downloadTransport(item);
       if (!Number.isFinite(started) ||
@@ -389,7 +362,7 @@ const BrowserAcquisitionRuntime = (() => {
       // A second start is checked against the first candidate's frozen proof,
       // even after its live arm has been consumed.
       const proof = ctx.candidate ? await uniqueTaskSource(ctx, item, ctx.candidate.userArm,
-        Boolean(ctx.candidate.userArm), ctx.candidate.providerAction, ctx.candidate.versionEvidence)
+        Boolean(ctx.candidate.userArm), ctx.candidate.providerAction, ctx.candidate.recordEvidence)
         : await uniqueTaskSource(ctx, item);
       if (!proof) {
         // An ambiguous/unattributable start must not leave a reusable arm.
@@ -407,7 +380,7 @@ const BrowserAcquisitionRuntime = (() => {
         return;
       }
       ctx.candidate = {id: item.id, ownership: "task_navigation", navigationUrl: ctx.navigationUrl,
-        navigationTime: proof.navigationTime, userArm: proof.userArm, versionEvidence: ctx.versionEvidence,
+        navigationTime: proof.navigationTime, userArm: proof.userArm, recordEvidence: ctx.recordEvidence,
         providerAction: proof.providerAction};
       ctx.userArm = null;
       if (await save(ctx)) await completed(item.id);
@@ -421,7 +394,7 @@ const BrowserAcquisitionRuntime = (() => {
       if (tab.incognito || tab.url !== ctx.navigationUrl) return false;
       // Reservation precedes the Chrome call; never set cookies, headers or path.
       ctx.candidate = {id: null, ownership: "extension_id", navigationUrl: ctx.navigationUrl,
-        navigationTime: Date.now(), versionEvidence: ctx.versionEvidence};
+        navigationTime: Date.now(), recordEvidence: ctx.recordEvidence};
       ctx.userArm = null;
       if (!await save(ctx)) return false;
       try {
@@ -466,33 +439,24 @@ const BrowserAcquisitionRuntime = (() => {
         if (candidate.userArm && ctx.navigationUrl !== candidate.navigationUrl) return;
         if (!await uniqueTaskSource({...ctx, navigationUrl: candidate.navigationUrl,
             navigationTime: candidate.providerAction ? ctx.navigationTime : candidate.navigationTime},
-            item, candidate.userArm, Boolean(candidate.userArm), candidate.providerAction, candidate.versionEvidence)) return;
+            item, candidate.userArm, Boolean(candidate.userArm), candidate.providerAction, candidate.recordEvidence)) return;
       }
       const transport = AcquisitionProtocol.downloadTransport(item);
       if (!transport || (transport.kind === "blob" && !candidate.userArm) || typeof item.filename !== "string" ||
           !item.filename.startsWith("/") || item.filename.length > 512 ||
           !Number.isSafeInteger(item.fileSize) || item.fileSize <= 0 ||
           !Number.isSafeInteger(item.totalBytes) || item.totalBytes < 0) return;
-      let versionEvidence = candidate.versionEvidence;
+      const recordEvidence = candidate.recordEvidence;
       if (transport.kind === "blob" && ctx.route === "xmu") {
         // A blob PDF action must come from this exact visible record, after
         // its explicit arm and before Chrome's download start.
-        if (!versionEvidence?.recordUrl) return;
+        if (!recordEvidence?.recordUrl) return;
         const started = Date.parse(item.startTime);
-        if (versionEvidence.recordUrl !== candidate.navigationUrl ||
-            !Number.isSafeInteger(versionEvidence.actionTime) ||
-            versionEvidence.actionTime < candidate.userArm.armedAt ||
-            versionEvidence.actionTime > started || started - versionEvidence.actionTime >
+        if (recordEvidence.recordUrl !== candidate.navigationUrl ||
+            !Number.isSafeInteger(recordEvidence.actionTime) ||
+            recordEvidence.actionTime < candidate.userArm.armedAt ||
+            recordEvidence.actionTime > started || started - recordEvidence.actionTime >
               (candidate.providerAction ? PROVIDER_PREPARATION_WINDOW_MS : ARM_WINDOW_MS)) return;
-      }
-      const frozen = ctx.plan.target_version;
-      // Exact frozen file identity plus its explicit typed metadata is positive
-      // manifestation evidence. A landing/referrer relation alone cannot invent
-      // a label, and explicit conflicting artifact evidence always takes priority.
-      if (!versionEvidence && frozen.url && candidate.navigationUrl === frozen.url &&
-          [item.url, item.finalUrl].includes(frozen.url)) {
-        const label = frozen.kind === "accepted_manuscript" ? "aam" : frozen.kind;
-        versionEvidence = {manifestation: frozen, version_labels: [label], observed_doi: null};
       }
       // Verified same-record SPA and EBSCO blob root referrers use the task's stable identity;
       // generic HTTP referrers retain byte equality and their original value.
@@ -503,15 +467,13 @@ const BrowserAcquisitionRuntime = (() => {
         navigation_url: candidate.navigationUrl, path: item.filename, url: transport.url,
         final_url: transport.finalUrl, referrer, mime: item.mime.slice(0, 128),
         total_bytes: item.totalBytes, file_size: item.fileSize, state: "complete", category: ctx.category,
-        version_labels: versionEvidence?.version_labels || [],
-        manifestation: versionEvidence?.manifestation || null,
-        observed_doi: versionEvidence?.observed_doi || null,
+        observed_doi: recordEvidence?.observed_doi || null,
         navigation_time: candidate.navigationTime, start_time: Date.parse(item.startTime)};
       if (transport.kind === "blob") {
         payload.transport_kind = "blob";
         payload.download_origin = transport.origin;
         payload.ownership = "user_arm";
-        payload.provider_record_url = versionEvidence?.recordUrl || null;
+        payload.provider_record_url = recordEvidence?.recordUrl || null;
       }
       if (candidate.providerAction) {
         payload.attribution = "ebsco_pdf_action";
@@ -538,8 +500,8 @@ const BrowserAcquisitionRuntime = (() => {
     async function taskUi(taskId) {
       const ctx = await context();
       if (!ctx || ctx.taskId !== taskId) return null;
-      return {task_id: ctx.taskId, acquisition_class: ctx.plan.acquisition_class,
-        can_fallback: ctx.route === "direct" && ctx.plan.acquisition_class === "PUBLISHED" && !ctx.candidate && !ctx.ambiguous,
+      return {task_id: ctx.taskId,
+        can_fallback: ctx.route === "direct" && !ctx.candidate && !ctx.ambiguous,
         choices: ctx.choices.map((c, id) => ({id, category: c.category, label: c.label})),
         candidate: Boolean(ctx.candidate), ambiguous: ctx.ambiguous};
     }
@@ -554,7 +516,7 @@ const BrowserAcquisitionRuntime = (() => {
       if (action === "check") return checkDownload(taskId);
       if (ctx.candidate) return false;
       if (action === "fallback") {
-        if (ctx.route !== "direct" || ctx.plan.acquisition_class !== "PUBLISHED") return false;
+        if (ctx.route !== "direct") return false;
         return emit(ctx, "publisher_fallback_request", {});
       }
       if (action === "choose") {
@@ -577,7 +539,6 @@ const BrowserAcquisitionRuntime = (() => {
       const ctx = await context();
       if (!ctx || ctx.taskId !== taskId) return false;
       if (value.type === "PUBLISHER_EXHAUSTED") {
-        if (ctx.plan.acquisition_class !== "PUBLISHED") return false;
         return publisherStatus(taskId, "exhausted");
       }
       if (value.type === "CHOOSE") return choose(taskId, value.choice_id);
@@ -622,7 +583,7 @@ const BrowserAcquisitionRuntime = (() => {
     };
     return Object.freeze({start: command(start), publisherStatus: command(publisherStatus),
       choose: command(choose), download: command(download), checkDownload: command(checkDownload),
-      recordVersionEvidence: command(recordVersionEvidence), taskUi: command(taskUi),
+      taskUi: command(taskUi),
       userAction: command(userAction), executeCommand: command(executeCommand)});
   }
 

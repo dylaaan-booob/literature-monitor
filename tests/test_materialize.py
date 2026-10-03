@@ -14,6 +14,8 @@ from literature_monitor.markdown_state import (
     PaperJournalAttributionState,
     merge_paper_state,
     parse_paper_state,
+    rewrite_managed_body,
+    serialize_document,
 )
 from literature_monitor.materialize import (
     MISSING_ABSTRACT,
@@ -29,9 +31,6 @@ from literature_monitor.models import (
     CanonicalPaper,
     ExternalIds,
     MetadataSource,
-    PaperVersion,
-    VersionKind,
-    VersionRef,
     Workflow,
     WorkflowStatus,
 )
@@ -49,13 +48,6 @@ def paper(
     authors: tuple[Author, ...] = (Author(name="Ada Author"),),
     abstract: str | None = "Complete abstract with every original detail.",
 ) -> CanonicalPaper:
-    version = PaperVersion(
-        source="doi",
-        identifier="10.5555/example",
-        kind=VersionKind.JOURNAL_FINAL,
-        url="https://doi.org/10.5555/example",
-        date=date(2026, 9, 17),
-    )
     return CanonicalPaper(
         id=UUID(identifier),
         metadata=CanonicalMetadata(
@@ -75,7 +67,6 @@ def paper(
             }
         ),
         authors=authors,
-        versions=(version,),
         sources=(
             MetadataSource(
                 provider="openalex",
@@ -87,43 +78,29 @@ def paper(
             status=WorkflowStatus.CANDIDATE,
             discovered_at=NOW,
         ),
-        preferred_version=VersionRef(
-            source=version.source,
-            identifier=version.identifier,
-        ),
     )
 
 
-def manifestation(
+def author_paper(
     identifier: str,
     *,
     title: str,
-    kind: VersionKind,
-    version_source: str,
-    version_identifier: str,
-    version_date: date | None,
+    publication_date: date | None,
     external_doi: str | None = None,
     author: Author = Author(name="Ada Author"),
     shared_record_id: str = "shared-work",
 ) -> CanonicalPaper:
-    version = PaperVersion(
-        source=version_source,
-        identifier=version_identifier,
-        kind=kind,
-        date=version_date,
-    )
     return CanonicalPaper(
         id=UUID(identifier),
         metadata=CanonicalMetadata(
             title=title,
             journal="Biometrics",
-            publication_date=version_date,
+            publication_date=publication_date,
             abstract=f"{title} abstract",
             author_keywords=(title.casefold(),),
         ),
-        external_ids=ExternalIds(doi=external_doi),
+        external_ids=ExternalIds(doi=external_doi or "10.5555/author"),
         authors=(author,),
-        versions=(version,),
         sources=(
             MetadataSource(
                 provider="openalex",
@@ -132,10 +109,6 @@ def manifestation(
             ),
         ),
         workflow=Workflow(discovered_at=NOW),
-        preferred_version=VersionRef(
-            source=version.source,
-            identifier=version.identifier,
-        ),
     )
 
 
@@ -184,10 +157,8 @@ def test_materializes_complete_paper_and_minimal_author_notes(tmp_path: Path) ->
         "author_keywords",
         "status",
         "discovered_at",
-        "preferred_version",
         "zotero_key",
         "external_ids",
-        "versions",
         "sources",
     ]
     assert values["id"] == str(source.id)
@@ -203,16 +174,12 @@ def test_materializes_complete_paper_and_minimal_author_notes(tmp_path: Path) ->
     assert values["author_keywords"] == ["statistics", "multiview"]
     assert values["status"] == "candidate"
     assert values["discovered_at"] == "2026-09-18T08:30:00Z"
-    assert values["preferred_version"] == {
-        "source": "doi",
-        "identifier": "10.5555/example",
-    }
     assert values["zotero_key"] is None
     assert values["external_ids"]["pmid"] == "12345678"  # type: ignore[index]
-    assert values["versions"] == [source.versions[0].model_dump(mode="json")]
+    assert "versions" not in values and "preferred_version" not in values
     assert values["sources"] == [source.sources[0].model_dump(mode="json")]
     assert source.metadata.abstract in contents
-    assert "## Versions\n\n- journal_final: doi 10.5555/example" in contents
+    assert "## Versions" not in contents
     assert "## Sources\n\n- openalex: https://openalex.org/W123" in contents
     assert contents.endswith("## Notes\n")
 
@@ -343,6 +310,7 @@ def test_missing_abstract_and_empty_summaries_are_explicit() -> None:
     source = CanonicalPaper(
         id=UUID("22345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
         metadata=CanonicalMetadata(title="No Abstract", journal="Biometrics"),
+        external_ids=ExternalIds(doi="10.5555/current"),
         authors=(Author(name="Ada Author"),),
         workflow=Workflow(discovered_at=NOW),
     )
@@ -353,7 +321,7 @@ def test_missing_abstract_and_empty_summaries_are_explicit() -> None:
     )
 
     assert f"## Abstract\n\n{MISSING_ABSTRACT}" in contents
-    assert "## Versions\n\n- None recorded." in contents
+    assert "## Versions" not in contents
     assert "## Sources\n\n- None recorded." in contents
 
 
@@ -369,7 +337,7 @@ def test_empty_canonical_abstract_is_preserved() -> None:
     )
 
     assert MISSING_ABSTRACT not in contents
-    assert "## Abstract\n\n\n\n## Versions" in contents
+    assert "## Abstract\n\n\n\n## Sources" in contents
 
 
 def test_renderer_rejects_author_stem_count_mismatch() -> None:
@@ -406,6 +374,10 @@ def test_stable_author_identities_are_reused_in_one_batch(tmp_path: Path) -> Non
         ),
     )
 
+    openalex_one = openalex_one.model_copy(update={"external_ids": ExternalIds(doi="10.5555/openalex_one")})
+    openalex_two = openalex_two.model_copy(update={"external_ids": ExternalIds(doi="10.5555/openalex_two")})
+    orcid_one = orcid_one.model_copy(update={"external_ids": ExternalIds(doi="10.5555/orcid_one")})
+    orcid_two = orcid_two.model_copy(update={"external_ids": ExternalIds(doi="10.5555/orcid_two")})
     result = materialize_papers(
         (openalex_one, openalex_two, orcid_one, orcid_two), tmp_path
     )
@@ -437,6 +409,8 @@ def test_invalid_orcid_and_name_only_authors_use_full_paper_uuid(
         authors=(Author(name="Same Name"),),
     )
 
+    first = first.model_copy(update={"external_ids": ExternalIds(doi="10.5555/first")})
+    second = second.model_copy(update={"external_ids": ExternalIds(doi="10.5555/second")})
     result = materialize_papers((first, second), tmp_path)
 
     assert {path.name for path in result.created_authors} == {
@@ -463,6 +437,8 @@ def test_paper_collision_context_does_not_change_name_only_author_path(
         title="Second Collision",
     )
 
+    first = first.model_copy(update={"external_ids": ExternalIds(doi="10.5555/first")})
+    second = second.model_copy(update={"external_ids": ExternalIds(doi="10.5555/second")})
     result = materialize_papers((first, second), tmp_path)
 
     assert {path.name for path in result.created_papers} == {
@@ -567,6 +543,8 @@ def test_failed_author_blocks_dependent_paper_but_not_unrelated_paper(
     failed_target.mkdir(parents=True)
 
     progress_events: list[ProgressEvent] = []
+    blocked = blocked.model_copy(update={"external_ids": ExternalIds(doi="10.5555/blocked")})
+    unrelated = unrelated.model_copy(update={"external_ids": ExternalIds(doi="10.5555/unrelated")})
     result = materialize_papers(
         (blocked, unrelated),
         tmp_path,
@@ -620,6 +598,8 @@ def test_paper_write_failure_keeps_authors_and_other_papers(tmp_path: Path) -> N
     )
     failed_target.mkdir(parents=True)
 
+    blocked = blocked.model_copy(update={"external_ids": ExternalIds(doi="10.5555/blocked")})
+    successful = successful.model_copy(update={"external_ids": ExternalIds(doi="10.5555/successful")})
     result = materialize_papers((blocked, successful), tmp_path)
 
     assert {path.name for path in result.created_authors} == {
@@ -646,86 +626,6 @@ def test_existing_author_file_is_available_to_new_paper(tmp_path: Path) -> None:
     assert result.existing_authors == (author_path,)
     assert len(result.created_papers) == 1
     assert author_path.read_bytes() == original
-
-
-@pytest.mark.parametrize("attribution_yaml", [None, "[0006-341X]", "damaged"])
-def test_fresh_uuid_recovers_existing_path_from_each_strong_identity(
-    tmp_path: Path,
-    attribution_yaml: str | None,
-) -> None:
-    cases = (
-        ("uuid", True, ExternalIds(), (), ()),
-        ("title_author", False, ExternalIds(), (), ()),
-        ("doi", False, ExternalIds(doi="10.1000/shared"), (), ()),
-        (
-            "external",
-            False,
-            ExternalIds.model_validate({"pmid": "12345"}),
-            (),
-            (),
-        ),
-        (
-            "version",
-            False,
-            ExternalIds(),
-            (
-                PaperVersion(
-                    source="arxiv",
-                    identifier="2609.00001",
-                    kind=VersionKind.PREPRINT,
-                ),
-            ),
-            (),
-        ),
-        (
-            "source",
-            False,
-            ExternalIds(),
-            (),
-            (
-                MetadataSource(
-                    provider="OpenAlex",
-                    record_id="W-identity",
-                    retrieved_at=NOW,
-                ),
-            ),
-        ),
-    )
-    for ordinal, (name, same_uuid, external_ids, versions, sources) in enumerate(
-        cases, start=1
-    ):
-        root = tmp_path / name
-        first_id = UUID(f"{ordinal:08x}-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-        initial = CanonicalPaper(
-            id=first_id,
-            metadata=CanonicalMetadata(title="Initial", journal="Biometrics"),
-            external_ids=external_ids,
-            authors=(Author(name="Ada"),),
-            versions=versions,
-            sources=sources,
-            workflow=Workflow(discovered_at=NOW),
-        )
-        first = materialize_papers((initial,), root)
-        path = first.created_papers[0]
-        path.write_text(with_journal_attribution(path.read_text(), attribution_yaml))
-        incoming = initial.model_copy(
-            update={
-                "id": (
-                    first_id
-                    if same_uuid
-                    else UUID(f"{ordinal + 20:08x}-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
-                ),
-                "metadata": initial.metadata.model_copy(update={"title": "Initial" if name == "title_author" else "Changed"}),
-                "journal_issns": ("0090-5364",),
-            }
-        )
-
-        second = materialize_papers((incoming,), root)
-
-        assert second.created_papers == ()
-        assert second.existing_papers == first.created_papers
-        assert len(tuple((root / "Papers").glob("*.md"))) == 1
-        assert frontmatter(first.created_papers[0].read_text())["id"] == str(first_id)
 
 
 def test_malformed_identity_readable_paper_blocks_duplicate_and_isolated_work(
@@ -766,368 +666,6 @@ def test_malformed_identity_readable_paper_blocks_duplicate_and_isolated_work(
     assert len(tuple((tmp_path / "Papers").glob("*.md"))) == 2
 
 
-def test_preferred_version_upgrade_updates_bibliographic_snapshot(
-    tmp_path: Path,
-) -> None:
-    preprint = manifestation(
-        "16345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-        title="Preprint title",
-        kind=VersionKind.PREPRINT,
-        version_source="doi",
-        version_identifier="10.5555/preprint",
-        version_date=date(2026, 1, 1),
-        external_doi="10.5555/preprint",
-    )
-    preprint = preprint.model_copy(
-        update={
-            "workflow": Workflow(
-                status=WorkflowStatus.KEPT,
-                discovered_at=NOW,
-            )
-        }
-    )
-    final = manifestation(
-        "17345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-        title="Final title",
-        kind=VersionKind.JOURNAL_FINAL,
-        version_source="doi",
-        version_identifier="10.5555/final",
-        version_date=date(2026, 9, 10),
-        external_doi="HTTPS://DOI.ORG/10.5555/FINAL",
-    )
-    first = materialize_papers((preprint,), tmp_path)
-
-    progress_events: list[ProgressEvent] = []
-    result = materialize_papers(
-        (final,),
-        tmp_path,
-        progress_callback=progress_events.append,
-    )
-
-    values = frontmatter(first.created_papers[0].read_text())
-    assert result.created_papers == ()
-    assert result.updated_papers == first.created_papers
-    assert values["id"] == str(preprint.id)
-    assert values["title"] == "Final title"
-    assert values["publication_date"] == "2026-09-10"
-    assert values["preferred_version"] == {
-        "source": "doi",
-        "identifier": "10.5555/final",
-    }
-    assert values["doi"] == "10.5555/final"
-    assert values["external_ids"]["doi"] == "10.5555/final"  # type: ignore[index]
-    assert {
-        (version["kind"], version["source"], version["identifier"])
-        for version in values["versions"]  # type: ignore[union-attr]
-    } == {
-        ("preprint", "doi", "10.5555/preprint"),
-        ("journal_final", "doi", "10.5555/final"),
-    }
-    assert any(
-        issue.message == "doi changed with the effective preferred version"
-        for issue in result.issues
-    )
-    assert not any(
-        issue.message == "external ID doi conflicts with durable value"
-        for issue in result.issues
-    )
-    assert not result.has_errors
-    writes = [
-        event.activity
-        for event in progress_events
-        if event.activity is not None
-        and event.activity.operation == "materialize_write"
-    ]
-    assert [(activity.current, activity.total) for activity in writes] == [
-        (0, 1),
-        (1, 1),
-    ]
-
-    stable_bytes = first.created_papers[0].read_bytes()
-    stable_rerun = materialize_papers((final,), tmp_path)
-
-    assert stable_rerun.updated_papers == ()
-    assert first.created_papers[0].read_bytes() == stable_bytes
-
-    exported = export_kept_papers(tmp_path)
-
-    assert exported.entries == ("10.5555/final",)
-    assert exported.issues == ()
-
-
-def test_lower_priority_rerun_preserves_effective_preferred_snapshot(
-    tmp_path: Path,
-) -> None:
-    final = manifestation(
-        "18345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-        title="Final title",
-        kind=VersionKind.JOURNAL_FINAL,
-        version_source="doi",
-        version_identifier="10.5555/final",
-        version_date=date(2026, 9, 10),
-        external_doi="10.5555/final",
-    )
-    preprint = manifestation(
-        "19345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-        title="Preprint title",
-        kind=VersionKind.PREPRINT,
-        version_source="doi",
-        version_identifier="10.5555/preprint",
-        version_date=date(2026, 1, 1),
-        external_doi="10.5555/preprint",
-    )
-    first = materialize_papers((final,), tmp_path)
-
-    result = materialize_papers((preprint,), tmp_path)
-
-    values = frontmatter(first.created_papers[0].read_text())
-    assert result.created_papers == ()
-    assert values["title"] == "Final title"
-    assert values["publication_date"] == "2026-09-10"
-    assert values["preferred_version"] == {
-        "source": "doi",
-        "identifier": "10.5555/final",
-    }
-    assert values["external_ids"]["doi"] == "10.5555/final"  # type: ignore[index]
-    assert {
-        version["identifier"]
-        for version in values["versions"]  # type: ignore[union-attr]
-    } == {"10.5555/preprint", "10.5555/final"}
-    assert any(
-        issue.severity is MaterializationIssueSeverity.WARNING
-        for issue in result.issues
-    )
-    assert any(
-        issue.message == "external ID doi conflicts with durable value"
-        for issue in result.issues
-    )
-    assert not result.has_errors
-
-
-@pytest.mark.parametrize("lower_kind,higher_kind", [
-    (VersionKind.UNKNOWN, VersionKind.PREPRINT),
-    (VersionKind.UNKNOWN, VersionKind.ACCEPTED_MANUSCRIPT),
-    (VersionKind.UNKNOWN, VersionKind.JOURNAL_ONLINE),
-    (VersionKind.UNKNOWN, VersionKind.JOURNAL_FINAL),
-    (VersionKind.PREPRINT, VersionKind.ACCEPTED_MANUSCRIPT),
-    (VersionKind.PREPRINT, VersionKind.JOURNAL_ONLINE),
-    (VersionKind.PREPRINT, VersionKind.JOURNAL_FINAL),
-    (VersionKind.ACCEPTED_MANUSCRIPT, VersionKind.JOURNAL_ONLINE),
-    (VersionKind.ACCEPTED_MANUSCRIPT, VersionKind.JOURNAL_FINAL),
-    (VersionKind.JOURNAL_ONLINE, VersionKind.JOURNAL_FINAL),
-])
-@pytest.mark.parametrize("reverse", [False, True])
-def test_same_version_kind_lifecycle_is_monotonic_and_idempotent(
-    tmp_path: Path,
-    lower_kind: VersionKind,
-    higher_kind: VersionKind,
-    reverse: bool,
-) -> None:
-    initial = paper("1a345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-    durable_kind, incoming_kind = (
-        (higher_kind, lower_kind) if reverse else (lower_kind, higher_kind)
-    )
-    initial = initial.model_copy(update={
-        "versions": (initial.versions[0].model_copy(update={"kind": durable_kind}),),
-    })
-    first = materialize_papers((initial,), tmp_path)
-    path, = first.created_papers
-    incoming = initial.model_copy(update={
-        "versions": (initial.versions[0].model_copy(update={
-            "kind": incoming_kind,
-            "source": "DOI",
-            "identifier": "https://doi.org/10.5555/EXAMPLE",
-        }),),
-    })
-
-    result = materialize_papers((incoming,), tmp_path)
-
-    assert not result.issues
-    assert not result.created_papers
-    assert result.updated_papers == (() if reverse else (path,))
-    values = frontmatter(path.read_text())
-    expected_version = initial.versions[0].model_copy(update={"kind": higher_kind})
-    assert values["versions"] == [expected_version.model_dump(mode="json")]
-    assert values["preferred_version"] == initial.preferred_version.model_dump(mode="json")
-    stable_bytes = path.read_bytes()
-
-    rerun = materialize_papers((incoming,), tmp_path)
-
-    assert not rerun.issues and not rerun.updated_papers
-    assert path.read_bytes() == stable_bytes
-
-
-@pytest.mark.parametrize("kind", list(VersionKind))
-def test_same_version_kind_evidence_does_not_rewrite_paper(
-    tmp_path: Path, kind: VersionKind,
-) -> None:
-    initial = paper("1a345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-    initial = initial.model_copy(update={
-        "versions": (initial.versions[0].model_copy(update={"kind": kind}),),
-    })
-    first = materialize_papers((initial,), tmp_path)
-    path, = first.created_papers
-    original = path.read_bytes()
-
-    result = materialize_papers((initial,), tmp_path)
-
-    assert not result.issues and not result.updated_papers
-    assert path.read_bytes() == original
-
-
-def test_kind_upgrade_reselects_preferred_and_preserves_durable_workflow(
-    tmp_path: Path,
-) -> None:
-    initial = paper("1a345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-    online = initial.versions[0].model_copy(update={"kind": VersionKind.JOURNAL_ONLINE})
-    newer_online = online.model_copy(update={
-        "source": "openalex", "identifier": "W999", "date": date(2026, 9, 18),
-    })
-    initial = initial.model_copy(update={
-        "versions": (online, newer_online),
-        "preferred_version": VersionRef(
-            source=newer_online.source, identifier=newer_online.identifier,
-        ),
-        "journal_issns": ("0006-341X", "1541-0420"),
-    })
-    first = materialize_papers((initial,), tmp_path)
-    path, = first.created_papers
-    edited = (
-        path.read_text()
-        .replace("status: candidate", "status: in_zotero\ncustom_field:\n  nested: retained")
-        .replace("zotero_key: null", "zotero_key: ZOT123")
-        .replace("## Notes\n", "## Notes\n\nHuman note.\n\n## Custom\n\nKeep this.\n")
-    )
-    path.write_text(edited, encoding="utf-8")
-    before = frontmatter(edited)
-    final = online.model_copy(update={"kind": VersionKind.JOURNAL_FINAL})
-    incoming = initial.model_copy(update={
-        "id": UUID("1b345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
-        "versions": (final,),
-        "preferred_version": VersionRef(source=final.source, identifier=final.identifier),
-    })
-
-    result = materialize_papers((incoming,), tmp_path)
-
-    assert not result.has_errors and not result.created_papers
-    assert result.updated_papers == (path,)
-    contents = path.read_text()
-    values = frontmatter(contents)
-    assert values["versions"] == [
-        final.model_dump(mode="json"), newer_online.model_dump(mode="json"),
-    ]
-    assert values["preferred_version"] == incoming.preferred_version.model_dump(mode="json")
-    for field in ("id", "status", "zotero_key", "journal_issns", "sources", "external_ids", "custom_field"):
-        assert values[field] == before[field]
-    assert "## Notes\n\nHuman note.\n\n## Custom\n\nKeep this.\n" in contents
-    stable_bytes = path.read_bytes()
-
-    rerun = materialize_papers((incoming,), tmp_path)
-
-    assert not rerun.issues and not rerun.updated_papers
-    assert path.read_bytes() == stable_bytes
-
-
-def test_version_enrichment_and_conflict_are_nonfatal_warnings(
-    tmp_path: Path,
-) -> None:
-    initial = manifestation(
-        "1a345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-        title="Versioned",
-        kind=VersionKind.UNKNOWN,
-        version_source="doi",
-        version_identifier="10.5555/version",
-        version_date=None,
-    )
-    enriched = manifestation(
-        "1b345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-        title="Versioned",
-        kind=VersionKind.JOURNAL_ONLINE,
-        version_source="doi",
-        version_identifier="10.5555/version",
-        version_date=date(2026, 9, 10),
-    )
-    enriched = enriched.model_copy(update={
-        "versions": (PaperVersion.model_validate(enriched.versions[0].model_dump() | {
-            "url": "https://example.org/online.pdf",
-        }),),
-    })
-    first = materialize_papers((initial,), tmp_path)
-    enrichment = materialize_papers((enriched,), tmp_path)
-    assert not enrichment.has_errors
-    enriched_version = frontmatter(first.created_papers[0].read_text())["versions"][0]
-    assert enriched_version == enriched.versions[0].model_dump(mode="json")
-    conflicting = enriched.model_copy(
-        update={
-            "versions": (
-                PaperVersion.model_validate(
-                    enriched.versions[0].model_dump() | {
-                        "kind": VersionKind.JOURNAL_FINAL,
-                        "date": date(2026, 9, 11),
-                        "url": "https://example.org/final.pdf",
-                    }
-                ),
-            )
-        }
-    )
-
-    result = materialize_papers((conflicting,), tmp_path)
-
-    values = frontmatter(first.created_papers[0].read_text())
-    version = values["versions"][0]  # type: ignore[index]
-    assert version["kind"] == "journal_final"
-    assert version["date"] == "2026-09-10"
-    assert version["url"] == "https://example.org/online.pdf"
-    assert len(result.issues) == 2
-    assert all(
-        issue.severity is MaterializationIssueSeverity.WARNING
-        for issue in result.issues
-    )
-    assert not result.has_errors
-
-    weaker = conflicting.model_copy(update={"versions": (conflicting.versions[0].model_copy(
-        update={"kind": VersionKind.ACCEPTED_MANUSCRIPT},
-    ),)})
-    stable_bytes = first.created_papers[0].read_bytes()
-
-    ignored = materialize_papers((weaker,), tmp_path)
-
-    assert not ignored.has_errors and not ignored.updated_papers
-    assert len(ignored.issues) == 2
-    assert all(issue.severity is MaterializationIssueSeverity.WARNING for issue in ignored.issues)
-    assert first.created_papers[0].read_bytes() == stable_bytes
-
-
-def test_title_fallback_requires_author_note_stable_evidence(
-    tmp_path: Path,
-) -> None:
-    original = CanonicalPaper(
-        id=UUID("1c345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
-        metadata=CanonicalMetadata(title="Same Title", journal="Biometrics"),
-        authors=(Author(name="Ada", openalex_id="https://openalex.org/A42"),),
-        workflow=Workflow(discovered_at=NOW),
-    )
-    first = materialize_papers((original,), tmp_path)
-    incoming = original.model_copy(
-        update={"id": UUID("1d345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb")}
-    )
-
-    matched = materialize_papers((incoming,), tmp_path)
-
-    assert matched.existing_papers == first.created_papers
-    assert matched.created_papers == ()
-
-    first.created_authors[0].write_text("opaque author\n", encoding="utf-8")
-    second_incoming = incoming.model_copy(
-        update={"id": UUID("1e345678-cccc-4ccc-8ccc-cccccccccccc")}
-    )
-    blocked_fallback = materialize_papers((second_incoming,), tmp_path)
-
-    assert len(blocked_fallback.created_papers) == 1
-    assert len(tuple((tmp_path / "Papers").glob("*.md"))) == 2
-    assert first.created_authors[0].read_text() == "opaque author\n"
-
-
 def test_title_author_fallback_does_not_cross_conflicting_dois(
     tmp_path: Path,
 ) -> None:
@@ -1154,13 +692,10 @@ def test_title_author_fallback_does_not_cross_conflicting_dois(
 
 
 def test_unidentified_author_gains_stable_id_without_renaming(tmp_path: Path) -> None:
-    initial = manifestation(
+    initial = author_paper(
         "1f345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         title="Initial",
-        kind=VersionKind.PREPRINT,
-        version_source="arxiv",
-        version_identifier="2601.00002",
-        version_date=date(2026, 1, 2),
+        publication_date=date(2026, 1, 2),
         author=Author(name="Ada"),
     )
     first = materialize_papers((initial,), tmp_path)
@@ -1241,6 +776,7 @@ def test_conflicting_openalex_id_blocks_same_orcid_author_match(
     initial = CanonicalPaper(
         id=UUID("20645678-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
         metadata=CanonicalMetadata(title="Stable Conflict", journal="Biometrics"),
+        external_ids=ExternalIds(doi="10.5555/current"),
         authors=(
             Author(
                 name="Ada",
@@ -1267,7 +803,7 @@ def test_conflicting_openalex_id_blocks_same_orcid_author_match(
 
     result = materialize_papers((incoming,), tmp_path)
 
-    assert result.existing_papers == ()
+    assert result.existing_papers == first.created_papers
     assert result.created_papers == ()
     assert result.has_errors
     assert first.created_papers[0].read_bytes() == original
@@ -1312,9 +848,9 @@ def test_changed_abstract_h2_replaces_complete_managed_abstract(
     first = materialize_papers((initial,), tmp_path)
     paper_path = first.created_papers[0]
     customized = paper_path.read_text().replace(
-        "<!-- literature-monitor:abstract-end -->\n\n## Versions",
+        "<!-- literature-monitor:abstract-end -->\n\n## Sources",
         "<!-- literature-monitor:abstract-end -->\n\n"
-        "## Custom\n\nKeep this section.\n\n## Versions",
+        "## Custom\n\nKeep this section.\n\n## Sources",
     )
     paper_path.write_text(customized, encoding="utf-8")
     changed = initial.model_copy(
@@ -1380,13 +916,10 @@ def test_atomic_replace_failure_preserves_original_paper(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original = manifestation(
+    original = author_paper(
         "21345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         title="Original",
-        kind=VersionKind.PREPRINT,
-        version_source="arxiv",
-        version_identifier="2601.00003",
-        version_date=date(2026, 1, 3),
+        publication_date=date(2026, 1, 3),
         author=Author(name="Ada", openalex_id="https://openalex.org/A100"),
     )
     first = materialize_papers((original,), tmp_path)
@@ -1616,7 +1149,7 @@ def test_external_ids_and_sources_union_preserve_durable_conflicts(
     incoming = initial.model_copy(
         update={
             "id": UUID("25345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
-            "external_ids": ExternalIds.model_validate({"pmid": "new-pmid"}),
+            "external_ids": ExternalIds.model_validate({"doi": "10.5555/shared", "pmid": "new-pmid"}),
             "sources": (
                 MetadataSource(
                     provider="OpenAlex",
@@ -1646,46 +1179,6 @@ def test_external_ids_and_sources_union_preserve_durable_conflicts(
     )
     assert any("external ID pmid conflicts" in issue.message for issue in result.issues)
     assert not result.has_errors
-
-
-def test_ambiguous_existing_identity_and_multiple_incoming_fail_closed(
-    tmp_path: Path,
-) -> None:
-    first = paper(
-        "26345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-        title="First duplicate",
-    ).model_copy(update={"journal_issns": ("0006-341X",)})
-    second = paper(
-        "27345678-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-        title="Second duplicate",
-    ).model_copy(update={"journal_issns": ("0090-5364",)})
-    seeded = materialize_papers((first, second), tmp_path)
-    assert len(seeded.created_papers) == 2
-    ambiguous = first.model_copy(
-        update={
-            "id": UUID("28345678-cccc-4ccc-8ccc-cccccccccccc"),
-            "metadata": first.metadata.model_copy(update={"title": "Ambiguous"}),
-        }
-    )
-
-    result = materialize_papers((ambiguous,), tmp_path)
-
-    assert result.created_papers == ()
-    assert result.has_errors
-    assert len(tuple((tmp_path / "Papers").glob("*.md"))) == 2
-
-    isolated_root = tmp_path / "single"
-    original = materialize_papers((first,), isolated_root)
-    incoming_one = first.model_copy(
-        update={"id": UUID("29345678-dddd-4ddd-8ddd-dddddddddddd")}
-    )
-    incoming_two = first.model_copy(
-        update={"id": UUID("2a345678-eeee-4eee-8eee-eeeeeeeeeeee")}
-    )
-    shared = materialize_papers((incoming_one, incoming_two), isolated_root)
-    assert shared.created_papers == ()
-    assert shared.existing_papers == original.created_papers
-    assert shared.has_errors
 
 
 def test_corpus_uuid_collision_only_changes_new_paper_filename(
@@ -1788,7 +1281,7 @@ def test_optional_journal_attribution_parsing_is_separate_from_identity_and_safe
     assert state.journal_attribution_state is PaperJournalAttributionState(expected)
     assert state.journal_issns == identities
     assert state.updateable and state.problems == ()
-    for attribute in ("paper_id", "identity_external_ids", "identity_version_keys", "identity_source_keys", "has_identity"):
+    for attribute in ("paper_id", "identity_external_ids", "has_identity"):
         assert getattr(state, attribute) == getattr(baseline, attribute)
     assert state.frontmatter == frontmatter(with_journal_attribution(contents, yaml_value))
 
@@ -1863,43 +1356,15 @@ def test_existing_attribution_replacement_repair_or_raw_preservation(tmp_path, y
     assert not rerun.issues and not rerun.updated_papers and path.read_bytes() == stable
 
 
-def test_lower_priority_manifestation_updates_attribution_without_version_or_metadata_warning(tmp_path):
-    initial = paper("35345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa").model_copy(update={
-        "journal_issns": ("0006-341X", "1541-0420"),
-    })
-    first = materialize_papers((initial,), tmp_path)
-    path, = first.created_papers
-    before = frontmatter(path.read_text())
-    lower = PaperVersion(source="arxiv", identifier="2601.00001", kind=VersionKind.PREPRINT)
-    incoming = initial.model_copy(update={
-        "id": UUID("36345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
-        "journal_issns": ("0090-5364",),
-        "versions": (lower,),
-        "preferred_version": VersionRef(source=lower.source, identifier=lower.identifier),
-    })
-    state = parse_paper_state(path, path.read_text(), tmp_path / "Authors")
-    merged = merge_paper_state(state, incoming)
-    assert not merged.incoming_is_preferred and merged.journal_issns_update == ("0090-5364",)
-    assert not merged.warnings
-    result = materialize_papers((incoming,), tmp_path)
-    assert not result.issues and result.updated_papers == (path,) and not result.created_papers
-    after = frontmatter(path.read_text())
-    assert after["journal_issns"] == ["0090-5364"]
-    for key in ("title", "journal", "publication_date", "preferred_version", "external_ids", "authors", "status"):
-        assert after[key] == before[key]
-    assert merged.abstract == initial.metadata.abstract
-    assert f"## Abstract\n\n{initial.metadata.abstract}\n" in path.read_text()
-    assert set(v["identifier"] for v in after["versions"]) == {"10.5555/example", lower.identifier}
-
-
 def test_shared_attribution_does_not_match_unrelated_papers(tmp_path):
     initial = paper("37345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa").model_copy(update={
-        "journal_issns": ("0006-341X",), "external_ids": ExternalIds(),
-        "versions": (), "preferred_version": None, "sources": (),
+        "journal_issns": ("0006-341X",), "external_ids": ExternalIds(doi="10.5555/initial"),
+        "sources": (),
     })
     first = materialize_papers((initial,), tmp_path)
     incoming = initial.model_copy(update={
         "id": UUID("38345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        "external_ids": ExternalIds(doi="10.5555/unrelated"),
         "metadata": initial.metadata.model_copy(update={"title": "Unrelated title"}),
         "authors": (Author(name="Other Author"),),
     })
@@ -1907,3 +1372,129 @@ def test_shared_attribution_does_not_match_unrelated_papers(tmp_path):
     assert not result.issues and len(result.created_papers) == 1
     assert len(tuple((tmp_path / "Papers").glob("*.md"))) == 2
     assert frontmatter(first.created_papers[0].read_text())["id"] == str(initial.id)
+
+
+@pytest.mark.parametrize("legacy", [{"versions": []}, {"versions": None}, {"preferred_version": None},
+    {"versions": [{"source": "doi", "identifier": "10.5555/example", "kind": "journal_final"}],
+     "preferred_version": {"source": "doi", "identifier": "10.5555/example"}}])
+def test_legacy_schema_is_blocked_unchanged_without_duplicate(tmp_path, legacy):
+    initial = paper("39345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    first = materialize_papers((initial,), tmp_path)
+    path, = first.created_papers
+    current = parse_paper_state(path, path.read_text(), tmp_path / "Authors")
+    path.write_text(serialize_document(dict(current.frontmatter, **legacy), current.body + "\n## Versions\n\nOld data.\n"))
+    before = path.read_bytes()
+    authors_before = {p: p.read_bytes() for p in (tmp_path / "Authors").glob("*.md")}
+    incoming = initial.model_copy(update={"id": UUID(int=900), "authors": (Author(name="New Author"),)})
+    result = materialize_papers((incoming,), tmp_path)
+    assert result.has_errors and not result.created_papers and not result.updated_papers
+    assert path.read_bytes() == before and len(list((tmp_path / "Papers").glob("*.md"))) == 1
+    assert {p: p.read_bytes() for p in (tmp_path / "Authors").glob("*.md")} == authors_before
+    state = parse_paper_state(path, path.read_text(), tmp_path / "Authors")
+    assert not state.updateable and state.identity_external_ids == frozenset({("doi", "10.5555/example")})
+
+
+def test_same_normalized_doi_recovers_uuid_despite_changed_provenance(tmp_path):
+    initial = paper("40345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    first = materialize_papers((initial,), tmp_path)
+    incoming = initial.model_copy(update={
+        "id": UUID(int=901),
+        "external_ids": ExternalIds(doi=" HTTPS://DOI.ORG/10.5555/EXAMPLE ", openalex="W-new"),
+        "sources": (MetadataSource(provider="crossref", record_id="new-record", retrieved_at=NOW),),
+    })
+    result = materialize_papers((incoming,), tmp_path)
+    assert not result.has_errors and not result.created_papers
+    path, = first.created_papers
+    values = frontmatter(path.read_text())
+    assert values["id"] == str(initial.id) and values["doi"] == "10.5555/example"
+    assert {source["provider"] for source in values["sources"]} == {"openalex", "crossref"}
+    stable = path.read_bytes()
+    assert not materialize_papers((incoming,), tmp_path).updated_papers
+    assert path.read_bytes() == stable
+
+
+def test_distinct_dois_never_merge_shared_ids_titles_or_authors(tmp_path):
+    initial = paper("41345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    first = materialize_papers((initial,), tmp_path)
+    path, = first.created_papers
+    before = path.read_bytes()
+    incoming = initial.model_copy(update={"id": UUID(int=902),
+        "external_ids": initial.external_ids.model_copy(update={"doi": "10.5555/different"})})
+    result = materialize_papers((incoming,), tmp_path)
+    assert not result.has_errors and len(result.created_papers) == 1 and not result.updated_papers
+    assert path.read_bytes() == before
+    assert {frontmatter(p.read_text())["doi"] for p in (tmp_path / "Papers").glob("*.md")} == {
+        "10.5555/example", "10.5555/different"}
+    assert frontmatter(result.created_papers[0].read_text())["status"] == "candidate"
+
+
+@pytest.mark.parametrize("mode", ["duplicate_doi", "uuid_doi_split", "uuid_retarget"])
+def test_durable_doi_and_uuid_conflicts_fail_closed(tmp_path, mode):
+    initial = paper("42345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    first = materialize_papers((initial,), tmp_path)
+    path, = first.created_papers
+    if mode != "uuid_retarget":
+        other = initial.model_copy(update={"id": UUID(int=903), "external_ids": ExternalIds(
+            doi="10.5555/example" if mode == "duplicate_doi" else "10.5555/other")})
+        other_path = tmp_path / "Papers" / "other.md"
+        other_path.write_text(render_paper_markdown(other, ("ada-author",)))
+    incoming = initial.model_copy(update={
+        "id": UUID(int=904) if mode == "duplicate_doi" else initial.id,
+        "external_ids": ExternalIds(doi="10.5555/example" if mode == "duplicate_doi" else "10.5555/other"),
+        "authors": (Author(name="Unrelated Author"),),
+    })
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*.md")}
+    result = materialize_papers((incoming,), tmp_path)
+    assert result.has_errors and not result.created_papers and not result.updated_papers and not result.created_authors
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*.md")} == before
+
+
+@pytest.mark.parametrize("doi", [None, "not-a-doi"])
+def test_no_valid_doi_has_no_paper_or_author_side_effects(tmp_path, doi):
+    initial = paper("43345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    first = materialize_papers((initial,), tmp_path)
+    incoming = initial.model_copy(update={"external_ids": initial.external_ids.model_copy(update={"doi": doi}),
+        "authors": (Author(name="New Author", openalex_id="A-new"),)})
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    result = materialize_papers((incoming,), tmp_path)
+    assert not result.has_errors and result.issues
+    assert not result.created_papers and not result.updated_papers and not result.created_authors
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+def test_canonical_snapshot_supplies_new_and_updated_markdown(tmp_path):
+    initial = paper("44345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    incoming = initial
+    first = materialize_papers((initial,), tmp_path)
+    path, = first.created_papers
+    before = path.read_bytes()
+    assert not materialize_papers((incoming,), tmp_path).updated_papers
+    assert path.read_bytes() == before
+    incoming = incoming.model_copy(update={"metadata": incoming.metadata.model_copy(update={
+        "title": "Current snapshot", "abstract": "Current abstract", "author_keywords": ("new",),
+        "publication_date": date(2026, 10, 1)}),
+        "authors": (Author(name="Ada Author", openalex_id="A-enriched"),)})
+    result = materialize_papers((incoming,), tmp_path)
+    assert not result.has_errors and result.updated_papers == (path,)
+    values = frontmatter(path.read_text())
+    assert values["publication_date"] == "2026-10-01" and values["title"] == "Current snapshot"
+    assert values["author_keywords"] == ["new"] and "Current abstract" in path.read_text()
+    assert "versions" not in values and "preferred_version" not in values and "## Versions" not in path.read_text()
+    author_path, = first.created_authors
+    assert frontmatter(author_path.read_text())["openalex_id"] == "A-enriched"
+
+
+def test_sources_and_non_doi_external_ids_are_not_identity(tmp_path):
+    current = paper("45345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    contents = render_paper_markdown(current, ("ada-author",))
+    state = parse_paper_state(tmp_path / "note.md", contents, tmp_path / "Authors")
+    raw = dict(state.frontmatter, id="invalid", doi=None, external_ids={"openalex": "W123", "arxiv": "2609.01234"})
+    state = parse_paper_state(tmp_path / "note.md", serialize_document(raw, state.body), tmp_path / "Authors")
+    assert not state.has_identity and not state.updateable
+
+
+def test_body_rewrite_preserves_human_versions_heading_without_managing_it():
+    body = "# Title\n\n## Abstract\n\nOld.\n\n## Sources\n\nOld sources.\n\n## Versions\n\nHuman discussion.\n\n## Notes\n\nHuman notes.\n"
+    rewritten = rewrite_managed_body(body, title="Title", abstract="New.", sources_summary="New sources.")
+    assert "## Versions\n\nHuman discussion." in rewritten and "Human notes." in rewritten
+    assert rewritten.count("## Versions") == 1

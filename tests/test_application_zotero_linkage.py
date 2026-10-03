@@ -13,8 +13,13 @@ from literature_monitor.application.zotero_linkage import LinkageOutcome, link_p
 from literature_monitor.markdown_state import parse_paper_state, serialize_document
 from literature_monitor.materialize import render_paper_markdown
 from literature_monitor.models import (
-    Author, CanonicalMetadata, CanonicalPaper, ExternalIds, MetadataSource,
-    PaperVersion, VersionKind, VersionRef, Workflow, WorkflowStatus,
+    Author,
+    CanonicalMetadata,
+    CanonicalPaper,
+    ExternalIds,
+    MetadataSource,
+    Workflow,
+    WorkflowStatus,
 )
 from literature_monitor.zotero_local import (
     VerifiedZoteroItem, ZoteroIdentityResult, ZoteroLocalClient, ZoteroReadOutcome,
@@ -36,15 +41,12 @@ def verified_identity():
 
 @pytest.fixture
 def paper_path(tmp_path):
-    version = PaperVersion(source="doi", identifier=DOI, kind=VersionKind.JOURNAL_FINAL, date=date(2026, 9, 20))
     paper = CanonicalPaper(
         id=PAPER_ID,
         metadata=CanonicalMetadata(title="Linkage Paper", journal="Biometrics", abstract="Original abstract."),
         external_ids=ExternalIds.model_validate({"doi": DOI, "openalex": "https://openalex.org/W123", "pmid": "123"}),
         authors=(Author(name="Ada Author"),),
-        versions=(version,),
         sources=(MetadataSource(provider="openalex", record_id="https://openalex.org/W123", retrieved_at=NOW),),
-        preferred_version=VersionRef(source="doi", identifier=DOI),
         workflow=Workflow(status=WorkflowStatus.IN_ZOTERO, discovered_at=NOW),
         journal_issns=("0006-341X",),
     )
@@ -128,7 +130,7 @@ def test_current_paper_doi_must_still_match_verification(paper_path, tmp_path, d
     update(paper_path, doi=doi, external_ids=ids)
     before = paper_path.read_bytes()
     result = link_paper_to_zotero(state(paper_path), verified_identity(), **file_identities(paper_path))
-    assert result.outcome is LinkageOutcome.STATE_CONFLICT
+    assert result.outcome is (LinkageOutcome.INVALID_PAPER if doi is None else LinkageOutcome.STATE_CONFLICT)
     assert paper_path.read_bytes() == before
 
 

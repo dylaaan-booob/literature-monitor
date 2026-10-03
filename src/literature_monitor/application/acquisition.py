@@ -1,4 +1,4 @@
-"""Bounded acquisition preflight/commit (SPEC §§36.3–36.7)."""
+"""DOI-bound acquisition preflight/commit (SPEC §37.7)."""
 
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -8,8 +8,8 @@ import stat
 from uuid import UUID, uuid4
 
 from literature_monitor.identifiers import normalize_doi
-from literature_monitor.markdown_state import PaperMarkdownState, normalize_version_key, parse_paper_state
-from literature_monitor.models import PaperVersion, VersionKind, WorkflowStatus
+from literature_monitor.markdown_state import PaperMarkdownState, parse_paper_state
+from literature_monitor.models import WorkflowStatus
 from literature_monitor.zotero_credentials import AuthorizationRetryBoundary, ZoteroAuthorizationRuntime
 from literature_monitor.zotero_local import VerifiedZoteroItem, ZoteroLocalClient, ZoteroReadOutcome
 from literature_monitor.zotero_write import (
@@ -105,20 +105,6 @@ class AcquisitionResult:
         return message
 
 
-class AcquisitionClass(str, Enum):
-    PUBLISHED = "PUBLISHED"
-    ACCEPTED_MANUSCRIPT = "ACCEPTED_MANUSCRIPT"
-    PREPRINT = "PREPRINT"
-
-
-_ACQUISITION_CLASSES = {
-    VersionKind.JOURNAL_FINAL: AcquisitionClass.PUBLISHED,
-    VersionKind.JOURNAL_ONLINE: AcquisitionClass.PUBLISHED,
-    VersionKind.ACCEPTED_MANUSCRIPT: AcquisitionClass.ACCEPTED_MANUSCRIPT,
-    VersionKind.PREPRINT: AcquisitionClass.PREPRINT,
-}
-
-
 @dataclass(frozen=True)
 class AcquisitionTask:
     """Process-local identity; continuations must never rebuild it from Paper."""
@@ -127,8 +113,6 @@ class AcquisitionTask:
     paper_id: UUID
     doi: str
     zotero_key: str
-    target_version: PaperVersion
-    acquisition_class: AcquisitionClass
     server_id: str
 
     @property
@@ -146,8 +130,6 @@ class PreparedAcquisition:
 class _PaperAction:
     state: PaperMarkdownState
     doi: str
-    target_version: PaperVersion
-    acquisition_class: AcquisitionClass
     directory_identity: tuple[int, int]
     file_identity: tuple[int, int]
 
@@ -201,24 +183,16 @@ def _read_paper(output_dir: Path, paper_id: UUID) -> _PaperAction | None:
         return None
     state, file_identity = matches[0]
     if (state.problems or not state.updateable or state.frontmatter is None or state.body is None
-            or state.status is not WorkflowStatus.IN_ZOTERO or state.preferred_version is None):
+            or state.status is not WorkflowStatus.IN_ZOTERO):
         return None
     doi = normalize_doi(state.external_ids.doi) if state.external_ids is not None else None
     if doi is None:
         return None
-    preferred = normalize_version_key(state.preferred_version.source, state.preferred_version.identifier)
-    versions = [version for version in state.versions if normalize_version_key(version.source, version.identifier) == preferred]
-    if len(versions) != 1:
-        return None
-    target = versions[0]
-    qualification = _ACQUISITION_CLASSES.get(target.kind)
-    if qualification is None:
-        return None
-    return _PaperAction(state, doi, target, qualification, directory_identity, file_identity)
+    return _PaperAction(state, doi, directory_identity, file_identity)
 
 
 class AcquisitionService:
-    """Prepare once and commit qualified bytes without rereading Paper."""
+    """Prepare once and commit staged bytes without rereading Paper."""
 
     def __init__(self, output_dir: Path, *,
                  authorization_retry_boundary: AuthorizationRetryBoundary | None = None,
@@ -243,20 +217,17 @@ class AcquisitionService:
         with ZoteroAuthorizationClient(task.server_id, authorization_runtime=self._authorization_runtime) as client:
             return client.authorization_status()
 
-    def commit(self, task: AcquisitionTask, qualified: 'QualifiedPdf', *, linkage_completed=False) -> AcquisitionResult:
-        from literature_monitor.version_qualification import QualifiedPdf
+    def commit(self, task: AcquisitionTask, artifact: 'StagedPdf', *, linkage_completed=False) -> AcquisitionResult:
+        from literature_monitor.pdf_staging import StagedPdf
         if not isinstance(task, AcquisitionTask):
             raise TypeError('A frozen acquisition task is required.')
         attempt = _Attempt(linked=linkage_completed)
-        if (not isinstance(task, AcquisitionTask) or not isinstance(qualified, QualifiedPdf)
-                or qualified.artifact.task_id != task.task_id
-                or qualified.acquisition_class is not task.acquisition_class
-                or not qualified.artifact.validate()):
+        if (not isinstance(artifact, StagedPdf) or artifact.task_id != task.task_id
+                or not artifact.validate()):
             return AcquisitionResult(task.paper_id, AcquisitionOutcome.NO_VALID_PDF,
                 AcquisitionRecovery.CHECK_ZOTERO, linkage_completed=linkage_completed)
         try:
-            return self._upload(task, qualified.artifact.path, attempt,
-                validate=qualified.artifact.validate)
+            return self._upload(task, artifact.path, attempt, validate=artifact.validate)
         except Exception:
             return AcquisitionResult(task.paper_id, AcquisitionOutcome.INTERNAL_FAILURE,
                 AcquisitionRecovery.CHECK_ZOTERO, linkage_completed=attempt.linked,
@@ -302,7 +273,6 @@ class AcquisitionService:
                 return result(AcquisitionOutcome.ZOTERO_FAILURE, AcquisitionRecovery.CHECK_ZOTERO)
             task = AcquisitionTask(
                 task_id=uuid4(), paper_id=paper_id, doi=paper.doi, zotero_key=parent.key,
-                target_version=paper.target_version, acquisition_class=paper.acquisition_class,
                 server_id=parent.server_id,
             )
             if attachments.has_pdf:

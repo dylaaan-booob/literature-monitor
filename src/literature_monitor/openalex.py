@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode
 
 import httpx
 from pydantic import Field, ValidationError, field_validator
@@ -23,13 +23,10 @@ from literature_monitor.coverage import (
     CoverageUnit,
 )
 from literature_monitor.identifiers import normalize_doi
-from literature_monitor.provider_revision import parse_revision_timestamp
 from literature_monitor.models import (
     Author,
     CanonicalMetadata,
     DomainModel,
-    EvidenceVersionHint,
-    EvidenceVersionRole,
     ExternalIds,
     MetadataSource,
     NonEmptyStr,
@@ -48,23 +45,18 @@ SOURCE_FIELDS = (
 )
 THIN_WORK_FIELDS = (
     "id,doi,title,publication_date,abstract_inverted_index,authorships,"
-    "primary_location,updated_date"
+    "primary_location"
 )
-VERSION_FIELDS = "id,locations"
 _OPENALEX_BATCH_SIZE = 100
 WORK_FIELDS = (
     "id,doi,title,publication_date,abstract_inverted_index,authorships,"
-    "primary_location,locations"
+    "primary_location"
 )
 _OPENALEX_ID_PATTERN = re.compile(
     r"^(?:https://openalex\.org/)?([SAW]\d+)$", re.IGNORECASE
 )
 _ORCID_PATTERN = re.compile(
     r"^(?:https?://orcid\.org/)?\d{4}-\d{4}-\d{4}-\d{3}[\dX]/?$", re.IGNORECASE,
-)
-_ARXIV_LOCATION_ID = re.compile(
-    r"^pmh:oai:arxiv\.org:(.+)$",
-    re.IGNORECASE,
 )
 
 
@@ -95,19 +87,6 @@ class ResolvedSource:
     issn: tuple[str, ...]
 
 
-class OpenAlexVersion(str, Enum):
-    PUBLISHED = "publishedVersion"
-    ACCEPTED = "acceptedVersion"
-    SUBMITTED = "submittedVersion"
-
-
-class OpenAlexVersionHint(DomainModel):
-    source: NonEmptyStr
-    identifier: NonEmptyStr
-    version: OpenAlexVersion
-    url: NonEmptyStr | None = None
-
-
 class OpenAlexMetadata(DomainModel):
     """Partial bibliographic fields; journal comes from verified Source resolution."""
 
@@ -126,8 +105,6 @@ class OpenAlexWorkRecord(DomainModel):
     authors: tuple[Author, ...] = ()
     source_id: NonEmptyStr
     provenance: MetadataSource
-    version_hints: tuple[OpenAlexVersionHint, ...] = ()
-    updated_at: datetime | None = Field(default=None, exclude=True)
     is_published: bool | None = Field(default=None, exclude=True)
 
     @field_validator("is_published", mode="before")
@@ -141,17 +118,7 @@ class OpenAlexWorkRecord(DomainModel):
         # Existing complete-record callers retain their input shape; ingestion is partial.
         return value.model_dump() if isinstance(value, CanonicalMetadata) else value
 
-    @field_validator("updated_at", mode="before")
-    @classmethod
-    def normalize_revision(cls, value: object) -> datetime | None:
-        return parse_revision_timestamp(value)
-
     def to_evidence(self) -> ProviderWorkEvidence:
-        roles = {
-            OpenAlexVersion.PUBLISHED: EvidenceVersionRole.PUBLICATION,
-            OpenAlexVersion.ACCEPTED: EvidenceVersionRole.MANUSCRIPT,
-            OpenAlexVersion.SUBMITTED: EvidenceVersionRole.PREPRINT,
-        }
         return ProviderWorkEvidence(
             provenance=self.provenance,
             title=self.metadata.title,
@@ -161,15 +128,6 @@ class OpenAlexWorkRecord(DomainModel):
             author_keywords=self.metadata.author_keywords,
             authors=self.authors,
             external_ids=self.external_ids,
-            version_hints=tuple(
-                EvidenceVersionHint(
-                    source=hint.source,
-                    identifier=hint.identifier,
-                    role=roles[hint.version],
-                    url=hint.url,
-                )
-                for hint in self.version_hints
-            ),
         )
 
 
@@ -345,19 +303,6 @@ class OpenAlexClient:
         yield from self._iter_work_pages(
             source_ids, from_date, to_date, fields=THIN_WORK_FIELDS,
             progress_callback=progress_callback,
-        )
-
-    def get_work_locations(
-        self, work_ids: Sequence[str], *, progress_callback: ProgressCallback | None = None,
-    ) -> dict[str, Any]:
-        if not 1 <= len(work_ids) <= _OPENALEX_BATCH_SIZE:
-            raise ValueError("Version batch requires 1–100 Works")
-        ids = "|".join(_short_openalex_id(work_id, "W") for work_id in work_ids)
-        return self._request_json(
-            "/works", {"filter": "ids.openalex:" + ids, "select": VERSION_FIELDS, "per_page": "100"},
-            progress_callback=progress_callback,
-            activity=ActivityUpdate(kind=ActivityKind.WORKING, source="openalex",
-                                    operation="version_hydration", label="Hydrating OpenAlex versions", unit="work"),
         )
 
     def _iter_work_pages(
@@ -878,17 +823,6 @@ def resolve_journal_source(
     return source, issues
 
 
-def parse_openalex_updated_date(value: object) -> datetime | None:
-    """OpenAlex defines its raw updated_date as UTC even when the offset is omitted."""
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ValueError("OpenAlex updated_date must be an ISO timestamp string")
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?", value):
-        value += "Z"
-    return parse_revision_timestamp(value)
-
-
 def _parse_publication_date(value: Any) -> date | None:
     if value is None:
         return None
@@ -923,81 +857,6 @@ def _optional_openalex_id(value: Any, prefix: str) -> str | None:
     return _canonical_openalex_id(value, prefix)
 
 
-def _location_identity(value: Any) -> tuple[str, str] | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    identifier = value.strip()
-    if identifier.casefold().startswith("doi:"):
-        try:
-            doi = normalize_doi(identifier[4:])
-        except ValueError:
-            return None
-        return ("doi", doi) if doi is not None else None
-    arxiv = _ARXIV_LOCATION_ID.fullmatch(identifier)
-    if arxiv is not None and arxiv.group(1).strip():
-        return "arxiv", arxiv.group(1).strip()
-    return "openalex_location", identifier
-
-
-def _location_url(location: dict[str, Any]) -> tuple[str | None, bool]:
-    invalid = False
-    for field in ("landing_page_url", "pdf_url"):
-        value = location.get(field)
-        if value is None:
-            continue
-        if not isinstance(value, str) or not value.strip():
-            invalid = True
-            continue
-        parsed = urlparse(value.strip())
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            invalid = True
-            continue
-        return value.strip(), invalid
-    return None, invalid
-
-
-def _normalize_version_hints(
-    value: Any,
-) -> tuple[tuple[OpenAlexVersionHint, ...], tuple[str, ...]]:
-    if value is None:
-        return (), ()
-    if not isinstance(value, list):
-        return (), ("invalid locations was ignored",)
-    hints: dict[tuple[str, str, OpenAlexVersion], OpenAlexVersionHint] = {}
-    warnings: list[str] = []
-    for index, location in enumerate(value):
-        if not isinstance(location, dict):
-            warnings.append(f"ignored malformed location at index {index}")
-            continue
-        try:
-            version = OpenAlexVersion(location.get("version"))
-        except ValueError:
-            warnings.append(
-                f"ignored location at index {index} without a recognized version"
-            )
-            continue
-        identity = _location_identity(location.get("id"))
-        if identity is None:
-            warnings.append(
-                f"ignored location at index {index} without a stable identity"
-            )
-            continue
-        url, invalid_url = _location_url(location)
-        if invalid_url:
-            warnings.append(f"ignored invalid location URL at index {index}")
-        hint = OpenAlexVersionHint(
-            source=identity[0],
-            identifier=identity[1],
-            version=version,
-            url=url,
-        )
-        key = (hint.source, hint.identifier, hint.version)
-        current = hints.get(key)
-        if current is None or (current.url is None and hint.url is not None):
-            hints[key] = hint
-    return tuple(hints[key] for key in sorted(hints)), tuple(warnings)
-
-
 def _work_source_id(payload: Any) -> str | None:
     """Absent nested identity is distinct from explicit invalid/conflicting identity."""
     if not isinstance(payload, dict):
@@ -1021,7 +880,6 @@ def _normalize_work(
     payload: Any,
     source: ResolvedSource,
     retrieved_at: datetime,
-    *, thin: bool = False,
 ) -> tuple[OpenAlexWorkRecord | None, tuple[str, ...]]:
     if not isinstance(payload, dict):
         raise OpenAlexRecordError("work response entry is not an object")
@@ -1035,11 +893,6 @@ def _normalize_work(
             f"work venue {work_source_id} does not match resolved Source {source.openalex_id}"
         )
 
-    warnings: list[str] = []
-    try:
-        updated_at = parse_openalex_updated_date(payload.get("updated_date"))
-    except ValueError:
-        updated_at = None
     try:
         publication_date = _parse_publication_date(payload.get("publication_date"))
     except (TypeError, ValueError):
@@ -1056,8 +909,6 @@ def _normalize_work(
         abstract = _reconstruct_abstract(payload.get("abstract_inverted_index"))
     except ValueError:
         abstract = None
-    version_hints, location_warnings = ((), ()) if thin else _normalize_version_hints(payload.get("locations"))
-    warnings.extend(location_warnings)
 
     authorships = payload.get("authorships")
     if not isinstance(authorships, list):
@@ -1100,14 +951,12 @@ def _normalize_work(
                 record_id=work_id,
                 retrieved_at=retrieved_at,
             ),
-            version_hints=version_hints,
-            updated_at=updated_at,
             is_published=(
                 payload["primary_location"].get("is_published")
                 if isinstance(payload.get("primary_location"), dict) else None
             ),
         ),
-        tuple(warnings),
+        (),
     )
 
 
@@ -1410,7 +1259,7 @@ def _fetch_thin_sources(
                         issues[source_id].append(DiscoveryIssue(IssueSeverity.ERROR, "work_retrieval", sources[source_id].journal,
                                                                "duplicate Work in traversal", record_id=work_id))
                     seen.add(work_id)
-                    record, warnings = _normalize_work(raw, sources[source_id], timestamp, thin=True)
+                    record, warnings = _normalize_work(raw, sources[source_id], timestamp)
                 except (OpenAlexError, ValidationError) as error:
                     affected.add(source_id)
                     issues[source_id].append(DiscoveryIssue(IssueSeverity.ERROR, "record_normalization", sources[source_id].journal, str(error), record_id=record_id if isinstance(record_id, str) else None))
@@ -1488,72 +1337,3 @@ def discover_journals_batched(
         tuple(issue for unit in units for issue in unit.issues),
         tuple(unit.coverage for unit in units), tuple(units),
     )
-
-
-@dataclass(frozen=True)
-class OpenAlexVersionHydration:
-    work_id: str
-    version_hints: tuple[OpenAlexVersionHint, ...]
-    issues: tuple[DiscoveryIssue, ...] = ()
-    succeeded: bool = True
-
-
-def hydrate_work_versions(
-    client: OpenAlexClient, work_ids: Sequence[str], *, progress_callback: ProgressCallback | None = None,
-) -> tuple[OpenAlexVersionHydration, ...]:
-    """Locations only; no membership, retention decision, coverage, or durable access."""
-    ids = tuple(dict.fromkeys(_canonical_openalex_id(work_id, "W") for work_id in work_ids))
-
-    def fetch(batch: tuple[str, ...]) -> dict[str, OpenAlexVersionHydration]:
-        mapped: dict[str, OpenAlexVersionHydration] = {}
-        terminal = False
-        failure = "missing or malformed OpenAlex location record"
-        try:
-            payload = client.get_work_locations(batch, progress_callback=progress_callback)
-            results = payload.get("results")
-            if not isinstance(results, list):
-                raise OpenAlexRequestError("OpenAlex version response lacks results")
-            duplicates: set[str] = set()
-            seen_ids: set[str] = set()
-            for raw in results:
-                try:
-                    work_id = _canonical_openalex_id(raw.get("id"), "W") if isinstance(raw, dict) else None
-                except OpenAlexRecordError:
-                    continue
-                if work_id not in batch:
-                    continue
-                if work_id in seen_ids:
-                    duplicates.add(work_id)
-                seen_ids.add(work_id)
-                if not isinstance(raw.get("locations"), list):
-                    continue
-                try:
-                    hints, warnings = _normalize_version_hints(raw["locations"])
-                except (ValueError, ValidationError):
-                    continue
-                mapped[work_id] = OpenAlexVersionHydration(work_id, hints, tuple(
-                    DiscoveryIssue(IssueSeverity.WARNING, "version_hydration", "", warning, record_id=work_id)
-                    for warning in warnings
-                ))
-            for work_id in duplicates:
-                mapped.pop(work_id, None)
-        except OpenAlexError as error:
-            terminal = isinstance(error, OpenAlexRequestError) and error.terminal
-            failure = str(error)
-        missing = tuple(work_id for work_id in batch if work_id not in mapped)
-        if missing and len(batch) > 1 and not terminal:
-            midpoint = max(1, len(missing) // 2)
-            for subset in (missing[:midpoint], missing[midpoint:]):
-                if subset:
-                    mapped.update(fetch(subset))
-        for work_id in missing:
-            if work_id not in mapped:
-                mapped[work_id] = OpenAlexVersionHydration(work_id, (), (
-                    DiscoveryIssue(IssueSeverity.WARNING, "version_hydration", "", failure, record_id=work_id),
-                ), False)
-        return mapped
-
-    results = {}
-    for offset in range(0, len(ids), _OPENALEX_BATCH_SIZE):
-        results.update(fetch(ids[offset:offset + _OPENALEX_BATCH_SIZE]))
-    return tuple(results[work_id] for work_id in ids)

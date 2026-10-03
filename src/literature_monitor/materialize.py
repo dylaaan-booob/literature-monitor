@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -22,9 +23,7 @@ from literature_monitor.markdown_state import (
     merge_paper_state,
     normalize_openalex_author_id,
     normalize_orcid,
-    normalize_source_key,
     normalize_text,
-    normalize_version_key,
     parse_author_state,
     parse_paper_state,
     render_abstract_section,
@@ -34,9 +33,7 @@ from literature_monitor.markdown_state import (
 from literature_monitor.models import (
     Author,
     CanonicalPaper,
-    ExternalIds,
     MetadataSource,
-    PaperVersion,
 )
 from literature_monitor.naming import paper_filename
 from literature_monitor.progress import (
@@ -109,21 +106,6 @@ def _yaml_frontmatter(values: dict[str, object]) -> str:
     return f"---\n{rendered}\n---\n"
 
 
-def _version_summary(versions: Sequence[PaperVersion]) -> str:
-    if not versions:
-        return "- None recorded."
-    lines: list[str] = []
-    for version in versions:
-        details = [
-            f"{version.kind.value}: {version.source} {version.identifier}",
-            f"date={version.date.isoformat() if version.date else 'unknown'}",
-        ]
-        if version.url is not None:
-            details.append(f"url={version.url}")
-        lines.append(f"- {'; '.join(details)}")
-    return "\n".join(lines)
-
-
 def _source_summary(sources: Sequence[MetadataSource]) -> str:
     if not sources:
         return "- None recorded."
@@ -147,6 +129,10 @@ def render_paper_markdown(
         f"[[Authors/{stem}|{author.name}]]"
         for author, stem in zip(paper.authors, author_note_stems, strict=True)
     ]
+    doi = normalize_doi(paper.external_ids.doi)
+    if doi is None or not re.fullmatch(r"10\.\d{4,9}/[^\s]+", doi):
+        raise ValueError("Paper requires a valid DOI")
+    external_ids = paper.external_ids.model_copy(update={"doi": doi})
     workflow = paper.workflow.model_dump(mode="json")
     frontmatter: dict[str, object] = {
         "type": "paper",
@@ -159,22 +145,16 @@ def render_paper_markdown(
             if paper.metadata.publication_date is not None
             else None
         ),
-        "doi": paper.external_ids.doi,
+        "doi": doi,
         "openalex_id": paper.external_ids.openalex,
         "arxiv_id": paper.external_ids.arxiv,
         "author_keywords": list(paper.metadata.author_keywords),
         "status": workflow["status"],
         "discovered_at": workflow["discovered_at"],
-        "preferred_version": (
-            paper.preferred_version.model_dump(mode="json")
-            if paper.preferred_version is not None
-            else None
-        ),
         "zotero_key": workflow["zotero_key"],
-        "external_ids": paper.external_ids.model_dump(
+        "external_ids": external_ids.model_dump(
             mode="json", exclude_none=False
         ),
-        "versions": [version.model_dump(mode="json") for version in paper.versions],
         "sources": [source.model_dump(mode="json") for source in paper.sources],
     }
     if paper.journal_issns:
@@ -183,7 +163,6 @@ def render_paper_markdown(
         f"{_yaml_frontmatter(frontmatter)}\n"
         f"# {paper.metadata.title}\n\n"
         f"{render_abstract_section(paper.metadata.abstract)}"
-        f"## Versions\n\n{_version_summary(paper.versions)}\n\n"
         f"## Sources\n\n{_source_summary(paper.sources)}\n\n"
         "## Notes\n"
     )
@@ -302,38 +281,6 @@ def _scan_authors(
     return states, openalex_index, orcid_index
 
 
-def _normalized_external_ids(external_ids: ExternalIds) -> set[tuple[str, str]]:
-    identities: set[tuple[str, str]] = set()
-    for namespace, identifier in external_ids.model_dump(exclude_none=True).items():
-        normalized_namespace = namespace.strip().casefold()
-        normalized_identifier = identifier.strip()
-        if normalized_namespace == "doi":
-            normalized_identifier = normalize_doi(normalized_identifier) or ""
-        if normalized_namespace and normalized_identifier:
-            identities.add((normalized_namespace, normalized_identifier))
-    return identities
-
-
-def _incoming_evidence(
-    paper: CanonicalPaper,
-) -> tuple[
-    set[tuple[str, str]],
-    set[tuple[str, str]],
-    set[tuple[str, str]],
-]:
-    return (
-        _normalized_external_ids(paper.external_ids),
-        {
-            normalize_version_key(version.source, version.identifier)
-            for version in paper.versions
-        },
-        {
-            normalize_source_key(source.provider, source.record_id)
-            for source in paper.sources
-        },
-    )
-
-
 def _author_stable_keys(author: Author) -> set[tuple[str, str]]:
     keys: set[tuple[str, str]] = set()
     openalex = normalize_openalex_author_id(author.openalex_id)
@@ -375,8 +322,6 @@ def _link_compatible(
     link: AuthorLink,
     author: Author,
     author_states: dict[Path, AuthorMarkdownState],
-    *,
-    for_title_fallback: bool,
 ) -> bool:
     incoming_keys = _author_stable_keys(author)
     linked_state = author_states.get(link.path)
@@ -386,113 +331,77 @@ def _link_compatible(
             return _stable_keys_match_without_conflict(incoming_keys, linked_keys)
         if linked_keys:
             return False
-        if for_title_fallback:
-            return False
     existing_name = linked_state.name if linked_state is not None else link.alias
     return normalize_text(existing_name) == normalize_text(author.name)
-
-
-def _authors_compatible(
-    state: PaperMarkdownState,
-    paper: CanonicalPaper,
-    author_states: dict[Path, AuthorMarkdownState],
-) -> bool:
-    if len(state.author_links) != len(paper.authors):
-        return False
-    return all(
-        _link_compatible(
-            link,
-            author,
-            author_states,
-            for_title_fallback=True,
-        )
-        for link, author in zip(state.author_links, paper.authors, strict=True)
-    )
-
-
-def _external_evidence_compatible(
-    state: PaperMarkdownState,
-    paper: CanonicalPaper,
-) -> bool:
-    existing_dois = {
-        identifier
-        for namespace, identifier in state.identity_external_ids
-        if namespace == "doi"
-    }
-    incoming_dois = {
-        identifier
-        for namespace, identifier in _normalized_external_ids(paper.external_ids)
-        if namespace == "doi"
-    }
-    return not existing_dois or not incoming_dois or existing_dois == incoming_dois
 
 
 def _match_papers(
     papers: Sequence[CanonicalPaper],
     states: Sequence[PaperMarkdownState],
-    author_states: dict[Path, AuthorMarkdownState],
     papers_dir: Path,
     issues: list[MaterializationIssue],
 ) -> list[_PaperMatch]:
     uuid_index: dict[UUID, set[Path]] = defaultdict(set)
-    external_index: dict[tuple[str, str], set[Path]] = defaultdict(set)
-    version_index: dict[tuple[str, str], set[Path]] = defaultdict(set)
-    source_index: dict[tuple[str, str], set[Path]] = defaultdict(set)
+    doi_index: dict[str, set[Path]] = defaultdict(set)
     states_by_path = {state.path: state for state in states}
     for state in states:
         if state.paper_id is not None:
             uuid_index[state.paper_id].add(state.path)
-        for key in state.identity_external_ids:
-            external_index[key].add(state.path)
-        for key in state.identity_version_keys:
-            version_index[key].add(state.path)
-        for key in state.identity_source_keys:
-            source_index[key].add(state.path)
+        for namespace, identifier in state.identity_external_ids:
+            if namespace == "doi":
+                doi_index[identifier].add(state.path)
+
+    incoming_dois: dict[str, int] = defaultdict(int)
+    incoming_uuids: dict[UUID, int] = defaultdict(int)
+    for paper in papers:
+        doi = normalize_doi(paper.external_ids.doi)
+        if doi is not None:
+            incoming_dois[doi] += 1
+            incoming_uuids[paper.id] += 1
 
     matches: list[_PaperMatch] = []
     for paper in papers:
-        candidate_paths: set[Path] = set(uuid_index.get(paper.id, set()))
-        external_ids, version_keys, source_keys = _incoming_evidence(paper)
-        for key in external_ids:
-            candidate_paths.update(external_index.get(key, set()))
-        for key in version_keys:
-            candidate_paths.update(version_index.get(key, set()))
-        for key in source_keys:
-            candidate_paths.update(source_index.get(key, set()))
-
+        doi = normalize_doi(paper.external_ids.doi)
+        if doi is None or not re.fullmatch(r"10\.\d{4,9}/[^\s]+", doi):
+            _warning(
+                issues, papers_dir,
+                f"skipped incoming Paper {paper.id} without valid DOI",
+            )
+            matches.append(_PaperMatch(None, blocked=True))
+            continue
+        if incoming_dois[doi] > 1 or incoming_uuids[paper.id] > 1:
+            issues.append(
+                MaterializationIssue(
+                    papers_dir, f"ambiguous incoming DOI/UUID for Paper {paper.id}",
+                )
+            )
+            matches.append(_PaperMatch(None, blocked=True))
+            continue
+        candidate_paths = uuid_index.get(paper.id, set()) | doi_index.get(doi, set())
         if len(candidate_paths) > 1:
             issues.append(
                 MaterializationIssue(
-                    papers_dir,
-                    f"ambiguous identity for incoming Paper {paper.id}: "
+                    papers_dir, f"ambiguous identity for incoming Paper {paper.id}: "
                     + ", ".join(str(path) for path in sorted(candidate_paths)),
                 )
             )
             matches.append(_PaperMatch(None, blocked=True))
             continue
-        if len(candidate_paths) == 1:
-            matches.append(_PaperMatch(states_by_path[next(iter(candidate_paths))]))
-            continue
-
-        title_candidates = [
-            state
-            for state in states
-            if state.updateable
-            and state.title is not None
-            and normalize_text(state.title) == normalize_text(paper.metadata.title)
-            and _external_evidence_compatible(state, paper)
-            and _authors_compatible(state, paper, author_states)
-        ]
-        if len(title_candidates) > 1:
-            issues.append(
-                MaterializationIssue(
-                    papers_dir,
-                    f"ambiguous title/author match for incoming Paper {paper.id}",
+        if candidate_paths:
+            state = states_by_path[next(iter(candidate_paths))]
+            durable_dois = {
+                identifier for namespace, identifier in state.identity_external_ids
+                if namespace == "doi"
+            }
+            if durable_dois != {doi}:
+                issues.append(
+                    MaterializationIssue(
+                        state.path, "incoming DOI conflicts with durable Paper UUID",
+                    )
                 )
-            )
-            matches.append(_PaperMatch(None, blocked=True))
-        elif title_candidates:
-            matches.append(_PaperMatch(title_candidates[0]))
+                matches.append(_PaperMatch(state, blocked=True))
+            else:
+                matches.append(_PaperMatch(state))
         else:
             matches.append(_PaperMatch(None))
 
@@ -619,7 +528,6 @@ def _resolve_author_links(
                 AuthorLink(target.stem, candidate_state.name, target),
                 author,
                 author_states,
-                for_title_fallback=False,
             ):
                 issues.append(
                     MaterializationIssue(
@@ -637,7 +545,6 @@ def _resolve_author_links(
                     old_link,
                     author,
                     author_states,
-                    for_title_fallback=False,
                 )
             ]
             if len(compatible_links) > 1:
@@ -668,7 +575,6 @@ def _resolve_author_links(
                 AuthorLink(target.stem, state.name, target),
                 author,
                 author_states,
-                for_title_fallback=False,
             ):
                 issues.append(
                     MaterializationIssue(
@@ -763,16 +669,8 @@ def _render_updated_paper(
             "discovered_at": state.discovered_at.isoformat().replace(
                 "+00:00", "Z"
             ),
-            "preferred_version": (
-                merged.preferred_version.model_dump(mode="json")
-                if merged.preferred_version is not None
-                else None
-            ),
             "zotero_key": state.zotero_key,
             "external_ids": external_values,
-            "versions": [
-                version.model_dump(mode="json") for version in merged.versions
-            ],
             "sources": [source.model_dump(mode="json") for source in merged.sources],
         }
     )
@@ -782,7 +680,6 @@ def _render_updated_paper(
         state.body,
         title=merged.title,
         abstract=merged.abstract,
-        versions_summary=_version_summary(merged.versions),
         sources_summary=_source_summary(merged.sources),
     )
     return serialize_document(frontmatter, body)
@@ -826,7 +723,6 @@ def materialize_papers(
     matches = _match_papers(
         papers,
         states,
-        author_states,
         papers_dir,
         issues,
     )
@@ -884,54 +780,29 @@ def materialize_papers(
                 merged = merge_paper_state(state, paper)
                 for message in merged.warnings:
                     _warning(issues, state.path, message)
-                if merged.incoming_is_preferred:
-                    resolved = _resolve_author_links(
-                        paper,
-                        state.paper_id or paper.id,
-                        authors_dir,
-                        state,
-                        author_states,
-                        openalex_index,
-                        orcid_index,
-                        created_authors,
-                        existing_authors,
-                        issues,
+                resolved = _resolve_author_links(
+                    paper,
+                    state.paper_id or paper.id,
+                    authors_dir,
+                    state,
+                    author_states,
+                    openalex_index,
+                    orcid_index,
+                    created_authors,
+                    existing_authors,
+                    issues,
+                )
+                if resolved is None:
+                    continue
+                author_links, _stems = resolved
+                durable_author_links = tuple(
+                    f"[[Authors/{link.stem}|{link.alias}]]" for link in state.author_links
+                )
+                if durable_author_links != author_links:
+                    _warning(
+                        issues, state.path,
+                        "authors changed with incoming canonical metadata",
                     )
-                    if resolved is None:
-                        continue
-                    author_links, _stems = resolved
-                    durable_author_links = tuple(
-                        f"[[Authors/{link.stem}|{link.alias}]]"
-                        for link in state.author_links
-                    )
-                    if durable_author_links != author_links:
-                        _warning(
-                            issues,
-                            state.path,
-                            "authors changed with the effective preferred version",
-                        )
-                else:
-                    author_links = tuple(
-                        f"[[Authors/{link.stem}|{link.alias}]]"
-                        for link in state.author_links
-                    )
-                    authors_compatible = len(state.author_links) == len(paper.authors) and all(
-                        _link_compatible(
-                            link,
-                            author,
-                            author_states,
-                            for_title_fallback=False,
-                        )
-                        for link, author in zip(
-                            state.author_links, paper.authors, strict=True
-                        )
-                    )
-                    if not authors_compatible:
-                        _warning(
-                            issues,
-                            state.path,
-                            "ignored authors from a non-effective incoming version",
-                        )
                 try:
                     contents = _render_updated_paper(state, merged, author_links)
                 except Exception as error:

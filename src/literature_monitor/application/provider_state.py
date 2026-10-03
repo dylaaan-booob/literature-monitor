@@ -1,4 +1,4 @@
-"""Revision-bound normalized Provider state (§30.4); no production Run integration."""
+"""Crossref-only revision-bound Provider state (§37.6) and safe publication."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ import re
 import sqlite3
 import stat
 import tempfile
-from urllib.parse import urlsplit
 
 from pydantic import TypeAdapter
 
@@ -23,20 +22,15 @@ from literature_monitor.crossref import (
     CrossrefWorkRecord, parse_crossref_indexed_at, validate_normalized_crossref_record,
 )
 from literature_monitor.identifiers import normalize_doi
-from literature_monitor.openalex import OpenAlexVersionHint
 from literature_monitor.provider_revision import parse_revision_timestamp
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 CROSSREF_SERIALIZATION_VERSION = 1
-OPENALEX_SERIALIZATION_VERSION = 1
 STATE_FILENAME = "provider-state.sqlite3"
-_WORK_ID = re.compile(r"https://openalex\.org/W\d+")
-_VERSION_HINTS = TypeAdapter(tuple[OpenAlexVersionHint, ...])
 _REVISION_TIMESTAMP = TypeAdapter(datetime | None)
 _SCHEMA = (
     "CREATE TABLE schema_metadata (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), schema_version INTEGER NOT NULL)",
     "CREATE TABLE crossref_records (doi TEXT PRIMARY KEY NOT NULL, indexed_at TEXT NOT NULL, retrieved_at TEXT NOT NULL, semantic_hash TEXT NOT NULL, record_json TEXT NOT NULL)",
-    "CREATE TABLE openalex_versions (work_id TEXT PRIMARY KEY NOT NULL, hydrated_against_updated_at TEXT NOT NULL, retrieved_at TEXT NOT NULL, versions_json TEXT NOT NULL)",
 )
 
 
@@ -121,65 +115,12 @@ def deserialize_crossref_record(text: str) -> CrossrefWorkRecord:
     return record
 
 
-def _validate_hints(hints: tuple[OpenAlexVersionHint, ...]) -> None:
-    keys = []
-    for hint in hints:
-        if hint.source not in {"doi", "arxiv", "openalex_location"}:
-            raise ValueError("unsupported normalized location identity")
-        if hint.source == "doi" and normalize_doi(hint.identifier) != hint.identifier:
-            raise ValueError("version DOI must already be normalized")
-        if (hint.identifier != hint.identifier.strip() or not hint.identifier
-                or any(character.isspace() for character in hint.identifier)):
-            raise ValueError("invalid version identifier")
-        if hint.source == "openalex_location" and hint.identifier.casefold().startswith(("doi:", "arxiv:")):
-            raise ValueError("location identifier belongs to another namespace")
-        for url in (hint.url, hint.identifier if "://" in hint.identifier else None):
-            if url is not None:
-                parsed = urlsplit(url)
-                if (parsed.scheme not in {"http", "https"} or not parsed.hostname
-                        or any(character.isspace() for character in url)):
-                    raise ValueError("invalid version URL")
-                parsed.port  # Reject malformed ports without repairing the URL.
-        keys.append((hint.source, hint.identifier, hint.version.value))
-    if keys != sorted(set(keys)):
-        raise ValueError("version hints must be sorted and unique")
-
-
-def serialize_openalex_versions(hints: tuple[OpenAlexVersionHint, ...]) -> str:
-    data = [hint.model_dump(mode="json") for hint in hints]
-    parsed = _VERSION_HINTS.validate_json(_json(data), strict=True)
-    if [hint.model_dump(mode="json") for hint in parsed] != data:
-        raise ValueError("noncanonical normalized version hints")
-    _validate_hints(parsed)
-    return _json({"serialization_version": OPENALEX_SERIALIZATION_VERSION, "version_hints": data})
-
-
-def deserialize_openalex_versions(text: str) -> tuple[OpenAlexVersionHint, ...]:
-    data = _payload(text, OPENALEX_SERIALIZATION_VERSION, "version_hints")
-    hints = _VERSION_HINTS.validate_json(_json(data), strict=True)
-    if [hint.model_dump(mode="json") for hint in hints] != data:
-        raise ValueError("noncanonical normalized version hints")
-    _validate_hints(hints)
-    return hints
-
-
-def _crossref_semantic_hash(record: CrossrefWorkRecord, *, include_work_type: bool) -> str:
+def crossref_semantic_hash(record: CrossrefWorkRecord) -> str:
     fields = {
-        "doi", "title", "journal", "abstract", "authors", "issns", "dates", "relations",
+        "doi", "title", "journal", "abstract", "authors", "issns", "dates", "relations", "work_type",
     }
-    if include_work_type:
-        fields.add("work_type")
     data = record.model_dump(mode="json", include=fields)
     return hashlib.sha256(_json(data).encode("utf-8")).hexdigest()
-
-
-def _crossref_semantic_hash_v1(record: CrossrefWorkRecord) -> str:
-    """仅用于验证 legacy digest，保持原 v1 算法。"""
-    return _crossref_semantic_hash(record, include_work_type=False)
-
-
-def crossref_semantic_hash(record: CrossrefWorkRecord) -> str:
-    return _crossref_semantic_hash(record, include_work_type=True)
 
 
 @dataclass(frozen=True)
@@ -209,32 +150,12 @@ class CrossrefRecordState:
 
 
 @dataclass(frozen=True)
-class OpenAlexVersionState:
-    work_id: str
-    hydrated_against_updated_at: datetime
-    retrieved_at: datetime
-    version_hints: tuple[OpenAlexVersionHint, ...]
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.work_id, str) or not _WORK_ID.fullmatch(self.work_id):
-            raise ValueError("state requires canonical OpenAlex Work ID")
-        _canonical_time(self.hydrated_against_updated_at)
-        _canonical_time(self.retrieved_at)
-        if not isinstance(self.version_hints, tuple):
-            raise ValueError("version hints must be immutable normalized values")
-        serialize_openalex_versions(self.version_hints)
-
-
-@dataclass(frozen=True)
 class ProviderState:
     crossref_records: tuple[CrossrefRecordState, ...] = ()
-    openalex_versions: tuple[OpenAlexVersionState, ...] = ()
 
     def __post_init__(self) -> None:
         if len({row.doi for row in self.crossref_records}) != len(self.crossref_records):
             raise ValueError("duplicate Crossref DOI in Provider state")
-        if len({row.work_id for row in self.openalex_versions}) != len(self.openalex_versions):
-            raise ValueError("duplicate OpenAlex Work ID in Provider state")
 
 
 class ProviderStateStatus(str, Enum):
@@ -274,7 +195,7 @@ def _connect(path: Path, *, readonly: bool) -> sqlite3.Connection:
 
 def _schema_version(connection: sqlite3.Connection) -> int:
     rows = connection.execute("SELECT singleton, schema_version FROM schema_metadata").fetchall()
-    if rows not in ([(1, 1)], [(1, SCHEMA_VERSION)]):
+    if rows != [(1, SCHEMA_VERSION)]:
         raise ValueError("unsupported Provider-state schema version")
     return rows[0][1]
 
@@ -287,25 +208,16 @@ def _read_connection(connection: sqlite3.Connection) -> ProviderState:
     schema = connection.execute("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name").fetchall()
     if sorted(row[0] for row in schema) != sorted(_SCHEMA):
         raise ValueError("incompatible Provider-state schema")
-    version = _schema_version(connection)
-    hash_record = _crossref_semantic_hash_v1 if version == 1 else crossref_semantic_hash
+    _schema_version(connection)
     crossref = []
     for doi, indexed, retrieved, digest, payload in connection.execute(
         "SELECT doi, indexed_at, retrieved_at, semantic_hash, record_json FROM crossref_records ORDER BY doi"
     ):
         record = deserialize_crossref_record(payload)
-        # 先按 durable 版本验证 digest，再构造满足当前 invariant 的内存对象。
-        if digest != hash_record(record):
-            raise ValueError("Crossref state semantic hash mismatch")
         crossref.append(CrossrefRecordState(
-            doi, _read_time(indexed), _read_time(retrieved), crossref_semantic_hash(record), record,
+            doi, _read_time(indexed), _read_time(retrieved), digest, record,
         ))
-    openalex = tuple(OpenAlexVersionState(
-        work_id, _read_time(revision), _read_time(retrieved), deserialize_openalex_versions(payload),
-    ) for work_id, revision, retrieved, payload in connection.execute(
-        "SELECT work_id, hydrated_against_updated_at, retrieved_at, versions_json FROM openalex_versions ORDER BY work_id"
-    ))
-    return ProviderState(tuple(crossref), openalex)
+    return ProviderState(tuple(crossref))
 
 
 def read_provider_state(output_dir: Path) -> ProviderStateReadResult:
@@ -329,11 +241,6 @@ def _upsert_changes(connection: sqlite3.Connection, state: ProviderState) -> Non
         "INSERT INTO crossref_records VALUES (?, ?, ?, ?, ?) ON CONFLICT(doi) DO UPDATE SET indexed_at=excluded.indexed_at, retrieved_at=excluded.retrieved_at, semantic_hash=excluded.semantic_hash, record_json=excluded.record_json",
         [(row.doi, _time_text(row.indexed_at), _time_text(row.retrieved_at), row.semantic_hash,
           serialize_crossref_record(row.record)) for row in state.crossref_records],
-    )
-    connection.executemany(
-        "INSERT INTO openalex_versions VALUES (?, ?, ?, ?) ON CONFLICT(work_id) DO UPDATE SET hydrated_against_updated_at=excluded.hydrated_against_updated_at, retrieved_at=excluded.retrieved_at, versions_json=excluded.versions_json",
-        [(row.work_id, _time_text(row.hydrated_against_updated_at), _time_text(row.retrieved_at),
-          serialize_openalex_versions(row.version_hints)) for row in state.openalex_versions],
     )
 
 
@@ -413,18 +320,9 @@ def update_provider_state(output_dir: Path, changes: ProviderState) -> None:
         return
     with closing(_connect(directory / STATE_FILENAME, readonly=False)) as connection, connection:
         connection.execute("BEGIN IMMEDIATE")
-        previous = _read_connection(connection)
-        if _schema_version(connection) == 1:
-            # 全历史 rehash、版本更新与 pending upsert 必须共同提交或回滚。
-            connection.executemany(
-                "UPDATE crossref_records SET semantic_hash=? WHERE doi=?",
-                [(row.semantic_hash, row.doi) for row in previous.crossref_records],
-            )
-            connection.execute("UPDATE schema_metadata SET schema_version=? WHERE singleton=1", (SCHEMA_VERSION,))
+        _read_connection(connection)
         _upsert_changes(connection, changes)
         _read_connection(connection)
-        if _schema_version(connection) != SCHEMA_VERSION:
-            raise ValueError("Provider-state migration did not reach current schema")
 
 
 def replace_invalid_provider_state(output_dir: Path, fresh_state: ProviderState) -> None:

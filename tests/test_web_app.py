@@ -36,9 +36,6 @@ from literature_monitor.models import (
     CanonicalPaper,
     ExternalIds,
     MetadataSource,
-    PaperVersion,
-    VersionKind,
-    VersionRef,
     WorkflowStatus,
     Workflow,
 )
@@ -99,15 +96,6 @@ def make_paper(
             doi="10.1000/example",
             crossref="10.1000/example",
         ),
-        versions=(
-            PaperVersion(
-                source="openalex",
-                identifier="W123",
-                kind=VersionKind.JOURNAL_FINAL,
-                url="https://example.test/paper",
-                date=date(2026, 9, 1),
-            ),
-        ),
         sources=(
             MetadataSource(
                 provider="openalex",
@@ -115,7 +103,6 @@ def make_paper(
                 retrieved_at=datetime(2026, 9, 20, 10, 0, tzinfo=timezone.utc),
             ),
         ),
-        preferred_version=VersionRef(source="openalex", identifier="W123"),
         zotero_key=zotero_key,
     )
 
@@ -463,7 +450,8 @@ def test_paper_detail_is_uuid_addressed_and_renders_existing_projection(
     assert "causal inference, statistics" in response.text
     assert "Ada Example, Lin Example" in response.text
     assert "10.1000/example" in response.text
-    assert "journal_final" in response.text
+    assert "<h3>Versions</h3>" not in response.text
+    assert "journal_final" not in response.text
     assert "openalex · W123" in response.text
     assert "ZOT123" in response.text
 
@@ -1104,13 +1092,9 @@ def test_mark_route_verifies_zotero_and_refreshes_real_workspace_without_false_n
     papers_dir.mkdir(parents=True)
     paths = []
     for ordinal in (1, 2):
-        version = PaperVersion(
-            source="doi", identifier=f"10.5555/mark-{ordinal}", kind=VersionKind.JOURNAL_FINAL,
-        )
         paper = CanonicalPaper(
             id=UUID(int=ordinal), metadata=CanonicalMetadata(title=f"Kept {ordinal}", journal="Biometrics"),
-            external_ids=ExternalIds(doi=version.identifier), authors=(Author(name="Ada Author"),),
-            versions=(version,), preferred_version=VersionRef(source=version.source, identifier=version.identifier),
+            external_ids=ExternalIds(doi=f"10.5555/mark-{ordinal}"), authors=(Author(name="Ada Author"),),
             workflow=Workflow(status=WorkflowStatus.KEPT, discovered_at=datetime(2026, 9, 20, tzinfo=timezone.utc),
                               zotero_key="PARENT01" if ordinal == 1 else None),
         )

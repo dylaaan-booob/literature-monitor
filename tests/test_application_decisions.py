@@ -27,9 +27,6 @@ from literature_monitor.models import (
     CanonicalPaper,
     ExternalIds,
     MetadataSource,
-    PaperVersion,
-    VersionKind,
-    VersionRef,
     Workflow,
     WorkflowStatus,
 )
@@ -109,12 +106,6 @@ def write_paper(
     title: str = "Decision Paper",
     zotero_key: str | None = None,
 ) -> Path:
-    version = PaperVersion(
-        source="doi",
-        identifier="10.5555/decision",
-        kind=VersionKind.JOURNAL_FINAL,
-        date=date(2026, 9, 20),
-    )
     paper = CanonicalPaper(
         id=paper_id,
         metadata=CanonicalMetadata(
@@ -132,7 +123,6 @@ def write_paper(
             }
         ),
         authors=(Author(name="Ada Author"),),
-        versions=(version,),
         sources=(
             MetadataSource(
                 provider="openalex",
@@ -144,10 +134,6 @@ def write_paper(
             status=status,
             discovered_at=NOW,
             zotero_key=zotero_key,
-        ),
-        preferred_version=VersionRef(
-            source=version.source,
-            identifier=version.identifier,
         ),
     )
     path = output_dir / "Papers" / filename
@@ -257,7 +243,7 @@ def test_status_only_mutation_preserves_unknown_frontmatter_and_complete_human_b
     assert result.outcome is DecisionOutcome.UPDATED
     assert after_frontmatter["status"] == "kept"
     assert after_frontmatter["custom_field"] == {"nested": ["retain", 3]}
-    assert after_frontmatter["versions"] == before_frontmatter["versions"]
+    assert "versions" not in after_frontmatter and "preferred_version" not in after_frontmatter
     assert after_frontmatter["sources"] == before_frontmatter["sources"]
     assert after_frontmatter["title"] == before_frontmatter["title"]
     assert after_frontmatter["journal"] == before_frontmatter["journal"]

@@ -130,7 +130,7 @@ def test_openalex_type_cannot_veto_discovered_exact_crossref(kind):
     anchor, warnings = _normalize_work({
         "id": "https://openalex.org/W1", "doi": "10.5555/a", "title": "statistics", "type": kind,
         "primary_location": {"source": {"id": resolved.openalex_id}, "is_published": False},
-    }, resolved, NOW, thin=True)
+    }, resolved, NOW)
     candidates = filter_candidate_evidence(DiscoveryResult((resolved,), (anchor,), ()),
         discovery((cr(),)), supplementation(), (A,))
     assert not warnings and candidates.openalex_records == (anchor,)
@@ -256,7 +256,7 @@ def production(tmp_path, monkeypatch):
     config = tmp_path / "monitor.yaml"
     config.write_text("venue_whitelist: journals.md\nkeyword_expression: statistics\noutput_dir: workspace\nfrom_date: 2026-01-01\nto_date: 2026-01-31\n")
     case = SimpleNamespace(openalex=DiscoveryResult((source(),), (), ()), crossref=discovery(),
-                           supplements=supplementation(), hydrated=(), assembly=None, pending=())
+                           supplements=supplementation(), canonical_evidence=(), assembly=None, pending=())
     monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kw: nullcontext(object()))
     monkeypatch.setattr(monitor, "CrossrefClient", lambda **kw: nullcontext(object()))
     monkeypatch.setattr(monitor, "discover_journals_batched", lambda *args, **kw: case.openalex)
@@ -280,11 +280,11 @@ def production(tmp_path, monkeypatch):
             oa_records, cr_records, supplied, monitor_journal_issns=monitor_journal_issns,
         )
     monkeypatch.setattr(monitor, "assemble_live_provider_evidence", assemble)
-    def hydrate(client, records, **kw):
-        case.hydrated = records
-        return SimpleNamespace(records=records, issues=(), reused_work_ids=(),
-                               hydrated_work_ids=(), pending_changes=())
-    monkeypatch.setattr(monitor, "hydrate_retained_openalex_versions", hydrate)
+    original_canonicalize = monitor.canonicalize_records
+    def canonicalize(evidence):
+        case.canonical_evidence = evidence
+        return original_canonicalize(evidence)
+    monkeypatch.setattr(monitor, "canonicalize_records", canonicalize)
     case.config = config
     case.output = tmp_path / "workspace"
     return case
@@ -300,7 +300,7 @@ def test_ineligible_is_absent_before_assembly_and_keeps_acquired_state(productio
     case.pending = (CrossrefRecordState.from_record(record),)
     case.config.write_text(case.config.read_text().replace("keyword_expression: statistics", f"keyword_expression: {expression}"))
     result = monitor.run_monitor(case.config)
-    assert case.assembly == ((), (), ()) and not case.hydrated
+    assert case.assembly == ((), (), ()) and not case.canonical_evidence
     assert not result.warnings and not result.errors and result.outcome is monitor.RunOutcome.COMPLETED
     assert result.statistics.openalex_records == int(with_anchor)
     assert result.statistics.crossref_discovery_records == result.state_usage.crossref_new == 1
@@ -314,7 +314,7 @@ def test_ineligible_is_absent_before_assembly_and_keeps_acquired_state(productio
         else {record.provenance.record_id}
     )
     assert read_provider_state(case.output).state.crossref_records == case.pending
-    assert PROVIDER_STATE_SCHEMA_VERSION == 2
+    assert PROVIDER_STATE_SCHEMA_VERSION == 3
     snapshot = json.loads((case.output / ".literature-monitor/last-run.json").read_text())
     assert snapshot["schema_version"] == 2 and "diagnostics" not in snapshot
     assert not list((case.output / "Papers").glob("*.md"))
@@ -348,7 +348,7 @@ def test_excluded_supplement_still_counts_and_persists_acquired_prime_record(pro
     case.supplements = supplementation(supplement(anchor, prime))
     case.pending = case.supplements.pending_changes
     result = monitor.run_monitor(case.config)
-    assert case.assembly == ((), (), ()) and not case.hydrated
+    assert case.assembly == ((), (), ()) and not case.canonical_evidence
     assert not result.warnings and not result.errors and result.canonical_paper_count == 0
     assert result.statistics.openalex_records == result.statistics.crossref_supplement_records == 1
     assert result.statistics.evidence_clusters == 0 and result.state_usage.crossref_new == 1
@@ -370,22 +370,23 @@ def test_production_publication_fallbacks_preserve_provider_errors(production, s
     result = monitor.run_monitor(case.config)
     excluded = published is False and status is not CoverageStatus.FAILED
     disputed = published is None or (published is False and status is CoverageStatus.FAILED)
-    assert result.canonical_paper_count == result.created_papers == int(not excluded)
-    assert bool(case.hydrated) is (not excluded)
+    skipped_no_doi = status is None and not excluded
+    assert result.canonical_paper_count == result.created_papers == int(not excluded and not skipped_no_doi)
+    assert bool(case.canonical_evidence) is (not excluded)
     assert bool(result.errors) is (status is CoverageStatus.FAILED)
     assert all(e.component is monitor.MonitorIssueComponent.CROSSREF_SUPPLEMENT for e in result.errors)
-    assert bool(result.warnings) is disputed
-    assert all(w.component is monitor.MonitorIssueComponent.CANDIDATE_ELIGIBILITY for w in result.warnings)
+    assert bool(result.warnings) is (disputed or skipped_no_doi)
+    assert all(w.component in {monitor.MonitorIssueComponent.CANDIDATE_ELIGIBILITY, monitor.MonitorIssueComponent.CANONICALIZATION} for w in result.warnings)
     assert result.coverage == (*case.crossref.coverage, *case.supplements.coverage)
     expected = (monitor.RunOutcome.COMPLETED_WITH_ERRORS if status is CoverageStatus.FAILED else
-                monitor.RunOutcome.COMPLETED_WITH_WARNINGS if disputed else monitor.RunOutcome.COMPLETED)
+                monitor.RunOutcome.COMPLETED_WITH_WARNINGS if disputed or skipped_no_doi else monitor.RunOutcome.COMPLETED)
     assert result.outcome is expected
 
 
 def test_strong_exact_evidence_suppresses_only_scope_warning(production):
     case = production
-    # A DOI-less disputed snapshot joins by the unchanged conservative title/author rule.
-    anchor = oa(doi=None, published=None)
+    # Disputed venue evidence shares an explicit DOI with the strong Crossref record.
+    anchor = oa(published=None, source_number=999)
     case.openalex = replace(case.openalex, records=(anchor,))
     case.crossref = discovery((cr(),))
     result = monitor.run_monitor(case.config)
@@ -405,7 +406,7 @@ def test_empty_projection_warns_only_for_genuinely_eligible_clusters(production,
     case.supplements = supplementation(supplement(anchor))
     case.config.write_text(case.config.read_text().replace("keyword_expression: statistics", "keyword_expression: NOT statistics"))
     result = monitor.run_monitor(case.config)
-    assert result.canonical_paper_count == 0 and not case.hydrated and not result.errors
+    assert result.canonical_paper_count == 0 and not case.canonical_evidence and not result.errors
     assert [w.stage for w in result.warnings] == (["unsearchable"] if published else [])
     if published is None:
         diagnostic, = result.diagnostics
@@ -432,7 +433,7 @@ def test_mixed_eligible_disputed_empty_cluster_keeps_both_signals_and_never_matc
     result = monitor.run_monitor(case.config)
     assert result.statistics.evidence_clusters == 1
     assert result.statistics.retained_clusters == result.canonical_paper_count == 0
-    assert matched_projections == [()] and not case.hydrated and not result.errors
+    assert matched_projections == [()] and not case.canonical_evidence and not result.errors
     warning, = result.warnings
     diagnostic, = result.diagnostics
     assert warning.stage == "unsearchable" and warning.component is monitor.MonitorIssueComponent.SEARCH
@@ -445,7 +446,7 @@ def test_mixed_eligible_disputed_empty_cluster_keeps_both_signals_and_never_matc
 
 
 @pytest.mark.parametrize('separation', ['authors', 'doi', 'missing_authors'])
-def test_production_logical_separations_are_diagnostics_only_and_not_doubled(production, separation):
+def test_production_doi_identity_does_not_emit_retired_separation_diagnostics(production, separation):
     case = production
     records = tuple(oa(doi=f'10.5555/{i}' if separation == 'doi' else None,
                        published=True, number=i + 1).model_copy(update={
@@ -456,29 +457,31 @@ def test_production_logical_separations_are_diagnostics_only_and_not_doubled(pro
     if separation == 'doi':
         case.supplements = supplementation(*(supplement(r) for r in records))
     if separation == 'missing_authors':
-        # Unmatched insufficient author evidence still gets a separation explanation.
+        # Unmatched evidence remains observable without a canonicalization issue.
         case.config.write_text(case.config.read_text().replace('keyword_expression: statistics',
                                                               'keyword_expression: astronomy'))
     result = monitor.run_monitor(case.config)
-    assert result.outcome is monitor.RunOutcome.COMPLETED
-    assert not result.warnings and not result.errors
-    diagnostic, = result.diagnostics
-    assert diagnostic.kind is (RunDiagnosticKind.CONFLICTING_DOI_SEPARATION if separation == 'doi'
-                               else RunDiagnosticKind.REPEATED_TITLE_SEPARATION)
-    assert diagnostic.record_ids == tuple(sorted(r.provenance.record_id for r in records))
-    assert result.statistics.consolidation_issues == result.statistics.canonicalization_issues == 0
+    assert result.outcome is (monitor.RunOutcome.COMPLETED_WITH_WARNINGS if separation == "authors" else monitor.RunOutcome.COMPLETED)
+    assert not result.errors
+    assert all(w.component is monitor.MonitorIssueComponent.CANONICALIZATION for w in result.warnings)
+    assert bool(result.warnings) is (separation == "authors")
+    assert result.created_papers == (4 if separation == "doi" else 0)
+    assert not result.diagnostics
+    assert result.statistics.consolidation_issues == 0
+    assert result.statistics.canonicalization_issues == (4 if separation == 'authors' else 0)
     assert result.statistics.evidence_clusters == 4
-    assert result.canonical_paper_count == (0 if separation == 'missing_authors' else 4)
+    assert result.canonical_paper_count == (4 if separation == 'doi' else 0)
     assert result.coverage == (*case.crossref.coverage, *case.supplements.coverage)
     snapshot = json.loads((case.output / '.literature-monitor' / 'last-run.json').read_text())
     assert snapshot['schema_version'] == 2 and 'diagnostics' not in snapshot
-    assert PROVIDER_STATE_SCHEMA_VERSION == 2
+    assert PROVIDER_STATE_SCHEMA_VERSION == 3
     assert read_provider_state(case.output).state.crossref_records == ()
     for paper in (case.output / 'Papers').glob('*.md'):
-        assert diagnostic.kind.value not in paper.read_text()
+        assert 'conflicting_doi_separation' not in paper.read_text()
+        assert 'repeated_title_separation' not in paper.read_text()
 
 
-def test_production_a2_and_consolidation_diagnostics_share_the_transient_surface(production):
+def test_production_retains_scope_diagnostics_without_title_separation(production):
     case = production
     first = oa(doi=None, published=None)
     second = oa(doi=None, published=True, number=2).model_copy(update={'authors': (Author(name='Grace Author'),)})
@@ -491,9 +494,8 @@ def test_production_a2_and_consolidation_diagnostics_share_the_transient_surface
     assert result.outcome is monitor.RunOutcome.COMPLETED and not result.warnings and not result.errors
     assert {d.kind for d in result.diagnostics} == {
         RunDiagnosticKind.NON_CANDIDATE_EXCLUSION, RunDiagnosticKind.SCOPE_DISPUTE,
-        RunDiagnosticKind.REPEATED_TITLE_SEPARATION,
     }
-    assert len(result.diagnostics) == 3 and result.statistics.consolidation_issues == 0
+    assert len(result.diagnostics) == 2 and result.statistics.consolidation_issues == 0
     assert case.assembly[1] == () and result.coverage == case.crossref.coverage
 
 
@@ -624,7 +626,11 @@ def test_alias_prime_receives_only_retained_anchor_contexts(kind, expected):
         prime_evidence, = (e for e in assembled if e.provenance.provider == "crossref")
         assert prime_evidence.monitor_journal_issns == expected
         assert set(prime_evidence.supplements) == {ref(r) for r in candidates.openalex_records}
-        assert canonicalize_records(assembled).papers[0].journal_issns == expected
+        papers = {paper.doi: paper for paper in canonicalize_records(assembled).papers}
+        assert len(papers) == len(candidates.openalex_records) + 1
+        assert papers[prime.doi].journal_issns == expected
+        for anchor in candidates.openalex_records:
+            assert papers[anchor.external_ids.doi].journal_issns == candidates.monitor_journal_issns[ref(anchor)]
 
 
 @pytest.mark.parametrize("kind", ["journal-article", "other"])

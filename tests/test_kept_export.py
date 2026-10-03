@@ -95,88 +95,6 @@ def test_doi_is_normalized_and_preferred_over_arxiv(tmp_path: Path) -> None:
     assert result.issues == ()
 
 
-def test_arxiv_is_used_when_doi_is_missing(tmp_path: Path) -> None:
-    write_paper(tmp_path, "paper.md", 1, arxiv="2601.01234")
-
-    result = export_kept_papers(tmp_path)
-
-    assert result.entries == ("arXiv:2601.01234",)
-    assert result.issues == ()
-
-
-@pytest.mark.parametrize(
-    "unsafe_doi",
-    ("10.5555/new\nline", "10.5555/tab\tvalue"),
-)
-def test_unsafe_doi_falls_back_to_arxiv(
-    unsafe_doi: str,
-    tmp_path: Path,
-) -> None:
-    write_paper(
-        tmp_path,
-        "paper.md",
-        1,
-        doi=unsafe_doi,
-        arxiv="2601.01234",
-    )
-
-    result = export_kept_papers(tmp_path)
-
-    assert result.entries == ("arXiv:2601.01234",)
-    assert all(entry.splitlines() == [entry] for entry in result.entries)
-    assert result.issues == ()
-
-
-def test_unsafe_arxiv_falls_back_to_single_line_manual_entry(tmp_path: Path) -> None:
-    write_paper(
-        tmp_path,
-        "paper.md",
-        1,
-        title="Manual Paper",
-        journal="Biometrics",
-        publication_date=date(2026, 1, 15),
-        arxiv="2601.\n01234",
-    )
-
-    result = export_kept_papers(tmp_path)
-
-    assert result.entries == (
-        "MANUAL\tManual Paper\tBiometrics\t2026-01-15",
-    )
-    assert all(entry.splitlines() == [entry] for entry in result.entries)
-    assert result.issues == ()
-
-
-def test_manual_entries_use_iso_date_unknown_and_single_line_text(
-    tmp_path: Path,
-) -> None:
-    write_paper(
-        tmp_path,
-        "dated.md",
-        1,
-        title=" A\tmanual\npaper ",
-        journal=" Journal\r\n  Name ",
-        publication_date=date(2026, 1, 15),
-    )
-    write_paper(
-        tmp_path,
-        "unknown.md",
-        2,
-        title="Unknown date",
-        journal="Biometrics",
-        publication_date=None,
-    )
-
-    result = export_kept_papers(tmp_path)
-
-    assert result.entries == (
-        "MANUAL\tA manual paper\tJournal Name\t2026-01-15",
-        "MANUAL\tUnknown date\tBiometrics\tunknown",
-    )
-    assert all("\n" not in entry and "\r" not in entry for entry in result.entries)
-    assert result.issues == ()
-
-
 def test_entries_follow_filename_order_not_creation_order(tmp_path: Path) -> None:
     write_paper(tmp_path, "z-last.md", 1, doi="10.5555/z")
     write_paper(tmp_path, "a-first.md", 2, doi="10.5555/a")
@@ -283,6 +201,17 @@ def test_directory_enumeration_oserror_becomes_an_issue(
     assert result.issues[0].path == papers_dir
     assert result.issues[0].message == "cannot scan Papers directory: scan denied"
     assert result.has_errors
+
+
+@pytest.mark.parametrize("doi", [None, "10.5555/new\nline", "10.5555/tab\tvalue"])
+def test_unsupported_doi_identity_is_reported_without_arxiv_or_manual_repair(tmp_path, doi):
+    path = write_paper(tmp_path, "unsupported.md", 1, doi="10.5555/current", arxiv="2601.01234")
+    replace_frontmatter(path, doi=doi, external_ids={"doi": doi, "arxiv": "2601.01234"})
+    before = path.read_bytes()
+    result = export_kept_papers(tmp_path)
+    assert result.entries == () and result.has_errors
+    assert any("valid DOI" in issue.message for issue in result.issues)
+    assert path.read_bytes() == before
 
 
 def test_export_preserves_all_paper_and_author_bytes(tmp_path: Path) -> None:

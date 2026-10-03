@@ -17,9 +17,6 @@ from literature_monitor.models import (
     CanonicalPaper,
     ExternalIds,
     MetadataSource,
-    PaperVersion,
-    VersionKind,
-    VersionRef,
     Workflow,
     WorkflowStatus,
 )
@@ -36,12 +33,6 @@ def write_paper(
     discovered_at: datetime = datetime(2026, 9, 21, tzinfo=timezone.utc),
     zotero_key: str | None = None,
 ) -> Path:
-    version = PaperVersion(
-        source="doi",
-        identifier=f"10.5555/{ordinal}",
-        kind=VersionKind.JOURNAL_FINAL,
-        date=publication_date,
-    )
     paper = CanonicalPaper(
         id=UUID(int=ordinal),
         metadata=CanonicalMetadata(
@@ -56,7 +47,6 @@ def write_paper(
             openalex=f"https://openalex.org/W{ordinal}",
         ),
         authors=(Author(name="Ada Author"),),
-        versions=(version,),
         sources=(
             MetadataSource(
                 provider="openalex",
@@ -68,10 +58,6 @@ def write_paper(
             status=status,
             discovered_at=discovered_at,
             zotero_key=zotero_key,
-        ),
-        preferred_version=VersionRef(
-            source=version.source,
-            identifier=version.identifier,
         ),
     )
     path = output_dir / "Papers" / filename
@@ -140,8 +126,19 @@ def test_all_workflow_statuses_appear_only_in_their_derived_view(
     assert candidate.authors[0].name == "Ada Author"
     assert candidate.authors[0].note_stem == "ada-author"
     assert candidate.external_ids.doi == "10.5555/1"
-    assert len(candidate.versions) == 1
+    assert not hasattr(candidate, "versions") and not hasattr(candidate, "preferred_version")
     assert len(candidate.sources) == 1
+
+
+@pytest.mark.parametrize("retired", [{"versions": []}, {"preferred_version": None}])
+def test_unsupported_legacy_paper_is_an_issue_and_is_never_repaired(tmp_path, retired):
+    path = write_paper(tmp_path, "legacy.md", 1)
+    replace_frontmatter(path, **retired)
+    before = path.read_bytes()
+    snapshot = load_workspace(tmp_path)
+    assert not snapshot.papers
+    assert any("unsupported pre-v0.5.2" in issue.message for issue in snapshot.issues)
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize("group", ["Statistics", None, "unmapped"])

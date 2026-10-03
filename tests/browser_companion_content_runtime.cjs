@@ -134,18 +134,22 @@ function recordFixture() {
 function runContentCases() {
   let cases = 0;
   for (const mode of ['valid', 'wrong_doi', 'missing_doi', 'aam', 'preprint', 'missing_journal',
-    'missing_issue', 'missing_volume', 'missing_source_year', 'abstract_preprint', 'abstract_aam', 'other_type', 'wrong_year', 'html_selected', 'hidden_pdf_label', 'untrusted', 'unclaimed',
+    'missing_issue', 'missing_volume', 'missing_source_year', 'missing_publication_metadata', 'missing_modal_year', 'online_first',
+    'abstract_preprint', 'abstract_aam', 'other_type', 'wrong_year', 'html_selected', 'hidden_pdf_label', 'untrusted', 'unclaimed',
     'unrelated_path', 'other_origin', 'record_changed', 'hidden_record', 'modal_hides_record', 'styled_radio']) {
     const f = recordFixture();
     if (mode === 'wrong_doi') f.doi.own = '10.9999/wrong';
     if (mode === 'missing_doi') f.doi.own = '';
     if (mode === 'aam') f.type.own = 'Accepted author manuscript';
     if (mode === 'preprint') f.type.own = 'Preprint';
+    if (mode === 'online_first') f.type.own = 'Online first';
     if (mode === 'other_type') f.type.own = 'Book';
     if (mode === 'missing_journal') f.source.children[0].own = '';
     if (mode === 'missing_issue') f.source.own = 'Summer2026, Vol. 8';
     if (mode === 'missing_volume') f.source.own = 'Summer2026, Issue 3';
     if (mode === 'missing_source_year') f.source.own = 'Vol. 8 Issue 3';
+    if (mode === 'missing_publication_metadata') f.article.children = f.article.children.slice(0, 2);
+    if (mode === 'missing_modal_year') f.body.children = f.body.children.filter(node => node !== f.year);
     if (['abstract_preprint', 'abstract_aam'].includes(mode)) {
       const abstract = e('p', mode === 'abstract_preprint' ? 'we compare against an earlier preprint'
         : 'accepted manuscript policies are discussed');
@@ -164,12 +168,13 @@ function runContentCases() {
     if (mode === 'modal_hides_record') f.article.attrs['aria-hidden'] = 'true';
     h.click(f.button, mode !== 'untrusted');
     const evidence = h.messages.filter(m => m.type === 'ebsco_pdf_action');
-    const valid = ['valid', 'modal_hides_record', 'styled_radio', 'abstract_preprint', 'abstract_aam'].includes(mode);
+    const valid = ['valid', 'modal_hides_record', 'styled_radio', 'abstract_preprint', 'abstract_aam',
+      'aam', 'preprint', 'online_first', 'other_type', 'missing_journal', 'missing_issue',
+      'missing_volume', 'missing_source_year', 'missing_publication_metadata', 'missing_modal_year', 'wrong_year'].includes(mode);
     assert.equal(evidence.length, valid ? 1 : 0, mode);
     if (valid) {
       assert.equal(evidence[0].record.doi, DOI); // injected descendant DOI ignored
-      assert.equal(evidence[0].record.document_type, 'Article');
-      assert.equal(evidence[0].record.year, 2026);
+      assert.deepEqual(Object.keys(evidence[0].record), ['doi']);
       assert.equal(evidence[0].pageUrl, RECORD);
       assert.equal(evidence[0].manifestation, undefined);
     }
@@ -418,5 +423,5 @@ function runContentCases() {
   }
   return cases;
 }
-module.exports = {runContentCases, RECORD, REDIRECT, execute, e};
+module.exports = {runContentCases, recordFixture, RECORD, REDIRECT, execute, e};
 if (require.main === module) process.stdout.write(`Shipped content adapters: ${runContentCases()} cases passed. Synthetic DOM only.\n`);

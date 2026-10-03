@@ -129,18 +129,13 @@ def validate_command(task_id: UUID, value: object) -> dict | None:
         if set(command) != fields | {'plan'} or type(command['plan']) is not dict:
             return None
         plan = command['plan']
-        if set(plan) != {'task_id', 'doi', 'acquisition_class', 'target_version', 'direct_url'}:
-            return None
-        version = plan['target_version']
-        if type(version) is not dict or set(version) != {'source', 'identifier', 'kind', 'url', 'date'}:
+        if set(plan) != {'task_id', 'doi', 'direct_url'}:
             return None
         try:
             # Local imports avoid a dependency cycle with the A7 event parser.
-            from literature_monitor.application.acquisition import AcquisitionClass, AcquisitionTask
+            from literature_monitor.application.acquisition import AcquisitionTask
             from literature_monitor.browser_acquisition import navigation_plan
-            from literature_monitor.models import PaperVersion
-            task = AcquisitionTask(task_id, task_id, plan['doi'], '', PaperVersion.model_validate(version),
-                                   AcquisitionClass(plan['acquisition_class']), '')
+            task = AcquisitionTask(task_id, task_id, plan['doi'], '', '')
             return command if navigation_plan(task).message() == plan else None
         except (ValueError, TypeError, KeyError):
             return None

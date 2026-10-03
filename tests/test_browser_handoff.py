@@ -266,11 +266,9 @@ def test_command_schema_refuses_authority_tabs_and_arbitrary_targets(reply):
 
 def test_start_reply_must_equal_a7_validated_plan():
     from literature_monitor.web.browser_handoff import validate_command
-    from literature_monitor.application.acquisition import AcquisitionClass, AcquisitionTask
+    from literature_monitor.application.acquisition import AcquisitionTask
     from literature_monitor.browser_acquisition import navigation_plan
-    from literature_monitor.models import PaperVersion,VersionKind
-    task=AcquisitionTask(TASK,TASK,'10.5555/test','PARENT01',
-        PaperVersion(source='doi',identifier='10.5555/test',kind=VersionKind.JOURNAL_FINAL),AcquisitionClass.PUBLISHED,'instance')
+    task=AcquisitionTask(TASK,TASK,'10.5555/test','PARENT01','instance')
     command={'task_id':str(TASK),'type':'START','plan':navigation_plan(task).message()}
     assert validate_command(TASK,command)==command
     command['plan']['direct_url']='https://arbitrary.example/'

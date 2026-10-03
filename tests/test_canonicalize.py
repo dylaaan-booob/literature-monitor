@@ -7,8 +7,6 @@ from typing import Any
 import pytest
 
 from literature_monitor.canonicalize import (
-    AuthorIdentity,
-    _authors_compatible,
     _normalize_abstract,
     _normalize_retrievals,
     _choose_evidence,
@@ -16,7 +14,6 @@ from literature_monitor.canonicalize import (
     canonicalize_records,
     consolidate_evidence,
 )
-from literature_monitor.diagnostics import RunDiagnosticKind
 from literature_monitor.crossref import (
     CrossrefPartialDate,
     CrossrefRelation,
@@ -26,19 +23,15 @@ from literature_monitor.crossref import (
 from literature_monitor.models import (
     Author,
     CanonicalMetadata,
-    EvidenceVersionHint,
-    EvidenceVersionRole,
+    EvidenceDate,
+    EvidenceDateKind,
     ExternalIds,
+    ProviderRecordRef,
     MetadataSource,
     ProviderTopic,
     ProviderWorkEvidence,
-    VersionKind,
 )
-from literature_monitor.openalex import (
-    OpenAlexVersion,
-    OpenAlexVersionHint,
-    OpenAlexWorkRecord,
-)
+from literature_monitor.openalex import OpenAlexWorkRecord
 from literature_monitor.search import build_searchable_projection
 
 
@@ -58,7 +51,7 @@ def openalex(
     identifier: str,
     *,
     title: str = "A Study",
-    doi: str | None = None,
+    doi: str | None = "10.5555/example",
     arxiv: str | None = None,
     authors: tuple[Author, ...] | None = None,
     publication_date: date | None = None,
@@ -66,7 +59,6 @@ def openalex(
     author_keywords: tuple[str, ...] = (),
     retrieved_at: datetime = NOW,
     external_ids: dict[str, str] | None = None,
-    version_hints: tuple[OpenAlexVersionHint, ...] = (),
 ) -> OpenAlexWorkRecord:
     values: dict[str, Any] = {
         "openalex": f"https://openalex.org/{identifier}",
@@ -91,7 +83,6 @@ def openalex(
             record_id=f"https://openalex.org/{identifier}",
             retrieved_at=retrieved_at,
         ),
-        version_hints=version_hints,
     )
 
 
@@ -164,51 +155,6 @@ def paper_projection(paper: object) -> dict[str, Any]:
     return payload
 
 
-@pytest.mark.parametrize("same_provider", [False, True])
-def test_version_hints_do_not_rank_canonical_metadata(same_provider: bool) -> None:
-    openalex_evidence = ProviderWorkEvidence(
-        provenance=MetadataSource(
-            provider="openalex", record_id="https://openalex.org/W1", retrieved_at=NOW,
-        ),
-        title="OpenAlex title",
-        journal="Biometrics",
-        publication_date=date(2026, 9, 1),
-        authors=(author(),),
-        external_ids=ExternalIds(doi="10.5555/a", openalex="https://openalex.org/W1"),
-    )
-    other_evidence = openalex_evidence.model_copy(update={
-        "title": "Crossref title",
-        "provenance": openalex_evidence.provenance if same_provider else MetadataSource(
-            provider="crossref", record_id="10.5555/a", retrieved_at=NOW,
-        ),
-    })
-    hint = EvidenceVersionHint(
-        source="arxiv", identifier="2601.01234", role=EvidenceVersionRole.PREPRINT,
-        url="https://arxiv.org/abs/2601.01234",
-    )
-    baseline = canonicalize_records((openalex_evidence, other_evidence)).papers[0]
-    hydrated = canonicalize_records((
-        openalex_evidence.model_copy(update={"version_hints": (hint,)}), other_evidence,
-    )).papers[0]
-
-    assert baseline.metadata.title == "Crossref title"
-    assert hydrated.metadata == baseline.metadata
-    assert hydrated.authors == baseline.authors
-    assert hydrated.external_ids == baseline.external_ids
-    assert hydrated.preferred_version == baseline.preferred_version
-    assert baseline.preferred_version.source == "doi"
-    assert baseline.preferred_version.identifier == "10.5555/a"
-    if same_provider:
-        # Duplicate snapshots retain the metadata-selected snapshot's hints.
-        assert hydrated.versions == baseline.versions
-        return
-    assert set(baseline.versions) < set(hydrated.versions)
-    version, = [item for item in hydrated.versions if item.source == "arxiv"]
-    assert version.identifier == hint.identifier
-    assert version.kind is VersionKind.PREPRINT
-    assert str(version.url) == hint.url
-
-
 def test_non_openalex_evidence_can_create_a_canonical_paper() -> None:
     evidence = ProviderWorkEvidence(
         provenance=MetadataSource(
@@ -220,7 +166,7 @@ def test_non_openalex_evidence_can_create_a_canonical_paper() -> None:
         journal="Biometrics",
         publication_date=date(2026, 9, 1),
         authors=(author("Ada Author", orcid="0000-0001-2345-6789"),),
-        external_ids=ExternalIds.model_validate({"independent": "work-1"}),
+        external_ids=ExternalIds.model_validate({"doi": "10.5555/independent", "independent": "work-1"}),
     )
 
     result = canonicalize_records((evidence,))
@@ -269,7 +215,7 @@ def test_public_consolidation_keeps_conflicting_dois_separate() -> None:
 
     assert len(result.clusters) == 2
     assert not result.issues
-    assert [d.kind for d in result.diagnostics] == [RunDiagnosticKind.CONFLICTING_DOI_SEPARATION]
+    assert not result.diagnostics
 
 
 def test_crossref_only_sufficient_evidence_canonicalizes() -> None:
@@ -328,7 +274,7 @@ def test_compatible_cross_provider_authors_merge_stable_ids() -> None:
 def semantic_scholar_evidence(
     paper_id: str,
     *,
-    doi: str | None = None,
+    doi: str | None = "10.5555/example",
     topics: tuple[ProviderTopic, ...] = (),
 ) -> ProviderWorkEvidence:
     return ProviderWorkEvidence(
@@ -463,27 +409,7 @@ def test_taxonomy_does_not_affect_equal_snapshot_selection() -> None:
     assert [item.name for item in first.papers[0].authors] == ["Ada Author"]
 
 
-def test_title_fallback_does_not_use_evidence_without_authors() -> None:
-    complete = openalex("W1", title="Shared title").to_evidence()
-    partial = ProviderWorkEvidence(
-        provenance=MetadataSource(
-            provider="crossref",
-            record_id="record-without-authors",
-            retrieved_at=NOW,
-        ),
-        title="Shared title",
-        journal="Biometrics",
-        external_ids=ExternalIds(crossref="record-without-authors"),
-    )
-
-    result = canonicalize_records((complete, partial))
-
-    assert len(result.papers) == 1
-    assert result.papers[0].external_ids.crossref is None
-    assert any(issue.stage == "insufficient_metadata" for issue in result.issues)
-
-
-def test_exact_normalized_doi_merges_and_deduplicates_one_version() -> None:
+def test_exact_normalized_doi_produces_one_paper() -> None:
     result = canonicalize(
         (
             enriched(openalex("W2", doi="https://doi.org/10.5555/EXAMPLE")),
@@ -493,309 +419,8 @@ def test_exact_normalized_doi_merges_and_deduplicates_one_version() -> None:
 
     assert len(result.papers) == 1
     paper = result.papers[0]
-    assert [(version.source, version.identifier) for version in paper.versions] == [
-        ("doi", "10.5555/example")
-    ]
+    assert paper.doi == "10.5555/example"
     assert len(paper.sources) == 2
-
-
-@pytest.mark.parametrize(
-    ("relation_type", "subject_kind", "target_kind"),
-    [
-        ("is-preprint-of", VersionKind.PREPRINT, VersionKind.JOURNAL_FINAL),
-        ("has-preprint", VersionKind.JOURNAL_FINAL, VersionKind.PREPRINT),
-        (
-            "is-manuscript-of",
-            VersionKind.ACCEPTED_MANUSCRIPT,
-            VersionKind.JOURNAL_FINAL,
-        ),
-        (
-            "has-manuscript",
-            VersionKind.JOURNAL_FINAL,
-            VersionKind.ACCEPTED_MANUSCRIPT,
-        ),
-    ],
-)
-def test_directional_relation_roles_are_applied_to_subject_and_target(
-    relation_type: str,
-    subject_kind: VersionKind,
-    target_kind: VersionKind,
-) -> None:
-    subject = openalex("W1", doi="10.5555/subject", title="Subject")
-    target = openalex("W2", doi="10.5555/target", title="Target")
-    result = canonicalize(
-        (
-            enriched(
-                subject,
-                crossref(
-                    "10.5555/subject",
-                    relations=(relation(relation_type, "10.5555/target"),),
-                ),
-            ),
-            enriched(target),
-        )
-    )
-
-    assert len(result.papers) == 1
-    kinds = {version.identifier: version.kind for version in result.papers[0].versions}
-    assert kinds == {
-        "10.5555/subject": subject_kind,
-        "10.5555/target": target_kind,
-    }
-
-
-@pytest.mark.parametrize("relation_type", ["is-version-of", "has-version"])
-def test_generic_version_relations_merge_without_assigning_special_roles(
-    relation_type: str,
-) -> None:
-    result = canonicalize(
-        (
-            enriched(
-                openalex("W1", doi="10.5555/a", title="A"),
-                crossref(
-                    "10.5555/a",
-                    relations=(relation(relation_type, "10.5555/b"),),
-                ),
-            ),
-            enriched(openalex("W2", doi="10.5555/b", title="B")),
-        )
-    )
-
-    assert len(result.papers) == 1
-    assert {version.kind for version in result.papers[0].versions} == {
-        VersionKind.JOURNAL_FINAL
-    }
-
-
-def test_is_identical_to_retains_different_discovered_version_keys() -> None:
-    result = canonicalize(
-        (
-            enriched(
-                openalex("W1", doi="10.5555/a", title="A"),
-                crossref(
-                    "10.5555/a",
-                    relations=(relation("is-identical-to", "10.5555/b"),),
-                ),
-            ),
-            enriched(openalex("W2", doi="10.5555/b", title="B")),
-        )
-    )
-
-    assert len(result.papers) == 1
-    assert {version.identifier for version in result.papers[0].versions} == {
-        "10.5555/a",
-        "10.5555/b",
-    }
-
-
-def test_relation_target_uses_matching_external_identifier_namespace() -> None:
-    subject = enriched(
-        openalex("W1", doi="10.5555/a", title="A"),
-        crossref(
-            "10.5555/a",
-            relations=(relation("is-version-of", "123", id_type="pmid"),),
-        ),
-    )
-    pmid_target = enriched(
-        openalex("W2", doi="10.5555/b", title="B", external_ids={"pmid": "123"})
-    )
-    other_namespace = enriched(
-        openalex("W3", title="C", arxiv="123")
-    )
-
-    result = canonicalize((subject, pmid_target, other_namespace))
-
-    assert len(result.papers) == 2
-    assert {len(paper.versions) for paper in result.papers} == {1, 2}
-
-
-def test_nonversion_and_dangling_relations_do_not_invent_versions() -> None:
-    references = enriched(
-        openalex("W1", doi="10.5555/a", title="A"),
-        crossref(
-            "10.5555/a",
-            relations=(relation("references", "10.5555/b"),),
-        ),
-    )
-    unrelated = enriched(openalex("W2", doi="10.5555/b", title="B"))
-    dangling = enriched(
-        openalex("W3", doi="10.5555/c", title="C"),
-        crossref(
-            "10.5555/c",
-            relations=(relation("is-preprint-of", "10.5555/missing"),),
-        ),
-    )
-
-    result = canonicalize((references, unrelated, dangling))
-
-    assert len(result.papers) == 3
-    dangling_paper = next(
-        paper for paper in result.papers if paper.external_ids.openalex.endswith("W3")
-    )
-    assert len(dangling_paper.versions) == 1
-    assert dangling_paper.versions[0].kind is VersionKind.PREPRINT
-
-
-def test_title_and_name_fallback_merges_only_when_no_stable_ids_exist() -> None:
-    result = canonicalize(
-        (
-            enriched(openalex("W2", title="  The  Study ", authors=(author("Ada  Author"),))),
-            enriched(openalex("W1", title="the study", authors=(author("ada author"),))),
-        )
-    )
-
-    assert len(result.papers) == 1
-
-
-def test_matching_stable_author_ids_are_compatible() -> None:
-    stable = "https://openalex.org/A1"
-    result = canonicalize(
-        (
-            enriched(openalex("W1", authors=(author("Ada", openalex_id=stable),))),
-            enriched(openalex("W2", authors=(author("A. Author", openalex_id=stable),))),
-        )
-    )
-
-    assert len(result.papers) == 1
-
-
-@pytest.mark.parametrize(
-    ("left", "right"),
-    [
-        (author("Ada", openalex_id="A1"), author("Ada", openalex_id="A2")),
-        (author("Ada", orcid="O1"), author("Ada", orcid="O2")),
-    ],
-)
-def test_conflicting_stable_author_evidence_blocks_fallback(
-    left: Author,
-    right: Author,
-) -> None:
-    result = canonicalize(
-        (
-            enriched(openalex("W1", authors=(left,))),
-            enriched(openalex("W2", authors=(right,))),
-        )
-    )
-
-    assert len(result.papers) == 2
-    assert not result.issues
-    assert [d.kind for d in result.diagnostics] == [RunDiagnosticKind.REPEATED_TITLE_SEPARATION]
-
-
-def test_different_author_counts_block_title_fallback() -> None:
-    result = canonicalize(
-        (
-            enriched(openalex("W1", authors=(author("Ada"),))),
-            enriched(openalex("W2", authors=(author("Ada"), author("Grace")))),
-        )
-    )
-
-    assert len(result.papers) == 2
-    assert not result.issues
-    assert [d.kind for d in result.diagnostics] == [RunDiagnosticKind.REPEATED_TITLE_SEPARATION]
-
-
-def test_different_titles_do_not_create_dedup_issue() -> None:
-    result = canonicalize(
-        (enriched(openalex("W1", title="One")), enriched(openalex("W2", title="Two")))
-    )
-
-    assert len(result.papers) == 2
-    assert not result.issues
-
-
-def test_conflicting_doi_components_are_not_fallback_merged() -> None:
-    result = canonicalize(
-        (
-            enriched(openalex("W1", doi="10.5555/a")),
-            enriched(openalex("W2", doi="10.5555/b")),
-        )
-    )
-
-    assert len(result.papers) == 2
-    assert not result.issues
-    assert [d.kind for d in result.diagnostics] == [RunDiagnosticKind.CONFLICTING_DOI_SEPARATION]
-
-
-def test_doi_free_bridge_cannot_transitively_merge_conflicting_dois() -> None:
-    result = canonicalize(
-        (
-            enriched(openalex("W1", doi="10.5555/a")),
-            enriched(openalex("W2")),
-            enriched(openalex("W3", doi="10.5555/c")),
-        )
-    )
-
-    assert len(result.papers) == 2
-    assert not result.issues
-    assert [d.kind for d in result.diagnostics] == [RunDiagnosticKind.CONFLICTING_DOI_SEPARATION]
-
-
-def test_journal_origin_without_crossref_is_final() -> None:
-    paper = canonicalize((enriched(openalex("W1")),)).papers[0]
-
-    assert paper.versions[0].kind is VersionKind.JOURNAL_FINAL
-
-
-def test_journal_without_crossref_is_preferred_over_related_preprint() -> None:
-    preprint = enriched(
-        openalex("W1", doi="10.5555/pre", arxiv="2601.00001", title="Preprint"),
-        crossref(
-            "10.5555/pre",
-            relations=(relation("is-preprint-of", "10.5555/final"),),
-        ),
-    )
-    journal = enriched(openalex("W2", doi="10.5555/final", title="Final"))
-
-    paper = canonicalize((preprint, journal)).papers[0]
-
-    assert paper.preferred_version is not None
-    assert paper.preferred_version.identifier == "10.5555/final"
-    assert paper.metadata.title == "Final"
-
-
-def test_nonpreferred_version_cross_provider_conflict_remains_visible() -> None:
-    preprint = enriched(
-        openalex(
-            "W1",
-            doi="10.5555/pre",
-            arxiv="2601.00001",
-            title="OpenAlex preprint",
-        ),
-        crossref(
-            "10.5555/pre",
-            title="Crossref preprint",
-            relations=(relation("is-preprint-of", "10.5555/final"),),
-        ),
-    )
-    final = enriched(
-        openalex("W2", doi="10.5555/final", title="Final title")
-    )
-
-    result = canonicalize((preprint, final))
-
-    assert result.papers[0].metadata.title == "Final title"
-    assert any(
-        issue.stage == "metadata_conflict"
-        and "OpenAlex and Crossref conflict on nonempty title" in issue.message
-        for issue in result.issues
-    )
-
-
-def test_online_evidence_outweighs_generic_published_for_kind() -> None:
-    record = openalex("W1", doi="10.5555/online")
-    evidence = crossref(
-        "10.5555/online",
-        dates=(
-            partial_date("published-online", 2026, 4, 2),
-            partial_date("published", 2026, 4, 8),
-        ),
-    )
-
-    version = canonicalize((enriched(record, evidence),)).papers[0].versions[0]
-
-    assert version.kind is VersionKind.JOURNAL_ONLINE
-    assert version.date == date(2026, 4, 2)
 
 
 def test_shared_crossref_evidence_supplements_every_openalex_anchor() -> None:
@@ -820,105 +445,13 @@ def test_shared_crossref_evidence_supplements_every_openalex_anchor() -> None:
 
     assert paper_projection(forward.papers[0]) == paper_projection(reverse.papers[0])
     assert forward.issues == reverse.issues
-    versions = {
-        (version.source, version.identifier): version
-        for version in forward.papers[0].versions
+    assert len(forward.papers) == 1
+    assert forward.papers[0].metadata.publication_date == date(2026, 5, 1)
+    normalized, _ = _normalize_retrievals(tuple(item for group in records for item in group))
+    crossref_record, = [item for item in normalized if item.provenance.provider == "crossref"]
+    assert {anchor.record_id for anchor in crossref_record.supplements} == {
+        "https://openalex.org/W1", "https://openalex.org/W2",
     }
-    assert versions[("arxiv", "2601.00001")].kind is VersionKind.PREPRINT
-    assert versions[("arxiv", "2601.00001")].date == date(2026, 5, 1)
-    assert versions[("doi", "10.5555/same")].kind is VersionKind.JOURNAL_ONLINE
-    assert versions[("doi", "10.5555/same")].date == date(2026, 5, 1)
-
-
-def test_one_openalex_work_builds_distinct_inline_location_versions() -> None:
-    record = openalex(
-        "W1",
-        doi="https://doi.org/10.5555/FINAL",
-        publication_date=date(2026, 9, 1),
-        version_hints=(
-            OpenAlexVersionHint(
-                source="doi",
-                identifier="10.5555/final",
-                version=OpenAlexVersion.PUBLISHED,
-                url="https://doi.org/10.5555/final",
-            ),
-            OpenAlexVersionHint(
-                source="arxiv",
-                identifier="2601.01234",
-                version=OpenAlexVersion.SUBMITTED,
-                url="https://arxiv.org/abs/2601.01234",
-            ),
-            OpenAlexVersionHint(
-                source="openalex_location",
-                identifier="pmh:oai:repository.example:item-1",
-                version=OpenAlexVersion.ACCEPTED,
-                url="https://repository.example/item-1",
-            ),
-        ),
-    )
-    evidence = crossref(
-        "10.5555/final",
-        dates=(partial_date("published-online", 2026, 8, 15),),
-    )
-
-    paper = canonicalize((enriched(record, evidence),)).papers[0]
-
-    versions = {
-        (version.source, version.identifier): version for version in paper.versions
-    }
-    assert set(versions) == {
-        ("arxiv", "2601.01234"),
-        ("doi", "10.5555/final"),
-        ("openalex_location", "pmh:oai:repository.example:item-1"),
-    }
-    assert versions[("doi", "10.5555/final")].kind is VersionKind.JOURNAL_ONLINE
-    assert versions[("doi", "10.5555/final")].date == date(2026, 8, 15)
-    assert versions[("arxiv", "2601.01234")].kind is VersionKind.PREPRINT
-    assert versions[("arxiv", "2601.01234")].date is None
-    assert (
-        versions[("openalex_location", "pmh:oai:repository.example:item-1")].kind
-        is VersionKind.ACCEPTED_MANUSCRIPT
-    )
-    assert (
-        versions[("openalex_location", "pmh:oai:repository.example:item-1")].date
-        is None
-    )
-    assert paper.external_ids.doi == "https://doi.org/10.5555/FINAL"
-    assert paper.external_ids.arxiv is None
-    assert paper.preferred_version is not None
-    assert (paper.preferred_version.source, paper.preferred_version.identifier) == (
-        "doi",
-        "10.5555/final",
-    )
-
-
-def test_partial_online_date_classifies_without_fabricating_version_date() -> None:
-    record = openalex("W1", doi="10.5555/online")
-    evidence = crossref(
-        "10.5555/online",
-        dates=(partial_date("published-online", 2026, 4),),
-    )
-
-    version = canonicalize((enriched(record, evidence),)).papers[0].versions[0]
-
-    assert version.kind is VersionKind.JOURNAL_ONLINE
-    assert version.date is None
-
-
-def test_print_evidence_outweighs_online_for_kind_and_date() -> None:
-    record = openalex("W1", doi="10.5555/final")
-    evidence = crossref(
-        "10.5555/final",
-        dates=(
-            partial_date("published-online", 2026, 3, 1),
-            partial_date("published-print", 2026, 5, 1),
-        ),
-    )
-
-    version = canonicalize((enriched(record, evidence),)).papers[0].versions[0]
-
-    assert version.kind is VersionKind.JOURNAL_FINAL
-    assert version.date == date(2026, 5, 1)
 
 
 def test_same_date_kind_conflict_chooses_earliest_and_reports_issue() -> None:
@@ -933,41 +466,8 @@ def test_same_date_kind_conflict_chooses_earliest_and_reports_issue() -> None:
 
     result = canonicalize((enriched(record, evidence),))
 
-    assert result.papers[0].versions[0].date == date(2026, 5, 1)
+    assert result.papers[0].metadata.publication_date == date(2026, 5, 1)
     assert any(issue.stage == "date_conflict" for issue in result.issues)
-
-
-def test_same_kind_prefers_latest_dated_version_then_stable_identifier() -> None:
-    first = enriched(
-        openalex("W1", doi="10.5555/a", arxiv="2601.00001", publication_date=date(2026, 1, 1)),
-        crossref(
-            "10.5555/a",
-            relations=(relation("is-identical-to", "10.5555/b"),),
-        ),
-    )
-    second = enriched(
-        openalex("W2", doi="10.5555/b", arxiv="2602.00001", publication_date=date(2026, 2, 1))
-    )
-
-    paper = canonicalize((first, second)).papers[0]
-
-    assert paper.preferred_version is not None
-    assert paper.preferred_version.identifier == "2602.00001"
-
-    tied = canonicalize(
-        (
-            enriched(
-                openalex("W3", doi="10.5555/c", arxiv="2603.00002"),
-                crossref(
-                    "10.5555/c",
-                    relations=(relation("is-identical-to", "10.5555/d"),),
-                ),
-            ),
-            enriched(openalex("W4", doi="10.5555/d", arxiv="2603.00001")),
-        )
-    ).papers[0]
-    assert tied.preferred_version is not None
-    assert tied.preferred_version.identifier == "2603.00001"
 
 
 def test_crossref_fills_missing_abstract_but_does_not_overwrite_conflict() -> None:
@@ -994,40 +494,6 @@ def test_crossref_fills_missing_abstract_but_does_not_overwrite_conflict() -> No
     assert any(issue.stage == "metadata_conflict" for issue in conflict.issues)
 
 
-def test_preferred_manifestation_supplies_metadata_authors_and_external_ids() -> None:
-    preprint = enriched(
-        openalex(
-            "W1",
-            title="Preprint title",
-            doi="10.5555/pre",
-            arxiv="2601.00001",
-            authors=(author("Preprint Author"),),
-        ),
-        crossref(
-            "10.5555/pre",
-            relations=(relation("is-preprint-of", "10.5555/final"),),
-        ),
-    )
-    final = enriched(
-        openalex(
-            "W2",
-            title="Final title",
-            doi="10.5555/final",
-            authors=(author("Final Author"),),
-        )
-    )
-
-    paper = canonicalize((preprint, final)).papers[0]
-
-    assert paper.metadata.title == "Final title"
-    assert [item.name for item in paper.authors] == ["Final Author"]
-    assert paper.external_ids.doi == "10.5555/final"
-    assert {version.identifier for version in paper.versions} == {
-        "2601.00001",
-        "10.5555/final",
-    }
-
-
 def test_representative_uses_fixed_completeness_then_openalex_id() -> None:
     poorer = enriched(openalex("W1", doi="10.5555/same", title="Poorer"))
     richer = enriched(
@@ -1048,7 +514,7 @@ def test_representative_uses_fixed_completeness_then_openalex_id() -> None:
     assert tied.metadata.title == "First"
 
 
-def test_same_version_openalex_conflicts_are_visible_after_deterministic_selection() -> None:
+def test_same_doi_openalex_conflicts_are_visible_after_deterministic_selection() -> None:
     first = enriched(
         openalex(
             "W1",
@@ -1069,7 +535,6 @@ def test_same_version_openalex_conflicts_are_visible_after_deterministic_selecti
     result = canonicalize((second, first))
 
     assert len(result.papers) == 1
-    assert len(result.papers[0].versions) == 1
     assert result.papers[0].metadata.title == "A title"
     assert [item.name for item in result.papers[0].authors] == ["Ada"]
     conflicts = [issue for issue in result.issues if issue.stage == "metadata_conflict"]
@@ -1080,7 +545,7 @@ def test_same_version_openalex_conflicts_are_visible_after_deterministic_selecti
     assert not any("OpenAlex and OpenAlex" in issue.message for issue in conflicts)
 
 
-def test_same_version_crossref_conflict_is_visible_after_deterministic_selection() -> None:
+def test_same_doi_crossref_conflict_is_visible_after_deterministic_selection() -> None:
     first = enriched(
         openalex("W1", doi="10.5555/conflict"),
         crossref("10.5555/conflict", abstract="Alpha abstract"),
@@ -1124,7 +589,6 @@ def test_duplicate_retrieval_uses_latest_snapshot_without_history_conflict() -> 
     assert result.papers[0].metadata.title == "New title"
     assert result.papers[0].metadata.abstract == "Improved"
     assert not result.issues
-    assert len(result.papers[0].versions) == 1
     assert len(result.papers[0].sources) == 1
 
 
@@ -1213,7 +677,7 @@ def test_equally_recent_snapshot_arxiv_conflict_is_visible() -> None:
 
     result = canonicalize((later_identifier, earlier_identifier))
 
-    assert result.papers[0].versions[0].identifier == "2601.00001"
+    assert result.papers[0].external_ids.arxiv == "2601.00001"
     assert any(
         issue.stage == "identifier_conflict"
         and issue.message.endswith("conflict on arxiv identifier")
@@ -1235,7 +699,7 @@ def test_partial_crossref_date_precision_is_not_a_conflict_or_fabricated() -> No
 
     result = canonicalize((item,))
 
-    assert result.papers[0].versions[0].date is None
+    assert result.papers[0].metadata.publication_date is None
     assert not [issue for issue in result.issues if issue.stage == "date_conflict"]
 
 
@@ -1256,7 +720,7 @@ def test_crossref_date_and_openalex_date_difference_is_not_metadata_conflict() -
     assert not [issue for issue in result.issues if issue.stage == "metadata_conflict"]
 
 
-def test_repeated_evidence_deduplicates_versions_and_provenance() -> None:
+def test_repeated_evidence_deduplicates_papers_and_provenance() -> None:
     item = enriched(
         openalex("W1", doi="10.5555/repeat"),
         crossref("10.5555/repeat"),
@@ -1264,7 +728,6 @@ def test_repeated_evidence_deduplicates_versions_and_provenance() -> None:
 
     paper = canonicalize((item, item, item)).papers[0]
 
-    assert len(paper.versions) == 1
     assert [(source.provider, source.record_id) for source in paper.sources] == [
         ("crossref", "10.5555/repeat"),
         ("openalex", "https://openalex.org/W1"),
@@ -1295,75 +758,6 @@ def test_reversed_input_is_semantically_order_independent() -> None:
     assert forward.issues == reverse.issues
 
 
-@pytest.mark.parametrize(('left', 'right', 'expected'), [
-    ((author('Ada Author', openalex_id='A1'),), (author('ada  author'),), AuthorIdentity.MATCH),
-    ((author('Ada Author', orcid='O1'),), (author('Ada Author'),), AuthorIdentity.MATCH),
-    ((author('Ada Author', openalex_id='A1'),), (author('Ada Author', orcid='O1'),), AuthorIdentity.MATCH),
-    ((author('Ada', openalex_id='A1'),), (author('A. Author', openalex_id='A1'),), AuthorIdentity.MATCH),
-    ((author('Ada', openalex_id='A1'),), (author('Ada', openalex_id='A2'),), AuthorIdentity.CONFLICT),
-    ((author('Ada', orcid='O1'),), (author('Ada', orcid='O2'),), AuthorIdentity.CONFLICT),
-    ((author('Ada'),), (), AuthorIdentity.INCONCLUSIVE),
-    ((), (), AuthorIdentity.INCONCLUSIVE),
-    ((author('Ada'),), (author('Ada'), author('Grace')), AuthorIdentity.CONFLICT),
-    ((author('Ada'), author('Grace')), (author('Grace'), author('Ada')), AuthorIdentity.CONFLICT),
-    ((author('Ada Lovelace'),), (author('A. Lovelace'),), AuthorIdentity.CONFLICT),
-])
-def test_title_author_identity_tristate_and_observable_grouping(left, right, expected):
-    assert _authors_compatible(left, right) is expected
-    assert _authors_compatible(right, left) is expected
-    first = openalex('W1').to_evidence().model_copy(update={'authors': left})
-    second = openalex('W2').to_evidence().model_copy(update={'authors': right})
-    result = consolidate_evidence((first, second))
-    assert not result.issues
-    assert len(result.clusters) == (1 if expected is AuthorIdentity.MATCH else 2)
-    assert [d.kind for d in result.diagnostics] == (
-        [] if expected is AuthorIdentity.MATCH else [RunDiagnosticKind.REPEATED_TITLE_SEPARATION]
-    )
-
-
-@pytest.mark.parametrize('size', [3, 4, 8])
-@pytest.mark.parametrize('reason', ['missing_authors', 'different_authors', 'doi', 'both'])
-def test_title_separation_diagnostics_are_logical_and_order_independent(size, reason):
-    records = tuple(
-        openalex(f'W{i}', doi=f'10.5555/{i}' if reason in {'doi', 'both'} else None)
-        .to_evidence().model_copy(update={
-            'authors': (() if reason == 'missing_authors' else
-                        (author(f'Author {i}' if reason == 'different_authors' or
-                                (reason == 'both' and i == size - 1) else 'Ada Author'),))
-        }) for i in range(size)
-    )
-    forward = consolidate_evidence(records)
-    reverse = consolidate_evidence(tuple(reversed(records)))
-    assert len(forward.clusters) == size
-    assert not forward.issues and forward.diagnostics == reverse.diagnostics
-    expected = ({RunDiagnosticKind.CONFLICTING_DOI_SEPARATION} if reason == 'doi' else
-                {RunDiagnosticKind.REPEATED_TITLE_SEPARATION})
-    if reason == 'both':
-        expected.add(RunDiagnosticKind.CONFLICTING_DOI_SEPARATION)
-    assert {d.kind for d in forward.diagnostics} == expected
-    assert len(forward.diagnostics) == len(expected)
-    all_ids = {r.provenance.record_id for r in records}
-    for diagnostic in forward.diagnostics:
-        expected_ids = all_ids
-        if reason == 'both' and diagnostic.kind is RunDiagnosticKind.CONFLICTING_DOI_SEPARATION:
-            expected_ids = all_ids - {records[-1].provenance.record_id}
-        assert diagnostic.record_ids == tuple(sorted(expected_ids))
-    if reason != 'missing_authors':
-        canonical = canonicalize_records(records)
-        assert not canonical.issues and canonical.diagnostics == forward.diagnostics
-
-
-def test_one_sided_author_id_cannot_bridge_comparable_id_conflicts():
-    records = tuple(openalex(f'W{i}', authors=(a,)).to_evidence() for i, a in enumerate((
-        author('Ada', openalex_id='A1'), author('Ada'), author('Ada', openalex_id='A2'),
-    )))
-    result = consolidate_evidence(records)
-    assert len(result.clusters) == 2 and not result.issues
-    diagnostic, = result.diagnostics
-    assert diagnostic.kind is RunDiagnosticKind.REPEATED_TITLE_SEPARATION
-    assert set(diagnostic.record_ids) == {r.provenance.record_id for r in records}
-
-
 _AUTHOR_EQUIVALENTS = [
     ('Ada Lovelace', 'A. Lovelace'),
     ('Ada Lovelace', 'Lovelace, Ada'),
@@ -1389,7 +783,7 @@ def established_pair(layer, *, authors_left=None, authors_right=None, abstract_l
     return first, second
 
 
-@pytest.mark.parametrize('layer', ['snapshot', 'same_version', 'cross_provider'])
+@pytest.mark.parametrize('layer', ['snapshot', 'same_doi', 'cross_provider'])
 @pytest.mark.parametrize(('left', 'right'), _AUTHOR_EQUIVALENTS)
 def test_established_identity_author_representation_equivalence(layer, left, right):
     records = established_pair(layer, authors_left=(author(left),), authors_right=(author(right),))
@@ -1409,7 +803,7 @@ def test_equivalent_author_representation_enriches_ids_without_display_churn():
     assert result.papers[0].authors == (author('Ada Lovelace', openalex_id='A1', orcid='O1'),)
 
 
-@pytest.mark.parametrize('layer', ['snapshot', 'same_version', 'cross_provider'])
+@pytest.mark.parametrize('layer', ['snapshot', 'same_doi', 'cross_provider'])
 @pytest.mark.parametrize(('left', 'right'), [
     ((author('Ada Lovelace'),), (author('Grace Hopper'),)),
     ((author('Ada Lovelace'),), (author('Ada Lovelace'), author('Grace Hopper'))),
@@ -1462,7 +856,7 @@ _ABSTRACT_EQUIVALENTS = [
 ]
 
 
-@pytest.mark.parametrize('layer', ['snapshot', 'same_version', 'cross_provider'])
+@pytest.mark.parametrize('layer', ['snapshot', 'same_doi', 'cross_provider'])
 @pytest.mark.parametrize(('left', 'right'), _ABSTRACT_EQUIVALENTS)
 def test_established_identity_abstract_representation_equivalence(layer, left, right):
     records = established_pair(layer, abstract_left=left, abstract_right=right)
@@ -1471,7 +865,7 @@ def test_established_identity_abstract_representation_equivalence(layer, left, r
     assert result.papers[0].metadata.abstract == left
 
 
-@pytest.mark.parametrize('layer', ['snapshot', 'same_version', 'cross_provider'])
+@pytest.mark.parametrize('layer', ['snapshot', 'same_doi', 'cross_provider'])
 @pytest.mark.parametrize(('left', 'right'), [
     ('We find 3 effects.', 'We find 4 effects.'),
     ('We do not find effects.', 'We do find effects.'),
@@ -1542,9 +936,6 @@ def test_snapshot_tie_break_ignores_swapped_attribution(different_metadata):
     left = openalex("W1", title="Left title").to_evidence()
     right = left.model_copy(update={
         "title": "Right title" if different_metadata else left.title,
-        "version_hints": (EvidenceVersionHint(
-            source="arxiv", identifier="2601.00001", role=EvidenceVersionRole.PREPRINT,
-        ),),
     })
     baseline = _choose_evidence((left, right))
     for identities in (("0006-341X", "0090-5364"), ("0090-5364", "0006-341X")):
@@ -1567,7 +958,7 @@ def test_attribution_disagreement_alone_has_no_snapshot_or_metadata_diagnostics(
 
 
 @pytest.mark.parametrize("case", [
-    "single", "doi", "external_id", "title_author", "relation_versions", "conflicting_doi", "conflicting_authors",
+    "single", "doi", "external_id", "title_author", "raw_relation", "conflicting_doi", "conflicting_authors",
 ])
 def test_attribution_is_component_union_and_does_not_change_domain_decisions(case):
     first = openalex("W1", doi="10.5555/first").to_evidence()
@@ -1580,7 +971,7 @@ def test_attribution_is_component_union_and_does_not_change_domain_decisions(cas
     elif case == "title_author":
         records = (first.model_copy(update={"external_ids": ExternalIds(openalex="W1")}),
                    second.model_copy(update={"external_ids": ExternalIds()}))
-    elif case == "relation_versions":
+    elif case == "raw_relation":
         records = (
             first,
             crossref("10.5555/pre", title="Preprint title", journal="Biometrics", authors=(author(),),
@@ -1609,15 +1000,212 @@ def test_attribution_is_component_union_and_does_not_change_domain_decisions(cas
             assert build_searchable_projection(cluster.evidence) == build_searchable_projection(original.evidence)
         result = canonicalize_records(inputs)
         assert result.issues == baseline.issues and result.diagnostics == baseline.diagnostics
-        for paper, original, cluster in zip(result.papers, baseline.papers, clusters.clusters, strict=True):
+        doi_clusters = [cluster for cluster in clusters.clusters if cluster.evidence[0].external_ids.doi]
+        for paper, original, cluster in zip(result.papers, baseline.papers, doi_clusters, strict=True):
             assert paper.model_dump(exclude={"id", "workflow", "journal_issns"}) == original.model_dump(exclude={"id", "workflow", "journal_issns"})
             assert paper.workflow.status == original.workflow.status
             assert paper.journal_issns == tuple(sorted({issn for e in cluster.evidence for issn in e.monitor_journal_issns}))
-        if case in {"doi", "external_id", "title_author", "relation_versions"}:
+        if case == "doi":
             assert len(result.papers) == 1
             assert result.papers[0].journal_issns == ("0006-341X", "0090-5364")
-        if case == "relation_versions":
-            assert result.papers[0].preferred_version.identifier == "10.5555/first"
-            assert len(result.papers[0].versions) == 2
+        elif case in {"external_id", "title_author", "conflicting_authors"}:
+            assert not result.papers
+            assert all(issue.stage == "missing_doi" for issue in result.issues)
+        elif case in {"raw_relation", "conflicting_doi"}:
+            assert len(result.papers) == 2
     assert "journal_issns" not in CanonicalMetadata.model_fields
     assert "monitor_journal_issns" not in CanonicalMetadata.model_fields
+
+
+def test_sparse_same_doi_evidence_contributes_without_being_representative():
+    complete = openalex("W-complete", doi="10.5555/sparse").to_evidence()
+    sparse = ProviderWorkEvidence(
+        provenance=MetadataSource(provider="crossref", record_id="10.5555/sparse", retrieved_at=NOW),
+        external_ids=ExternalIds(doi="HTTPS://DOI.ORG/10.5555/SPARSE", crossref="10.5555/sparse"),
+        abstract="Sparse source abstract",
+        dates=(EvidenceDate(kind="published-print", year=2026, month=8, day=4),),
+        monitor_journal_issns=("0006-341X",),
+    )
+    for inputs in ((complete, sparse), (sparse, complete)):
+        result = canonicalize_records(inputs)
+        assert not result.issues and not result.diagnostics
+        paper, = result.papers
+        assert paper.doi == "10.5555/sparse"
+        assert paper.metadata.title == complete.title
+        assert paper.metadata.abstract == sparse.abstract
+        assert paper.metadata.publication_date == date(2026, 8, 4)
+        assert paper.external_ids.crossref == "10.5555/sparse"
+        assert {source.provider for source in paper.sources} == {"openalex", "crossref"}
+        assert paper.journal_issns == ("0006-341X",)
+
+
+@pytest.mark.parametrize("relation_type", [
+    "is-preprint-of", "has-preprint", "is-manuscript-of", "has-manuscript",
+    "is-version-of", "has-version", "is-identical-to", "references",
+])
+def test_raw_crossref_relations_never_merge_or_cross_enrich_dois(relation_type):
+    left = crossref(
+        "10.5555/left", title="A Study", journal="Biometrics", authors=(author(),),
+        relations=(relation(relation_type, "10.5555/right"),),
+    )
+    right = crossref(
+        "10.5555/right", title="A Study", journal="Biometrics",
+        abstract="Right DOI abstract", authors=(author(openalex_id="A-right"),),
+        dates=(partial_date("published-print", 2026, 6, 1),),
+    )
+    baseline = left.model_copy(update={"relations": ()}).to_evidence()
+    assert left.relations and left.to_evidence() == baseline
+    for inputs in ((left.to_evidence(), right.to_evidence()), (right.to_evidence(), left.to_evidence())):
+        result = canonicalize_records(inputs)
+        assert not result.issues and not result.diagnostics
+        assert [paper.doi for paper in result.papers] == ["10.5555/left", "10.5555/right"]
+        first, second = result.papers
+        assert first.metadata.abstract is None and first.metadata.publication_date is None
+        assert first.authors[0].openalex_id is None
+        assert second.metadata.abstract == "Right DOI abstract"
+        assert second.metadata.publication_date == date(2026, 6, 1)
+        assert {s.record_id for s in first.sources} == {"10.5555/left"}
+
+
+@pytest.mark.parametrize("same_provider_record", [False, True])
+def test_shared_non_doi_identifiers_and_supplements_cannot_join_distinct_dois(same_provider_record):
+    first = openalex("W1", doi="10.5555/first", arxiv="2601.00001").to_evidence()
+    second = first.model_copy(update={
+        "external_ids": first.external_ids.model_copy(update={"doi": "10.5555/second"}),
+        "provenance": first.provenance if same_provider_record else MetadataSource(
+            provider="crossref", record_id="shared-crossref", retrieved_at=NOW,
+        ),
+        "supplements": (ProviderRecordRef(provider="openalex", record_id=first.provenance.record_id),),
+    })
+    for inputs in ((first, second), (second, first)):
+        clusters = consolidate_evidence(inputs)
+        assert len(clusters.clusters) == 2
+        result = canonicalize_records(inputs)
+        assert [paper.doi for paper in result.papers] == ["10.5555/first", "10.5555/second"]
+        assert not result.issues and not result.diagnostics
+
+
+@pytest.mark.parametrize("doi", [None, "not-a-doi", "https://doi.org/"])
+def test_doi_less_and_invalid_identity_cannot_create_papers_even_with_arxiv(doi):
+    records = tuple(openalex(f"W{i}", doi=doi, arxiv="2601.00001").to_evidence() for i in range(2))
+    forward = consolidate_evidence(records)
+    assert len(forward.clusters) == 2
+    assert all(len(cluster.evidence) == 1 for cluster in forward.clusters)
+    assert not forward.issues and not forward.diagnostics
+    baseline = canonicalize_records(records)
+    reversed_result = canonicalize_records(tuple(reversed(records)))
+    assert not baseline.papers and baseline.issues == reversed_result.issues
+    assert len(baseline.issues) == 2 and all(issue.stage == "missing_doi" for issue in baseline.issues)
+
+
+def test_doi_less_title_author_and_identifier_matches_never_bridge_or_enrich():
+    first = openalex("W1", doi="10.5555/first", arxiv="shared").to_evidence()
+    second = openalex("W2", doi="10.5555/second", arxiv="shared").to_evidence()
+    bridge = openalex("W3", doi=None, arxiv="shared", abstract="Unsupported enrichment").to_evidence()
+    for inputs in ((first, bridge, second), (second, bridge, first)):
+        consolidated = consolidate_evidence(inputs)
+        assert len(consolidated.clusters) == 3 and not consolidated.diagnostics
+        result = canonicalize_records(inputs)
+        assert [paper.doi for paper in result.papers] == ["10.5555/first", "10.5555/second"]
+        assert all(paper.metadata.abstract is None for paper in result.papers)
+        issue, = result.issues
+        assert issue.stage == "missing_doi" and issue.record_ids == (bridge.provenance.record_id,)
+
+
+@pytest.mark.parametrize(("higher", "lower"), [
+    ("published-print", "published-online"),
+    ("published-online", "published"),
+    ("published", "issued"),
+    ("issued", None),
+])
+def test_direct_doi_date_precedence_is_independent_of_input_order(higher, lower):
+    representative = openalex("W1", doi="10.5555/date", publication_date=date(2026, 12, 1)).to_evidence()
+    preferred = representative.model_copy(update={
+        "provenance": MetadataSource(provider="crossref", record_id="preferred", retrieved_at=NOW),
+        "dates": (EvidenceDate(kind=higher, year=2026, month=8, day=2),),
+    })
+    dates = () if lower is None else (EvidenceDate(kind=lower, year=2025, month=1, day=1),)
+    other = representative.model_copy(update={"dates": dates})
+    for inputs in ((preferred, other), (other, preferred)):
+        result = canonicalize_records(inputs)
+        assert result.papers[0].metadata.publication_date == date(2026, 8, 2)
+        assert not result.issues
+
+
+@pytest.mark.parametrize("precision", [None, 4])
+def test_partial_higher_date_tier_allows_next_complete_tier_without_invention(precision):
+    record = openalex("W1", doi="10.5555/date", publication_date=date(2026, 12, 1)).to_evidence()
+    record = record.model_copy(update={"dates": (
+        EvidenceDate(kind="published-print", year=2026, month=precision),
+        EvidenceDate(kind="published-online", year=2026, month=5, day=2),
+    )})
+    result = canonicalize_records((record,))
+    assert result.papers[0].metadata.publication_date == date(2026, 5, 2)
+    assert not result.issues
+
+
+@pytest.mark.parametrize("kind", list(EvidenceDateKind))
+def test_complete_date_wins_compatible_partial_and_equivalent_duplicates(kind):
+    record = openalex("W1", doi="10.5555/date").to_evidence().model_copy(update={"dates": (
+        EvidenceDate(kind=kind, year=2026),
+        EvidenceDate(kind=kind, year=2026, month=5),
+        EvidenceDate(kind=kind, year=2026, month=5, day=2),
+        EvidenceDate(kind=kind, year=2026, month=5, day=2),
+    )})
+    result = canonicalize_records((record,))
+    assert result.papers[0].metadata.publication_date == date(2026, 5, 2)
+    assert not result.issues
+
+
+@pytest.mark.parametrize("kind", list(EvidenceDateKind))
+def test_distinct_complete_same_tier_dates_choose_earliest_and_report_deterministically(kind):
+    records = tuple(
+        openalex(f"W{day}", doi="10.5555/date").to_evidence().model_copy(update={
+            "dates": (EvidenceDate(kind=kind, year=2026, month=5, day=day),),
+        }) for day in (9, 2, 9)
+    )
+    forward = canonicalize_records(records)
+    reverse = canonicalize_records(tuple(reversed(records)))
+    assert paper_projection(forward.papers[0]) == paper_projection(reverse.papers[0])
+    assert forward.papers[0].metadata.publication_date == date(2026, 5, 2)
+    assert forward.issues == reverse.issues
+    issue, = forward.issues
+    assert issue.stage == "date_conflict" and kind.value in issue.message
+    assert "2026-05-02, 2026-05-09" in issue.message
+
+
+@pytest.mark.parametrize("fallback", [None, date(2026, 9, 1)])
+def test_only_partial_evidence_uses_representative_date_never_retrieval_or_revision(fallback):
+    raw = crossref(
+        "10.5555/date", dates=tuple(partial_date(kind.value, 2025) for kind in EvidenceDateKind),
+        retrieved_at=NOW + timedelta(days=1),
+    ).model_copy(update={"indexed_at": NOW + timedelta(days=2)})
+    representative = openalex("W1", doi="10.5555/date", publication_date=fallback).to_evidence()
+    for inputs in ((representative, raw.to_evidence()), (raw.to_evidence(), representative)):
+        result = canonicalize_records(inputs)
+        assert result.papers[0].metadata.publication_date == fallback
+        assert not result.issues
+
+
+def test_issued_full_date_is_used_after_all_higher_tiers_only_supply_partial_evidence():
+    record = openalex("W1", doi="10.5555/date", publication_date=date(2026, 12, 1)).to_evidence()
+    record = record.model_copy(update={"dates": (
+        EvidenceDate(kind="published-print", year=2026),
+        EvidenceDate(kind="published-online", year=2026, month=5),
+        EvidenceDate(kind="published", year=2026),
+        EvidenceDate(kind="issued", year=2026, month=6, day=3),
+    )})
+    result = canonicalize_records((record,))
+    assert result.papers[0].metadata.publication_date == date(2026, 6, 3)
+    assert not result.issues
+
+
+@pytest.mark.parametrize("missing", ["title", "journal", "authors"])
+def test_doi_component_still_requires_a_bibliographically_eligible_representative(missing):
+    record = openalex("W1", doi="10.5555/incomplete").to_evidence()
+    record = record.model_copy(update={missing: () if missing == "authors" else None})
+    result = canonicalize_records((record,))
+    assert not result.papers
+    issue, = result.issues
+    assert issue.stage == "insufficient_metadata"
+    assert issue.record_ids == (record.provenance.record_id,)

@@ -12,7 +12,6 @@ import pytest
 from literature_monitor.application import provider_state as ps
 from literature_monitor.application.run_state import LAST_RUN_SCHEMA_VERSION
 from literature_monitor.crossref import normalize_crossref_discovered_work
-from literature_monitor.openalex import OpenAlexVersion, OpenAlexVersionHint
 
 NOW = datetime(2026, 9, 26, tzinfo=timezone.utc)
 
@@ -30,15 +29,8 @@ def crossref(doi: str = "10.5555/a") -> ps.CrossrefRecordState:
     return ps.CrossrefRecordState.from_record(record)
 
 
-def openalex(work_id: str = "https://openalex.org/W1") -> ps.OpenAlexVersionState:
-    return ps.OpenAlexVersionState(work_id, NOW, NOW, (
-        OpenAlexVersionHint(source="doi", identifier="10.5555/a", version=OpenAlexVersion.PUBLISHED,
-                            url="https://doi.org/10.5555/a"),
-    ))
-
-
 def changes() -> ps.ProviderState:
-    return ps.ProviderState((crossref(),), (openalex(),))
+    return ps.ProviderState((crossref(),))
 
 
 def state_path(output_dir: Path) -> Path:
@@ -49,36 +41,42 @@ def connect(output_dir: Path) -> sqlite3.Connection:
     return sqlite3.connect(state_path(output_dir))
 
 
-def write_v1(output_dir: Path, state: ps.ProviderState) -> None:
-    state_path(output_dir).parent.mkdir(parents=True)
-    with connect(output_dir) as connection:
-        for statement in ps._SCHEMA:
-            connection.execute(statement)
-        connection.execute("INSERT INTO schema_metadata VALUES (1, 1)")
-        connection.executemany("INSERT INTO crossref_records VALUES (?, ?, ?, ?, ?)", [
-            (row.doi, ps._time_text(row.indexed_at), ps._time_text(row.retrieved_at),
-             ps._crossref_semantic_hash_v1(row.record),
-             json.dumps(json.loads(ps.serialize_crossref_record(row.record)), indent=2))
-            for row in state.crossref_records
-        ])
-        connection.executemany("INSERT INTO openalex_versions VALUES (?, ?, ?, ?)", [
-            (row.work_id, ps._time_text(row.hydrated_against_updated_at), ps._time_text(row.retrieved_at),
-             ps.serialize_openalex_versions(row.version_hints)) for row in state.openalex_versions
-        ])
-    connection.close()
-
-
 def durable_rows(output_dir: Path) -> tuple:
     with connect(output_dir) as connection:
         rows = tuple(connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
-                     for table in ("schema_metadata", "crossref_records", "openalex_versions"))
+                     for table in ("schema_metadata", "crossref_records"))
     connection.close()
     return rows
 
 
+@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("legacy_table", [False, True])
+def test_old_schemas_are_not_reused_converted_or_updated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: int, legacy_table: bool) -> None:
+    ps.update_provider_state(tmp_path, changes())
+    with connect(tmp_path) as connection:
+        connection.execute("UPDATE schema_metadata SET schema_version=?", (version,))
+        if legacy_table:
+            connection.execute("CREATE TABLE openalex_versions (work_id TEXT PRIMARY KEY NOT NULL, hydrated_against_updated_at TEXT NOT NULL, retrieved_at TEXT NOT NULL, versions_json TEXT NOT NULL)")
+    connection.close()
+    before = state_path(tmp_path).read_bytes()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("incompatible state must not deserialize historical records for reuse")
+
+    monkeypatch.setattr(ps, "deserialize_crossref_record", forbidden)
+    result = ps.read_provider_state(tmp_path)
+    assert result.status is ps.ProviderStateStatus.INVALID
+    assert result.state is None and result.replaceable
+    assert "schema" in result.error
+    with pytest.raises(ValueError, match="schema"):
+        ps.update_provider_state(tmp_path, changes())
+    assert state_path(tmp_path).read_bytes() == before
+    assert list(state_path(tmp_path).parent.iterdir()) == [state_path(tmp_path)]
+
+
 def test_independent_schema_and_serialization_versions() -> None:
-    assert ps.SCHEMA_VERSION == 2
-    assert ps.CROSSREF_SERIALIZATION_VERSION == ps.OPENALEX_SERIALIZATION_VERSION == 1
+    assert ps.SCHEMA_VERSION == 3
+    assert ps.CROSSREF_SERIALIZATION_VERSION == 1
     assert LAST_RUN_SCHEMA_VERSION == 2
 
 
@@ -89,15 +87,12 @@ def test_complete_roundtrip_schema_and_no_wal(tmp_path: Path) -> None:
     assert result.status is ps.ProviderStateStatus.AVAILABLE
     assert result.state == expected
     with connect(tmp_path) as connection:
-        assert connection.execute("SELECT * FROM schema_metadata").fetchall() == [(1, 2)]
+        assert connection.execute("SELECT * FROM schema_metadata").fetchall() == [(1, 3)]
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("delete",)
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert tables == {"schema_metadata", "crossref_records", "openalex_versions"}
+        assert tables == {"schema_metadata", "crossref_records"}
         assert [row[1] for row in connection.execute("PRAGMA table_info(crossref_records)")] == [
             "doi", "indexed_at", "retrieved_at", "semantic_hash", "record_json",
-        ]
-        assert [row[1] for row in connection.execute("PRAGMA table_info(openalex_versions)")] == [
-            "work_id", "hydrated_against_updated_at", "retrieved_at", "versions_json",
         ]
     connection.close()
     assert sorted(path.name for path in state_path(tmp_path).parent.iterdir()) == [ps.STATE_FILENAME]
@@ -136,27 +131,6 @@ def test_hash_ignores_revision_and_provenance() -> None:
     assert ps.crossref_semantic_hash(ps.deserialize_crossref_record(ps.serialize_crossref_record(record))) == digest
 
 
-def test_v1_hash_preserves_original_algorithm_and_ignores_work_type() -> None:
-    record = crossref().record
-    expected = "a8015ec157e4ecc1c146385aa4cb4da3679455a7f10273abc103d9eb55698bfc"
-    assert ps._crossref_semantic_hash_v1(record) == expected
-    assert ps._crossref_semantic_hash_v1(record.model_copy(update={"work_type": "book"})) == expected
-    assert ps.crossref_semantic_hash(record) != expected
-
-
-def test_v1_read_converts_in_memory_without_durable_changes(tmp_path: Path) -> None:
-    expected = changes()
-    write_v1(tmp_path, expected)
-    before, before_bytes = durable_rows(tmp_path), state_path(tmp_path).read_bytes()
-    result = ps.read_provider_state(tmp_path)
-    assert result.status is ps.ProviderStateStatus.AVAILABLE
-    assert result.state == expected
-    assert result.state.crossref_records[0].semantic_hash != before[1][0][3]
-    assert durable_rows(tmp_path) == before
-    assert state_path(tmp_path).read_bytes() == before_bytes
-    assert list(state_path(tmp_path).parent.iterdir()) == [state_path(tmp_path)]
-
-
 @pytest.mark.parametrize("field,value", [
     ("doi", " 10.5555/a"), ("doi", "10.5555/A"), ("title", " Study "),
     ("issns", ["0006-341x"]), ("indexed_at", "2026-09-26T08:00:00+08:00"),
@@ -193,29 +167,12 @@ def test_strict_author_relation_and_duplicate_fields() -> None:
         ps.deserialize_crossref_record('{"serialization_version":1,"serialization_version":1,"record":{}}')
 
 
-@pytest.mark.parametrize("field,value", [
-    ("source", "unknown"), ("identifier", "10.5555/A"), ("identifier", " bad id"),
-    ("url", "file:///tmp/paper"), ("url", "https://"), ("url", "https://example.org:bad"),
-    ("version", "unknown"), ("extra", "value"),
-])
-def test_strict_version_payload(field: str, value: str) -> None:
-    payload = json.loads(ps.serialize_openalex_versions(openalex().version_hints))
-    payload["version_hints"][0][field] = value
-    with pytest.raises(ValueError):
-        ps.deserialize_openalex_versions(json.dumps(payload))
-
-
-@pytest.mark.parametrize("serializer,deserializer,payload", [
-    (ps.serialize_crossref_record, ps.deserialize_crossref_record, "record"),
-    (ps.serialize_openalex_versions, ps.deserialize_openalex_versions, "versions"),
-])
 @pytest.mark.parametrize("version", [2, True, "1"])
-def test_serialization_versions_are_independent_and_strict(serializer, deserializer, payload, version) -> None:
-    value = crossref().record if payload == "record" else openalex().version_hints
-    envelope = json.loads(serializer(value))
+def test_crossref_serialization_version_is_independent_and_strict(version) -> None:
+    envelope = json.loads(ps.serialize_crossref_record(crossref().record))
     envelope["serialization_version"] = version
     with pytest.raises(ValueError):
-        deserializer(json.dumps(envelope))
+        ps.deserialize_crossref_record(json.dumps(envelope))
 
 
 def test_missing_revision_remains_transient_but_not_durable() -> None:
@@ -223,8 +180,6 @@ def test_missing_revision_remains_transient_but_not_durable() -> None:
     assert record.to_evidence().title == "Study"
     with pytest.raises(ValueError):
         ps.CrossrefRecordState.from_record(record)
-    with pytest.raises(ValueError):
-        replace(openalex(), hydrated_against_updated_at=None)
 
 
 @pytest.mark.parametrize("update", [
@@ -237,18 +192,11 @@ def test_crossref_state_invariants(update) -> None:
         replace(crossref(), **update)
 
 
-@pytest.mark.parametrize("work_id", ["W1", "https://openalex.org/w1", "https://openalex.org/S1", " https://openalex.org/W1"])
-def test_openalex_state_identity(work_id: str) -> None:
-    with pytest.raises(ValueError):
-        openalex(work_id)
-
-
-@pytest.mark.parametrize("version", [1, 2])
 @pytest.mark.parametrize("damage", [
     "UPDATE schema_metadata SET schema_version=999", "DELETE FROM schema_metadata",
     "UPDATE schema_metadata SET singleton=0, schema_version=1",
     "ALTER TABLE crossref_records ADD COLUMN extra TEXT", "CREATE TABLE membership (id TEXT)",
-    "DROP TABLE openalex_versions", "UPDATE crossref_records SET semantic_hash='bad'",
+    "DROP TABLE crossref_records", "CREATE TABLE openalex_versions (work_id TEXT)", "UPDATE crossref_records SET semantic_hash='bad'",
     "UPDATE crossref_records SET record_json='{}'", "UPDATE crossref_records SET indexed_at='2026-09-26T00:00:00Z'",
     "UPDATE crossref_records SET doi='10.5555/b'",
     "UPDATE crossref_records SET indexed_at='2026-09-27T00:00:00.000000Z'",
@@ -256,14 +204,9 @@ def test_openalex_state_identity(work_id: str) -> None:
     "UPDATE crossref_records SET record_json=json_set(record_json, '$.serialization_version', 2)",
     "UPDATE crossref_records SET record_json=json_set(record_json, '$.record.title', ' Study ')",
     "UPDATE crossref_records SET record_json=json_set(record_json, '$.record.provenance.record_id', '10.5555/b')",
-    "UPDATE openalex_versions SET work_id='W1'",
-    "UPDATE openalex_versions SET versions_json='{}'",
 ])
-def test_invalid_state_read_is_untrusted_and_nonmutating(tmp_path: Path, damage: str, version: int) -> None:
-    if version == 1:
-        write_v1(tmp_path, changes())
-    else:
-        ps.update_provider_state(tmp_path, changes())
+def test_invalid_state_read_is_untrusted_and_nonmutating(tmp_path: Path, damage: str) -> None:
+    ps.update_provider_state(tmp_path, changes())
     with connect(tmp_path) as connection:
         connection.execute("PRAGMA ignore_check_constraints=ON")
         connection.execute(damage)
@@ -279,38 +222,7 @@ def test_invalid_state_read_is_untrusted_and_nonmutating(tmp_path: Path, damage:
     assert state_path(tmp_path).read_bytes() == before
 
 
-@pytest.mark.parametrize("version", [1, 2])
-def test_persisted_hash_must_use_durable_logical_version(tmp_path: Path, version: int) -> None:
-    write_v1(tmp_path, changes())
-    wrong_hash = (ps.crossref_semantic_hash if version == 1 else ps._crossref_semantic_hash_v1)(crossref().record)
-    with connect(tmp_path) as connection:
-        connection.execute("UPDATE schema_metadata SET schema_version=?", (version,))
-        connection.execute("UPDATE crossref_records SET semantic_hash=?", (wrong_hash,))
-    connection.close()
-    assert ps.read_provider_state(tmp_path).status is ps.ProviderStateStatus.INVALID
-
-
-def test_v1_migration_rehashes_all_history_and_preserves_untouched_payloads(tmp_path: Path) -> None:
-    initial = ps.ProviderState((crossref(), crossref("10.5555/history")), (openalex("https://openalex.org/W999"),))
-    write_v1(tmp_path, initial)
-    before = durable_rows(tmp_path)
-    revised = ps.CrossrefRecordState.from_record(crossref().record.model_copy(update={"work_type": "journal-issue"}))
-    pending = ps.ProviderState((revised, crossref("10.5555/new")), (openalex(),))
-    ps.update_provider_state(tmp_path, pending)
-    metadata, rows, oa = durable_rows(tmp_path)
-    assert metadata == [(1, 2)]
-    assert {row[0] for row in rows} == {"10.5555/a", "10.5555/history", "10.5555/new"}
-    for row in rows:
-        assert row[3] == ps.crossref_semantic_hash(ps.deserialize_crossref_record(row[4]))
-    historical = next(row for row in rows if row[0] == "10.5555/history")
-    assert historical[:3] == before[1][1][:3] and historical[4] == before[1][1][4]
-    assert before[2][0] in oa
-    state = ps.read_provider_state(tmp_path).state
-    assert revised in state.crossref_records and pending.openalex_versions[0] in state.openalex_versions
-    assert list(state_path(tmp_path).parent.iterdir()) == [state_path(tmp_path)]
-
-
-def test_v2_upsert_does_not_repeat_legacy_rehash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_v3_upsert_preserves_existing_rows_without_rehash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ps.update_provider_state(tmp_path, changes())
     before = durable_rows(tmp_path)
     statements = []
@@ -325,31 +237,16 @@ def test_v2_upsert_does_not_repeat_legacy_rehash(tmp_path: Path, monkeypatch: py
     ps.update_provider_state(tmp_path, ps.ProviderState((crossref("10.5555/new"),)))
     assert not any(sql.startswith(("UPDATE crossref_records", "UPDATE schema_metadata")) for sql in statements)
     after = durable_rows(tmp_path)
-    assert before[1][0] in after[1] and before[2] == after[2]
+    assert before[1][0] in after[1] and before[0] == after[0]
 
 
-@pytest.mark.parametrize("phase", ["hashes", "metadata", "pending", "validation"])
-def test_v1_migration_failure_rolls_back_every_phase(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str) -> None:
-    initial = ps.ProviderState((crossref(), crossref("10.5555/history")), (openalex(),))
-    write_v1(tmp_path, initial)
+@pytest.mark.parametrize("phase", ["pending", "validation"])
+def test_transaction_failure_rolls_back_pending_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str) -> None:
+    initial = ps.ProviderState((crossref(), crossref("10.5555/history")))
+    ps.update_provider_state(tmp_path, initial)
     before = durable_rows(tmp_path)
-    original_connect, original_upsert, original_read = ps._connect, ps._upsert_changes, ps._read_connection
-
-    class FaultConnection(sqlite3.Connection):
-        def executemany(self, sql, parameters):
-            result = super().executemany(sql, parameters)
-            if phase == "hashes" and sql.startswith("UPDATE crossref_records"):
-                raise sqlite3.IntegrityError("after historical hashes")
-            return result
-
-        def execute(self, sql, parameters=()):
-            result = super().execute(sql, parameters)
-            if phase == "metadata" and sql.startswith("UPDATE schema_metadata"):
-                raise sqlite3.IntegrityError("after schema metadata")
-            return result
-
-    def fault_connect(path, *, readonly):
-        return original_connect(path, readonly=True) if readonly else sqlite3.connect(path, factory=FaultConnection)
+    original_upsert, original_read = ps._upsert_changes, ps._read_connection
+    reads = 0
 
     def fault_upsert(connection, pending):
         original_upsert(connection, pending)
@@ -357,54 +254,46 @@ def test_v1_migration_failure_rolls_back_every_phase(tmp_path: Path, monkeypatch
             raise sqlite3.IntegrityError("after pending upsert")
 
     def fault_read(connection):
+        nonlocal reads
         result = original_read(connection)
-        if phase == "validation" and ps._schema_version(connection) == 2:
-            raise ValueError("after final v2 validation")
+        reads += 1
+        if phase == "validation" and reads == 2:
+            raise ValueError("after final state validation")
         return result
 
     with monkeypatch.context() as patch:
-        patch.setattr(ps, "_connect", fault_connect)
         patch.setattr(ps, "_upsert_changes", fault_upsert)
         patch.setattr(ps, "_read_connection", fault_read)
         with pytest.raises((sqlite3.IntegrityError, ValueError)):
-            ps.update_provider_state(tmp_path, ps.ProviderState((crossref("10.5555/new"),),
-                                                             (openalex("https://openalex.org/W3"),)))
+            ps.update_provider_state(tmp_path, ps.ProviderState((crossref("10.5555/new"),)))
     assert durable_rows(tmp_path) == before
     assert ps.read_provider_state(tmp_path).state == initial
     assert list(state_path(tmp_path).parent.iterdir()) == [state_path(tmp_path)]
 
 
 def test_transaction_upsert_retains_history(tmp_path: Path) -> None:
-    initial = ps.ProviderState((crossref(), crossref("10.5555/history")), (openalex(), openalex("https://openalex.org/W2")))
+    initial = ps.ProviderState((crossref(), crossref("10.5555/history")))
     ps.update_provider_state(tmp_path, initial)
     record = crossref().record.model_copy(update={"title": "Updated", "indexed_at": NOW + timedelta(days=1)})
     updated = ps.CrossrefRecordState.from_record(record)
-    oa = replace(openalex(), hydrated_against_updated_at=NOW + timedelta(days=1), version_hints=())
-    ps.update_provider_state(tmp_path, ps.ProviderState((updated,), (oa,)))
-    assert ps.read_provider_state(tmp_path).state == ps.ProviderState((updated, initial.crossref_records[1]), (oa, initial.openalex_versions[1]))
+    ps.update_provider_state(tmp_path, ps.ProviderState((updated,)))
+    assert ps.read_provider_state(tmp_path).state == ps.ProviderState((updated, initial.crossref_records[1]))
 
 
-@pytest.mark.parametrize("provider", ["crossref", "openalex"])
 @pytest.mark.parametrize("conflicting", [False, True])
 @pytest.mark.parametrize("existing", [False, True])
 def test_duplicate_state_identity_is_rejected_before_persistence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    provider: str, conflicting: bool, existing: bool,
+    conflicting: bool, existing: bool,
 ) -> None:
     initial = changes()
     if existing:
         ps.update_provider_state(tmp_path, initial)
     before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
-    if provider == "crossref":
-        first = crossref()
-        second = ps.CrossrefRecordState.from_record(first.record.model_copy(update={"title": "Other"})) if conflicting else first
-        inputs = {"crossref_records": (first, second)}
-        message = "duplicate Crossref DOI"
-    else:
-        first = openalex()
-        second = replace(first, hydrated_against_updated_at=NOW + timedelta(days=1)) if conflicting else first
-        inputs = {"openalex_versions": (first, second)}
-        message = "duplicate OpenAlex Work ID"
+    first = crossref()
+    second = ps.CrossrefRecordState.from_record(first.record.model_copy(update={"title": "Other"})) if conflicting else first
+    inputs = {"crossref_records": (first, second)}
+    message = "duplicate Crossref DOI"
 
     def unexpected_persistence(*args, **kwargs):
         pytest.fail("duplicate state reached persistence")
@@ -431,14 +320,14 @@ def test_transaction_rollback_and_connections_close(tmp_path: Path, monkeypatch:
         opened.append(connection)
         return connection
 
-    def fail_after_first_table(connection, state):
+    def fail_after_upsert(connection, state):
         original_upsert(connection, ps.ProviderState(state.crossref_records))
-        raise sqlite3.IntegrityError("simulated second-table failure")
+        raise sqlite3.IntegrityError("simulated failure after upsert")
 
     monkeypatch.setattr(ps, "_connect", tracking_connect)
-    monkeypatch.setattr(ps, "_upsert_changes", fail_after_first_table)
+    monkeypatch.setattr(ps, "_upsert_changes", fail_after_upsert)
     with pytest.raises(sqlite3.IntegrityError):
-        ps.update_provider_state(tmp_path, ps.ProviderState((crossref("10.5555/new"),), (openalex("https://openalex.org/W3"),)))
+        ps.update_provider_state(tmp_path, ps.ProviderState((crossref("10.5555/new"),)))
     assert ps.read_provider_state(tmp_path).state == changes()
     for connection in opened:
         with pytest.raises(sqlite3.ProgrammingError, match="closed"):

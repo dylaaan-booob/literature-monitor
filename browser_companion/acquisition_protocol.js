@@ -2,11 +2,6 @@
 
 // Deterministic transport helpers. Runtime URLs stay in memory/session only.
 const AcquisitionProtocol = (() => {
-  const KINDS = {PUBLISHED: ["journal_final", "journal_online"],
-    ACCEPTED_MANUSCRIPT: ["accepted_manuscript"], PREPRINT: ["preprint"]};
-  const LABELS = ["published", "journal_final", "journal_online", "aam",
-    "accepted author manuscript", "accepted manuscript", "preprint"];
-
   function validDoi(value) {
     return typeof value === "string" && value.length <= 200 && value === value.trim().toLowerCase() &&
       /^10\.[0-9]{4,9}\/[^\s]+$/.test(value);
@@ -46,21 +41,9 @@ const AcquisitionProtocol = (() => {
   }
 
   function plan(value) {
-    if (!value || Object.keys(value).sort().join(",") !== "acquisition_class,direct_url,doi,target_version,task_id" ||
+    if (!value || Object.keys(value).sort().join(",") !== "direct_url,doi,task_id" ||
         !BrowserHandoffProtocol.validTaskId(value.task_id) || !validDoi(value.doi)) return null;
-    const v = value.target_version;
-    if (!v || Object.keys(v).sort().join(",") !== "date,identifier,kind,source,url" ||
-        !KINDS[value.acquisition_class]?.includes(v.kind) ||
-        typeof v.source !== "string" || !v.source || v.source.length > 128 ||
-        typeof v.identifier !== "string" || !v.identifier || v.identifier.length > 256 ||
-        (v.date !== null && !/^\d{4}-\d{2}-\d{2}$/.test(v.date))) return null;
-    if (value.acquisition_class === "PUBLISHED") {
-      if (value.direct_url !== doiUrl(value.doi)) return null;
-    } else {
-      if (!safeUrl(v.url) || value.direct_url !== v.url ||
-          ["doi.org", "dx.doi.org"].includes(new URL(v.url).hostname)) return null;
-    }
-    if (!safeUrl(value.direct_url) || (v.url !== null && !safeUrl(v.url))) return null;
+    if (value.direct_url !== doiUrl(value.doi) || !safeUrl(value.direct_url)) return null;
     return structuredClone(value);
   }
 
@@ -118,11 +101,6 @@ const AcquisitionProtocol = (() => {
     return new TextEncoder().encode(JSON.stringify(value)).length <= 4096;
   }
 
-  function versionEvidence(value) {
-    return value && Array.isArray(value.version_labels) && value.version_labels.length <= 4 &&
-      value.version_labels.every(label => LABELS.includes(label));
-  }
-
   function command(value, taskId) {
     if (!value || typeof value !== "object" || Array.isArray(value) || !boundedPayload(value) ||
         value.task_id !== taskId || !BrowserHandoffProtocol.validTaskId(taskId)) return null;
@@ -141,5 +119,5 @@ const AcquisitionProtocol = (() => {
 
   return Object.freeze({validDoi, safeUrl, downloadTransport, doiUrl, plan, resolverUrl, resolverContext,
     sameResolverObservationContext, ebscoRecordContext, sameEbscoRecordPage,
-    sanitizedIdentity, boundedPayload, versionEvidence, command});
+    sanitizedIdentity, boundedPayload, command});
 })();

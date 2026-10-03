@@ -19,8 +19,6 @@ from literature_monitor.markdown_state import (
 from literature_monitor.models import (
     ExternalIds,
     MetadataSource,
-    PaperVersion,
-    VersionRef,
     WorkflowStatus,
 )
 from literature_monitor.safe_write import read_text_exact
@@ -44,9 +42,7 @@ class WorkspacePaper:
     author_keywords: tuple[str, ...]
     authors: tuple[WorkspaceAuthor, ...]
     external_ids: ExternalIds
-    versions: tuple[PaperVersion, ...]
     sources: tuple[MetadataSource, ...]
-    preferred_version: VersionRef | None
     zotero_key: str | None
     journal_attribution_state: PaperJournalAttributionState = PaperJournalAttributionState.MISSING_OR_EMPTY
     journal_issns: tuple[str, ...] = ()
@@ -154,9 +150,7 @@ def _project_paper(state: PaperMarkdownState) -> WorkspacePaper:
             for link in state.author_links
         ),
         external_ids=state.external_ids,
-        versions=state.versions,
         sources=state.sources,
-        preferred_version=state.preferred_version,
         zotero_key=state.zotero_key,
         journal_attribution_state=state.journal_attribution_state,
         journal_issns=state.journal_issns,

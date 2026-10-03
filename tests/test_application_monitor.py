@@ -61,9 +61,6 @@ from literature_monitor.models import (
     ExternalIds,
     MetadataSource,
     ProviderWorkEvidence,
-    PaperVersion,
-    VersionKind,
-    VersionRef,
 )
 from literature_monitor.openalex import (
     DiscoveryIssue,
@@ -120,17 +117,10 @@ def write_monitor(
 
 
 def canonical_paper() -> CanonicalPaper:
-    version = PaperVersion(
-        kind=VersionKind.JOURNAL_FINAL,
-        source="doi",
-        identifier="10.5555/paper",
-    )
     return CanonicalPaper(
         metadata=CanonicalMetadata(title="Canonical paper", journal="Biometrics"),
         external_ids=ExternalIds(doi="10.5555/paper"),
         authors=(Author(name="Ada Author"),),
-        versions=(version,),
-        preferred_version=VersionRef(source="doi", identifier="10.5555/paper"),
     )
 
 
@@ -332,11 +322,6 @@ def install_core_mocks(
                                    issues=result.issues, coverage=result.coverage,
                                    reused_dois=(), refreshed_dois=(), new_dois=())
 
-    def hydrate(client, records, **kwargs):
-        assert records == (oa_record,)
-        return SimpleNamespace(records=records, reused_work_ids=(), hydrated_work_ids=(),
-                               issues=(), pending_changes=())
-
     monkeypatch.setattr(monitor, "discover_journals_batched", discover_openalex)
     monkeypatch.setattr(monitor, "CrossrefRetrieval", CrossrefExecution)
     monkeypatch.setattr(monitor, "assemble_live_provider_evidence", lambda oa, cr, supplied, **kw: supplied)
@@ -350,7 +335,6 @@ def install_core_mocks(
         cluster_eligibility=lambda evidence: ClusterEligibility(True, False, False),
         monitor_journal_issns={},
     ))
-    monkeypatch.setattr(monitor, "hydrate_retained_openalex_versions", hydrate)
     monkeypatch.setattr(monitor, "consolidate_evidence", consolidate)
     monkeypatch.setattr(monitor, "build_searchable_projection", build_projection)
     monkeypatch.setattr(monitor, "match_searchable_projections", match)
@@ -1473,7 +1457,7 @@ def install_owned_clients(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[tup
 
 
 @pytest.mark.parametrize("entrypoint", [run_monitor, _run_canonical_core])
-@pytest.mark.parametrize("failure_at", [None, "discover_journals_batched", "CrossrefRetrieval", "crossref_supplement", "assemble_live_provider_evidence", "match_searchable_projections", "hydrate_retained_openalex_versions", "canonicalize_records"])
+@pytest.mark.parametrize("failure_at", [None, "discover_journals_batched", "CrossrefRetrieval", "crossref_supplement", "assemble_live_provider_evidence", "match_searchable_projections", "canonicalize_records"])
 def test_canonical_execution_closes_owned_clients_on_all_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

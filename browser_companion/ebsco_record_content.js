@@ -36,22 +36,8 @@
     if (!record) return null;
     const doiHeadings = [...record.querySelectorAll("h3")].filter(node => visible(node) && text(node) === "DOI");
     const doi = doiHeadings.length === 1 ? field(doiHeadings[0]) : null;
-    const typeHeading = one(record, "h3#TypDoc"), sourceHeading = one(record, "h3#Src");
-    const type = field(typeHeading), source = field(sourceHeading);
-    if (!doi || doi.id !== "DOI" || !type || !source ||
-        !["文献类型", "Document Type"].includes(text(typeHeading)) ||
-        !["来源", "Source"].includes(text(sourceHeading)) || type.innerText.trim() !== "Article") return null;
-    const journal = one(source, 'a[data-auto="processed-link__publication-authority"]');
-    const sourceText = source.innerText.trim().replace(/\s+/g, " ");
-    const years = sourceText.match(/(?<!\d)(?:19|20)\d{2}(?!\d)/g);
-    const volume = sourceText.match(/\bVol\.?\s+(\d{1,4})\b/i);
-    const issue = sourceText.match(/\bIssue\s+(\d{1,4})\b/i);
-    const journalText = journal?.innerText.trim().replace(/\s+/g, " ");
-    if (!journal || !journalText || journalText.length > 200 ||
-        !years || years.length !== 1 || !volume || !issue) return null;
-    return {node: record, text: text(record), fields: {doi: ownText(doi).toLowerCase(),
-      document_type: "Article", journal: journalText, year: Number(years[0]),
-      volume: volume[1], issue: issue[1]}};
+    if (!doi || doi.id !== "DOI") return null;
+    return {node: record, text: text(record), fields: {doi: ownText(doi).toLowerCase()}};
   }
 
   chrome.runtime.sendMessage({type: "ebsco_context"}, context => {
@@ -72,11 +58,10 @@
       const observed = captured;
       if (!observed || !observed.node.isConnected || text(observed.node) !== observed.text ||
           document.querySelectorAll(METADATA).length !== 1 || observed.fields.doi !== context.doi) return;
-      const year = one(document, "p.nuc-modal-header-with-metadata__meta-data-publication-year");
       const pdfs = [...document.querySelectorAll(PDF)].filter(node => node.checked && !node.disabled &&
         !node.closest('[hidden], [inert], [aria-hidden="true"]') &&
         [...node.labels].some(label => visible(label) && /^PDF(?:\b|[（(])/i.test(text(label))));
-      if (!year || year.innerText.trim() !== String(observed.fields.year) || pdfs.length !== 1) return;
+      if (pdfs.length !== 1) return;
       chrome.runtime.sendMessage({type: "ebsco_pdf_action", task_id: context.task_id, pageUrl,
         action_time: Date.now(), record: observed.fields}, () => { void chrome.runtime.lastError; });
     }, true);

@@ -32,17 +32,6 @@
       <p class="muted">No external identifiers.</p>
     {% endif %}
 
-    <h3>Versions</h3>
-    {% if paper.versions %}
-      <ul>
-        {% for version in paper.versions %}
-          <li>{{ version.source }} · {{ version.identifier }} · {{ version.kind.value }}{% if version.date %} · {{ version.date.isoformat() }}{% endif %}{% if version.url %} · <a href="{{ version.url }}">link</a>{% endif %}</li>
-        {% endfor %}
-      </ul>
-    {% else %}
-      <p class="muted">No versions recorded.</p>
-    {% endif %}
-
     <h3>Sources</h3>
     {% if paper.sources %}
       <ul>

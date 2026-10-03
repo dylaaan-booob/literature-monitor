@@ -325,7 +325,13 @@ def test_no_legacy_browser_or_external_zotero_integration():
 def test_installation_and_guidance_are_truthful():
     for term in ('chrome://extensions', 'Developer mode', 'Load unpacked', 'browser_companion',
                  '普通 Chrome', 'Chrome 102', 'Literature Monitor', 'Zotero Desktop',
-                 'cookie', '密码', 'Zotero Connector', 'A7', 'A8', '尚未', '真实普通 Chrome'):
+                 'cookie', '密码', 'Zotero Connector', 'DOI-bound',
+                 'https://doi.org/<normalized-doi>', 'PUBLISHER_EXHAUSTED',
+                 'publisher 已明确 exhausted', 'recordEvidence', 'ebsco_pdf_action',
+                 '10 秒', '120 秒', 'navigation epoch', 'stage_download', 'StagedPdf',
+                 'v0.5.1 是最新已发布版本', 'v0.5.2 development',
+                 'Python package metadata 保持 **0.5.1**',
+                 '历史 v0.5.1 证据不建立 v0.5.2 live 验证'):
         assert term in README
     template = (ROOT / 'src/literature_monitor/web/templates/browser_handoff.html').read_text()
     for term in ('chrome://extensions', 'Developer mode', 'Load unpacked', 'browser_companion'):
@@ -349,14 +355,14 @@ def test_a7_commands_bind_to_session_tab_not_a_supplied_tab():
     assert emitter.index('current.eventCapability !== state.eventCapability') < emitter.index('postJson(')
 
 
-def test_a7_frozen_direct_route_and_published_only_fallback():
+def test_a7_frozen_doi_route_and_explicit_exhaustion_fallback():
     assert 'navigationUrl: plan.direct_url' in ACQUISITION
     assert 'return navigate(ctx, plan.direct_url)' in ACQUISITION
     assert 'status !== "exhausted" || ctx.candidate' in ACQUISITION
-    assert 'ctx.plan.acquisition_class !== "PUBLISHED"' in ACQUISITION
+    assert 'acquisition_class' not in ACQUISITION
     assert 'navigate(ctx, AcquisitionProtocol.resolverUrl(ctx.plan.doi))' in ACQUISITION
     assert 'value.direct_url !== doiUrl(value.doi)' in ACQUISITION_PROTOCOL
-    assert 'value.direct_url !== v.url' in ACQUISITION_PROTOCOL
+    assert 'target_version' not in ACQUISITION_PROTOCOL
     assert '"human_required"' in ACQUISITION
     assert 'if (message.human_required)' in ACQUISITION
     assert 'metadata' not in RESOLVER  # No generic publisher metadata/DOM classifier.
@@ -444,7 +450,7 @@ def test_fix1_arm_is_consumed_and_frozen_for_completion():
     for check in ('value.ambiguous', 'value.userArm.navigationUrl !== value.navigationUrl',
                   'Date.now() - value.userArm.armedAt > ARM_WINDOW_MS', 'value.userArm = null', 'await save(value)'):
         assert check in context
-    assert 'versionEvidence: null, userArm: null' in ACQUISITION
+    assert 'recordEvidence: null, userArm: null' in ACQUISITION
     navigation = ACQUISITION.split('async function observeNavigation', 1)[1].split('async function armUserDownload', 1)[0]
     assert 'ctx.userArm = null' in navigation
     created = ACQUISITION.split('async function created', 1)[1].split('async function download', 1)[0]
@@ -514,10 +520,8 @@ def test_a7_only_complete_candidates_and_no_user_download_mutation():
         assert check in ACQUISITION
     for forbidden in ('removeFile', '.erase(', '.cancel(', 'chrome.cookies', 'headers:', 'password', 'api_key'):
         assert forbidden not in ACQUISITION
-    assert 'versionEvidence?.version_labels || []' in ACQUISITION
-    assert 'versionEvidence?.manifestation || null' in ACQUISITION
-    assert '!versionEvidence && frozen.url && candidate.navigationUrl === frozen.url' in ACQUISITION
-    assert '[item.url, item.finalUrl].includes(frozen.url)' in ACQUISITION
+    for retired in ('version_labels', 'manifestation', 'target_version', 'versionEvidence'):
+        assert retired not in ACQUISITION
     assert 'sanitizedIdentity(url)' in ACQUISITION
     assert '{scheme: new URL(safe).protocol, host: new URL(safe).hostname}' in ACQUISITION_PROTOCOL
 
@@ -532,7 +536,7 @@ def test_a8_fixed_command_schema_has_no_tab_or_arbitrary_url_override():
     assert 'tabId' not in validator and 'capability' not in validator
     execute=ACQUISITION.split('async function executeCommand',1)[1].split('async function guarded',1)[0]
     assert 'owner.taskId !== taskId' in execute
-    assert 'ctx.plan.acquisition_class !== "PUBLISHED"' in execute
+    assert 'acquisition_class' not in execute
     assert 'choose(taskId, value.choice_id)' in execute
     assert 'download(taskId, ctx.navigationUrl)' in execute
     assert 'JSON.stringify(ctx.plan) === JSON.stringify(value.plan)' in execute
@@ -567,7 +571,7 @@ def test_a8_popup_is_extension_owned_and_uses_only_real_claimed_tab():
         assert '"'+action+'"' in POPUP
     user=ACQUISITION.split('async function userAction',1)[1].split('async function executeCommand',1)[0]
     assert 'live.url !== ctx.navigationUrl' in user
-    assert 'ctx.plan.acquisition_class !== "PUBLISHED"' in user
+    assert 'acquisition_class' not in user
     for kind in ('publisher_fallback_request','resolver_choice_request','user_download_request'):
         assert kind in user
     assert 'armUserDownload(live)' in user
@@ -601,8 +605,8 @@ def test_a8_shipped_worker_with_simulated_chrome_and_network():
         assert result.returncode==0,result.stderr
     result=subprocess.run([node,str(ROOT/'tests/browser_companion_runtime.cjs')],capture_output=True,text=True,timeout=10)
     assert result.returncode==0,result.stderr
-    assert '174 cases passed. No browser/network used.' in result.stdout
-    assert 'Shipped content adapters: 101 cases passed.' in result.stdout
+    assert '175 cases passed. No browser/network used.' in result.stdout
+    assert 'Shipped content adapters: 104 cases passed.' in result.stdout
 
 
 def test_live_fix_record_adapter_is_narrow_and_keeps_navigation_http_only():
@@ -615,12 +619,14 @@ def test_live_fix_record_adapter_is_narrow_and_keeps_navigation_http_only():
     assert 'blob' not in safe_url
     for check in ('record-html-metadata', 'child.nodeType === 3', 'observed.fields.doi !== context.doi',
                   'event.isTrusted', 'bulk-download-modal-download-button', 'node.checked',
-                  'processed-link__publication-authority', 'meta-data-publication-year'):
+                  'observed.node.isConnected', 'text(observed.node) !== observed.text'):
         assert check in EBSCO
+    for retired in ('document_type', 'processed-link__publication-authority', 'meta-data-publication-year'):
+        assert retired not in EBSCO
     assert 'storeRecordEvidence(ctx, evidence, providerAction)' in ACQUISITION
     assert 'sender.tab?.id !== ctx.tabId' in ACQUISITION
-    assert 'ctx.plan.acquisition_class !== "PUBLISHED"' in ACQUISITION
-    assert 'payload.provider_record_url = versionEvidence?.recordUrl || null' in ACQUISITION
+    assert 'acquisition_class' not in ACQUISITION
+    assert 'payload.provider_record_url = recordEvidence?.recordUrl || null' in ACQUISITION
 
 
 def test_verified_provider_preparation_uses_separate_explicit_clocks():

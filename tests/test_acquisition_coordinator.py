@@ -10,10 +10,9 @@ from uuid import UUID, uuid4
 import pytest
 
 from literature_monitor.application.acquisition import (
-    AcquisitionClass, AcquisitionOutcome as Outcome, AcquisitionRecovery as Recovery,
+    AcquisitionOutcome as Outcome, AcquisitionRecovery as Recovery,
     AcquisitionResult, AcquisitionStage as Stage, AcquisitionTask, PreparedAcquisition,
 )
-from literature_monitor.models import PaperVersion, VersionKind
 from literature_monitor.web import acquisition_coordinator as coordination
 from literature_monitor.web.acquisition_coordinator import (
     AcquisitionCoordinator, AcquisitionCoordinatorStatus as Status,
@@ -41,7 +40,6 @@ class ControlledService:
         self.result = None
         self.error = None
         self.commit_error = None
-        self.kind = VersionKind.JOURNAL_FINAL
         self.auth = Auth.AUTHORIZED
         self.auth_hook = None
         self.linked = False
@@ -59,12 +57,8 @@ class ControlledService:
             raise self.error
         if self.result is not None:
             return self.result
-        target = PaperVersion(source='doi', identifier=DOI, kind=self.kind, url=TARGET)
-        acq_class = {VersionKind.JOURNAL_FINAL: AcquisitionClass.PUBLISHED,
-                     VersionKind.PREPRINT: AcquisitionClass.PREPRINT,
-                     VersionKind.ACCEPTED_MANUSCRIPT: AcquisitionClass.ACCEPTED_MANUSCRIPT}[self.kind]
-        self.prepared = PreparedAcquisition(AcquisitionTask(uuid4(), paper_id, DOI, 'PARENT01', target,
-                                                          acq_class, 'synthetic-instance'), self.linked)
+        self.prepared = PreparedAcquisition(AcquisitionTask(uuid4(), paper_id, DOI, 'PARENT01',
+                                                          'synthetic-instance'), self.linked)
         return self.prepared
 
     def authorization_status(self, task):
@@ -73,9 +67,9 @@ class ControlledService:
             self.auth_hook()
         return ZoteroAuthorizationResult(self.auth, task.server_id)
 
-    def commit(self, task, qualified, *, linkage_completed=False):
-        assert task is self.prepared.task and qualified.artifact.task_id == task.task_id
-        self.commits.append((task, qualified, linkage_completed))
+    def commit(self, task, artifact, *, linkage_completed=False):
+        assert task is self.prepared.task and artifact.task_id == task.task_id
+        self.commits.append((task, artifact, linkage_completed))
         self.commit_entered.set()
         assert self.commit_release.wait(5)
         self.content_posts += 1
@@ -149,8 +143,7 @@ def download_payload(s, **changes):
     payload = dict(doi=DOI, download_id=7, route='direct', ownership='task_navigation',
         navigation_url=TARGET, path=str(s.source.resolve()), url=TARGET, final_url=TARGET,
         referrer=TARGET, mime='application/pdf', total_bytes=size, file_size=size,
-        state='complete', category='', version_labels=['published'],
-        manifestation=s.task.target_version.model_dump(mode='json'),
+        state='complete', category='',
         navigation_time=1000, start_time=2000, observed_doi=DOI)
     payload.update(changes)
     return payload
@@ -236,14 +229,6 @@ def test_wrong_or_late_task_tab_cannot_advance_or_get_commands(scenario):
     assert s.service.content_posts == 0
 
 
-@pytest.mark.parametrize('kind', [VersionKind.PREPRINT, VersionKind.ACCEPTED_MANUSCRIPT])
-def test_nonpublished_fallback_rejected_by_application(scenario, kind):
-    s = scenario; s.service.kind = kind; start_browser(s); ready(s)
-    snapshot = s.c.snapshot()
-    assert dispatch(s,'publisher_fallback_request',{}).command is None
-    assert s.c.snapshot() == snapshot
-
-
 def test_explicit_fallback_and_current_resolver_choice_without_arbitrary_url(scenario):
     s = start_browser(scenario); ready(s)
     command = dispatch(s,'publisher_fallback_request',{}).command
@@ -261,15 +246,44 @@ def test_explicit_fallback_and_current_resolver_choice_without_arbitrary_url(sce
     assert dispatch(s,'user_download_request',{}).command == {'task_id':str(s.task.task_id),'type':'DOWNLOAD_CURRENT'}
 
 
-@pytest.mark.parametrize('changes', [{'version_labels':[]}, {'version_labels':['preprint']},
-    {'manifestation':None}, {'doi':'10.5555/wrong'}, {'path':'relative.pdf'}, {'file_size':1}])
-def test_invalid_or_unqualified_download_no_writer_and_source_unchanged(scenario, changes):
+@pytest.mark.parametrize('changes', [{'doi':'10.5555/wrong'}, {'observed_doi':'10.5555/wrong'}, {'path':'relative.pdf'}, {'file_size':1}])
+def test_invalid_download_no_writer_and_source_unchanged(scenario, changes):
     s = start_browser(scenario); ready(s); before = s.source.read_bytes()
     stage_candidate(s, **changes)
     assert s.c.snapshot().result.outcome is Outcome.NO_VALID_PDF
     assert s.service.commits == [] and s.service.content_posts == 0
     assert s.source.read_bytes() == before and list(s.root.iterdir()) == []
     assert s.c.registry.status(str(s.task.task_id)) is None
+
+
+@pytest.mark.parametrize('change', ['object_type', 'task_id', 'download_id', 'byte_count'])
+def test_staged_artifact_binding_rejects_before_authorization(scenario, monkeypatch, change):
+    s = start_browser(scenario); ready(s)
+    original = coordination.stage_download
+    def stage(*args, **kwargs):
+        artifact = original(*args, **kwargs)
+        if change == 'object_type':
+            artifact.cleanup()
+            return object()
+        return replace(artifact, **{change: {
+            'task_id': uuid4(), 'download_id': 8, 'byte_count': artifact.byte_count + 1,
+        }[change]})
+    def unexpected_authorization():
+        pytest.fail('Invalid staged binding must stop before authorization')
+    monkeypatch.setattr(coordination, 'stage_download', stage)
+    s.service.auth_hook = unexpected_authorization
+    stage_candidate(s)
+    assert s.c.snapshot().result.outcome is Outcome.NO_VALID_PDF
+    assert s.service.commits == [] and s.service.content_posts == 0
+    assert list(s.root.iterdir()) == [] and s.source.exists()
+
+
+def test_direct_download_without_observed_doi_commits_staged_artifact(scenario):
+    s = start_browser(scenario); ready(s)
+    stage_candidate(s, observed_doi=None)
+    assert s.c.snapshot().result.outcome is Outcome.SUCCEEDED
+    assert s.service.content_posts == 1 and s.service.commits[0][1].task_id == s.task.task_id
+    assert list(s.root.iterdir()) == [] and s.source.exists()
 
 
 def test_event_handler_returns_while_staging_is_still_blocked(scenario, monkeypatch):
@@ -290,10 +304,10 @@ def test_event_handler_returns_while_staging_is_still_blocked(scenario, monkeypa
 
 
 @pytest.mark.parametrize('auth', [Auth.REQUIRED, Auth.SECURE_STORE_FAILURE, Auth.API_FAILURE])
-def test_missing_authorization_retains_qualified_task_without_worker(scenario, auth):
+def test_missing_authorization_retains_artifact_task_without_worker(scenario, auth):
     s = start_browser(scenario); ready(s); s.service.auth = auth
     stage_candidate(s)
-    snapshot = s.c.snapshot(); artifact = s.c._active.qualified.artifact
+    snapshot = s.c.snapshot(); artifact = s.c._active.artifact
     assert snapshot.stage is Stage.WAITING_FOR_ZOTERO_AUTH and snapshot.resume_available and snapshot.cancel_available
     assert artifact.validate() and not s.service.commits and all(not w.is_alive() for w in s.workers)
     assert s.c.resume(OTHER,snapshot.attempt_id) is Action.UNAVAILABLE
@@ -301,7 +315,7 @@ def test_missing_authorization_retains_qualified_task_without_worker(scenario, a
     s.service.auth = Auth.AUTHORIZED
     assert s.c.resume(ID,snapshot.attempt_id) is Action.ACCEPTED
     join_workers(s)
-    assert s.service.commits[0][0] is s.task and s.service.commits[0][1].artifact is artifact
+    assert s.service.commits[0][0] is s.task and s.service.commits[0][1] is artifact
     assert s.service.content_posts == 1 and not artifact.path.exists() and s.source.exists()
     assert s.c.snapshot().result.outcome is Outcome.SUCCEEDED
 
@@ -313,8 +327,7 @@ def test_resume_leaves_stale_artifact_rejection_to_real_service_commit(scenario,
 
     s = start_browser(scenario); ready(s); s.service.auth = Auth.REQUIRED
     stage_candidate(s); snapshot = s.c.snapshot()
-    qualified = s.c._active.qualified
-    artifact = qualified.artifact
+    artifact = s.c._active.artifact
     if change == 'modify':artifact.path.write_bytes(b'changed')
     else:artifact.path.unlink()
     events = []
@@ -328,7 +341,7 @@ def test_resume_leaves_stale_artifact_rejection_to_real_service_commit(scenario,
         return validate(value)
 
     def commit(task, value, *, linkage_completed=False):
-        assert task is s.task and value is qualified
+        assert task is s.task and value is artifact
         assert s.c._active.gate_entered and s.c.snapshot().stage is Stage.ATTACHING
         events.append(('commit',))
         s.service.commits.append((task, value, linkage_completed))
@@ -372,7 +385,7 @@ def test_cancel_wins_before_gate_even_after_authorization_check(scenario, monkey
     try:
         dispatch(s,'download_candidate',download_payload(s)); assert entered.wait(5)
         assert authorization_checked.is_set()
-        snapshot = s.c.snapshot(); artifact = s.c._active.qualified.artifact
+        snapshot = s.c.snapshot(); artifact = s.c._active.artifact
         assert s.c.cancel(ID,snapshot.attempt_id) is Action.ACCEPTED
         assert not artifact.path.exists() and s.c.registry.status(str(s.task.task_id)) is None
     finally: release.set(); join_workers(s)

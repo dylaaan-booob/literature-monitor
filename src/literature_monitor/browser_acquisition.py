@@ -12,9 +12,8 @@ import re
 from urllib.parse import quote, urlencode, urlsplit
 from uuid import UUID
 
-from .application.acquisition import AcquisitionClass, AcquisitionTask
+from .application.acquisition import AcquisitionTask
 from .identifiers import normalize_doi
-from .models import PaperVersion, VersionKind
 from .web.browser_handoff import AuthenticatedBrowserEvent, MAX_PAYLOAD_BYTES
 
 
@@ -26,13 +25,6 @@ class PublisherState(str, Enum):
     ACCESSIBLE = 'accessible'
     HUMAN_REQUIRED = 'human_required'
     EXHAUSTED = 'exhausted'
-
-
-CLASS_KINDS = {
-    AcquisitionClass.PUBLISHED: {VersionKind.JOURNAL_FINAL, VersionKind.JOURNAL_ONLINE},
-    AcquisitionClass.ACCEPTED_MANUSCRIPT: {VersionKind.ACCEPTED_MANUSCRIPT},
-    AcquisitionClass.PREPRINT: {VersionKind.PREPRINT},
-}
 
 
 def safe_runtime_url(value: object) -> str:
@@ -58,16 +50,10 @@ def safe_runtime_url(value: object) -> str:
 
 
 def frozen_identity(task: AcquisitionTask) -> None:
-    if (not isinstance(task, AcquisitionTask) or not isinstance(task.task_id, UUID)
-            or not isinstance(task.target_version, PaperVersion) or not isinstance(task.acquisition_class, AcquisitionClass)
-            or task.target_version.kind not in CLASS_KINDS[task.acquisition_class]):
+    if not isinstance(task, AcquisitionTask) or not isinstance(task.task_id, UUID):
         raise BrowserEvidenceError('Ineligible frozen browser task.')
     if not isinstance(task.doi, str) or len(task.doi) > 200 or normalize_doi(task.doi) != task.doi or not re.fullmatch(r'10\.\d{4,9}/[^\s]+', task.doi):
         raise BrowserEvidenceError('Invalid frozen DOI.')
-    if len(task.target_version.source) > 128 or len(task.target_version.identifier) > 256:
-        raise BrowserEvidenceError('Frozen manifestation exceeds transport limits.')
-    if task.target_version.url is not None:
-        safe_runtime_url(str(task.target_version.url))
 
 
 def ebsco_record_url(value: object) -> str:
@@ -83,34 +69,23 @@ def ebsco_record_url(value: object) -> str:
 class BrowserNavigationPlan:
     task_id: UUID
     doi: str
-    acquisition_class: AcquisitionClass
-    target_version: PaperVersion = field(repr=False)
     direct_url: str = field(repr=False)
 
     def message(self) -> dict:
         """Only frozen navigation identity, without Zotero/Paper credentials."""
         return {'task_id': str(self.task_id), 'doi': self.doi,
-                'acquisition_class': self.acquisition_class.value,
-                'target_version': self.target_version.model_dump(mode='json'),
                 'direct_url': self.direct_url}
 
 
 def navigation_plan(task: AcquisitionTask) -> BrowserNavigationPlan:
     frozen_identity(task)
-    if task.acquisition_class is AcquisitionClass.PUBLISHED:
-        target = safe_runtime_url('https://doi.org/' + quote(task.doi, safe='/'))
-    else:
-        if task.target_version.url is None:
-            raise BrowserEvidenceError('Frozen manifestation has no direct target.')
-        target = safe_runtime_url(str(task.target_version.url))
-        if urlsplit(target).hostname in {'doi.org', 'dx.doi.org'}:
-            raise BrowserEvidenceError('DOI navigation does not identify this manifestation.')
-    return BrowserNavigationPlan(task.task_id, task.doi, task.acquisition_class, task.target_version, target)
+    target = safe_runtime_url('https://doi.org/' + quote(task.doi, safe='/'))
+    return BrowserNavigationPlan(task.task_id, task.doi, target)
 
 
 def xmu_fallback_url(task: AcquisitionTask, publisher_state: PublisherState) -> str:
     frozen_identity(task)
-    if task.acquisition_class is not AcquisitionClass.PUBLISHED or publisher_state is not PublisherState.EXHAUSTED:
+    if publisher_state is not PublisherState.EXHAUSTED:
         raise BrowserEvidenceError('Institutional fallback is not eligible.')
     return 'https://resolver.ebsco.com/c/45yels/result?' + urlencode({
         'rft_id': 'info:doi/' + task.doi, 'x-opid': '45yels',
@@ -135,8 +110,6 @@ class BrowserDownloadEvidence:
     total_bytes: int
     file_size: int
     category: str
-    version_labels: tuple[str, ...]
-    manifestation: PaperVersion | None = field(repr=False)
     navigation_time: int
     start_time: int
     observed_doi: str | None = None
@@ -151,10 +124,8 @@ class BrowserDownloadEvidence:
 DOWNLOAD_FIELDS = frozenset({
     'doi', 'download_id', 'route', 'ownership', 'navigation_url', 'path', 'url',
     'final_url', 'referrer', 'mime', 'total_bytes', 'file_size', 'category',
-    'version_labels', 'manifestation', 'navigation_time', 'start_time', 'state', 'observed_doi',
+    'navigation_time', 'start_time', 'state', 'observed_doi',
 })
-VERSION_LABELS = frozenset({'published', 'journal_final', 'journal_online', 'aam',
-                           'accepted author manuscript', 'accepted manuscript', 'preprint'})
 BLOB_DOWNLOAD_FIELDS = DOWNLOAD_FIELDS | {'transport_kind', 'download_origin', 'provider_record_url'}
 PROVIDER_ACTION_FIELDS = BLOB_DOWNLOAD_FIELDS | {'attribution', 'arm_time', 'action_time'}
 ARM_WINDOW_MS = 10_000
@@ -182,7 +153,8 @@ def download_evidence(event: AuthenticatedBrowserEvent, task: AcquisitionTask,
             raise ValueError
         if len(json.dumps(p, ensure_ascii=False).encode()) > MAX_PAYLOAD_BYTES or p['doi'] != task.doi or p['state'] != 'complete':
             raise ValueError
-        if p['observed_doi'] is not None and (normalize_doi(p['observed_doi']) != p['observed_doi'] or p['observed_doi'] != task.doi):
+        observed_doi = normalize_doi(p['observed_doi']) if p['observed_doi'] is not None else None
+        if p['observed_doi'] is not None and observed_doi != task.doi:
             raise ValueError
         for key in ('download_id', 'total_bytes', 'file_size', 'navigation_time', 'start_time'):
             if type(p[key]) is not int or p[key] < 0:
@@ -199,7 +171,7 @@ def download_evidence(event: AuthenticatedBrowserEvent, task: AcquisitionTask,
             raise ValueError
         if p['route'] not in {'direct', 'xmu'} or p['ownership'] not in ({'user_arm'} if blob else {'extension_id', 'task_navigation'}):
             raise ValueError
-        if p['route'] == 'xmu' and (task.acquisition_class is not AcquisitionClass.PUBLISHED or p['category'] not in {'FullText', 'SmartLinks'}):
+        if p['route'] == 'xmu' and p['category'] not in {'FullText', 'SmartLinks'}:
             raise ValueError
         if p['route'] == 'direct' and p['category'] != '':
             raise ValueError
@@ -220,6 +192,8 @@ def download_evidence(event: AuthenticatedBrowserEvent, task: AcquisitionTask,
             if p['provider_record_url'] is not None:
                 if p['route'] != 'xmu' or ebsco_record_url(p['provider_record_url']) != p['navigation_url']:
                     raise ValueError
+            if p['route'] == 'xmu' and (p['provider_record_url'] is None or observed_doi != task.doi):
+                raise ValueError
         else:
             for key in ('url', 'final_url'):
                 safe_runtime_url(p[key])
@@ -229,19 +203,14 @@ def download_evidence(event: AuthenticatedBrowserEvent, task: AcquisitionTask,
             raise ValueError
         if not isinstance(p['mime'], str) or len(p['mime']) > 128:
             raise ValueError
-        labels = p['version_labels']
-        if type(labels) is not list or len(labels) > 4 or any(label not in VERSION_LABELS for label in labels):
-            raise ValueError
-        manifestation = None if p['manifestation'] is None else PaperVersion.model_validate(p['manifestation'])
-        if provider_action and (p['route'] != 'xmu' or task.acquisition_class is not AcquisitionClass.PUBLISHED
+        if provider_action and (p['route'] != 'xmu'
                 or p['provider_record_url'] != ebsco_record_url(p['navigation_url'])
-                or p['observed_doi'] != task.doi or labels != ['published']
-                or manifestation != task.target_version):
+                or observed_doi != task.doi):
             raise ValueError
         return BrowserDownloadEvidence(event.task_id, event.tab_binding, task.doi,
             p['download_id'], p['route'], p['ownership'], p['navigation_url'], p['path'],
             p['url'], p['final_url'], p['referrer'], p['mime'], p['total_bytes'], p['file_size'],
-            p['category'], tuple(labels), manifestation, p['navigation_time'], p['start_time'], p['observed_doi'],
+            p['category'], p['navigation_time'], p['start_time'], observed_doi,
             transport_kind='blob' if blob else 'http', download_origin=p.get('download_origin'),
             provider_record_url=p.get('provider_record_url'), attribution=p.get('attribution'), arm_time=p.get('arm_time'),
             action_time=p.get('action_time'))

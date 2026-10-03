@@ -483,14 +483,14 @@ def test_supplement_probe_and_full_hydration_are_internally_bounded():
     assert all(len(r.url.params["filter"].split(",")) < 23 for r in http.requests)
 
 
-def test_pending_changes_are_only_returned_in_memory_and_serialization_versions_stable(tmp_path, monkeypatch):
+def test_pending_changes_are_only_returned_in_memory_and_crossref_serialization_stays_stable(tmp_path, monkeypatch):
     import literature_monitor.application.provider_state as provider_state
     monkeypatch.chdir(tmp_path)
     http = HTTP(lambda r: work_list([member()]) if "select" in r.url.params else work_list([full()]))
     result = http.retrieval().discover((JournalConfig(name="Biometrics", issn=(A,)),), DAY, DAY)
     assert len(result.pending_changes) == 1 and not list(tmp_path.iterdir())
-    assert provider_state.SCHEMA_VERSION == 2
-    assert provider_state.CROSSREF_SERIALIZATION_VERSION == provider_state.OPENALEX_SERIALIZATION_VERSION == 1
+    assert provider_state.SCHEMA_VERSION == 3
+    assert provider_state.CROSSREF_SERIALIZATION_VERSION == 1
 
 
 def test_conflicting_duplicate_manifest_revisions_require_live_hydration_and_partial(monkeypatch):

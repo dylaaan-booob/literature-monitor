@@ -16,14 +16,11 @@ from literature_monitor.config import JournalConfig
 from literature_monitor.coverage import CoverageComponent, CoverageStatus
 from literature_monitor.models import (
     CanonicalMetadata,
-    EvidenceVersionRole,
-    VersionKind,
 )
 from literature_monitor.openalex import (
     IssueSeverity,
     OpenAlexClient,
     OpenAlexRequestError,
-    OpenAlexVersion,
     discover_journals,
     resolve_journal_source,
 )
@@ -408,7 +405,7 @@ def test_discovery_pages_normalizes_records_and_builds_venue_first_query() -> No
         ],
         "select": [
             "id,doi,title,publication_date,abstract_inverted_index,authorships,"
-            "primary_location,locations"
+            "primary_location"
         ],
         "per_page": ["100"],
         "cursor": ["*"],
@@ -582,57 +579,29 @@ def test_discovery_unusable_meta_count_stays_indeterminate(count: object) -> Non
     assert all(item.total is None for item in works)
 
 
-def test_normalization_preserves_inline_location_version_hints() -> None:
-    page = deepcopy(fixture("works_page_1.json"))
-    page["meta"]["next_cursor"] = None
-    work = page["results"][0]
-    work["doi"] = "https://doi.org/10.5555/FINAL"
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("locations", [
+    None, {"not": "a list"},
+    [{"id": "doi:10.5555/other", "version": "publishedVersion"},
+     {"id": "pmh:oai:arXiv.org:2601.01234", "version": "submittedVersion"},
+     {"id": "repository:item-1", "version": "acceptedVersion"}],
+    ["malformed", {"id": None, "version": "unknownVersion"}],
+])
+def test_discovery_ignores_locations_and_emits_ordinary_metadata(batched, locations) -> None:
+    work = a4_work(doi="https://doi.org/10.5555/FINAL")
     work["keywords"] = [{"display_name": "Generated keyword"}]
     work["topics"] = [{"display_name": "Generated topic"}]
-    work["locations"] = [
-        {
-            "id": "doi:10.5555/FINAL",
-            "version": "publishedVersion",
-            "landing_page_url": "https://doi.org/10.5555/final",
-        },
-        {
-            "id": "pmh:oai:arXiv.org:2601.01234",
-            "version": "submittedVersion",
-            "landing_page_url": "https://arxiv.org/abs/2601.01234",
-        },
-        {
-            "id": "pmh:oai:repository.example:item-1",
-            "version": "acceptedVersion",
-            "landing_page_url": "https://repository.example/item-1",
-        },
-    ]
-    client, _ = make_client(fixture("source_biometrics.json"), page)
-
-    result = discover_journals(
-        client,
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
-        date(2026, 1, 1),
-        date(2026, 1, 31),
-    )
-
-    assert not result.has_errors
-    record = result.records[0]
+    work["locations"] = locations
+    work["primary_location"]["is_published"] = True
+    result = partial_discovery([work], batched=batched)
+    record, = result.records
+    assert not result.issues
     assert record.external_ids.doi == "10.5555/final"
     assert record.external_ids.arxiv is None
     assert record.metadata.author_keywords == ()
-    assert {
-        (hint.source, hint.identifier, hint.version)
-        for hint in record.version_hints
-    } == {
-        ("doi", "10.5555/final", OpenAlexVersion.PUBLISHED),
-        ("arxiv", "2601.01234", OpenAlexVersion.SUBMITTED),
-        (
-            "openalex_location",
-            "pmh:oai:repository.example:item-1",
-            OpenAlexVersion.ACCEPTED,
-        ),
-    }
-
+    assert record.source_id == "https://openalex.org/S8265502"
+    assert record.is_published is True
+    assert "version_hints" not in record.model_dump()
     evidence = record.to_evidence()
     assert evidence.provenance == record.provenance
     assert evidence.title == record.metadata.title
@@ -642,92 +611,7 @@ def test_normalization_preserves_inline_location_version_hints() -> None:
     assert evidence.author_keywords == record.metadata.author_keywords
     assert evidence.authors == record.authors
     assert evidence.external_ids == record.external_ids
-    assert {
-        (hint.source, hint.identifier, hint.role, hint.url)
-        for hint in evidence.version_hints
-    } == {
-        (
-            "doi",
-            "10.5555/final",
-            EvidenceVersionRole.PUBLICATION,
-            "https://doi.org/10.5555/final",
-        ),
-        (
-            "arxiv",
-            "2601.01234",
-            EvidenceVersionRole.PREPRINT,
-            "https://arxiv.org/abs/2601.01234",
-        ),
-        (
-            "openalex_location",
-            "pmh:oai:repository.example:item-1",
-            EvidenceVersionRole.MANUSCRIPT,
-            "https://repository.example/item-1",
-        ),
-    }
-
-    paper = canonicalize_records((evidence,)).papers[0]
-    versions = {
-        (version.source, version.identifier): version for version in paper.versions
-    }
-    assert versions[("doi", "10.5555/final")].kind is VersionKind.JOURNAL_FINAL
-    assert versions[("arxiv", "2601.01234")].kind is VersionKind.PREPRINT
-    assert versions[("arxiv", "2601.01234")].date is None
-    assert (
-        versions[("openalex_location", "pmh:oai:repository.example:item-1")].kind
-        is VersionKind.ACCEPTED_MANUSCRIPT
-    )
-    assert paper.preferred_version is not None
-    assert (paper.preferred_version.source, paper.preferred_version.identifier) == (
-        "doi",
-        "10.5555/final",
-    )
-
-
-def test_malformed_locations_fail_soft_without_dropping_work() -> None:
-    page = deepcopy(fixture("works_page_1.json"))
-    page["meta"]["next_cursor"] = None
-    invalid_collection = page["results"][0]
-    invalid_collection["locations"] = {"not": "a list"}
-    mixed = deepcopy(invalid_collection)
-    mixed["id"] = "https://openalex.org/W100"
-    mixed["locations"] = [
-        {
-            "id": "doi:10.5555/valid",
-            "version": "publishedVersion",
-        },
-        "malformed",
-        {"id": "pmh:oai:arXiv.org:2601.99999", "version": "unknownVersion"},
-        {"id": None, "version": "submittedVersion"},
-        {"id": "pmh:oai:arXiv.org:2601.88888"},
-    ]
-    page["results"] = [invalid_collection, mixed]
-    client, _ = make_client(fixture("source_biometrics.json"), page)
-
-    result = discover_journals(
-        client,
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
-        date(2026, 1, 1),
-        date(2026, 1, 31),
-    )
-
-    assert len(result.records) == 2
-    assert not result.has_errors
-    assert result.records[0].metadata.title
-    mixed_record = next(
-        record
-        for record in result.records
-        if record.external_ids.openalex == "https://openalex.org/W100"
-    )
-    assert [
-        (hint.source, hint.identifier, hint.version)
-        for hint in mixed_record.version_hints
-    ] == [("doi", "10.5555/valid", OpenAlexVersion.PUBLISHED)]
-    warning_messages = [issue.message for issue in result.issues]
-    assert "invalid locations was ignored" in warning_messages
-    assert any("malformed location" in message for message in warning_messages)
-    assert any("without a recognized version" in message for message in warning_messages)
-    assert any("without a stable identity" in message for message in warning_messages)
+    assert "version_hints" not in evidence.model_dump()
 
 
 def test_normalization_preserves_author_order_orcid_and_abstract_positions() -> None:
@@ -1056,43 +940,18 @@ def test_client_does_not_fallback_for_unrelated_construction_errors(
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("revision,expected", [
-    (None, None),
-    ("2026-09-26T10:30:00+08:00", datetime(2026, 9, 26, 2, 30, tzinfo=timezone.utc)),
-    ("2026-09-26T10:30:00", datetime(2026, 9, 26, 10, 30, tzinfo=timezone.utc)),
-    ("invalid", None),
-])
-def test_work_revision_is_optional_timezone_safe_and_not_evidence(revision: str | None, expected: datetime | None) -> None:
+def test_default_record_serialization_contains_ordinary_provider_metadata() -> None:
     source = openalex_module.ResolvedSource(
         "Biometrics", ("0006-341X",), ("0006-341X",), (),
         "https://openalex.org/S8265502", "Biometrics", "0006-341X", ("0006-341X",),
     )
-    payload = fixture("works_page_1.json")["results"][0]
-    plain, _ = openalex_module._normalize_work(payload, source, datetime(2026, 9, 26, tzinfo=timezone.utc))
-    payload["updated_date"] = revision
-    record, warnings = openalex_module._normalize_work(payload, source, plain.provenance.retrieved_at)
-    assert record.updated_at == expected
-    assert record.to_evidence() == plain.to_evidence()
-    assert not warnings
-
-
-@pytest.mark.parametrize("revision", [None, datetime(2026, 9, 26, tzinfo=timezone.utc)])
-def test_default_record_serialization_preserves_released_shape(revision: datetime | None) -> None:
-    source = openalex_module.ResolvedSource(
-        "Biometrics", ("0006-341X",), ("0006-341X",), (),
-        "https://openalex.org/S8265502", "Biometrics", "0006-341X", ("0006-341X",),
-    )
-    plain, _ = openalex_module._normalize_work(
+    record, _ = openalex_module._normalize_work(
         fixture("works_page_1.json")["results"][0], source,
         datetime(2026, 9, 26, tzinfo=timezone.utc),
     )
-    record = plain.model_copy(update={"updated_at": revision})
-    assert record.updated_at == revision
-    expected_fields = {"metadata", "external_ids", "authors", "source_id", "provenance", "version_hints"}
+    expected_fields = {"metadata", "external_ids", "authors", "source_id", "provenance"}
     assert set(record.model_dump()) == expected_fields
     assert set(json.loads(record.model_dump_json())) == expected_fields
-    assert record.model_dump() == plain.model_dump()
-    assert record.model_dump_json() == plain.model_dump_json()
 
 
 def a4_sources(*sources):
@@ -1105,7 +964,7 @@ def a4_page(*works, cursor=None, count=None):
 
 def a4_work(work_id="W1", source_id="S8265502", **updates):
     raw = fixture("works_page_1.json")["results"][0]
-    raw.update(id=f"https://openalex.org/{work_id}", updated_date="2026-01-31T00:00:00")
+    raw.update(id=f"https://openalex.org/{work_id}")
     raw["primary_location"]["source"]["id"] = f"https://openalex.org/{source_id}"
     raw.update(updates)
     return raw
@@ -1197,8 +1056,7 @@ def test_a4_terminal_source_failure_opens_execution_circuit(status, requests):
         units = openalex_module.resolve_journal_sources_batched(client, a4_journals())
         assert all(unit.status is CoverageStatus.FAILED for unit in units)
         for call in (lambda: client.get_source_by_issn("0006-341X"),
-                     lambda: list(client.iter_thin_work_pages(("S1",), date(2026, 1, 1), date(2026, 1, 31))),
-                     lambda: client.get_work_locations(("W1",))):
+                     lambda: list(client.iter_thin_work_pages(("S1",), date(2026, 1, 1), date(2026, 1, 31)))):
             with pytest.raises(OpenAlexRequestError) as raised:
                 call()
             assert raised.value.kind is openalex_module.OpenAlexFailureKind.CIRCUIT_OPEN
@@ -1214,13 +1072,12 @@ def test_a4_thin_discovery_fields_mapping_and_searchable_metadata():
         result = a4_discover(client)
     assert [unit.records[0].external_ids.openalex for unit in result.units] == ["https://openalex.org/W1", "https://openalex.org/W2"]
     assert all(unit.coverage.status is CoverageStatus.COMPLETE for unit in result.units)
-    assert all(record.version_hints == () for record in result.records)
-    assert all(record.updated_at == datetime(2026, 1, 31, tzinfo=timezone.utc) for record in result.records)
+    assert all("version_hints" not in record.to_evidence().model_dump() for record in result.records)
     assert not result.issues
     params = dict(transport.requests[-1].url.params)
     assert params["filter"] == "primary_location.source.id:S8265502|S4210191041,from_publication_date:2026-01-01,to_publication_date:2026-01-31"
     assert params["select"] == openalex_module.THIN_WORK_FIELDS
-    assert "updated_date" in params["select"].split(",")
+    assert "updated_date" not in params["select"].split(",")
     assert "updated_at" not in params["select"].split(",")
     assert "locations" not in params["select"].split(",")
     assert set(params) == {"filter", "select", "per_page", "cursor"}
@@ -1229,17 +1086,6 @@ def test_a4_thin_discovery_fields_mapping_and_searchable_metadata():
     assert result.records[0].metadata == legacy.metadata
     assert result.records[0].authors == legacy.authors
     assert result.records[0].external_ids == legacy.external_ids
-
-
-@pytest.mark.parametrize("revision", [None, "bad", "2026-02-30T00:00:00", "2026-01-31", 123, {}])
-def test_a4_missing_or_invalid_revision_preserves_candidate_without_issue(revision):
-    client, _ = make_client(a4_sources(fixture("source_biometrics.json")), a4_page(a4_work(updated_date=revision)))
-    with client:
-        result = a4_discover(client, a4_journals()[:1])
-    assert len(result.records) == 1
-    assert result.records[0].updated_at is None
-    assert result.coverage[0].status is CoverageStatus.COMPLETE
-    assert not result.issues
 
 
 def test_a4_same_source_preserves_both_journal_reporting_units():
@@ -1451,66 +1297,6 @@ def test_a4_complete_traversal_excludes_below_floor_records_without_coverage_los
 
 
 @pytest.mark.parametrize("raw,expected", [
-    (None, None),
-    ("2026-09-26T08:19:03.415552", datetime(2026, 9, 26, 8, 19, 3, 415552, tzinfo=timezone.utc)),
-    ("2026-09-26T08:19:03.415552Z", datetime(2026, 9, 26, 8, 19, 3, 415552, tzinfo=timezone.utc)),
-    ("2026-09-26T16:19:03.415552+08:00", datetime(2026, 9, 26, 8, 19, 3, 415552, tzinfo=timezone.utc)),
-    ("2026-09-26T08:19:03Z", datetime(2026, 9, 26, 8, 19, 3, tzinfo=timezone.utc)),
-    ("2026-09-26T16:19:03+08:00", datetime(2026, 9, 26, 8, 19, 3, tzinfo=timezone.utc)),
-])
-def test_openalex_updated_date_adapter_preserves_utc_precision(raw, expected):
-    assert openalex_module.parse_openalex_updated_date(raw) == expected
-    if expected is not None:
-        assert openalex_module.parse_openalex_updated_date(raw).tzinfo is timezone.utc
-
-
-@pytest.mark.parametrize("raw", [
-    "bad", "2026-09-26", "2026-02-30T08:19:03", "2026-09-26T25:19:03",
-    "2026-09-26T08:19:03.1234567", "2026-09-26T08:19:03+00:99",
-    "2026-09-26 08:19:03", " 2026-09-26T08:19:03", 123, True, {}, [],
-    datetime(2026, 9, 26, tzinfo=timezone.utc),
-])
-def test_openalex_updated_date_adapter_rejects_invalid_raw_values(raw):
-    with pytest.raises(ValueError):
-        openalex_module.parse_openalex_updated_date(raw)
-
-
-def test_generic_revision_parser_and_internal_model_still_reject_timezone_naive_values():
-    from literature_monitor.provider_revision import parse_revision_timestamp
-
-    raw = "2026-09-26T08:19:03.415552"
-    with pytest.raises(ValueError):
-        parse_revision_timestamp(raw)
-    client, _ = make_client(a4_sources(fixture("source_biometrics.json")), a4_page(a4_work(updated_date=raw)))
-    with client:
-        record, = a4_discover(client, a4_journals()[:1]).records
-    assert record.updated_at == datetime(2026, 9, 26, 8, 19, 3, 415552, tzinfo=timezone.utc)
-    assert "updated_at" not in record.model_dump()
-    assert "updated_at" not in json.loads(record.model_dump_json())
-    assert "updated_at" not in record.to_evidence().model_dump()
-    data = record.model_dump()
-    data["updated_at"] = raw
-    with pytest.raises(ValidationError):
-        openalex_module.OpenAlexWorkRecord.model_validate(data)
-
-
-def test_raw_updated_at_is_ignored_and_legacy_select_remains_unchanged():
-    raw = a4_work()
-    raw.pop("updated_date")
-    raw["updated_at"] = "2026-09-26T08:19:03Z"
-    client, _ = make_client(a4_sources(fixture("source_biometrics.json")), a4_page(raw))
-    with client:
-        result = a4_discover(client, a4_journals()[:1])
-    assert result.records[0].updated_at is None
-    assert not result.issues
-    assert "updated_date" not in openalex_module.WORK_FIELDS.split(",")
-    assert "updated_at" not in openalex_module.WORK_FIELDS.split(",")
-    legacy, warnings = openalex_module._normalize_work(raw, result.sources[0], result.records[0].provenance.retrieved_at)
-    assert legacy.updated_at is None
-    assert not warnings
-
-
-@pytest.mark.parametrize("raw,expected", [
     (True, True), (False, False), (None, None), ("true", None), ("false", None),
     (0, None), (1, None), ([], None), ({}, None),
 ])
@@ -1523,7 +1309,7 @@ def test_is_published_is_strict_transient_evidence_without_diagnostic_shape_chan
     record, = result.records
     assert record.is_published is expected
     assert not result.issues
-    fields = {"metadata", "external_ids", "authors", "source_id", "provenance", "version_hints"}
+    fields = {"metadata", "external_ids", "authors", "source_id", "provenance"}
     assert set(record.model_dump()) == fields
     assert set(json.loads(record.model_dump_json())) == fields
     assert "is_published" not in record.to_evidence().model_dump()
@@ -1550,43 +1336,6 @@ def test_missing_primary_location_publication_has_unknown_value_without_warning(
     assert record.is_published is None and not warnings
 
 
-@pytest.mark.parametrize("mode", ["matching", "changed", "missing", "malformed"])
-@pytest.mark.parametrize("partial", [False, True])
-def test_provider_updated_date_drives_internal_version_state_binding(mode, partial):
-    from literature_monitor.application.openalex_retrieval import hydrate_retained_openalex_versions
-    from literature_monitor.application.provider_state import OpenAlexVersionState
-    from literature_monitor.openalex import OpenAlexVersionHint
-
-    revision = datetime(2026, 9, 26, 8, 19, 3, 415552, tzinfo=timezone.utc)
-    old_hints = (OpenAlexVersionHint(source="doi", identifier="10.5555/old", version=OpenAlexVersion.ACCEPTED),)
-    state = OpenAlexVersionState("https://openalex.org/W1", revision, revision, old_hints)
-    raw_revision = {"matching": "2026-09-26T08:19:03.415552", "changed": "2026-09-27T08:19:03.415552",
-                    "missing": None, "malformed": "bad"}[mode]
-    raw = a4_work(updated_date=raw_revision)
-    if partial:
-        raw.update(title=None, authorships=None)
-    outcomes = [a4_sources(fixture("source_biometrics.json")), a4_page(raw)]
-    if mode != "matching":
-        outcomes.append(a4_page({"id": "W1", "locations": []}))
-    client, transport = make_client(*outcomes)
-    with client:
-        discovery = a4_discover(client, a4_journals()[:1])
-        result = hydrate_retained_openalex_versions(client, discovery.records, version_state=(state,), retrieved_at=revision)
-    assert len(transport.requests) == (2 if mode == "matching" else 3)
-    assert len(result.records) == 1
-    if mode == "matching":
-        assert result.records[0].version_hints == old_hints
-        assert result.reused_work_ids == (state.work_id,)
-        assert not result.pending_changes
-    else:
-        assert result.hydrated_work_ids == (state.work_id,)
-        assert len(result.pending_changes) == (1 if mode == "changed" else 0)
-        if mode == "changed":
-            assert result.pending_changes[0].hydrated_against_updated_at == discovery.records[0].updated_at
-    assert discovery.coverage[0].status is CoverageStatus.COMPLETE
-    assert not discovery.issues and not result.issues
-
-
 def partial_discovery(raws, *, batched):
     if batched:
         client, transport = make_client(a4_sources(fixture("source_biometrics.json")), a4_page(*raws))
@@ -1597,6 +1346,8 @@ def partial_discovery(raws, *, batched):
             client, a4_journals()[:1], date(2026, 1, 1), date(2026, 1, 31),
             retrieved_at=datetime(2026, 1, 31, tzinfo=timezone.utc)))
     assert len(transport.requests) == 2
+    fields = transport.requests[-1].url.params["select"].split(",")
+    assert "locations" not in fields and "primary_location" in fields
     assert transport.closed
     return result
 
@@ -1765,7 +1516,7 @@ def test_multi_source_explicit_conflict_remains_error_even_after_successful_spli
 def test_complete_traversal_coverage_is_independent_of_field_completeness(batched):
     records = [a4_work("W1", title=None), a4_work("W2", doi=None),
         a4_work("W3", authorships=None), a4_work("W4", abstract_inverted_index=None),
-        a4_work("W5", updated_date=None, publication_date=None), a4_work("W6", title=None, doi=None)]
+        a4_work("W5", publication_date=None), a4_work("W6", title=None, doi=None)]
     result = partial_discovery(records, batched=batched)
     assert len(result.records) == 5
     assert not result.has_errors

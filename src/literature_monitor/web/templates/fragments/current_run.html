@@ -50,7 +50,6 @@
     {% endfor %}
     {% set usage = result.state_usage %}
     <p>Provider state: Crossref metadata {{ usage.crossref_reused }} reused · {{ usage.crossref_refreshed }} refreshed · {{ usage.crossref_new }} new</p>
-    <p>Provider state: OpenAlex versions {{ usage.openalex_versions_reused }} reused · {{ usage.openalex_versions_hydrated }} hydrated</p>
   {% elif run_snapshot.status.value == "FINISHED" and run_snapshot.unexpected_error %}
     <p>Run stopped · {{ run_snapshot.unexpected_error.message }}</p>
     <p class="muted">{{ run_snapshot.unexpected_error.category }}</p>

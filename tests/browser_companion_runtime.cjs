@@ -9,14 +9,11 @@ const OTHER = '33333333-3333-4333-8333-333333333333';
 const ORIGIN = 'http://localhost:8765';
 const LANDING = 'https://publisher.example/article';
 const PDF = 'https://publisher.example/file.pdf';
-const {runContentCases, RECORD, REDIRECT, execute, e} = require('./browser_companion_content_runtime.cjs');
+const {runContentCases, recordFixture, RECORD, REDIRECT, execute, e} = require('./browser_companion_content_runtime.cjs');
 const BLOB = 'blob:https://research.ebsco.com/12345678-1234-1234-1234-123456789abc';
 
-function plan(kind = 'journal_final') {
-  const published = kind === 'journal_final';
-  return {task_id: TASK, doi: '10.5555/test', acquisition_class: published ? 'PUBLISHED' : 'PREPRINT',
-    target_version: {source: 'doi', identifier: '10.5555/test', kind, url: PDF, date: null},
-    direct_url: published ? 'https://doi.org/10.5555/test' : PDF};
+function plan() {
+  return {task_id: TASK, doi: '10.5555/test', direct_url: 'https://doi.org/10.5555/test'};
 }
 
 function harness() {
@@ -174,10 +171,11 @@ async function commandScenario(type) {
     assert.equal(h.data.claimedHandoff.taskId, OTHER); cases++;
   }
   {
-    const h = harness(); h.reply = () => ({command: {type: 'START', task_id: TASK, plan: plan('preprint')}});
+    const h = harness(); h.reply = () => ({command: {type: 'START', task_id: TASK, plan: plan()}});
     assert.equal((await h.ready()).ok, true);
-    assert.equal(await h.runtime.executeCommand({type: 'PUBLISHER_EXHAUSTED', task_id: TASK}, TASK), false);
-    assert.deepEqual(h.updates, [PDF]); cases++;
+    assert.equal(await h.runtime.executeCommand({type: 'PUBLISHER_EXHAUSTED', task_id: TASK}, TASK), true);
+    assert.equal(h.updates[0], plan().direct_url);
+    assert(h.updates.at(-1).startsWith('https://resolver.ebsco.com/c/45yels/result?')); cases++;
   }
   {
     const h = harness(); await h.ready();
@@ -424,6 +422,34 @@ async function commandScenario(type) {
     if (armDelay) h.now += armDelay;
     await h.message({type: 'task_action', action: 'arm', choice_id: null});
   }
+  // Shipped content -> worker -> delayed blob evidence, without publication proof.
+  for (const label of ['Accepted author manuscript', 'Preprint']) {
+    const h = harness(); await approvedRecord(h);
+    const f = recordFixture();
+    f.type.own = label;
+    f.article.children = f.article.children.slice(0, 4); // DOI and type text only.
+    f.body.children = f.body.children.filter(node => node !== f.year);
+    const replies = [];
+    const content = execute('ebsco_record_content.js', RECORD, f.body, undefined, (message, reply) => {
+      h.contentMessage(message).then(result => { replies.push(result); reply(result); });
+    });
+    await flush();
+    content.click(f.entry); content.click(f.button); await flush();
+    assert.equal(replies.at(-1).ok, true, label);
+    const action = content.messages.find(message => message.type === 'ebsco_pdf_action');
+    assert.deepEqual(Object.keys(action.record), ['doi']);
+    assert.equal(action.record.doi, plan().doi);
+    h.now = action.action_time + 24000;
+    const item = download(BLOB, RECORD); item.startTime = new Date(h.now).toISOString();
+    await h.created(item);
+    const reports = h.requests.filter(request => request.event_type === 'download_candidate');
+    assert.equal(reports.length, 1, label);
+    assert.equal(reports[0].payload.attribution, 'ebsco_pdf_action');
+    assert.equal(reports[0].payload.observed_doi, plan().doi);
+    assert.equal(reports[0].payload.provider_record_url, RECORD);
+    assert.equal(reports[0].payload.start_time - reports[0].payload.action_time, 24000);
+    cases++;
+  }
   // Independent action/preparation clocks; shipped worker, no real downloads.
   for (const mode of ['delayed', 'boundary', 'no_action', 'late_action', 'over_bound',
     'before_action', 'new_document', 'reload', 'wrong_task', 'wrong_tab', 'wrong_record',
@@ -440,7 +466,7 @@ async function commandScenario(type) {
     const armedAt = h.now; h.now += mode === 'late_action' ? 10001 : 1000;
     const actionTime = h.now;
     const action = {type: 'ebsco_pdf_action', task_id: TASK, pageUrl: RECORD, action_time: actionTime,
-      record: {doi: plan().doi, document_type: 'Article', journal: 'Test Journal', year: 2026, volume: '8', issue: '3'}};
+      record: {doi: plan().doi}};
     if (mode === 'wrong_doi') action.record.doi = '10.9999/wrong';
     if (['race_navigation', 'race_task'].includes(mode)) {
       let release; const set = h.chrome.storage.session.set;
@@ -520,23 +546,23 @@ async function commandScenario(type) {
     }
     cases++;
   }
-  for (const mode of ['valid', 'single_choice', 'late_record_event', 'racing_record_store', 'wrong_doi', 'aam', 'wrong_type',
-    'wrong_task', 'wrong_tab', 'subframe', 'other_extension', 'other_record', 'no_arm', 'wrong_year', 'no_issue']) {
+  for (const mode of ['valid', 'single_choice', 'late_record_event', 'racing_record_store', 'wrong_doi', 'missing_doi', 'malformed_record',
+    'wrong_task', 'wrong_tab', 'subframe', 'other_extension', 'other_record', 'no_arm', 'invalid_task', 'extra_record_field']) {
     const h = harness(); await approvedRecord(h, mode === 'single_choice');
     const action = {type: 'ebsco_pdf_action', task_id: TASK, pageUrl: RECORD, action_time: Date.now(),
-      record: {doi: plan().doi, document_type: 'Article', journal: 'Test Journal', year: 2026, volume: '8', issue: '3'}};
+      record: {doi: plan().doi}};
     const sender = {};
     if (mode === 'wrong_doi') action.record.doi = '10.9999/wrong';
-    if (mode === 'aam') action.record.document_type = 'Accepted author manuscript';
-    if (mode === 'wrong_type') action.record.document_type = 'Preprint';
+    if (mode === 'missing_doi') delete action.record.doi;
+    if (mode === 'malformed_record') action.record = null;
     if (mode === 'wrong_task') action.task_id = OTHER;
     if (mode === 'wrong_tab') sender.tab = {id: 99};
     if (mode === 'subframe') sender.frameId = 1;
     if (mode === 'other_extension') sender.id = 'other-extension';
     if (mode === 'other_record') action.pageUrl = RECORD.replace('record8', 'record9');
     if (mode === 'no_arm') h.data.browserAcquisition.userArm = null;
-    if (mode === 'wrong_year') action.record.year = 0;
-    if (mode === 'no_issue') action.record.issue = '';
+    if (mode === 'invalid_task') action.task_id = 'not-a-task';
+    if (mode === 'extra_record_field') action.record.extra = 'unexpected';
     const item = download(BLOB, RECORD);
     if (mode === 'late_record_event') {
       await h.created(item);
@@ -560,8 +586,8 @@ async function commandScenario(type) {
     const reports = h.requests.filter(r => r.event_type === 'download_candidate');
     assert.equal(reports.length, valid ? 1 : 0, mode);
     if (valid) {
-      assert.deepEqual(reports[0].payload.version_labels, ['published']);
-      assert.deepEqual(reports[0].payload.manifestation, plan().target_version);
+      assert(!Object.hasOwn(reports[0].payload, 'version_labels'));
+      assert(!Object.hasOwn(reports[0].payload, 'manifestation'));
       assert.equal(reports[0].payload.observed_doi, plan().doi);
       assert.equal(reports[0].payload.provider_record_url, RECORD);
     }
@@ -572,7 +598,7 @@ async function commandScenario(type) {
     assert.equal((await h.contentMessage({type: 'ebsco_context'})).ok, false); cases++;
   }
   {
-    const h = harness(); h.reply = () => ({command: {type: 'START', task_id: TASK, plan: plan('preprint')}});
+    const h = harness(); h.reply = () => ({command: {type: 'START', task_id: TASK, plan: plan()}});
     await h.ready(); await h.navigate(RECORD);
     assert.equal((await h.contentMessage({type: 'ebsco_context'})).ok, false); cases++;
   }
@@ -606,8 +632,7 @@ async function commandScenario(type) {
     const action = {type: 'ebsco_pdf_action', task_id: TASK,
       pageUrl: mode === 'wrong_page' ? base.replace('context7', 'context8')
         : mode === 'page_query' ? base + '&ui=download' : base,
-      action_time: Date.now(), record: {doi: plan().doi, document_type: 'Article',
-        journal: 'Test Journal', year: 2026, volume: '8', issue: '3'}};
+      action_time: Date.now(), record: {doi: plan().doi}};
     const item = download(mode === 'http_query_referrer' ? PDF : BLOB,
       mode === 'wrong_referrer' ? modal.replace('record8', 'record9') : modal);
     if (mode === 'competing_tab') h.competitor = true;
@@ -621,8 +646,8 @@ async function commandScenario(type) {
       const payload = reports[0].payload;
       assert.equal(payload.navigation_url, base); assert.equal(payload.provider_record_url, base);
       assert.equal(payload.referrer, base); assert.equal(payload.observed_doi, plan().doi);
-      assert.deepEqual(payload.version_labels, ['published']);
-      assert.deepEqual(payload.manifestation, plan().target_version);
+      assert(!Object.hasOwn(payload, 'version_labels'));
+      assert(!Object.hasOwn(payload, 'manifestation'));
       assert.equal(payload.url, null); assert.equal(payload.final_url, null);
       assert.equal(payload.ownership, 'user_arm');
     }
@@ -631,14 +656,13 @@ async function commandScenario(type) {
   }
   for (const mode of ['root', 'root_modal', 'fulltext_root', 'empty', 'exact', 'spa',
     'other_origin_root', 'non_root_path', 'no_arm', 'expired_arm', 'wrong_tab', 'competing_tab',
-    'empty_category', 'unapproved_category', 'other_blob_origin', 'non_published', 'http_download',
+    'empty_category', 'unapproved_category', 'other_blob_origin', 'http_download',
     'malformed_blob', 'http_root', 'root_query', 'root_fragment', 'root_no_slash', 'direct_route',
     'wrong_record', 'missing_record']) {
     const h = harness(); await approvedRecord(h);
     const arm = structuredClone(h.data.browserAcquisition.userArm);
     assert.equal((await h.contentMessage({type: 'ebsco_pdf_action', task_id: TASK, pageUrl: RECORD,
-      action_time: Date.now(), record: {doi: plan().doi, document_type: 'Article',
-        journal: 'Test Journal', year: 2026, volume: '8', issue: '3'}})).ok, true);
+      action_time: Date.now(), record: {doi: plan().doi}})).ok, true);
     const item = download(BLOB, 'https://research.ebsco.com/');
     item.byExtensionId = null; item.fileSize = item.totalBytes = 3 * 1024 * 1024 + 100;
     if (mode === 'root_modal') h.tab.url = RECORD + '?modal=details-bulk-download';
@@ -655,7 +679,6 @@ async function commandScenario(type) {
     if (mode === 'empty_category') h.data.browserAcquisition.category = '';
     if (mode === 'unapproved_category') h.data.browserAcquisition.category = 'Other';
     if (mode === 'other_blob_origin') item.url = item.finalUrl = BLOB.replace('research.ebsco.com', 'other.example');
-    if (mode === 'non_published') h.data.browserAcquisition.plan = plan('preprint');
     if (mode === 'http_download') item.url = item.finalUrl = PDF;
     if (mode === 'malformed_blob') item.url = item.finalUrl = 'blob:https://research.ebsco.com/not-a-uuid';
     if (mode === 'http_root') item.referrer = 'http://research.ebsco.com/';
@@ -687,7 +710,7 @@ async function commandScenario(type) {
       assert.equal(payload.download_origin, 'https://research.ebsco.com');
       assert.equal(payload.transport_kind, 'blob');
       assert.equal(payload.url, null); assert.equal(payload.final_url, null);
-      assert.deepEqual(payload.version_labels, ['published']);
+      assert(!Object.hasOwn(payload, 'version_labels'));
       assert.equal(payload.observed_doi, plan().doi);
       for (const fn of h.listeners.changed) fn({id: item.id, state: {current: 'complete'}});
       await flush(); assert.equal(h.requests.filter(r => r.event_type === 'download_candidate').length, 1);

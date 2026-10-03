@@ -1,4 +1,4 @@
-"""Frozen preflight and A7-qualified commit with network-independent writer APIs."""
+"""Frozen preflight and DOI-bound staged commit with network-independent writer APIs."""
 
 from dataclasses import FrozenInstanceError
 import os
@@ -9,13 +9,20 @@ from uuid import UUID
 
 import httpx
 import pytest
-from pydantic import ValidationError
 
 from literature_monitor.application import acquisition as application
 from literature_monitor.application.acquisition import AcquisitionService, AuthorizationRetryBoundary, AcquisitionOutcome as Outcome, AcquisitionRecovery as Recovery, AcquisitionStage as Stage, AcquisitionResult, PreparedAcquisition
 from literature_monitor.markdown_state import parse_paper_state, serialize_document
 from literature_monitor.materialize import render_paper_markdown
-from literature_monitor.models import Author, CanonicalMetadata, CanonicalPaper, ExternalIds, MetadataSource, PaperVersion, VersionKind, VersionRef, Workflow, WorkflowStatus
+from literature_monitor.models import (
+    Author,
+    CanonicalMetadata,
+    CanonicalPaper,
+    ExternalIds,
+    MetadataSource,
+    Workflow,
+    WorkflowStatus,
+)
 from literature_monitor.zotero_local import VerifiedZoteroItem, ZoteroIdentityResult, ZoteroAttachmentResult, ZoteroReadOutcome as Read
 from literature_monitor.zotero_write import ZoteroAuthorizationClient, ZoteroWriteClient, ZoteroUploadStage
 from literature_monitor.zotero_credentials import ZoteroAuthorizationRuntime
@@ -50,17 +57,16 @@ def scenario(tmp_path, monkeypatch):
     root = tmp_path/'vault'
     path = root/'Papers'/'unrelated-name.md'
     path.parent.mkdir(parents=True)
-    version = PaperVersion(source='doi', identifier=DOI, kind=VersionKind.JOURNAL_FINAL, date=date(2026,9,20))
     paper = CanonicalPaper(id=ID, metadata=CanonicalMetadata(title='Synthetic test', journal='Biometrics'), external_ids=ExternalIds(doi=DOI),
-        authors=(Author(name='Test Author'),), versions=(version,), sources=(MetadataSource(provider='openalex', record_id='https://openalex.org/W1', retrieved_at=NOW),),
-        preferred_version=VersionRef(source='doi',identifier=DOI), workflow=Workflow(status=WorkflowStatus.IN_ZOTERO, discovered_at=NOW), journal_issns=('0006-341X',))
+        authors=(Author(name='Test Author'),), sources=(MetadataSource(provider='openalex', record_id='https://openalex.org/W1', retrieved_at=NOW),),
+        workflow=Workflow(status=WorkflowStatus.IN_ZOTERO, discovered_at=NOW), journal_issns=('0006-341X',))
     path.write_text(render_paper_markdown(paper, ('test-author',)))
     current = state(path)
     frontmatter = dict(current.frontmatter, custom={'keep':[1,'human']})
     path.write_text(serialize_document(frontmatter,current.body+'\n## Notes\nHuman notes remain.\n'))
     s = SimpleNamespace(root=root, path=path, parent=PARENT, pdf_keys=(), pdf_file_keys=(), next_child_key=CHILD, identities=[], read_outcome=Read.VERIFIED,
         attachment_outcome=Read.CHECKED, unknown_attachments=False, local_closed=False, requests=[], tokens=[], stages=[], resolve_calls=[],
-        inspect_calls=0, staging_calls=0, qualification_calls=0, writer_calls=0, files=[], prepared_hook=None, qualified_hook=None,
+        inspect_calls=0, staging_calls=0, artifact_calls=0, writer_calls=0, files=[], prepared_hook=None, staged_hook=None,
         identity_hook=None, attachment_hook=None, write_hook=None, stage_hook=None, secret_error=None,
         post_status={}, post_counts={}, protocol_full=False, remembered=True, authorize_status=200, authorize_remember=True)
     class Local:
@@ -133,42 +139,36 @@ def scenario(tmp_path, monkeypatch):
         if isinstance(prepared,AcquisitionResult):return prepared
         s.staging_calls+=1
         if s.prepared_hook:s.prepared_hook()
-        qualified=qualified_download(s,prepared,tmp_path)
+        artifact=staged_download(s,prepared,tmp_path)
         try:
-            s.qualification_calls+=1
-            if s.qualified_hook:s.qualified_hook()
+            s.artifact_calls+=1
+            if s.staged_hook:s.staged_hook()
             if s.stage_hook:s.stage_hook(Stage.ATTACHING)
-            return service.commit(prepared.task,qualified,linkage_completed=prepared.linkage_completed)
-        finally:qualified.artifact.cleanup()
+            return service.commit(prepared.task,artifact,linkage_completed=prepared.linkage_completed)
+        finally:artifact.cleanup()
     s.run=run
     return s
 
 
-def qualified_download(s,prepared,tmp_path):
+def staged_download(s,prepared,tmp_path):
     from literature_monitor.browser_acquisition import download_evidence
     from literature_monitor.pdf_staging import stage_download
-    from literature_monitor.version_qualification import qualify_pdf
     from literature_monitor.web.browser_handoff import AuthenticatedBrowserEvent
     task=prepared.task
     source=tmp_path/'chrome-downloads'/f'source-{len(s.sources)}.pdf'
     source.parent.mkdir(exist_ok=True);source.write_bytes(b'%PDF-1.7\nsynthetic published artifact')
     s.sources.append(source)
     size=source.stat().st_size
-    # Explicit synthetic artifact metadata is supplied by this fixture; production
-    # code still rejects absent/ambiguous version evidence.
     payload=dict(doi=DOI,download_id=11,route='direct',ownership='task_navigation',
         navigation_url='https://publisher.example/paper',path=str(source.resolve()),
         url='https://publisher.example/file.pdf',final_url='https://publisher.example/file.pdf',
         referrer='https://publisher.example/paper',mime='application/pdf',total_bytes=size,
-        file_size=size,state='complete',category='',version_labels=['published'],
-        manifestation=task.target_version.model_dump(mode='json'),observed_doi=DOI,
+        file_size=size,state='complete',category='',observed_doi=DOI,
         navigation_time=1000,start_time=2000)
     evidence=download_evidence(AuthenticatedBrowserEvent(task.task_id,'tab-42','download_candidate',payload),task,'tab-42')
     artifact=stage_download(evidence,project_dir=s.root,workspace_dir=s.root,config_path=tmp_path/'config'/'monitor.yaml')
     s.files.append(artifact.path)
-    try:return qualify_pdf(task,evidence,artifact,claimed_tab_binding='tab-42')
-    except BaseException:
-        artifact.cleanup();raise
+    return artifact
 
 
 def posts(s):return [r for r in s.requests if r.method=='POST']
@@ -237,7 +237,7 @@ def test_concurrent_nonnull_linkage_after_null_read_is_conflict(scenario, monkey
     result = s.run()
     assert result.outcome is Outcome.CONFLICT and not result.linkage_completed
     assert s.path.read_bytes() == concurrent_bytes[0]
-    assert s.inspect_calls == s.staging_calls == s.qualification_calls == s.writer_calls == 0
+    assert s.inspect_calls == s.staging_calls == s.artifact_calls == s.writer_calls == 0
     assert not posts(s)
 
 
@@ -250,7 +250,7 @@ def test_confirmed_file_short_circuit_with_real_local_reader(scenario, monkeypat
     use_local_file_reads(s,monkeypatch)
     result = s.run()
     assert result.outcome is Outcome.PDF_ALREADY_ATTACHED
-    assert s.staging_calls == s.qualification_calls == s.writer_calls == 0 and not posts(s)
+    assert s.staging_calls == s.artifact_calls == s.writer_calls == 0 and not posts(s)
     file_reads = [r for r in s.local_requests if r.url.path.endswith('/file')]
     assert len(file_reads) == len(metadata)
     assert 'SENTINEL_FILE_PATH' not in repr(result)
@@ -261,7 +261,7 @@ def test_metadata_only_child_enters_normal_acquisition_with_real_local_reader(sc
     use_local_file_reads(s,monkeypatch)
     result = s.run()
     assert result.outcome is Outcome.SUCCEEDED
-    assert s.staging_calls == s.qualification_calls == s.writer_calls == 1
+    assert s.staging_calls == s.artifact_calls == s.writer_calls == 1
     assert s.pdf_file_keys == (CHILD,) and 'EMPTY001' in s.pdf_keys
     assert_clean(s,result)
 
@@ -287,7 +287,7 @@ def test_preflight_checks_actual_storage_before_browser_or_writer(scenario, tmp_
     assert attachments.pdf_keys == ('PARTIAL1',)
     assert attachments.pdf_file_keys == (('PARTIAL1',) if exists else ())
     assert s.pdf_keys == ('PARTIAL1',) and s.path.read_bytes() == before
-    assert s.staging_calls == s.qualification_calls == s.writer_calls == 0 and not posts(s)
+    assert s.staging_calls == s.artifact_calls == s.writer_calls == 0 and not posts(s)
     assert all(request.method == 'GET' for request in s.local_requests)
     assert 'SENTINEL_FILE_PATH' not in repr(result) + repr(attachments)
 
@@ -298,7 +298,7 @@ def test_unknown_file_state_prevents_acquisition_with_real_local_reader(scenario
     use_local_file_reads(s,monkeypatch,file_failure=status)
     result = s.run()
     assert result.outcome is Outcome.ZOTERO_FAILURE
-    assert s.staging_calls == s.qualification_calls == s.writer_calls == 0 and not posts(s)
+    assert s.staging_calls == s.artifact_calls == s.writer_calls == 0 and not posts(s)
 
 
 def test_new_attempt_after_child_created_failure_reverifies_and_uploads(scenario, monkeypatch):
@@ -314,7 +314,7 @@ def test_new_attempt_after_child_created_failure_reverifies_and_uploads(scenario
     second = s.run()
     assert s.local_requests[previous_reads].url.path == '/api/users/0/items/' + PARENT.key
     assert second.outcome is Outcome.SUCCEEDED and second.upload_stage is ZoteroUploadStage.REGISTERED
-    assert s.staging_calls == s.qualification_calls == s.writer_calls == 2
+    assert s.staging_calls == s.artifact_calls == s.writer_calls == 2
     assert s.pdf_keys == (CHILD,'CHILD002') and s.pdf_file_keys == ('CHILD002',)
     assert all(r.url.path != '/api/users/0/items/' + PARENT.key for r in posts(s))
     assert_clean(s,second)
@@ -393,7 +393,7 @@ def test_existing_pdf_short_circuits_before_browser_and_authorization(scenario):
     s=scenario;s.pdf_keys=s.pdf_file_keys=('EXTERNAL',)
     result=s.run()
     assert result.outcome is Outcome.PDF_ALREADY_ATTACHED and result.linkage_completed
-    assert s.staging_calls==s.qualification_calls==s.writer_calls==0 and posts(s)==[]
+    assert s.staging_calls==s.artifact_calls==s.writer_calls==0 and posts(s)==[]
 
 
 @pytest.mark.parametrize('kind',['unknown','failure'])
@@ -406,12 +406,12 @@ def test_incomplete_attachment_read_is_not_absence(scenario,kind):
     assert not s.staging_calls and not posts(s)
 
 
-@pytest.mark.parametrize('boundary',['prepared','qualified','attaching'])
+@pytest.mark.parametrize('boundary',['prepared','artifact','attaching'])
 @pytest.mark.parametrize('change',[lambda s:update(s.path,status='kept'),lambda s:change_doi(s.path),lambda s:s.path.unlink()])
 def test_frozen_task_survives_later_paper_changes(scenario,boundary,change):
     s=scenario
     if boundary=='prepared':s.prepared_hook=lambda:change(s)
-    elif boundary=='qualified':s.qualified_hook=lambda:change(s)
+    elif boundary=='artifact':s.staged_hook=lambda:change(s)
     else:s.stage_hook=lambda stage:change(s) if stage is Stage.ATTACHING else None
     result=s.run()
     assert result.outcome is Outcome.SUCCEEDED and posts(s)
@@ -426,19 +426,19 @@ def test_parent_identity_revalidation_before_upload(scenario,change):
         else:s.parent=VerifiedZoteroItem('OTHER001' if change=='parent' else PARENT.key,
             '10.5555/changed' if change=='doi' else DOI,
             'other-instance' if change=='server' else PARENT.server_id)
-    s.qualified_hook=change_parent
+    s.staged_hook=change_parent
     result=s.run()
     assert result.outcome is Outcome.CONFLICT and not posts(s)
     assert_clean(s,result)
 
 
-@pytest.mark.parametrize('boundary',['prepared','qualified'])
+@pytest.mark.parametrize('boundary',['prepared','artifact'])
 def test_external_pdf_appeared_short_circuits_upload_and_cleans_temp(scenario,boundary):
     s=scenario
     def hook():
         s.pdf_keys=s.pdf_file_keys=('EXTERNAL',)
     if boundary=='prepared':s.prepared_hook=hook
-    else:s.qualified_hook=hook
+    else:s.staged_hook=hook
     result=s.run()
     assert result.outcome is Outcome.PDF_ALREADY_ATTACHED and not posts(s)
     assert_clean(s,result)
@@ -620,7 +620,7 @@ def test_linkage_failure_stops_attempt_without_other_paper_changes(scenario,monk
 
 def test_attachment_recheck_failure_cleans_acquired_file_before_authorization(scenario):
     s=scenario
-    s.qualified_hook=lambda:setattr(s,'attachment_outcome',Read.INVALID_RESPONSE)
+    s.staged_hook=lambda:setattr(s,'attachment_outcome',Read.INVALID_RESPONSE)
     result=s.run()
     assert result.outcome is Outcome.ZOTERO_FAILURE and not posts(s)
     assert_clean(s,result)
@@ -643,11 +643,11 @@ def test_shared_authorization_retry_boundary_survives_new_services_and_expires(s
     s.service=service();s.runtime=s.service._authorization_runtime;s.post_status['/api/users/0/items']=[401];s.authorize_status=429
     first=s.run()
     assert first.recovery is Recovery.RATE_LIMITED and boundary.remaining()==30
-    previous=(s.staging_calls,s.qualification_calls,s.writer_calls,len(s.requests))
+    previous=(s.staging_calls,s.artifact_calls,s.writer_calls,len(s.requests))
     now[0]=110
     second=service().prepare(ID)
     assert second.recovery is Recovery.RATE_LIMITED and second.retry_after_seconds==20
-    assert (s.staging_calls,s.qualification_calls,s.writer_calls,len(s.requests))==previous
+    assert (s.staging_calls,s.artifact_calls,s.writer_calls,len(s.requests))==previous
     now[0]=130;s.authorize_status=200
     assert s.authorize().remembered
     third=s.run(service())
@@ -680,7 +680,7 @@ def test_unsafe_sibling_cannot_conceal_duplicate_identity(scenario,tmp_path,monk
         monkeypatch.setattr(application.os,'open',unreadable)
     result=s.run()
     assert result.outcome is Outcome.INELIGIBLE
-    assert not s.resolve_calls and s.staging_calls==s.qualification_calls==s.writer_calls==0 and not posts(s)
+    assert not s.resolve_calls and s.staging_calls==s.artifact_calls==s.writer_calls==0 and not posts(s)
     assert s.path.read_bytes()==before
     assert_clean(s,result)
 
@@ -697,17 +697,17 @@ def test_unsafe_papers_directory_fails_before_zotero(scenario,tmp_path,monkeypat
         elif kind=='symlink':directory.symlink_to(moved,target_is_directory=True)
     result=s.run()
     assert result.outcome is Outcome.INELIGIBLE and not s.resolve_calls and not posts(s)
-    assert s.staging_calls==s.qualification_calls==s.writer_calls==0
+    assert s.staging_calls==s.artifact_calls==s.writer_calls==0
     assert_clean(s,result)
 
 
 @pytest.mark.parametrize('invalid',[
+    {'versions':[]},
     {'preferred_version':None},
     {'preferred_version':{'source':'doi','identifier':'10.5555/not-present'}},
     {'preferred_version':{'source':'doi'}},
     {'preferred_version':[]},
     {'versions':'broken'},
-    {'versions':[]},
     {'versions':[{'source':'doi','identifier':DOI,'kind':'invalid'}]},
     {'versions':[{'source':'doi','identifier':'','kind':'journal_final'}]},
     {'versions':[
@@ -715,7 +715,7 @@ def test_unsafe_papers_directory_fails_before_zotero(scenario,tmp_path,monkeypat
         {'source':' DOI ','identifier':'https://doi.org/10.5555/ACQUISITION','kind':'journal_online'},
     ]},
 ])
-def test_invalid_preferred_version_state_prevents_all_external_work(scenario,invalid):
+def test_unsafe_paper_state_prevents_all_external_work(scenario,invalid):
     s=scenario;update(s.path,**invalid);before=s.path.read_bytes()
     result=s.run()
     assert result.outcome is Outcome.INELIGIBLE
@@ -741,19 +741,10 @@ def capture_tasks(monkeypatch):
     return tasks
 
 
-@pytest.mark.parametrize('kind,qualification',[
-    (VersionKind.JOURNAL_FINAL,application.AcquisitionClass.PUBLISHED),
-    (VersionKind.JOURNAL_ONLINE,application.AcquisitionClass.PUBLISHED),
-    (VersionKind.ACCEPTED_MANUSCRIPT,application.AcquisitionClass.ACCEPTED_MANUSCRIPT),
-    (VersionKind.PREPRINT,application.AcquisitionClass.PREPRINT),
-])
-def test_task_freezes_complete_normalized_preferred_entry(scenario,monkeypatch,kind,qualification):
+def test_task_freezes_only_verified_doi_and_parent_identity(scenario,monkeypatch):
     s=scenario
-    # A non-DOI version shares the identifier but must not be selected by DOI alone.
-    target={'source':' DOI ','identifier':'https://doi.org/10.5555/ACQUISITION',
-        'kind':kind.value,'url':'https://publisher.example/expected-version','date':'2026-09-20'}
-    update(s.path,versions=[{'source':'other','identifier':DOI,'kind':'journal_final'},target],
-        preferred_version={'source':'doi','identifier':DOI},
+    assert 'versions' not in state(s.path).frontmatter and 'preferred_version' not in state(s.path).frontmatter
+    update(s.path,
         doi='https://doi.org/10.5555/ACQUISITION',
         external_ids={'doi':'https://doi.org/10.5555/ACQUISITION'},zotero_key=PARENT.key)
     before=s.path.read_bytes();tasks=capture_tasks(monkeypatch)
@@ -763,24 +754,11 @@ def test_task_freezes_complete_normalized_preferred_entry(scenario,monkeypatch,k
     assert first.task_id!=second.task_id and isinstance(first.task_id,UUID)
     assert first.paper_id==ID and first.doi==DOI and first.zotero_key==PARENT.key
     assert first.server_id==PARENT.server_id and first.parent==PARENT
-    assert first.acquisition_class is qualification
-    assert first.target_version==PaperVersion.model_validate(target)
-    assert first.target_version.date==date(2026,9,20)
-    assert str(first.target_version.url)=='https://publisher.example/expected-version'
+    from dataclasses import fields
+    assert {field.name for field in fields(first)} == {'task_id','paper_id','doi','zotero_key','server_id'}
     with pytest.raises(FrozenInstanceError):first.doi='10.5555/retarget'
-    with pytest.raises(ValidationError):first.target_version.kind=VersionKind.UNKNOWN
     assert s.path.read_bytes()==before
     assert list(s.root.iterdir())==[s.path.parent]
-
-
-def test_unknown_preferred_does_not_fall_back_to_published_version(scenario):
-    s=scenario
-    update(s.path,versions=[
-        {'source':'other','identifier':'unknown-target','kind':'unknown'},
-        {'source':'doi','identifier':DOI,'kind':'journal_final'},
-    ],preferred_version={'source':'other','identifier':'unknown-target'})
-    result=s.run()
-    assert result.outcome is Outcome.INELIGIBLE and not s.resolve_calls and not posts(s)
 
 
 @pytest.mark.parametrize('legacy',[False,True])
@@ -811,7 +789,7 @@ def test_one_action_read_and_parse_through_writer_and_replay(scenario,monkeypatc
     assert_clean(s,result)
 
 
-@pytest.mark.parametrize('boundary',['prepared','qualified','authorization','retry','register'])
+@pytest.mark.parametrize('boundary',['prepared','artifact','authorization','retry','register'])
 def test_later_full_paper_edit_preserves_frozen_identity_and_concurrent_bytes(scenario,monkeypatch,boundary):
     s=scenario;tasks=capture_tasks(monkeypatch);concurrent=[]
     def edit():
@@ -823,7 +801,7 @@ def test_later_full_paper_edit_preserves_frozen_identity_and_concurrent_bytes(sc
         s.path.write_text(serialize_document(frontmatter,current.body+'\nChanged human body.\n'))
         concurrent.append(s.path.read_bytes())
     if boundary=='prepared':s.prepared_hook=edit
-    elif boundary=='qualified':s.qualified_hook=edit
+    elif boundary=='artifact':s.staged_hook=edit
     else:
         s.protocol_full=boundary=='register'
         if boundary in ('authorization','retry'):s.post_status['/api/users/0/items']=[401]
@@ -834,7 +812,6 @@ def test_later_full_paper_edit_preserves_frozen_identity_and_concurrent_bytes(sc
     assert result.outcome is Outcome.SUCCEEDED
     assert concurrent and s.path.read_bytes()==concurrent[-1]
     assert tasks[0].doi==DOI and tasks[0].zotero_key==PARENT.key
-    assert tasks[0].target_version.kind is VersionKind.JOURNAL_FINAL
     assert s.run().outcome is Outcome.INELIGIBLE
     assert len(tasks)==1
     assert all(doi==DOI and key in (None,PARENT.key) for doi,key in s.resolve_calls)
@@ -865,7 +842,7 @@ def test_nonnull_conflicting_key_never_uses_matching_doi_elsewhere(scenario,monk
     assert len(requests)==(0 if failure=='malformed_key' else 1)
     assert not any(r.url.path.endswith('/items') for r in requests)
     assert s.path.read_bytes()==before and not result.linkage_completed
-    assert s.staging_calls==s.qualification_calls==s.writer_calls==0 and not posts(s)
+    assert s.staging_calls==s.artifact_calls==s.writer_calls==0 and not posts(s)
 
 
 def test_valid_nonnull_key_has_no_enumeration_with_real_reader(scenario,monkeypatch):
@@ -969,7 +946,7 @@ def test_legacy_final_compare_location_conflict_aborts_all_continuations(scenari
     result=s.run()
     assert result.outcome is Outcome.CONFLICT and not result.linkage_completed
     assert calls==[s.path] and preserved.read_bytes()==original
-    assert s.inspect_calls==s.staging_calls==s.qualification_calls==s.writer_calls==0 and not posts(s)
+    assert s.inspect_calls==s.staging_calls==s.artifact_calls==s.writer_calls==0 and not posts(s)
     if kind=='symlink':assert s.path.is_symlink()
     elif kind=='directory':assert (s.path/'sentinel').read_bytes()==b'human object'
     elif kind=='fifo':assert not s.path.is_file()
@@ -998,7 +975,7 @@ def test_legacy_original_location_identity_conflict_at_compare_boundary(scenario
     assert moved.read_bytes()==original and state(moved).zotero_key is None
     assert s.path.read_bytes()==original and state(s.path).zotero_key is None
     if substitution=='parent_symlink':assert s.path.parent.is_symlink()
-    assert s.inspect_calls==s.staging_calls==s.qualification_calls==s.writer_calls==0 and not posts(s)
+    assert s.inspect_calls==s.staging_calls==s.artifact_calls==s.writer_calls==0 and not posts(s)
 
 
 def test_missing_settings_authorization_cleans_pdf_and_preserves_frozen_linkage(scenario, monkeypatch):
@@ -1050,11 +1027,10 @@ def test_actual_pdf_added_during_remembered_refresh_suppresses_replay(scenario):
 
 @pytest.fixture
 def prepared_commit(scenario, tmp_path, monkeypatch):
-    """Real A3 prepare + A7 parser/staging/qualification + actual HTTP mock writer."""
+    """Real A3 prepare + browser parser/staging + actual HTTP mock writer."""
     from literature_monitor.application.acquisition import PreparedAcquisition
     from literature_monitor.browser_acquisition import download_evidence
     from literature_monitor.pdf_staging import stage_download
-    from literature_monitor.version_qualification import qualify_pdf
     from literature_monitor.web.browser_handoff import AuthenticatedBrowserEvent
 
     s = scenario
@@ -1065,7 +1041,7 @@ def prepared_commit(scenario, tmp_path, monkeypatch):
     monkeypatch.setattr(application, '_read_paper', counted)
     prepared = s.service.prepare(ID)
     assert isinstance(prepared, PreparedAcquisition) and len(s.action_reads) == 1
-    assert s.staging_calls == s.qualification_calls == s.writer_calls == 0
+    assert s.staging_calls == s.artifact_calls == s.writer_calls == 0
     task = prepared.task
     source = tmp_path/'chrome-downloads'/'source.pdf'; source.parent.mkdir()
     source.write_bytes(b'%PDF-1.7\nsource bytes')
@@ -1074,31 +1050,29 @@ def prepared_commit(scenario, tmp_path, monkeypatch):
         navigation_url='https://publisher.example/paper', path=str(source.resolve()),
         url='https://publisher.example/file.pdf', final_url='https://publisher.example/file.pdf',
         referrer='https://publisher.example/paper', mime='application/pdf',
-        total_bytes=size, file_size=size, state='complete', category='', version_labels=['published'],
-        manifestation=task.target_version.model_dump(mode='json'), observed_doi=DOI,
+        total_bytes=size, file_size=size, state='complete', category='', observed_doi=DOI,
         navigation_time=1000, start_time=2000)
     evidence = download_evidence(AuthenticatedBrowserEvent(task.task_id,'tab-42','download_candidate',payload),task,'tab-42')
     artifact = stage_download(evidence,project_dir=s.root,workspace_dir=s.root,
                               config_path=tmp_path/'configuration'/'monitor.yaml')
-    qualified = qualify_pdf(task,evidence,artifact,claimed_tab_binding='tab-42')
-    s.prepared, s.task, s.qualified, s.source = prepared, task, qualified, source
+    s.prepared, s.task, s.artifact, s.source = prepared, task, artifact, source
     def no_reread(*args,**kwargs): raise AssertionError('Frozen commit must not reread Paper')
     monkeypatch.setattr(application,'_read_paper',no_reread)
-    s.commit = lambda **kwargs: s.service.commit(task,qualified,
+    s.commit = lambda **kwargs: s.service.commit(task,artifact,
         linkage_completed=prepared.linkage_completed,**kwargs)
     yield s
     artifact.cleanup()
     assert source.read_bytes() == b'%PDF-1.7\nsource bytes'
 
 
-def test_bounded_prepare_and_qualified_commit_keep_the_frozen_target(prepared_commit):
+def test_bounded_prepare_and_artifact_commit_keep_the_frozen_target(prepared_commit):
     s=prepared_commit
-    update(s.path, status='rejected', preferred_version=None, custom='later human edit')
+    update(s.path, status='rejected', custom='later human edit')
     before=s.path.read_bytes()
     result=s.commit()
     assert result.outcome is Outcome.SUCCEEDED and result.linkage_completed
     assert result.upload_stage is ZoteroUploadStage.REGISTERED
-    assert s.writer_calls==1 and s.staging_calls==s.qualification_calls==0
+    assert s.writer_calls==1 and s.staging_calls==s.artifact_calls==0
     assert len([r for r in posts(s) if r.url.path=='/api/users/0/items'])==1
     assert all(r.headers['Zotero-Server-ID']==s.task.server_id for r in posts(s))
     assert s.path.read_bytes()==before and len(s.action_reads)==1
@@ -1129,12 +1103,21 @@ def test_writer_guard_owns_final_check_before_each_content_post(prepared_commit)
     assert posts(s)[2].content == s.source.read_bytes()
 
 
-def test_final_commit_refuses_raw_paths_or_unqualified_pdf(prepared_commit):
+def test_final_commit_refuses_raw_paths_or_unvalidated_objects(prepared_commit):
     s=prepared_commit
-    for raw in (s.source,s.qualified.artifact,SimpleNamespace(path=s.source),None):
+    for raw in (s.source,SimpleNamespace(path=s.source),None):
         result=s.service.commit(s.task,raw,linkage_completed=s.prepared.linkage_completed)
         assert result.outcome is Outcome.NO_VALID_PDF
     assert s.writer_calls==0 and posts(s)==[]
+
+
+def test_final_commit_rejects_artifact_from_another_task(prepared_commit):
+    from dataclasses import replace
+    from uuid import uuid4
+    s = prepared_commit
+    result = s.service.commit(s.task, replace(s.artifact, task_id=uuid4()))
+    assert result.outcome is Outcome.NO_VALID_PDF
+    assert not s.requests and s.writer_calls == 0
 
 
 @pytest.mark.parametrize('field,value',[('key','OTHER001'),('normalized_doi','10.5555/changed'),('server_id','new-instance')])
@@ -1169,8 +1152,8 @@ def test_final_attachment_inspection_fails_closed(prepared_commit,incomplete):
 @pytest.mark.parametrize('change',['modify','delete'])
 def test_staged_artifact_changed_before_commit_never_reaches_writer(prepared_commit,change):
     s=prepared_commit
-    if change=='modify':s.qualified.artifact.path.write_bytes(b'changed')
-    else:s.qualified.artifact.path.unlink()
+    if change=='modify':s.artifact.path.write_bytes(b'changed')
+    else:s.artifact.path.unlink()
     result=s.commit()
     assert result.outcome is Outcome.NO_VALID_PDF and s.writer_calls==0 and posts(s)==[]
     assert not s.requests and not result.mutation_uncertain
@@ -1183,8 +1166,8 @@ def test_staged_artifact_changed_after_commit_check_blocks_first_post(prepared_c
     def change_after_local_preparation(request):
         # This credential probe follows commit validation and writer file/hash preparation.
         if request.method == 'GET':
-            if change == 'modify':s.qualified.artifact.path.write_bytes(b'changed')
-            else:s.qualified.artifact.path.unlink()
+            if change == 'modify':s.artifact.path.write_bytes(b'changed')
+            else:s.artifact.path.unlink()
 
     s.write_hook = change_after_local_preparation
     result = s.commit()
@@ -1203,8 +1186,8 @@ def test_staged_artifact_changed_after_child_blocks_remaining_bytes_mutation(pre
 
     def change_before_boundary(request):
         if request.method == 'GET' and [r.url.path for r in posts(s)] == expected_posts:
-            if change == 'modify':s.qualified.artifact.path.write_bytes(b'changed')
-            else:s.qualified.artifact.path.unlink()
+            if change == 'modify':s.artifact.path.write_bytes(b'changed')
+            else:s.artifact.path.unlink()
 
     s.write_hook = change_before_boundary
     result = s.commit()
@@ -1238,8 +1221,8 @@ def test_registration_succeeds_without_artifact_validation_after_confirmed_bytes
         # returned 201 and the real writer advanced to BYTES_UPLOADED.
         if request.method == 'GET' and [r.url.path for r in posts(s)] == before_registration:
             after_bytes = True
-            if change == 'modify':s.qualified.artifact.path.write_bytes(b'changed')
-            else:s.qualified.artifact.path.unlink()
+            if change == 'modify':s.artifact.path.write_bytes(b'changed')
+            else:s.artifact.path.unlink()
 
     s.write_hook = change_after_confirmed_bytes
     result = s.commit()
@@ -1319,8 +1302,8 @@ def test_stale_artifact_at_remembered_401_guard_blocks_dialog_or_replay(prepared
 
     def change_before_guard(request):
         if request.method == 'POST' and request.url.path == endpoint:
-            if change == 'modify':s.qualified.artifact.path.write_bytes(b'changed')
-            else:s.qualified.artifact.path.unlink()
+            if change == 'modify':s.artifact.path.write_bytes(b'changed')
+            else:s.artifact.path.unlink()
 
     s.write_hook = change_before_guard
     result = s.commit()

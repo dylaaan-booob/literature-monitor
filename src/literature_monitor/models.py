@@ -9,7 +9,6 @@ from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 from pydantic import (
-    AnyHttpUrl,
     BaseModel,
     ConfigDict,
     Field,
@@ -69,25 +68,6 @@ class Author(DomainModel):
     orcid: NonEmptyStr | None = None
 
 
-class VersionKind(str, Enum):
-    JOURNAL_FINAL = "journal_final"
-    JOURNAL_ONLINE = "journal_online"
-    ACCEPTED_MANUSCRIPT = "accepted_manuscript"
-    PREPRINT = "preprint"
-    UNKNOWN = "unknown"
-
-
-class VersionRef(DomainModel):
-    source: NonEmptyStr
-    identifier: NonEmptyStr
-
-
-class PaperVersion(VersionRef):
-    kind: VersionKind
-    url: AnyHttpUrl | None = None
-    date: Date | None = None
-
-
 class MetadataSource(DomainModel):
     provider: NonEmptyStr
     record_id: NonEmptyStr
@@ -128,26 +108,6 @@ class EvidenceDate(DomainModel):
         return self
 
 
-class EvidenceRelation(DomainModel):
-    relation_type: NonEmptyStr
-    id_type: NonEmptyStr
-    identifier: NonEmptyStr
-    asserted_by: NonEmptyStr | None = None
-
-
-class EvidenceVersionRole(str, Enum):
-    PUBLICATION = "publication"
-    MANUSCRIPT = "manuscript"
-    PREPRINT = "preprint"
-
-
-class EvidenceVersionHint(DomainModel):
-    source: NonEmptyStr
-    identifier: NonEmptyStr
-    role: EvidenceVersionRole
-    url: NonEmptyStr | None = None
-
-
 class ProviderTopic(DomainModel):
     """Reconstructible provider taxonomy, distinct from author keywords."""
 
@@ -169,8 +129,6 @@ class ProviderWorkEvidence(DomainModel):
     authors: tuple[Author, ...] = ()
     external_ids: ExternalIds = Field(default_factory=ExternalIds)
     dates: tuple[EvidenceDate, ...] = ()
-    relations: tuple[EvidenceRelation, ...] = ()
-    version_hints: tuple[EvidenceVersionHint, ...] = ()
     supplements: tuple[ProviderRecordRef, ...] = ()
     monitor_journal_issns: tuple[str, ...] = ()
 
@@ -200,10 +158,8 @@ class CanonicalPaper(DomainModel):
     metadata: CanonicalMetadata
     external_ids: ExternalIds = Field(default_factory=ExternalIds)
     authors: tuple[Author, ...]
-    versions: tuple[PaperVersion, ...] = ()
     sources: tuple[MetadataSource, ...] = ()
     workflow: Workflow = Field(default_factory=Workflow)
-    preferred_version: VersionRef | None = None
     journal_issns: tuple[str, ...] = ()
 
     @field_validator("authors")
@@ -212,20 +168,6 @@ class CanonicalPaper(DomainModel):
         if not value:
             raise ValueError("at least one author is required")
         return value
-
-    @model_validator(mode="after")
-    def validate_versions(self) -> CanonicalPaper:
-        keys = [(version.source, version.identifier) for version in self.versions]
-        if len(keys) != len(set(keys)):
-            raise ValueError("versions must not contain duplicate source/identifier pairs")
-        if self.preferred_version is not None:
-            preferred_key = (
-                self.preferred_version.source,
-                self.preferred_version.identifier,
-            )
-            if preferred_key not in keys:
-                raise ValueError("preferred_version must reference an existing version")
-        return self
 
     @property
     def doi(self) -> str | None:

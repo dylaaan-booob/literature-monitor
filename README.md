@@ -3,8 +3,22 @@
 This repository contains the journal-monitoring workflow specified in
 `SPEC.md`. The workflow uses OpenAlex for primary discovery and Crossref for
 secondary discovery and bibliographic evidence, consolidates provider evidence
-before local keyword filtering, canonicalizes retained papers and versions,
+before local keyword filtering, canonicalizes retained DOI-bound papers,
 safely updates durable Paper and Author Markdown, and exports kept papers.
+
+## Current development and released baseline
+
+This main-branch source checkout contains the **v0.5.2 development implementation**
+under SPEC §37. A0–A5 implementation and independent stage reviews are complete;
+the final independent integration audit is complete, with automated validation
+passing at the verified scope recorded in SPEC §37.10. v0.5.2 release preparation
+and release have not occurred. No v0.5.2 live browser/Zotero verification is
+claimed; historical v0.5.1 evidence does not establish it.
+Python package metadata and Provider User-Agent identities remain **0.5.1**.
+An installed v0.5.1 distribution follows its released contract, while the current
+source instructions below follow §37.
+
+### Historical v0.5.1 release and live evidence
 
 v0.5.1 is the latest released and completed baseline, with
 package metadata `0.5.1` and normal-Chrome PDF acquisition governed by SPEC §36. A0–A9
@@ -23,13 +37,14 @@ wheel/sdist SHA-256 digests are verified. The initial documentation closeout
 at `125bfb7` completed product/release closeout after the release tag; that
 documentation commit is outside the v0.5.1 tag target (SPEC §24.17).
 
-Current main additionally contains post-release PDF acquisition guard/cancellation
+The source checkout also retains post-release PDF acquisition guard/cancellation
 ownership hardening in `0b69d4b` (`Simplify PDF acquisition guard and cancellation
 ownership`). It preserves Add PDF's user-visible workflow, result and recovery
 semantics while removing duplicate checks. This main-branch maintenance has no
 new version, tag or release artifacts and is not included in the v0.5.1 tag,
-published wheel/sdist or GitHub Release artifacts. Current-source behavior and
-the separate engineering verification record are documented in SPEC §36.
+published wheel/sdist or GitHub Release artifacts. Its separate engineering
+verification record is documented in SPEC §36.
+Historical v0.5.1 live evidence does not establish v0.5.2 live verification.
 
 v0.5.0 previously released Institutional PDF Acquisition
 while preserving the existing four-state Markdown workflow. Its A0–A7
@@ -43,15 +58,17 @@ boundaries. Its A0–A7 implementation, independent stage reviews, final
 independent integration audit, release preparation, release transaction, and
 closeout are complete. Released package metadata is `0.4.7`.
 
-The workflow automatically reuses revision-validated Provider
-state while establishing live candidate membership on every Run. It batches
-OpenAlex Source/Works retrieval, hydrates locations/version hints only for
-retained Works, and uses live Crossref manifests and revisions to reuse or
-refresh metadata. OpenAlex and Crossref discovery can run concurrently, with
-independent per-source Activity/ETA. The old explicit provider-cache reuse mode
-is retired. No checkpoint resume, watermark, scheduler, or run history is added.
-Semantic Scholar remains excluded from supported production retrieval;
-historical identifiers and provenance remain readable.
+## Current retrieval architecture
+
+The workflow establishes live journal/date candidate membership on every Run.
+OpenAlex provides primary discovery through batched Source resolution and thin
+Works retrieval; it performs no retained-work location hydration. Crossref
+provides secondary discovery and bibliographic evidence, using live manifests
+and revisions to reuse or refresh Crossref-only Provider state. Both discovery
+branches can run concurrently with independent per-source Activity/ETA.
+The old explicit provider-cache reuse mode is retired. No checkpoint resume,
+watermark, scheduler, or run history is added. Semantic Scholar remains excluded
+from supported production retrieval; provider identifiers remain metadata/provenance.
 
 ## Setup
 
@@ -134,12 +151,12 @@ Paper Markdown remains the durable workflow state. The GUI does not add a
 workflow/execution database, persistent run history, heartbeat, SSE, WebSocket,
 queue, or another source of Paper decision state.
 
-### Add PDF to Zotero — released v0.5.1 workflow
+### Add PDF to Zotero — current v0.5.2 development workflow
 
-The user-visible workflow below remains released **v0.5.1** behavior. Final-write
-and cancellation ownership details describe current main's post-release hardening.
-Python package metadata is **0.5.1**; the standalone browser companion is installed
-from the source repository.
+This section describes the current source implementation under SPEC §37.
+The latest released baseline and package metadata remain **v0.5.1 / 0.5.1**;
+its historical live verification is recorded separately below. The standalone
+browser companion is installed from the source repository.
 
 1. **Keep** a Paper and use **Copy DOI** in Kept detail.
 2. Manually create or import the bibliographic parent into Zotero **My Library**.
@@ -173,26 +190,27 @@ from the source repository.
 
 #### Preflight and browser flow
 
-Add PDF accepts an existing `in_zotero` Paper and freezes its normalized DOI,
-complete preferred PaperVersion, verified Zotero parent key and workspace into
-one task. An existing non-null `zotero_key` must match the DOI; it cannot fall
-back to another parent. A null/missing compatibility key may become the uniquely
-verified parent's key. Before opening Chrome, preflight inspects actual current
-Zotero attachments. An actual existing PDF is **PDF already attached**, a
-successful no-op; incomplete attachment metadata alone is insufficient.
+Add PDF accepts an existing `in_zotero` Paper and freezes only task ID, Paper
+UUID, normalized DOI, verified Zotero parent key, and Zotero Server-ID. An
+existing non-null `zotero_key` must match the DOI; it cannot fall back to another
+parent. A null/missing key may become the uniquely verified parent's key.
+Before opening Chrome, preflight inspects actual current Zotero attachments.
+An actual existing PDF is **PDF already attached**, a successful no-op;
+incomplete attachment metadata alone is insufficient.
 
 The task opens a secure loopback handoff in normal Chrome and the companion
-continues in that same tab. PUBLISHED starts at the canonical DOI/publisher;
-accepted manuscript/preprint targets need their frozen manifestation's direct
-URL. Complete login, CAPTCHA, MFA, Cloudflare or gateway verification yourself
-in the task tab; these waits do not mean the publisher path is exhausted and
-are not bypassed. Use the companion's task actions to continue.
+continues in that same tab. START carries only `task_id`, `doi`, and `direct_url`;
+navigation begins at `https://doi.org/<normalized-doi>` with URL-safe encoding.
+Complete login, CAPTCHA, MFA, Cloudflare or gateway verification yourself in the
+task tab. These waits do not mean the publisher path is exhausted and are not
+bypassed. Use the companion's task actions to continue.
 
-Only a PUBLISHED task can explicitly choose **Publisher path exhausted — try
-XMU** after the publisher path cannot provide the target version. XMU uses
-visible, structured **Full Text / SmartLink(s)** results in document/provider
-order. Multiple eligible choices require explicit selection. There is no
-private `/api/links` parsing or broad publisher scraping.
+Choose **Publisher path exhausted — try XMU** only after explicitly confirming
+that the publisher path cannot provide the current DOI's PDF. XMU fallback uses
+this DOI-bound task without a publication-label gate. It uses visible,
+structured **Full Text / SmartLink(s)** results in document/provider order.
+Multiple eligible choices require explicit selection. There is no private
+`/api/links` parsing or broad publisher scraping.
 
 For a landing-page PDF link, use **Arm next user download** in the task tab
 before clicking it within 10 seconds. For a verified EBSCO Research PDF Download
@@ -205,15 +223,19 @@ download attribution fails closed; not every PDF viewer download is supported.
 The user download stays untouched. The application validates a private temporary
 copy outside the project/workspace, then cleans only that copy.
 
-#### Version qualification and final write
+#### Staging and final write
 
-PDF bytes and DOI equality alone are insufficient. The actual artifact must
-qualify against the complete frozen preferred PaperVersion. A PUBLISHED target
-requires positive published-version evidence; explicit accepted manuscript/AAM
-or preprint evidence rejects it. Missing or ambiguous evidence fails closed.
-There is no **Attach anyway** or lower-version fallback.
+Authenticated browser evidence must bind the complete download to the current
+task, claimed tab and navigation context. An observed DOI, when present, must
+match the frozen DOI. Missing observed DOI on an otherwise valid direct download
+is not itself a rejection. Preprint, AAM, online-first or final wording does not
+determine acceptance.
 
-On current main, a qualified staged artifact may enter writer local preparation.
+The application creates a private staged copy, checks path/race safety, the
+128 MiB limit and actual `%PDF` bytes, then proceeds through authorization and
+final Zotero identity checks to commit. The user source download is untouched.
+The task-ID-bound `StagedPdf` may enter writer local preparation.
+
 Before the first content POST, the writer's application guard checks current
 artifact validity and the frozen key, DOI, Zotero Server-ID and actual PDFs.
 Freshness checks continue at `NO_CONFIRMED_MUTATION` / `CHILD_CREATED`, while
@@ -237,7 +259,7 @@ remembered-credential 401 before mutation permits at most one eligible reauthori
 with fresh identity/PDF checks before authorization and again before replay.
 Rate limits remain shared across workspace changes.
 
-If a qualified PDF waits for authorization, authorize in Settings, then click
+If a staged PDF waits for authorization, authorize in Settings, then click
 **Continue after Zotero authorization**. The same frozen task and staged
 artifact resume, without rereading Paper or acquiring the PDF again.
 
@@ -264,12 +286,15 @@ are documented in the companion README.
 | Companion missing/not connected | Load the repo-root extension in normal Chrome; use **Retry companion connection** in the same handoff tab when offered. |
 | Normal Chrome could not open | Check Chrome installation and use Web **Open in Chrome again** for the same valid handoff. |
 | Institutional login/verification | Complete it in the same task tab, then continue using companion actions. |
-| Zotero authorization required | Authorize in Settings, then resume the same qualified artifact with **Continue after Zotero authorization**. |
+| Zotero authorization required | Authorize in Settings, then resume the same staged PDF with **Continue after Zotero authorization**. |
 | Zotero authorization rate-limited | Wait for the shared retry boundary before another explicit authorization. |
-| Unqualified/ambiguous PDF | Obtain evidence for the exact target manifestation; there is no override or lower-version fallback. |
+| Unattributed/ambiguous download, DOI mismatch or invalid PDF | Use the same task tab to obtain an attributable download for the DOI; there is no safety-check override. |
 | Partial/uncertain attachment | Inspect Zotero and its attachments before an explicit new attempt. |
 
-Automated checks and scoped live evidence remain distinct under SPEC §36.14.
+#### Historical v0.5.1 live verification
+
+Automated checks and historical scoped live evidence remain distinct under SPEC
+§36.14. These results do not establish v0.5.2 live verification.
 Fresh Local API inspection verified registered child `LJ6UV83V` under parent
 `ZHIST6EG` with an actual non-empty regular PDF file whose bytes equal the user
 Chrome download. The earlier incomplete child is retained and does not count
@@ -299,31 +324,27 @@ event lines on `stderr`. Machine/data output on `stdout` and exit codes are
 unchanged.
 
 Candidate membership remains based on the inclusive publication-date window.
-OpenAlex `updated_date` and Crossref `indexed` timestamps validate revisions
-only; they do not change candidate membership to an update-date window, recover
+Crossref `indexed` timestamps validate Crossref metadata revisions only; they
+do not change candidate membership to an update-date window, recover
 late-indexed records, provide watermark synchronization, or resume checkpoints.
 
 Transport remains synchronous and pooled, with one client per Provider
 execution. One OpenAlex and one Crossref discovery branch may run concurrently;
 there is no async rewrite or journal/ISSN/DOI worker pool. Dependent Crossref DOI
-supplementation waits for both discovery branches, and OpenAlex version
-hydration waits for local FTS5 retention.
+supplementation waits for both discovery branches.
 
 OpenAlex batches Source resolution with at most 100 ISSNs per batch, then uses
-multi-Source thin Works discovery. The normalized `updated_date` is a revision
-marker only. Discovery does not download `locations` for every Work; only
-retained W IDs hydrate locations/version hints, once per distinct ID. Those
-hints may be reused when the current live revision matches Provider state.
+multi-Source thin Works discovery. `primary_location`, its `is_published` flag,
+and Source/journal attribution remain discovery evidence. No retained-work
+location requests or OpenAlex revision state are used.
 
-In the current source tree, OpenAlex Provider evidence eligibility is separate
-from `CanonicalPaper` eligibility. A valid Work identity, trustworthy Source,
-and usable DOI or title allow evidence to continue even with empty authors,
-missing abstract, or missing publication date. Ordinary sparsity does not
-create ingestion-time missing-field warnings. A missing or unusable revision
-disables version reuse; a retained Work then hydrates its locations live.
-Normal Source absence is `UNAVAILABLE` with a warning, while unrecovered remote
-request failures and Source/journal identity failures remain `FAILED` with an
-error.
+OpenAlex Provider evidence eligibility is separate from `CanonicalPaper`
+eligibility. A valid Work identity, trustworthy Source, and usable DOI or title
+allow evidence to continue even with empty authors, missing abstract, or missing
+publication date. Ordinary sparsity does not create ingestion-time missing-field
+warnings. Normal Source absence is `UNAVAILABLE` with a warning, while
+unrecovered remote request failures and Source/journal identity failures remain
+`FAILED` with an error.
 
 Crossref establishes current DOI membership through live manifests. Matching
 current `indexed` revisions permit normalized metadata reuse; changed or new
@@ -333,15 +354,25 @@ coverage while evidence and state use the resolved prime DOI.
 
 DOI-anchored partial OpenAlex evidence can receive Crossref supplementation
 even without an OpenAlex title or authors. Title-only evidence without a DOI
-can proceed directly to local matching without a production `missing_doi`
-warning or a DOI-supplement request/coverage unit. After consolidation, a
+can proceed directly to local matching without an ingestion-time `missing_doi`
+warning or a DOI-supplement request/coverage unit. After consolidation, an
 eligible cluster with no usable title, author keywords, or abstract receives
 an `unsearchable` warning and is excluded from matcher candidates, including for
 pure `NOT` and complement expressions. This is a search-boundary warning,
-not a Provider retrieval issue. Matched evidence still needs a title, journal,
-and at least one author for `CanonicalPaper`; unmet eligibility produces the
-existing `insufficient_metadata` warning. Evidence grouping and representative
-selection remain in use without generic field-by-field Provider synthesis.
+not a Provider retrieval issue. Matched evidence needs a valid normalized DOI
+for `CanonicalPaper`; pure no-DOI evidence is skipped with a canonicalization
+`missing_doi` warning and creates no Paper. It also needs a title, journal, and
+at least one author; unmet metadata eligibility produces `insufficient_metadata`.
+Evidence grouping and representative selection remain in use without generic
+field-by-field Provider synthesis.
+
+Normalized valid DOI is the only supported canonical work identity: the same
+DOI produces one Paper, and different DOIs remain separate regardless of title,
+authors, other identifiers or relations. Raw Crossref relations remain provider
+metadata and have no canonical grouping effect. Publication-date precedence is
+`published-print → published-online → published → issued → representative publication_date`.
+Only complete dates participate in date selection; missing month/day components
+are never fabricated.
 
 Candidate Eligibility is evaluated after current Crossref supplementation and
 before evidence assembly and local matching. Exact Crossref `journal-article`
@@ -361,20 +392,19 @@ cluster has strong eligible evidence, in which case the dispute remains a
 diagnostic. An empty mixed eligible/disputed cluster retains both its genuine
 unsearchable warning and scope diagnostic.
 
-Non-candidate exclusion, scope dispute, repeated-title separation, and
-conflicting-DOI separation are typed transient Run diagnostics. CLI completion
+Non-candidate exclusion and scope dispute are typed transient Run diagnostics.
+CLI completion
 shows their logical-group counts and context separately from warnings/errors;
 Web technical details appear in Advanced & Diagnostics → Current run.
 Diagnostics alone do not change exit codes or `RunOutcome` and are not written
 to last-run, Paper/Author Markdown, monitor YAML, or Provider state.
 
-Title fallback distinguishes `MATCH`, `INCONCLUSIVE`, and `CONFLICT`, merging
-only on `MATCH`; a one-sided stable ID does not automatically conflict. Once
-same-work identity is established, limited author display forms may compare
+After DOI grouping, compatible ordered author display forms may compare
 equivalent while preserving author sequence and representative display names.
 Abstract comparison uses deterministic HTML/JATS, entity, Unicode, whitespace,
 punctuation, and structural-label normalization, preserving substantive text
-and the selected raw abstract. No fuzzy, embedding, or LLM similarity is used.
+and the selected raw abstract. These metadata comparisons do not create work
+identity. No fuzzy, embedding, or LLM similarity is used.
 
 OpenAlex Works discovery keeps cursor pagination at `per_page=100`. Crossref
 uses bounded manifest retrieval, splitting ISSNs and date intervals as needed,
@@ -399,8 +429,8 @@ entered the pending set. Coverage distinguishes complete, partial, unavailable,
 and failed execution without claiming that the bibliographic universe itself is
 complete. CLI completion summaries and the GUI finished-run panel show compact
 per-component counts. Completion reporting separately shows Provider-state
-usage: Crossref metadata reused/refreshed/new and OpenAlex versions
-reused/hydrated. Reuse does not remove live coverage units or reduce evidence
+usage: Crossref metadata reused/refreshed/new. Reuse does not remove live
+coverage units or reduce evidence
 statistics. Usage counts are transient completion information, not durable
 telemetry.
 
@@ -433,22 +463,17 @@ notes, and the next normal run remains valid. Materialization scanners do not
 treat this hidden metadata directory as Paper data.
 
 `.literature-monitor/provider-state.sqlite3` is application-owned,
-reconstructible optimization state. It stores normalized Crossref metadata and
-its revision, plus retained OpenAlex version hints bound to their live revision.
-It is not Paper/Author workflow state, candidate membership, run history, or
-checkpoint/cursor state. Normal production Run automatically uses it, but live
-Provider evidence always determines current membership. Matching revisions may
-reuse metadata/version hints; changed revisions refresh live. Missing state
-causes an ordinary all-live Run.
+reconstructible optimization state. It stores only normalized Crossref records,
+their revisions and consumed-metadata hashes. It is not Paper/Author workflow
+state, candidate membership, run history, or checkpoint/cursor state. Normal
+production Run automatically uses it, but live Provider evidence always determines
+current membership. Matching Crossref revisions permit metadata reuse; changed
+revisions refresh live. Missing state causes an ordinary all-live Run.
 
-Current Provider-state logical schema is v2. Crossref semantic hashes now
-consume `work_type`; the SQLite physical layout and both Provider serialization
-versions remain unchanged. Reading a valid v1 DB validates its original hashes
-and converts state in memory without writing, allowing revision-validated reuse
-in that same Run. The normal production persistence boundary transactionally
-migrates all historical Crossref hashes, including out-of-window records, to v2
-alongside pending state. Migration failure rolls back Provider state and reports
-a persistence warning without rolling back completed Paper/Author materialization.
+Current Provider-state logical schema is **v3, Crossref-only**. Old v1/v2 state
+is incompatible: Run uses all-live retrieval and only safely replaces it at the
+normal persistence boundary with a successfully constructed fresh database.
+There is no row-preserving migration or reuse of old rows.
 
 Corrupt or incompatible regular state causes an all-live Run with a warning;
 a successfully constructed fresh DB can safely replace that invalid regular
@@ -474,7 +499,10 @@ not persisted into last-run.
 
 Paper Markdown remains the durable workflow state: UUIDs, review status, human
 notes, unknown human-owned frontmatter, and unmanaged sections survive reruns
-according to the existing materialization rules. `Inbox.base` is presentation
+according to current-schema materialization rules. Sources remain provenance.
+The retired pre-v0.5.2 schema used `versions`, `preferred_version` and managed
+`## Versions`; current Papers have none of these. Old-schema frontmatter is
+explicitly rejected, without migration or repair. `Inbox.base` is presentation
 only. It is created when missing and an existing customized file is preserved.
 
 Read the snapshot without contacting providers or modifying the workspace:
@@ -634,7 +662,7 @@ uv run pytest
 The default `uv run pytest` suite includes deterministic full-cycle CLI
 regressions using local HTTP fixtures. The representative persistent-monitor
 lifecycle enters through `run --config`, while explicit `materialize` coverage
-remains for the legacy / diagnostic surface and an overlapping multi-journal
+remains for the diagnostic surface and an overlapping multi-journal
 rerun. The CLI can also be used for manual smoke validation against the real
 OpenAlex and Crossref providers, but those results depend on external service
 availability and are not part of the deterministic default suite. Optional
@@ -645,7 +673,7 @@ and `CROSSREF_MAILTO` environment variables.
 
 `run` is the normal persistent-monitor entry point. The commands below remain
 available as explicit diagnostic or lower-level surfaces for provider inspection,
-search diagnostics, canonicalization diagnostics, and legacy materialization.
+search diagnostics, canonicalization diagnostics, and diagnostic materialization.
 
 ## Diagnose OpenAlex discovery
 
@@ -846,21 +874,19 @@ CROSSREF_MAILTO=you@example.com uv run literature-monitor crossref-enrich \
 
 stdout is diagnostic `EnrichedWorkRecord` NDJSON and is not a stable export
 format. This historical diagnostic does not merge Crossref fields into canonical
-metadata and does not implement deduplication, version consolidation, UUID
+metadata and does not implement canonical grouping, UUID
 creation, Markdown materialization, Zotero integration, or persistence.
 
-## Diagnose canonicalization and versions
+## Diagnose DOI-first canonicalization
 
 The canonicalization diagnostic uses current live retrieval algorithms:
 batched OpenAlex discovery, Crossref manifest/full retrieval and DOI
-supplementation, and retained-only OpenAlex version hydration. It neither reads
-nor writes Provider state, modifies `last-run.json`, nor touches old
-`provider-cache.json`. Persistent revision reuse does not apply to diagnostics.
-All available evidence is consolidated before the local FTS5 filter evaluates
-the searchable projection using the rules above. Retained clusters become canonical papers.
-Matching is conservative and evidence-based:
-exact identifiers and explicit version relations take priority, while the
-title-and-author fallback requires compatible ordered author identities.
+supplementation. It neither reads nor writes Provider state, modifies
+`last-run.json`, nor touches old `provider-cache.json`. Persistent revision reuse
+does not apply to diagnostics. All available evidence is consolidated before
+local FTS5 filtering. Retained valid DOI groups become canonical papers; pure
+no-DOI evidence is skipped. Different DOIs remain separate, and neither relations
+nor title/author similarity establish identity.
 
 ```bash
 uv run literature-monitor canonicalize \
@@ -871,18 +897,17 @@ uv run literature-monitor canonicalize \
   --keyword-expression '"multiview learning"'
 ```
 
-All actually discovered versions remain in `versions`. The preferred version
-uses `journal_final > journal_online > accepted_manuscript > latest preprint`,
-with `unknown` as the final fallback. stdout is diagnostic `CanonicalPaper`
-NDJSON and is not a stable export format.
+stdout is diagnostic `CanonicalPaper` NDJSON with DOI-bound identity, selected
+bibliographic metadata and provider provenance; it is not a stable export format.
+Date selection follows the precedence above without inventing partial dates.
 
 The canonicalization diagnostic does not implement Markdown materialization,
 persistent rerun state, stable UUID recovery across independent runs, or Zotero
 export.
 
-## Legacy / diagnostic materialization
+## Diagnostic materialization
 
-`materialize` remains an explicit legacy / diagnostic-style entry point. It
+`materialize` remains an explicit diagnostic entry point. It
 runs the same OpenAlex/Crossref consolidation-before-filter production pipeline
 as `run`, but it still requires an explicit CLI `--output-dir` and continues to
 support the existing diagnostic `--journal` and `--keyword-expression`
@@ -908,23 +933,24 @@ The command writes to:
 └── Authors/
 ```
 
-This legacy / diagnostic `materialize` command uses the current live retrieval
-algorithms, including retained-only version hydration, without persistent
-revision reuse. It neither reads nor writes Provider state, modifies
-`.literature-monitor/last-run.json`, nor touches old `provider-cache.json`.
+This diagnostic `materialize` command uses the current live retrieval algorithms
+without persistent revision reuse. It neither reads nor writes Provider state,
+modifies `.literature-monitor/last-run.json`, nor touches old `provider-cache.json`.
 Only normal production `run` writes Provider state and last-run metadata.
 
-Incremental materialization scans existing Markdown and recovers Paper identity
-from UUIDs, external identifiers, version keys, and source keys before using the
-conservative title-and-ordered-author fallback. Matched Papers retain their
-durable UUID and path. Versions and sources accumulate across runs, and the
-preferred version is recomputed before bibliographic metadata is updated. A
-lower-priority incoming manifestation cannot overwrite the snapshot belonging
-to the effective preferred version.
+Incremental materialization matches existing current-schema Papers only through
+normalized DOI. UUID is the durable workspace reference recovered after that
+match; title, authors, source keys and other identifiers do not provide fallback
+work identity. Matched Papers retain their UUID and path. Pure no-DOI input is
+skipped. Sources remain provider provenance and accumulate across reruns.
+Current-schema reruns apply incoming canonical metadata, retain existing values
+when optional incoming data is missing, and report changes/conflicts as warnings.
+Pre-v0.5.2 Paper schemas are unsupported, without migration or legacy repair;
+identity-readable unsupported files block unsafe duplicate creation.
 
 Updates preserve workflow status, discovery time, Zotero key, unknown
 frontmatter, Notes, and unmanaged body sections. Managed frontmatter and the
-title, Abstract, Versions, and Sources sections are rewritten atomically only
+title, Abstract, and Sources sections are rewritten atomically only
 when their rendered bytes change. Existing opaque Author files remain reusable
 at their deterministic paths and are never overwritten; parseable Author notes
 may receive missing stable identifiers without being renamed.
@@ -964,9 +990,9 @@ uv run literature-monitor export-kept \
 
 Only Papers with `status: kept` are written to stdout. Papers marked
 `candidate`, `rejected`, or `in_zotero` are skipped. Each kept Paper produces
-one line using DOI first, then `arXiv:<id>`, or a tab-separated `MANUAL` entry
-with title, journal, and publication date when neither identifier is available;
-a missing date is written as `unknown`. Malformed Paper files are reported on
+one line containing its normalized DOI. Current-schema Papers require a valid
+DOI; DOI-less or unsupported old-schema files are reported as invalid rather
+than exported through another identifier. Malformed Paper files are reported on
 stderr without blocking other valid entries, and make the command exit with
 status 1. The output can be redirected to a file:
 

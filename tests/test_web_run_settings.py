@@ -493,14 +493,14 @@ def test_run_form_has_only_run_and_requires_no_mode_field(tmp_path):
 
 def test_provider_state_and_coverage_are_only_in_current_run(tmp_path):
     from literature_monitor.application.monitor import ProviderStateUsage
-    result = replace(make_run_result(), state_usage=ProviderStateUsage(1, 2, 3, 4, 5))
+    result = replace(make_run_result(), state_usage=ProviderStateUsage(1, 2, 3))
     app = create_app(tmp_path / "monitor.yaml")
     app.state.run_coordinator = StubCoordinator(snapshot=finished_snapshot(result=result))
     with TestClient(app, base_url="http://localhost") as client:
         primary = client.get("/fragments/run")
         response = client.get("/fragments/current-run")
     assert "Crossref metadata 1 reused · 2 refreshed · 3 new" in response.text
-    assert "OpenAlex versions 4 reused · 5 hydrated" in response.text
+    assert "OpenAlex versions" not in response.text
     assert "Live OpenAlex coverage:" in response.text
     assert ">Run again</button>" in primary.text
     assert "Provider state:" not in primary.text

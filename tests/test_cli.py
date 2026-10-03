@@ -51,9 +51,6 @@ from literature_monitor.models import (
     CanonicalPaper,
     ExternalIds,
     MetadataSource,
-    PaperVersion,
-    VersionKind,
-    VersionRef,
 )
 from literature_monitor.progress import (
     ActivityKind,
@@ -575,17 +572,10 @@ def crossref_candidate(
 
 
 def canonical_paper(identifier: str = "10.5555/one") -> CanonicalPaper:
-    version = PaperVersion(
-        kind=VersionKind.JOURNAL_FINAL,
-        source="doi",
-        identifier=identifier,
-    )
     return CanonicalPaper(
         metadata=CanonicalMetadata(title="Canonical paper", journal="Biometrics"),
         external_ids=ExternalIds(doi=identifier),
         authors=(Author(name="Ada Author"),),
-        versions=(version,),
-        preferred_version=VersionRef(source="doi", identifier=identifier),
     )
 
 
@@ -1154,7 +1144,7 @@ def test_run_cli_reports_automatic_provider_state_usage(tmp_path, monkeypatch, c
     from dataclasses import replace
     from literature_monitor.application.monitor import ProviderStateUsage
     calls = []
-    result = replace(cli_run_result(RunOutcome.COMPLETED), state_usage=ProviderStateUsage(1, 2, 3, 4, 5))
+    result = replace(cli_run_result(RunOutcome.COMPLETED), state_usage=ProviderStateUsage(1, 2, 3))
     def run(path, *, date_override, progress_callback):
         calls.append((path, date_override, callable(progress_callback)))
         return result
@@ -1165,7 +1155,7 @@ def test_run_cli_reports_automatic_provider_state_usage(tmp_path, monkeypatch, c
     captured = capsys.readouterr()
     assert "Provider-state reuse is now automatic." not in captured.err
     assert "Crossref metadata 1 reused · 2 refreshed · 3 new" in captured.err
-    assert "OpenAlex versions 4 reused · 5 hydrated" in captured.err
+    assert "OpenAlex versions" not in captured.err
     assert "Cache reuse:" not in captured.err
     assert result.warnings == () and result.outcome is RunOutcome.COMPLETED
 

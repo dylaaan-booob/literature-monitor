@@ -20,9 +20,6 @@ from literature_monitor.models import (
     CanonicalPaper,
     ExternalIds,
     MetadataSource,
-    PaperVersion,
-    VersionKind,
-    VersionRef,
     WorkflowStatus,
 )
 
@@ -36,14 +33,7 @@ _ORCID_PATTERN = re.compile(
 )
 _HEADING = re.compile(r" {0,3}(#{1,6})[ \t]+(.+?)\s*$")
 _FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
-_MANAGED_SECTIONS = ("abstract", "versions", "sources")
-_VERSION_PRIORITY = {
-    VersionKind.JOURNAL_FINAL: 4,
-    VersionKind.JOURNAL_ONLINE: 3,
-    VersionKind.ACCEPTED_MANUSCRIPT: 2,
-    VersionKind.PREPRINT: 1,
-    VersionKind.UNKNOWN: 0,
-}
+_MANAGED_SECTIONS = ("abstract", "sources")
 
 
 @dataclass(frozen=True)
@@ -78,8 +68,6 @@ class PaperMarkdownState:
     body: str | None
     paper_id: UUID | None
     identity_external_ids: frozenset[tuple[str, str]]
-    identity_version_keys: frozenset[tuple[str, str]]
-    identity_source_keys: frozenset[tuple[str, str]]
     updateable: bool
     problems: tuple[str, ...]
     title: str | None = None
@@ -92,20 +80,13 @@ class PaperMarkdownState:
     discovered_at: datetime | None = None
     zotero_key: str | None = None
     external_ids: ExternalIds | None = None
-    versions: tuple[PaperVersion, ...] = ()
     sources: tuple[MetadataSource, ...] = ()
-    preferred_version: VersionRef | None = None
     journal_attribution_state: PaperJournalAttributionState = PaperJournalAttributionState.MISSING_OR_EMPTY
     journal_issns: tuple[str, ...] = ()
 
     @property
     def has_identity(self) -> bool:
-        return bool(
-            self.paper_id
-            or self.identity_external_ids
-            or self.identity_version_keys
-            or self.identity_source_keys
-        )
+        return bool(self.paper_id or self.identity_external_ids)
 
 
 @dataclass(frozen=True)
@@ -116,10 +97,7 @@ class MergedPaperState:
     abstract: str | None
     author_keywords: tuple[str, ...]
     external_ids: ExternalIds
-    versions: tuple[PaperVersion, ...]
     sources: tuple[MetadataSource, ...]
-    preferred_version: VersionRef | None
-    incoming_is_preferred: bool
     warnings: tuple[str, ...]
     journal_issns_update: tuple[str, ...] | None = None
 
@@ -166,19 +144,6 @@ def normalize_orcid(value: str | None) -> str | None:
     check_value = (12 - total % 11) % 11
     expected = "X" if check_value == 10 else str(check_value)
     return normalized if digits[-1] == expected else None
-
-
-def normalize_version_key(source: str, identifier: str) -> tuple[str, str]:
-    normalized_source = source.strip().casefold()
-    normalized_identifier = identifier.strip()
-    if normalized_source == "doi":
-        doi = normalize_doi(normalized_identifier)
-        if doi is None:
-            raise ValueError("empty DOI version identifier")
-        normalized_identifier = doi
-    if not normalized_source or not normalized_identifier:
-        raise ValueError("version source and identifier must be non-empty")
-    return normalized_source, normalized_identifier
 
 
 def normalize_source_key(provider: str, record_id: str) -> tuple[str, str]:
@@ -395,14 +360,12 @@ def rewrite_managed_body(
     *,
     title: str,
     abstract: str | None,
-    versions_summary: str,
     sources_summary: str,
 ) -> str:
     layout = analyze_body(body)
     lines = body.splitlines(keepends=True)
     blocks = {
         "abstract": render_abstract_section(abstract),
-        "versions": f"## Versions\n\n{versions_summary}\n\n",
         "sources": f"## Sources\n\n{sources_summary}\n\n",
     }
     replacements: dict[int, tuple[int, str]] = {}
@@ -503,7 +466,8 @@ def _identity_external_ids(
         if not normalized_identifier:
             problems.append(f"external_ids.{namespace} is invalid")
             continue
-        identities.add((normalized_namespace, normalized_identifier))
+        if normalized_namespace == "doi":
+            identities.add((normalized_namespace, normalized_identifier))
         previous = values.get(normalized_namespace)
         if previous is not None and previous != identifier.strip():
             problems.append(f"external_ids has conflicting {normalized_namespace} values")
@@ -529,7 +493,8 @@ def _identity_external_ids(
         if not normalized_identifier:
             problems.append(f"{field} is invalid")
             continue
-        identities.add((namespace, normalized_identifier))
+        if namespace == "doi":
+            identities.add((namespace, normalized_identifier))
         previous = values.get(namespace)
         if previous is not None and previous != identifier.strip():
             previous_normalized = (
@@ -595,8 +560,6 @@ def parse_paper_state(
             body=None,
             paper_id=None,
             identity_external_ids=frozenset(),
-            identity_version_keys=frozenset(),
-            identity_source_keys=frozenset(),
             updateable=False,
             problems=(str(error),),
         )
@@ -614,45 +577,15 @@ def parse_paper_state(
     identity_external_ids, external_values = _identity_external_ids(
         frontmatter, problems
     )
-    version_keys: set[tuple[str, str]] = set()
-    versions: list[PaperVersion] = []
-    raw_versions = frontmatter.get("versions", [])
-    if not isinstance(raw_versions, list):
-        problems.append("versions must be a list")
-        raw_versions = []
-    for index, raw in enumerate(raw_versions):
-        if isinstance(raw, dict):
-            source = raw.get("source")
-            identifier = raw.get("identifier")
-            if isinstance(source, str) and isinstance(identifier, str):
-                try:
-                    version_keys.add(normalize_version_key(source, identifier))
-                except ValueError:
-                    pass
-        try:
-            versions.append(PaperVersion.model_validate(raw))
-        except ValidationError as error:
-            problems.append(f"versions[{index}] is invalid: {error.errors()[0]['msg']}")
-    if len({normalize_version_key(item.source, item.identifier) for item in versions}) != len(
-        versions
-    ):
-        problems.append("versions contains duplicate source/identifier keys")
+    if "versions" in frontmatter or "preferred_version" in frontmatter:
+        problems.append("unsupported pre-v0.5.2 Paper version schema")
 
-    source_keys: set[tuple[str, str]] = set()
     sources: list[MetadataSource] = []
     raw_sources = frontmatter.get("sources", [])
     if not isinstance(raw_sources, list):
         problems.append("sources must be a list")
         raw_sources = []
     for index, raw in enumerate(raw_sources):
-        if isinstance(raw, dict):
-            provider = raw.get("provider")
-            record_id = raw.get("record_id")
-            if isinstance(provider, str) and isinstance(record_id, str):
-                try:
-                    source_keys.add(normalize_source_key(provider, record_id))
-                except ValueError:
-                    pass
         try:
             sources.append(MetadataSource.model_validate(raw))
         except ValidationError as error:
@@ -708,19 +641,12 @@ def parse_paper_state(
     except ValidationError as error:
         problems.append(f"external_ids is invalid: {error.errors()[0]['msg']}")
         external_ids = None
-    raw_preferred = frontmatter.get("preferred_version")
-    if raw_preferred is None:
-        preferred = None
-    else:
-        try:
-            preferred = VersionRef.model_validate(raw_preferred)
-            if normalize_version_key(
-                preferred.source, preferred.identifier
-            ) not in {normalize_version_key(item.source, item.identifier) for item in versions}:
-                problems.append("preferred_version does not reference versions")
-        except (ValidationError, ValueError) as error:
-            problems.append(f"preferred_version is invalid: {error}")
-            preferred = None
+    if external_ids is not None:
+        doi = normalize_doi(external_ids.doi)
+        if doi is None or not re.fullmatch(r"10\.\d{4,9}/[^\s]+", doi):
+            problems.append("current Paper requires a valid DOI")
+        else:
+            external_ids = external_ids.model_copy(update={"doi": doi})
     try:
         layout = analyze_body(body)
         abstract = layout.abstract
@@ -735,8 +661,6 @@ def parse_paper_state(
         body=body,
         paper_id=paper_id,
         identity_external_ids=frozenset(identity_external_ids),
-        identity_version_keys=frozenset(version_keys),
-        identity_source_keys=frozenset(source_keys),
         updateable=not problems,
         problems=tuple(problems),
         title=title.strip() if title is not None else None,
@@ -749,9 +673,7 @@ def parse_paper_state(
         discovered_at=discovered_at,
         zotero_key=zotero_key.strip() if isinstance(zotero_key, str) else None,
         external_ids=external_ids,
-        versions=tuple(versions),
         sources=tuple(sources),
-        preferred_version=preferred,
         journal_attribution_state=journal_attribution_state,
         journal_issns=journal_issns,
     )
@@ -784,51 +706,6 @@ def parse_author_state(path: Path, contents: str) -> AuthorMarkdownState | None:
     )
 
 
-def merge_versions(
-    existing: tuple[PaperVersion, ...],
-    incoming: tuple[PaperVersion, ...],
-) -> tuple[tuple[PaperVersion, ...], tuple[str, ...]]:
-    merged = {
-        normalize_version_key(item.source, item.identifier): item for item in existing
-    }
-    warnings: list[str] = []
-    for candidate in incoming:
-        key = normalize_version_key(candidate.source, candidate.identifier)
-        current = merged.get(key)
-        if current is None:
-            merged[key] = candidate
-            continue
-        updates: dict[str, Any] = {}
-        if _VERSION_PRIORITY[candidate.kind] > _VERSION_PRIORITY[current.kind]:
-            updates["kind"] = candidate.kind
-        for field in ("date", "url"):
-            old = getattr(current, field)
-            new = getattr(candidate, field)
-            if old is None and new is not None:
-                updates[field] = new
-            elif old is not None and new is not None and str(old) != str(new):
-                warnings.append(f"version {key[0]}:{key[1]} has conflicting {field}")
-        if updates:
-            merged[key] = current.model_copy(update=updates)
-    ordered = tuple(merged[key] for key in sorted(merged))
-    return ordered, tuple(warnings)
-
-
-def select_preferred_version(versions: tuple[PaperVersion, ...]) -> VersionRef | None:
-    if not versions:
-        return None
-    selected = min(
-        versions,
-        key=lambda version: (
-            -_VERSION_PRIORITY[version.kind],
-            version.date is None,
-            -(version.date.toordinal() if version.date else 0),
-            *normalize_version_key(version.source, version.identifier),
-        ),
-    )
-    return VersionRef(source=selected.source, identifier=selected.identifier)
-
-
 def merge_sources(
     existing: tuple[MetadataSource, ...],
     incoming: tuple[MetadataSource, ...],
@@ -840,12 +717,6 @@ def merge_sources(
         if current is None or source.retrieved_at > current.retrieved_at:
             merged[key] = source
     return tuple(merged[key] for key in sorted(merged))
-
-
-def _preferred_key(value: VersionRef | None) -> tuple[str, str] | None:
-    if value is None:
-        return None
-    return normalize_version_key(value.source, value.identifier)
 
 
 def _external_mapping(value: ExternalIds) -> dict[str, str | None]:
@@ -877,40 +748,6 @@ def _merge_external_ids(
     return ExternalIds.model_validate(merged), tuple(warnings)
 
 
-def _version_for_preferred(
-    versions: tuple[PaperVersion, ...],
-    preferred: VersionRef | None,
-) -> PaperVersion | None:
-    key = _preferred_key(preferred)
-    if key is None:
-        return None
-    return next(
-        (
-            version
-            for version in versions
-            if normalize_version_key(version.source, version.identifier) == key
-        ),
-        None,
-    )
-
-
-def _align_external_doi_with_preferred(
-    external_ids: ExternalIds,
-    preferred: VersionRef | None,
-) -> tuple[ExternalIds, bool]:
-    preferred_key = _preferred_key(preferred)
-    if preferred_key is None or preferred_key[0] != "doi":
-        return external_ids, False
-    current_doi = normalize_doi(external_ids.doi)
-    if current_doi == preferred_key[1]:
-        return external_ids, False
-    replaced_durable_doi = external_ids.doi is not None
-    return (
-        external_ids.model_copy(update={"doi": preferred_key[1]}),
-        replaced_durable_doi,
-    )
-
-
 def _changed(left: Any, right: Any) -> bool:
     if isinstance(left, str) and isinstance(right, str):
         return normalize_text(left) != normalize_text(right)
@@ -923,110 +760,34 @@ def merge_paper_state(
 ) -> MergedPaperState:
     """Merge one canonical view into a validated durable Paper state."""
 
-    warnings: list[str] = []
-    versions, version_warnings = merge_versions(state.versions, paper.versions)
-    warnings.extend(version_warnings)
-    preferred = select_preferred_version(versions)
-    incoming_is_preferred = _preferred_key(preferred) == _preferred_key(
-        paper.preferred_version
-    )
+    durable_doi = normalize_doi(state.external_ids.doi if state.external_ids else None)
+    incoming_doi = normalize_doi(paper.external_ids.doi)
+    if durable_doi != incoming_doi:
+        raise ValueError("incoming DOI conflicts with durable Paper")
     external_ids, external_warnings = _merge_external_ids(
         state.external_ids or ExternalIds(), paper.external_ids
     )
-    external_ids, replaced_durable_doi = _align_external_doi_with_preferred(
-        external_ids,
-        preferred,
-    )
-    if replaced_durable_doi:
-        external_warnings = tuple(
-            warning
-            for warning in external_warnings
-            if warning != "external ID doi conflicts with durable value"
-        )
-        warnings.append("doi changed with the effective preferred version")
-    warnings.extend(external_warnings)
-    sources = merge_sources(state.sources, paper.sources)
-
-    title = state.title or paper.metadata.title
-    journal = state.journal or paper.metadata.journal
-    for field, durable, incoming in (
-        ("title", title, paper.metadata.title),
-        ("journal", journal, paper.metadata.journal),
-    ):
-        if incoming_is_preferred:
-            if durable and _changed(durable, incoming):
-                warnings.append(
-                    f"{field} changed with the effective preferred version"
-                )
-            if field == "title":
-                title = incoming
-            else:
-                journal = incoming
-        elif durable and _changed(durable, incoming):
-            warnings.append(
-                f"ignored {field} from a non-effective incoming version"
-            )
-
+    external_ids = external_ids.model_copy(update={"doi": incoming_doi})
+    warnings = list(external_warnings)
+    title = paper.metadata.title
+    journal = paper.metadata.journal
     abstract = state.abstract
-    incoming_abstract = paper.metadata.abstract
-    if incoming_abstract is not None:
-        if abstract is None:
-            abstract = incoming_abstract
-        elif incoming_is_preferred and incoming_abstract != "":
-            if _changed(abstract, incoming_abstract):
-                warnings.append(
-                    "abstract changed with the effective preferred version"
-                )
-            abstract = incoming_abstract
-        elif _changed(abstract, incoming_abstract):
-            warnings.append(
-                "empty incoming abstract did not replace durable abstract"
-                if incoming_is_preferred
-                else "ignored abstract from a non-effective incoming version"
-            )
-
-    keywords = state.author_keywords
-    incoming_keywords = tuple(paper.metadata.author_keywords)
-    if incoming_keywords:
-        if not keywords:
-            keywords = incoming_keywords
-        elif incoming_is_preferred:
-            if keywords != incoming_keywords:
-                warnings.append(
-                    "author keywords changed with the effective preferred version"
-                )
-            keywords = incoming_keywords
-        elif keywords != incoming_keywords:
-            warnings.append(
-                "ignored author keywords from a non-effective incoming version"
-            )
-
-    preferred_version = _version_for_preferred(versions, preferred)
-    if preferred_version is not None and preferred_version.date is not None:
-        publication_date = preferred_version.date
-        if (
-            state.publication_date is not None
-            and state.publication_date != publication_date
-        ):
-            warnings.append(
-                "publication date changed with the effective preferred version"
-            )
-    else:
-        publication_date = state.publication_date
-        incoming_date = paper.metadata.publication_date
-        if publication_date is None:
-            publication_date = incoming_date
-        elif incoming_date is not None and publication_date != incoming_date:
-            if incoming_is_preferred:
-                warnings.append(
-                    "publication date changed with the effective preferred version"
-                )
-                publication_date = incoming_date
-            else:
-                warnings.append(
-                    "ignored publication date from a non-effective incoming version"
-                )
-
+    if paper.metadata.abstract is not None:
+        if paper.metadata.abstract != "" or abstract is None:
+            abstract = paper.metadata.abstract
+        elif abstract != "":
+            warnings.append("empty incoming abstract did not replace durable abstract")
+    keywords = tuple(paper.metadata.author_keywords) or state.author_keywords
+    publication_date = paper.metadata.publication_date or state.publication_date
+    for field, old, new in (
+        ("title", state.title, title),
+        ("journal", state.journal, journal),
+        ("abstract", state.abstract, abstract),
+        ("author keywords", state.author_keywords, keywords),
+        ("publication date", state.publication_date, publication_date),
+    ):
+        if old is not None and _changed(old, new):
+            warnings.append(f"{field} changed with incoming canonical metadata")
     return MergedPaperState(
         title=title,
         journal=journal,
@@ -1034,10 +795,7 @@ def merge_paper_state(
         abstract=abstract,
         author_keywords=keywords,
         external_ids=external_ids,
-        versions=versions,
-        sources=sources,
-        preferred_version=preferred,
-        incoming_is_preferred=incoming_is_preferred,
+        sources=merge_sources(state.sources, paper.sources),
         warnings=tuple(warnings),
         journal_issns_update=paper.journal_issns or None,
     )

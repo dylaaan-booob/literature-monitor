@@ -1417,9 +1417,8 @@ def test_all_relation_types_are_preserved_and_doi_targets_are_normalized() -> No
     assert record.relations[0].identifier == "10.5555/target"
     assert record.relations[0].asserted_by == "subject"
     assert record.relations[1].identifier == "123456"
-    assert [item.model_dump() for item in record.to_evidence().relations] == [
-        item.model_dump() for item in record.relations
-    ]
+    assert "relations" not in record.to_evidence().model_dump()
+    assert "version_hints" not in record.to_evidence().model_dump()
 
 
 def test_optional_malformed_fields_warn_while_other_metadata_survives() -> None:

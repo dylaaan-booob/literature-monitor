@@ -1,4 +1,4 @@
-"""Provider-neutral evidence canonicalization and version consolidation."""
+"""DOI-first provider-neutral evidence consolidation and canonicalization."""
 
 from __future__ import annotations
 
@@ -8,10 +8,9 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date
-from enum import Enum
 from html.parser import HTMLParser
 
-from literature_monitor.diagnostics import RunDiagnostic, RunDiagnosticKind
+from literature_monitor.diagnostics import RunDiagnostic
 from literature_monitor.identifiers import normalize_doi
 from literature_monitor.models import (
     Author,
@@ -19,67 +18,18 @@ from literature_monitor.models import (
     CanonicalPaper,
     EvidenceDate,
     EvidenceDateKind,
-    EvidenceVersionHint,
-    EvidenceVersionRole,
     ExternalIds,
     MetadataSource,
-    PaperVersion,
     ProviderWorkEvidence,
-    VersionKind,
-    VersionRef,
 )
 
 
-_VERSION_RELATIONS = {
-    "is-preprint-of",
-    "has-preprint",
-    "is-manuscript-of",
-    "has-manuscript",
-    "is-version-of",
-    "has-version",
-    "is-identical-to",
-}
-
-_DATE_PRECEDENCE = {
-    VersionKind.JOURNAL_FINAL: (
-        EvidenceDateKind.PUBLISHED_PRINT,
-        EvidenceDateKind.PUBLISHED,
-        EvidenceDateKind.ISSUED,
-        EvidenceDateKind.PUBLISHED_ONLINE,
-    ),
-    VersionKind.JOURNAL_ONLINE: (
-        EvidenceDateKind.PUBLISHED_ONLINE,
-        EvidenceDateKind.PUBLISHED,
-        EvidenceDateKind.ISSUED,
-        EvidenceDateKind.PUBLISHED_PRINT,
-    ),
-    VersionKind.ACCEPTED_MANUSCRIPT: (
-        EvidenceDateKind.PUBLISHED_ONLINE,
-        EvidenceDateKind.PUBLISHED,
-        EvidenceDateKind.ISSUED,
-        EvidenceDateKind.PUBLISHED_PRINT,
-    ),
-    VersionKind.PREPRINT: (
-        EvidenceDateKind.PUBLISHED_ONLINE,
-        EvidenceDateKind.PUBLISHED,
-        EvidenceDateKind.ISSUED,
-        EvidenceDateKind.PUBLISHED_PRINT,
-    ),
-    VersionKind.UNKNOWN: (
-        EvidenceDateKind.PUBLISHED,
-        EvidenceDateKind.ISSUED,
-        EvidenceDateKind.PUBLISHED_ONLINE,
-        EvidenceDateKind.PUBLISHED_PRINT,
-    ),
-}
-
-_VERSION_PRIORITY = {
-    VersionKind.JOURNAL_FINAL: 4,
-    VersionKind.JOURNAL_ONLINE: 3,
-    VersionKind.ACCEPTED_MANUSCRIPT: 2,
-    VersionKind.PREPRINT: 1,
-    VersionKind.UNKNOWN: 0,
-}
+_DATE_PRECEDENCE = (
+    EvidenceDateKind.PUBLISHED_PRINT,
+    EvidenceDateKind.PUBLISHED_ONLINE,
+    EvidenceDateKind.PUBLISHED,
+    EvidenceDateKind.ISSUED,
+)
 
 
 @dataclass(frozen=True)
@@ -106,44 +56,6 @@ class EvidenceConsolidationResult:
     clusters: tuple[EvidenceCluster, ...]
     issues: tuple[CanonicalizationIssue, ...]
     diagnostics: tuple[RunDiagnostic, ...] = ()
-
-
-@dataclass(frozen=True)
-class _BuiltVersion:
-    version: PaperVersion
-    representative: ProviderWorkEvidence
-    base_evidence: tuple[ProviderWorkEvidence, ...]
-
-
-@dataclass(frozen=True)
-class _VersionEvidence:
-    record_index: int
-    hint: EvidenceVersionHint | None = None
-
-
-class _UnionFind:
-    def __init__(self, size: int) -> None:
-        self.parent = list(range(size))
-
-    def find(self, item: int) -> int:
-        root = item
-        while self.parent[root] != root:
-            root = self.parent[root]
-        while self.parent[item] != item:
-            parent = self.parent[item]
-            self.parent[item] = root
-            item = parent
-        return root
-
-    def union(self, left: int, right: int) -> None:
-        left_root = self.find(left)
-        right_root = self.find(right)
-        if left_root == right_root:
-            return
-        if left_root < right_root:
-            self.parent[right_root] = left_root
-        else:
-            self.parent[left_root] = right_root
 
 
 def _normalize_text(value: str) -> str:
@@ -309,7 +221,6 @@ def _completeness(record: ProviderWorkEvidence) -> tuple[int, ...]:
         sum(author.openalex_id is not None for author in record.authors),
         sum(author.orcid is not None for author in record.authors),
         sum(_is_complete_date(item) for item in record.dates),
-        len(record.relations),
     )
 
 
@@ -327,7 +238,7 @@ def _choose_evidence(
     return min(
         candidates,
         key=lambda record: record.model_copy(
-            update={"provider_topics": (), "fields_of_study": (), "version_hints": (),
+            update={"provider_topics": (), "fields_of_study": (),
                     "monitor_journal_issns": ()}
         ).model_dump_json(),
     )
@@ -363,7 +274,7 @@ def _author_name_tokens(name: str) -> tuple[str, ...]:
 
 
 def _author_names_equivalent(left: str, right: str) -> bool:
-    """仅比较已确认同一身份的姓名表示，不放宽 title fallback。"""
+    """仅比较同一 DOI 内作者姓名的兼容表示。"""
     left_tokens = _author_name_tokens(left)
     right_tokens = _author_name_tokens(right)
     if not left_tokens or not right_tokens or len(left_tokens) != len(right_tokens):
@@ -543,9 +454,10 @@ def _snapshot_issues(
 def _normalize_retrievals(
     records: Sequence[ProviderWorkEvidence],
 ) -> tuple[list[ProviderWorkEvidence], list[CanonicalizationIssue]]:
-    grouped: dict[tuple[str, str], list[ProviderWorkEvidence]] = defaultdict(list)
+    grouped: dict[tuple[str, str, str], list[ProviderWorkEvidence]] = defaultdict(list)
     for record in records:
-        grouped[_record_key(record)].append(record)
+        # A provider record ID can occur with distinct DOIs; never discard either work.
+        grouped[(*_record_key(record), _record_doi(record) or "")].append(record)
 
     normalized: list[ProviderWorkEvidence] = []
     issues: list[CanonicalizationIssue] = []
@@ -574,225 +486,23 @@ def _normalize_retrievals(
     return normalized, issues
 
 
-def _relation_target_key(
-    id_type: str,
-    identifier: str,
-) -> tuple[str, str] | None:
-    namespace = id_type.strip().casefold()
-    if namespace == "doi":
-        value = normalize_doi(identifier)
-        return (namespace, value) if value is not None else None
-    value = identifier.strip()
-    return (namespace, value) if namespace and value else None
-
-
-class AuthorIdentity(str, Enum):
-    MATCH = "MATCH"
-    INCONCLUSIVE = "INCONCLUSIVE"
-    CONFLICT = "CONFLICT"
-
-
-def _authors_compatible(
-    left: Sequence[Author], right: Sequence[Author],
-) -> AuthorIdentity:
-    """按作者顺序保守判断 title fallback 身份，见 SPEC §32.4。"""
-    if not left or not right:
-        return AuthorIdentity.INCONCLUSIVE
-    if len(left) != len(right):
-        return AuthorIdentity.CONFLICT
-    for left_author, right_author in zip(left, right, strict=True):
-        if _author_ids_conflict(left_author, right_author):
-            return AuthorIdentity.CONFLICT
-        shared_stable_id = (
-            left_author.openalex_id is not None
-            and left_author.openalex_id == right_author.openalex_id
-        ) or (
-            left_author.orcid is not None
-            and left_author.orcid == right_author.orcid
-        )
-        if shared_stable_id:
-            continue
-        if _normalize_text(left_author.name) != _normalize_text(
-            right_author.name
-        ):
-            return AuthorIdentity.CONFLICT
-    return AuthorIdentity.MATCH
-
-
-def _component_dois(
-    union_find: _UnionFind,
-    records: Sequence[ProviderWorkEvidence],
-    root: int,
-) -> set[str]:
-    return {
-        doi
-        for index, record in enumerate(records)
-        if union_find.find(index) == root
-        if (doi := _external_identifiers(record).get("doi")) is not None
-    }
-
-
-def _own_version_key(record: ProviderWorkEvidence) -> tuple[str, str]:
-    identifiers = _external_identifiers(record)
-    if (arxiv := identifiers.get("arxiv")) is not None:
-        return "arxiv", arxiv
-    if (doi := identifiers.get("doi")) is not None:
-        return "doi", doi
-    return _record_key(record)
-
-
-def _version_keys(
-    record: ProviderWorkEvidence,
-    anchors: dict[tuple[str, str], ProviderWorkEvidence],
-) -> tuple[tuple[str, str], ...]:
-    keys: set[tuple[str, str]] = set()
-    for reference in record.supplements:
-        anchor_key = (
-            reference.provider.strip().casefold(),
-            reference.record_id,
-        )
-        anchor = anchors.get(anchor_key)
-        if anchor is not None:
-            keys.add(_own_version_key(anchor))
-    if not keys:
-        keys.add(_own_version_key(record))
-    return tuple(sorted(keys))
+def _record_doi(record: ProviderWorkEvidence) -> str | None:
+    doi = normalize_doi(record.external_ids.doi)
+    return doi if doi is not None and re.fullmatch(r"10\.\d{4,9}/[^\s]+", doi) else None
 
 
 def _group_records(
     records: Sequence[ProviderWorkEvidence],
-    diagnostics: list[RunDiagnostic],
-) -> tuple[list[tuple[int, ...]], dict[int, set[str]]]:
-    union_find = _UnionFind(len(records))
-    roles: dict[int, set[str]] = defaultdict(set)
-
+) -> list[tuple[int, ...]]:
     dois: dict[str, list[int]] = defaultdict(list)
-    identifier_index: dict[tuple[str, str], list[int]] = defaultdict(list)
+    singletons: list[tuple[int, ...]] = []
     for index, record in enumerate(records):
-        identifiers = _external_identifiers(record)
-        for namespace, value in identifiers.items():
-            identifier_index[(namespace, value)].append(index)
-        if (doi := identifiers.get("doi")) is not None:
-            dois[doi].append(index)
-    for indexes in dois.values():
-        for index in indexes[1:]:
-            union_find.union(indexes[0], index)
-
-    for subject_index, record in enumerate(records):
-        for relation in record.relations:
-            relation_type = relation.relation_type.strip().casefold()
-            if relation_type not in _VERSION_RELATIONS:
-                continue
-            if relation_type == "is-preprint-of":
-                roles[subject_index].add("preprint")
-            elif relation_type == "is-manuscript-of":
-                roles[subject_index].add("manuscript")
-
-            target_key = _relation_target_key(
-                relation.id_type,
-                relation.identifier,
-            )
-            if target_key is None:
-                continue
-            for target_index in identifier_index.get(target_key, ()):
-                union_find.union(subject_index, target_index)
-                if relation_type == "is-preprint-of":
-                    roles[target_index].add("publication")
-                elif relation_type == "has-preprint":
-                    roles[target_index].add("preprint")
-                elif relation_type == "is-manuscript-of":
-                    roles[target_index].add("publication")
-                elif relation_type == "has-manuscript":
-                    roles[target_index].add("manuscript")
-
-    title_groups: dict[str, list[int]] = defaultdict(list)
-    for index, record in enumerate(records):
-        if record.title is not None:
-            title_groups[_normalize_text(record.title)].append(index)
-    for title, indexes in sorted(title_groups.items()):
-        separated: dict[RunDiagnosticKind, set[int]] = defaultdict(set)
-        for left_position, left_index in enumerate(indexes):
-            for right_index in indexes[left_position + 1 :]:
-                left_root = union_find.find(left_index)
-                right_root = union_find.find(right_index)
-                if left_root == right_root:
-                    continue
-                members = {
-                    index for index in range(len(records))
-                    if union_find.find(index) in (left_root, right_root)
-                }
-                identity = _authors_compatible(
-                    records[left_index].authors,
-                    records[right_index].authors,
-                )
-                # 单侧 ID 补充不能把已含矛盾 ID 的两个 component 间接合并。
-                if identity is AuthorIdentity.MATCH and any(
-                    _authors_compatible(records[a].authors, records[b].authors)
-                    is AuthorIdentity.CONFLICT
-                    for a in members if union_find.find(a) == left_root
-                    for b in members if union_find.find(b) == right_root
-                ):
-                    identity = AuthorIdentity.CONFLICT
-                if identity is not AuthorIdentity.MATCH:
-                    separated[RunDiagnosticKind.REPEATED_TITLE_SEPARATION].update(members)
-                    continue
-                left_dois = _component_dois(union_find, records, left_root)
-                right_dois = _component_dois(union_find, records, right_root)
-                if left_dois and right_dois and left_dois != right_dois:
-                    separated[RunDiagnosticKind.CONFLICTING_DOI_SEPARATION].update(members)
-                    continue
-                union_find.union(left_root, right_root)
-        for kind, members in sorted(separated.items()):
-            reason = (
-                "matching titles lack conclusive compatible author identity"
-                if kind is RunDiagnosticKind.REPEATED_TITLE_SEPARATION
-                else "conflicting DOI groups kept separate"
-            )
-            diagnostics.append(RunDiagnostic(
-                kind=kind,
-                message=f"{reason}; normalized title: {title}",
-                record_ids=tuple(sorted({
-                    records[index].provenance.record_id for index in members
-                })),
-            ))
-
-    components: dict[int, list[int]] = defaultdict(list)
-    for index in range(len(records)):
-        components[union_find.find(index)].append(index)
-
-    anchors = {_record_key(record): record for record in records}
-
-    def component_key(
-        indexes: Sequence[int],
-    ) -> tuple[tuple[str, str, str, str], ...]:
-        return tuple(
-            sorted(
-                (
-                    *version_key,
-                    records[index].provenance.provider,
-                    records[index].provenance.record_id,
-                )
-                for index in indexes
-                for version_key in _version_keys(records[index], anchors)
-            )
-        )
-
-    ordered = [
-        tuple(sorted(indexes, key=lambda index: _record_key(records[index])))
-        for indexes in components.values()
-    ]
-    ordered.sort(key=component_key)
-    return ordered, roles
-
-
-def _hint_version_key(hint: EvidenceVersionHint) -> tuple[str, str]:
-    source = hint.source.strip().casefold()
-    if source == "doi":
-        doi = normalize_doi(hint.identifier)
+        doi = _record_doi(record)
         if doi is None:
-            raise ValueError("DOI version hint is empty")
-        return source, doi
-    return source, hint.identifier.strip()
+            singletons.append((index,))
+        else:
+            dois[doi].append(index)
+    return [tuple(dois[doi]) for doi in sorted(dois)] + singletons
 
 
 def _canonical_eligible(record: ProviderWorkEvidence) -> bool:
@@ -815,8 +525,8 @@ def _representative(
     return min(candidates, key=_record_key)
 
 
-def _version_evidence_issues(
-    key: tuple[str, str],
+def _doi_evidence_issues(
+    doi: str,
     records: Sequence[ProviderWorkEvidence],
 ) -> list[CanonicalizationIssue]:
     issues: list[CanonicalizationIssue] = []
@@ -840,7 +550,7 @@ def _version_evidence_issues(
                         stage="metadata_conflict",
                         record_ids=record_ids,
                         message=(
-                            f"version {key[0]}:{key[1]} has conflicting "
+                            f"DOI {doi} has conflicting "
                             f"{provider} {field}"
                         ),
                     )
@@ -851,7 +561,7 @@ def _version_evidence_issues(
                     stage="metadata_conflict",
                     record_ids=record_ids,
                     message=(
-                        f"version {key[0]}:{key[1]} has conflicting "
+                        f"DOI {doi} has conflicting "
                         f"{provider} authors"
                     ),
                 )
@@ -867,7 +577,7 @@ def _version_evidence_issues(
                     stage="date_conflict",
                     record_ids=record_ids,
                     message=(
-                        f"version {key[0]}:{key[1]} has conflicting "
+                        f"DOI {doi} has conflicting "
                         f"{provider} publication_date"
                     ),
                 )
@@ -883,7 +593,7 @@ def _version_evidence_issues(
                     stage="metadata_conflict",
                     record_ids=record_ids,
                     message=(
-                        f"version {key[0]}:{key[1]} has conflicting "
+                        f"DOI {doi} has conflicting "
                         f"{provider} author_keywords"
                     ),
                 )
@@ -898,7 +608,7 @@ def _version_evidence_issues(
                         stage="identifier_conflict",
                         record_ids=record_ids,
                         message=(
-                            f"version {key[0]}:{key[1]} has conflicting "
+                            f"DOI {doi} has conflicting "
                             f"{provider} {namespace} identifiers"
                         ),
                     )
@@ -906,163 +616,33 @@ def _version_evidence_issues(
     return issues
 
 
-def _version_kind(
-    key: tuple[str, str],
-    records: Sequence[ProviderWorkEvidence],
-    roles: dict[int, set[str]],
-    indexes: Sequence[int],
-    hints: Sequence[EvidenceVersionHint],
-    issues: list[CanonicalizationIssue],
-) -> VersionKind:
-    evidence = set().union(*(roles.get(index, set()) for index in indexes))
-    evidence.update(hint.role.value for hint in hints)
-    if key[0] == "arxiv":
-        evidence.add(EvidenceVersionRole.PREPRINT.value)
-    explicit_roles = evidence & {"preprint", "manuscript", "publication"}
-    if len(explicit_roles) > 1:
-        issues.append(
-            CanonicalizationIssue(
-                stage="version_role_conflict",
-                record_ids=tuple(
-                    sorted(record.provenance.record_id for record in records)
-                ),
-                message=(
-                    f"version {key[0]}:{key[1]} has conflicting explicit roles: "
-                    f"{', '.join(sorted(explicit_roles))}"
-                ),
-            )
-        )
-        return VersionKind.UNKNOWN
-    if "preprint" in evidence:
-        return VersionKind.PREPRINT
-    if "manuscript" in evidence:
-        return VersionKind.ACCEPTED_MANUSCRIPT
-
-    date_kinds = {item.kind for record in records for item in record.dates}
-    if EvidenceDateKind.PUBLISHED_PRINT in date_kinds:
-        return VersionKind.JOURNAL_FINAL
-    if EvidenceDateKind.PUBLISHED_ONLINE in date_kinds:
-        return VersionKind.JOURNAL_ONLINE
-    return VersionKind.JOURNAL_FINAL
-
-
-def _resolved_version_date(
-    kind: VersionKind,
+def _publication_date(
     records: Sequence[ProviderWorkEvidence],
     representative: ProviderWorkEvidence,
     issues: list[CanonicalizationIssue],
 ) -> date | None:
-    if not records:
-        return None
     by_kind: dict[EvidenceDateKind, set[date]] = defaultdict(set)
     for record in records:
         for item in record.dates:
-            if _is_complete_date(item):
-                by_kind[item.kind].add(
-                    date(item.year, item.month or 1, item.day or 1)
-                )
+            if item.month is not None and item.day is not None:
+                by_kind[item.kind].add(date(item.year, item.month, item.day))
 
-    selected_by_kind: dict[EvidenceDateKind, date] = {}
-    record_ids = tuple(
-        sorted({record.provenance.record_id for record in records})
-    )
-    for date_kind, values in by_kind.items():
-        selected = min(values)
-        selected_by_kind[date_kind] = selected
+    record_ids = tuple(sorted({record.provenance.record_id for record in records}))
+    for kind in _DATE_PRECEDENCE:
+        values = by_kind[kind]
         if len(values) > 1:
+            selected = min(values)
             rendered = ", ".join(value.isoformat() for value in sorted(values))
-            issues.append(
-                CanonicalizationIssue(
-                    stage="date_conflict",
-                    record_ids=record_ids,
-                    message=(
-                        f"{date_kind.value} has multiple complete dates "
-                        f"({rendered}); selected {selected.isoformat()}"
-                    ),
-                )
-            )
-    for date_kind in _DATE_PRECEDENCE[kind]:
-        if date_kind in selected_by_kind:
-            return selected_by_kind[date_kind]
+            issues.append(CanonicalizationIssue(
+                stage="date_conflict",
+                record_ids=record_ids,
+                message=(f"{kind.value} has multiple complete dates ({rendered}); "
+                         f"selected {selected.isoformat()}"),
+            ))
+    for kind in _DATE_PRECEDENCE:
+        if by_kind[kind]:
+            return min(by_kind[kind])
     return representative.publication_date
-
-
-def _build_versions(
-    component: Sequence[int],
-    records: Sequence[ProviderWorkEvidence],
-    roles: dict[int, set[str]],
-    issues: list[CanonicalizationIssue],
-) -> list[_BuiltVersion]:
-    anchors = {_record_key(record): record for record in records}
-    grouped: dict[tuple[str, str], list[_VersionEvidence]] = defaultdict(list)
-    for index in component:
-        for key in _version_keys(records[index], anchors):
-            grouped[key].append(_VersionEvidence(index))
-        for hint in records[index].version_hints:
-            grouped[_hint_version_key(hint)].append(
-                _VersionEvidence(index, hint)
-            )
-
-    built: list[_BuiltVersion] = []
-    for key in sorted(grouped):
-        evidence = grouped[key]
-        indexes = sorted({item.record_index for item in evidence})
-        base_indexes = sorted(
-            {
-                item.record_index
-                for item in evidence
-                if item.hint is None
-            }
-        )
-        hints = tuple(item.hint for item in evidence if item.hint is not None)
-        version_records = [records[index] for index in indexes]
-        base_records = tuple(records[index] for index in base_indexes)
-        issues.extend(_version_evidence_issues(key, version_records))
-        representative = _representative(version_records)
-        kind = _version_kind(
-            key,
-            version_records,
-            roles,
-            base_indexes,
-            hints,
-            issues,
-        )
-        version_date = _resolved_version_date(
-            kind,
-            base_records,
-            representative,
-            issues,
-        )
-        hint_urls = sorted(
-            {hint.url for hint in hints if hint.url is not None}
-        )
-        built.append(
-            _BuiltVersion(
-                version=PaperVersion(
-                    kind=kind,
-                    source=key[0],
-                    identifier=key[1],
-                    url=hint_urls[0] if hint_urls else None,
-                    date=version_date,
-                ),
-                representative=representative,
-                base_evidence=base_records,
-            )
-        )
-    return built
-
-
-def _preferred_version(versions: Sequence[_BuiltVersion]) -> _BuiltVersion:
-    return min(
-        versions,
-        key=lambda built: (
-            -_VERSION_PRIORITY[built.version.kind],
-            built.version.date is None,
-            -(built.version.date.toordinal() if built.version.date else 0),
-            built.version.source,
-            built.version.identifier,
-        ),
-    )
 
 
 def _metadata_issues(
@@ -1187,66 +767,46 @@ def _merged_authors(
 def _build_paper(
     component: Sequence[int],
     records: Sequence[ProviderWorkEvidence],
-    roles: dict[int, set[str]],
     issues: list[CanonicalizationIssue],
 ) -> CanonicalPaper | None:
-    built_versions = _build_versions(component, records, roles, issues)
-    eligible_versions = [
-        built
-        for built in built_versions
-        if _canonical_eligible(built.representative)
-    ]
-    if not eligible_versions:
-        issues.append(
-            CanonicalizationIssue(
-                stage="insufficient_metadata",
-                record_ids=tuple(
-                    sorted(
-                        {
-                            records[index].provenance.record_id
-                            for index in component
-                        }
-                    )
-                ),
-                message=(
-                    "provider evidence lacks title, journal, or author data "
-                    "required for a canonical paper"
-                ),
-            )
-        )
+    evidence = tuple(records[index] for index in component)
+    record_ids = tuple(sorted({record.provenance.record_id for record in evidence}))
+    doi = _record_doi(evidence[0])
+    if doi is None:
+        issues.append(CanonicalizationIssue(
+            stage="missing_doi",
+            record_ids=record_ids,
+            message="provider evidence has no valid DOI; no canonical Paper created",
+        ))
+        return None
+    representative = _representative(evidence)
+    if not _canonical_eligible(representative):
+        issues.append(CanonicalizationIssue(
+            stage="insufficient_metadata",
+            record_ids=record_ids,
+            message=("provider evidence lacks title, journal, or author data "
+                     "required for a canonical paper"),
+        ))
         return None
 
-    preferred = _preferred_version(eligible_versions)
-    representative = preferred.representative
-    for built in built_versions:
-        issues.extend(_metadata_issues(built.representative, built.base_evidence))
-    metadata = CanonicalMetadata(
-        title=representative.title,
-        journal=representative.journal,
-        publication_date=preferred.version.date,
-        abstract=_fallback_abstract(
-            representative,
-            preferred.base_evidence,
-        ),
-        author_keywords=representative.author_keywords,
-    )
-
+    issues.extend(_doi_evidence_issues(doi, evidence))
+    issues.extend(_metadata_issues(representative, evidence))
     return CanonicalPaper(
+        metadata=CanonicalMetadata(
+            title=representative.title,
+            journal=representative.journal,
+            publication_date=_publication_date(evidence, representative, issues),
+            abstract=_fallback_abstract(representative, evidence),
+            author_keywords=representative.author_keywords,
+        ),
+        external_ids=_merged_external_ids(representative, evidence).model_copy(
+            update={"doi": doi},
+        ),
+        authors=_merged_authors(representative, evidence),
+        sources=_deduplicate_sources(evidence),
         journal_issns=tuple(sorted({
-            issn for index in component for issn in records[index].monitor_journal_issns
+            issn for record in evidence for issn in record.monitor_journal_issns
         })),
-        metadata=metadata,
-        external_ids=_merged_external_ids(
-            representative,
-            preferred.base_evidence,
-        ),
-        authors=_merged_authors(representative, preferred.base_evidence),
-        versions=tuple(built.version for built in built_versions),
-        sources=_deduplicate_sources(records[index] for index in component),
-        preferred_version=VersionRef(
-            source=preferred.version.source,
-            identifier=preferred.version.identifier,
-        ),
     )
 
 
@@ -1255,18 +815,18 @@ def canonicalize_records(
 ) -> CanonicalizationResult:
     """Consolidate provider-neutral evidence into canonical papers."""
 
-    normalized, components, roles, issues, diagnostics = _consolidation_parts(records)
+    normalized, components, issues = _consolidation_parts(records)
     papers = tuple(
         paper
         for component in components
-        if (paper := _build_paper(component, normalized, roles, issues)) is not None
+        if (paper := _build_paper(component, normalized, issues)) is not None
     )
     unique_issues = sorted(
         set(issues),
         key=lambda issue: (issue.stage, issue.record_ids, issue.message),
     )
     return CanonicalizationResult(
-        papers=papers, issues=tuple(unique_issues), diagnostics=tuple(diagnostics),
+        papers=papers, issues=tuple(unique_issues),
     )
 
 
@@ -1275,22 +835,18 @@ def _consolidation_parts(
 ) -> tuple[
     list[ProviderWorkEvidence],
     list[tuple[int, ...]],
-    dict[int, set[str]],
     list[CanonicalizationIssue],
-    list[RunDiagnostic],
 ]:
     normalized, issues = _normalize_retrievals(records)
-    diagnostics: list[RunDiagnostic] = []
-    components, roles = _group_records(normalized, diagnostics)
-    return normalized, components, roles, issues, diagnostics
+    return normalized, _group_records(normalized), issues
 
 
 def consolidate_evidence(
     records: Sequence[ProviderWorkEvidence],
 ) -> EvidenceConsolidationResult:
-    """Normalize snapshots and group provider evidence by conservative identity."""
+    """Normalize snapshots and group by DOI, keeping DOI-less candidates independent."""
 
-    normalized, components, _roles, issues, diagnostics = _consolidation_parts(records)
+    normalized, components, issues = _consolidation_parts(records)
     clusters = tuple(
         EvidenceCluster(
             evidence=tuple(normalized[index] for index in component)
@@ -1304,5 +860,4 @@ def consolidate_evidence(
     return EvidenceConsolidationResult(
         clusters=clusters,
         issues=tuple(unique_issues),
-        diagnostics=tuple(diagnostics),
     )

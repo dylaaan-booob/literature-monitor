@@ -234,11 +234,8 @@ def test_run_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
         def route(request):
             if request.url.path == "/sources":
                 return {"meta": {"count": 1}, "results": [fixture("openalex", "source_biometrics.json")]}
-            if request.url.params.get("select") == "id,locations":
-                return {"results": [{"id": "https://openalex.org/W4389363697", "locations": []}]}
+            assert not {"locations", "updated_date"}.intersection(request.url.params["select"].split(","))
             page = fixture("openalex", "works_page_2.json" if request.url.params.get("cursor") == "next-page" else "works_page_1.json")
-            for record in page["results"]:
-                record["updated_date"] = "2026-02-01T00:00:00Z"
             return page
         transport = RoutingTransport(route)
         openalex_transports.append(transport)
@@ -294,7 +291,7 @@ def test_run_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
             for value in values["authors"]
         )
         assert values["sources"]
-        assert values["versions"]
+        assert "versions" not in values and "preferred_version" not in values
 
     doi_path = next(
         path
@@ -377,13 +374,13 @@ def test_run_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
 
     assert len(openalex_transports) == 3
     assert len(crossref_transports) == 3
-    for index, transport in enumerate(openalex_transports):
+    for transport in openalex_transports:
         assert transport.closed
-        assert [request.url.path for request in transport.requests] == ["/sources", "/works", "/works"] + (["/works"] if index == 0 else [])
-        thin = [r for r in transport.requests if r.url.params.get("select") != "id,locations" and r.url.path == "/works"]
+        assert [request.url.path for request in transport.requests] == ["/sources", "/works", "/works"]
+        thin = [r for r in transport.requests if r.url.path == "/works"]
         for request in thin:
             assert "primary_location.source.id:S8265502" in request.url.params["filter"]
-            assert "locations" not in request.url.params["select"]
+            assert not {"locations", "updated_date"}.intersection(request.url.params["select"].split(","))
             assert "search" not in request.url.params and "q" not in request.url.params
     for index, transport in enumerate(crossref_transports):
         assert transport.closed
@@ -394,7 +391,6 @@ def test_run_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
         assert "issn:0006-341X" in manifest.url.params["filter"]
     assert state_result.state is not None
     assert read_provider_state(output_dir).state.crossref_records
-    assert read_provider_state(output_dir).state.openalex_versions
 
     before_export = snapshot_files(output_dir)
     assert main(("export-kept", "--output-dir", str(output_dir))) == 0
@@ -521,8 +517,7 @@ def test_representative_multi_journal_cycle_handles_overlapping_rerun(
             unique = {source["id"]: source for source in sources.values()}
             return {"meta": {"count": len(unique)}, "results": list(unique.values())}
         filters = request.url.params["filter"]
-        if request.url.params.get("select") == "id,locations":
-            return {"results": [{"id": work["id"], "locations": []} for work in works.values()]}
+        assert not {"locations", "updated_date"}.intersection(request.url.params["select"].split(","))
         assert filters.startswith("primary_location.source.id:")
         assert "from_publication_date:" in filters and "to_publication_date:" in filters
         return {"meta": {"count": 3, "next_cursor": None}, "results": list(works.values())}
@@ -643,14 +638,14 @@ def test_representative_multi_journal_cycle_handles_overlapping_rerun(
     source_requests = [request for request in openalex_requests if request.path == "/sources"]
     assert len(source_requests) == 2
     works_requests = [request for request in openalex_transport.requests
-                      if request.url.path == "/works" and request.url.params.get("select") != "id,locations"]
+                      if request.url.path == "/works"]
     assert len(works_requests) == 2
     for request, start, end in zip(works_requests, ("2026-01-01", "2026-01-15"), ("2026-01-20", "2026-01-31"), strict=True):
         filters = request.url.params["filter"]
         assert "S8265502|S199944782|S127827428" in filters
         assert f"from_publication_date:{start}" in filters and f"to_publication_date:{end}" in filters
         assert "search" not in request.url.params and "q" not in request.url.params
-    assert len([r for r in openalex_transport.requests if r.url.params.get("select") == "id,locations"]) == 2
+    assert not any("locations" in r.url.params.get("select", "").split(",") for r in openalex_transport.requests)
     assert all(r.url.path == "/v1/works" for r in crossref_transport.requests)
     manifests = [r for r in crossref_transport.requests if "issn:" in r.url.params["filter"]]
     assert len(manifests) == 2

@@ -22,7 +22,14 @@ from literature_monitor.application.settings import load_settings
 from literature_monitor.application.workspace import WorkspaceSnapshot
 from literature_monitor.markdown_state import parse_paper_state, serialize_document
 from literature_monitor.materialize import render_paper_markdown
-from literature_monitor.models import Author, CanonicalMetadata, CanonicalPaper, ExternalIds, PaperVersion, VersionKind, VersionRef, Workflow, WorkflowStatus
+from literature_monitor.models import (
+    Author,
+    CanonicalMetadata,
+    CanonicalPaper,
+    ExternalIds,
+    Workflow,
+    WorkflowStatus,
+)
 from literature_monitor.web import app as web
 from literature_monitor.web.acquisition_coordinator import (
     AcquisitionSnapshot, AcquisitionCoordinatorStatus as Status, UnexpectedAcquisitionError,
@@ -45,8 +52,6 @@ def forbidden(*args, **kwargs):
 def write_paper(output, paper_id=ID, status=WorkflowStatus.IN_ZOTERO):
     paper = CanonicalPaper(id=paper_id, metadata=CanonicalMetadata(title='Synthetic Paper',journal='Biometrics'),
         authors=(Author(name='Test Author'),), external_ids=ExternalIds(doi='10.5555/test'), journal_issns=('0006-341X',),
-        versions=(PaperVersion(source='doi',identifier='10.5555/test',kind=VersionKind.JOURNAL_FINAL),),
-        preferred_version=VersionRef(source='doi',identifier='10.5555/test'),
         workflow=Workflow(status=status,discovered_at=datetime(2026,9,30,tzinfo=timezone.utc)))
     path = output/'Papers'/f'{paper_id}.md'
     path.parent.mkdir(parents=True,exist_ok=True)
@@ -633,7 +638,6 @@ def web_download(s, source, **changes):
     payload=dict(doi=s.task.doi,download_id=7,route='direct',ownership='task_navigation',
         navigation_url=TARGET,path=str(source.resolve()),url=TARGET,final_url=TARGET,referrer=TARGET,
         mime='application/pdf',total_bytes=size,file_size=size,state='complete',category='',
-        version_labels=['published'],manifestation=s.task.target_version.model_dump(mode='json'),
         observed_doi=s.task.doi,navigation_time=1000,start_time=2000)
     payload.update(changes);return payload
 
@@ -750,7 +754,7 @@ def test_missing_zotero_authorization_settings_resume_uses_same_artifact(browser
     service.authorization_status=status
     source=tmp_path/'chrome-source.pdf';source.write_bytes(b'%PDF-synthetic')
     assert s.event('download_candidate',web_download(s,source)).status_code==204;s.join()
-    snapshot=s.app.state.acquisition_coordinator.snapshot();artifact=s.app.state.acquisition_coordinator._active.qualified.artifact
+    snapshot=s.app.state.acquisition_coordinator.snapshot();artifact=s.app.state.acquisition_coordinator._active.artifact
     assert snapshot.stage is Stage.WAITING_FOR_ZOTERO_AUTH and service.content_posts==0
     assert not any(r.method=='POST' for r in requests)
     page=s.client.get(f'/fragments/acquisition/{ID}')
@@ -760,7 +764,7 @@ def test_missing_zotero_authorization_settings_resume_uses_same_artifact(browser
     assert 'Remembered write authorization is available' in authorized.text
     assert s.action('resume',attempt_id=str(OTHER)).status_code==409
     assert s.action('resume').status_code==200;s.join()
-    assert service.commits[0][0] is s.task and service.commits[0][1].artifact is artifact
+    assert service.commits[0][0] is s.task and service.commits[0][1] is artifact
     assert service.content_posts==1 and source.read_bytes()==b'%PDF-synthetic' and not artifact.path.exists()
     assert len([r for r in requests if r.method=='POST'])==1
 

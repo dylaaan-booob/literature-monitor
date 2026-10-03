@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 import pytest
@@ -10,9 +10,6 @@ from literature_monitor.models import (
     CanonicalPaper,
     ExternalIds,
     MetadataSource,
-    PaperVersion,
-    VersionKind,
-    VersionRef,
     WorkflowStatus,
 )
 
@@ -37,18 +34,9 @@ def test_minimal_paper_generates_uuid4_and_defaults() -> None:
 
 def test_existing_uuid_and_nested_data_survive_json_round_trip() -> None:
     paper_id = uuid4()
-    version = PaperVersion(
-        kind=VersionKind.PREPRINT,
-        source="arxiv",
-        identifier="2401.00001",
-        url="https://arxiv.org/abs/2401.00001",
-        date=date(2024, 1, 1),
-    )
     paper = make_paper(
         id=paper_id,
         external_ids=ExternalIds(doi="10.1000/example", semantic_scholar="abc"),
-        versions=(version,),
-        preferred_version=VersionRef(source="arxiv", identifier="2401.00001"),
         sources=(
             MetadataSource(
                 provider="openalex",
@@ -87,17 +75,6 @@ def test_existing_non_uuid4_identity_is_preserved() -> None:
     assert make_paper(id=paper_id).id == paper_id
 
 
-def test_duplicate_versions_are_rejected() -> None:
-    version = PaperVersion(kind="preprint", source="arxiv", identifier="1")
-    with pytest.raises(ValidationError, match="duplicate"):
-        make_paper(versions=(version, version))
-
-
-def test_preferred_version_must_reference_existing_version() -> None:
-    with pytest.raises(ValidationError, match="existing version"):
-        make_paper(preferred_version=VersionRef(source="arxiv", identifier="missing"))
-
-
 def test_provenance_and_workflow_datetimes_require_timezones() -> None:
     with pytest.raises(ValidationError, match="timezone"):
         MetadataSource(provider="openalex", record_id="W1", retrieved_at=datetime(2026, 1, 1))
@@ -127,3 +104,25 @@ def test_external_identifier_names_and_values_are_trimmed() -> None:
     identifiers = ExternalIds.model_validate({" custom ": " value "})
 
     assert identifiers.model_extra == {"custom": "value"}
+
+
+def test_current_domain_has_no_version_or_relation_types() -> None:
+    import literature_monitor.models as models
+
+    for name in (
+        "VersionKind", "VersionRef", "PaperVersion", "EvidenceVersionRole",
+        "EvidenceVersionHint", "EvidenceRelation",
+    ):
+        assert not hasattr(models, name)
+    assert set(CanonicalPaper.model_fields) == {
+        "id", "metadata", "external_ids", "authors", "sources", "workflow", "journal_issns",
+    }
+    assert "version_hints" not in models.ProviderWorkEvidence.model_fields
+    assert "relations" not in models.ProviderWorkEvidence.model_fields
+    assert "supplements" in models.ProviderWorkEvidence.model_fields
+
+
+@pytest.mark.parametrize("retired", [{"versions": []}, {"preferred_version": None}])
+def test_current_domain_rejects_retired_version_payloads(retired) -> None:
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        make_paper(**retired)

@@ -369,10 +369,8 @@ def _log_coverage_summary(
     elif isinstance(result, RunResult):
         usage = result.state_usage
         logger.info(
-            "Provider state: Crossref metadata %s reused · %s refreshed · %s new; "
-            "OpenAlex versions %s reused · %s hydrated",
+            "Provider state: Crossref metadata %s reused · %s refreshed · %s new",
             usage.crossref_reused, usage.crossref_refreshed, usage.crossref_new,
-            usage.openalex_versions_reused, usage.openalex_versions_hydrated,
         )
 
 

@@ -8,12 +8,11 @@ import threading
 from uuid import UUID, uuid4
 
 from literature_monitor.application.acquisition import (
-    AcquisitionClass, AcquisitionOutcome, AcquisitionRecovery, AcquisitionResult,
+    AcquisitionOutcome, AcquisitionRecovery, AcquisitionResult,
     AcquisitionService, AcquisitionStage, PreparedAcquisition,
 )
 from literature_monitor.browser_acquisition import download_evidence, navigation_plan
-from literature_monitor.pdf_staging import stage_download
-from literature_monitor.version_qualification import qualify_pdf
+from literature_monitor.pdf_staging import StagedPdf, stage_download
 from literature_monitor.zotero_write import ZoteroAuthorizationOutcome
 from .browser_handoff import BrowserHandoffRegistry, HandoffLaunch
 from .chrome_launcher import launch_normal_chrome
@@ -83,7 +82,7 @@ class _Attempt:
     linked: bool = False
     launch: HandoffLaunch | None = None
     tab_binding: str | None = None
-    qualified: object = None
+    artifact: StagedPdf | None = None
     stage: AcquisitionStage = AcquisitionStage.LOCATING_ZOTERO
     worker_active: bool = False
     gate_entered: bool = False
@@ -267,12 +266,12 @@ class AcquisitionCoordinator:
         if attempt.task is not None:
             self.registry.invalidate(attempt.task.task_id)
         self._active = None
-        if attempt.qualified is not None:
+        if attempt.artifact is not None:
             try:
-                attempt.qualified.artifact.cleanup()
+                attempt.artifact.cleanup()
             except Exception:
                 pass  # Best effort, without logging artifact/source paths.
-            attempt.qualified = None
+            attempt.artifact = None
         attempt.launch = None
 
     def _failure(self, attempt, outcome=AcquisitionOutcome.NO_VALID_PDF, recovery=AcquisitionRecovery.RETRY):
@@ -316,7 +315,7 @@ class AcquisitionCoordinator:
             elif kind == 'publisher_state' and set(payload) == {'state'} and isinstance(payload['state'], str) and payload['state'] in {'accessible', 'human_required', 'exhausted'}:
                 attempt.stage = AcquisitionStage.WAITING_FOR_INSTITUTION_AUTH if payload['state'] == 'human_required' else AcquisitionStage.BROWSER_ACTION
             elif kind == 'publisher_fallback_request' and payload == {}:
-                if attempt.task.acquisition_class is not AcquisitionClass.PUBLISHED or attempt.route != 'direct':
+                if attempt.route != 'direct':
                     return None
                 attempt.route = 'xmu'
                 attempt.stage = AcquisitionStage.RESOLVING
@@ -347,7 +346,7 @@ class AcquisitionCoordinator:
                 return command('DOWNLOAD_CURRENT')
             elif kind == 'browser_path_failure':
                 if (set(payload) == {'reason'} and isinstance(payload['reason'], str) and payload['reason'] in {
-                    'navigation_failed', 'exact_manifestation_unavailable', 'resolver_not_ready',
+                    'navigation_failed', 'resolver_not_ready',
                     'resolver_choice_overflow', 'no_visible_eligible_choices', 'ambiguous_download_ownership', 'download_unavailable'}):
                     outcome = (AcquisitionOutcome.NO_ELIGIBLE_CANDIDATES if payload['reason'] == 'no_visible_eligible_choices'
                                else AcquisitionOutcome.RESOLVER_FAILURE if attempt.route == 'xmu' else AcquisitionOutcome.NO_VALID_PDF)
@@ -375,23 +374,27 @@ class AcquisitionCoordinator:
         artifact = None
         try:
             artifact = stage_download(evidence, **attempt.staging_options)
-            qualified = qualify_pdf(attempt.task, evidence, artifact, claimed_tab_binding=attempt.tab_binding)
+            if (not isinstance(artifact, StagedPdf) or evidence.task_id != attempt.task.task_id
+                    or artifact.task_id != attempt.task.task_id or evidence.tab_binding != attempt.tab_binding
+                    or evidence.doi != attempt.task.doi or artifact.download_id != evidence.download_id
+                    or artifact.byte_count != evidence.file_size or not artifact.validate()):
+                raise ValueError('Invalid task-bound staged PDF.')
             with self._lock:
                 if self._active is not attempt:
                     return
-                attempt.qualified = qualified
+                attempt.artifact = artifact
                 artifact = None  # The current task now owns cleanup.
             self._ready_to_commit(attempt)
         except ValueError:
             with self._lock:
                 self._failure(attempt)
         finally:
-            if artifact is not None:
+            if isinstance(artifact, StagedPdf):
                 artifact.cleanup()
 
     def _enter_gate(self, attempt):
         with self._lock:
-            if self._active is not attempt or attempt.gate_entered or attempt.qualified is None:
+            if self._active is not attempt or attempt.gate_entered or attempt.artifact is None:
                 return False
             attempt.gate_entered = True
             attempt.stage = AcquisitionStage.ATTACHING
@@ -399,8 +402,8 @@ class AcquisitionCoordinator:
             return True
 
     def _ready_to_commit(self, attempt):
-        qualified = attempt.qualified
-        if qualified is None:
+        artifact = attempt.artifact
+        if artifact is None:
             with self._lock:
                 self._failure(attempt)
             return
@@ -417,6 +420,6 @@ class AcquisitionCoordinator:
                 return
         if not self._enter_gate(attempt):
             return
-        result = attempt.service.commit(attempt.task, qualified, linkage_completed=attempt.linked)
+        result = attempt.service.commit(attempt.task, artifact, linkage_completed=attempt.linked)
         with self._lock:
             self._finish(attempt, result)

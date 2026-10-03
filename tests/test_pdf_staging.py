@@ -22,7 +22,7 @@ def setup(tmp_path):
     evidence = BrowserDownloadEvidence(uuid4(), 'tab-12', '10.1000/test', 7, 'direct',
         'task_navigation', 'https://example.org/paper', str(source), 'https://example.org/pdf',
         'https://example.org/pdf', 'https://example.org/paper', 'application/pdf',
-        source.stat().st_size, source.stat().st_size, '', ('published',), None, 1000, 2000)
+        source.stat().st_size, source.stat().st_size, '', 1000, 2000)
     kwargs = dict(project_dir=tmp_path/'project', workspace_dir=tmp_path/'workspace',
                   config_path=tmp_path/'config'/'monitor.yaml', browser_profile_dir=tmp_path/'profile',
                   download_dir=source_dir, temp_root=stage_root)
