@@ -20,6 +20,18 @@ choice. Prior implementation/final-audit/prepared-tree evidence and release
 artifact-integrity checks remain distinct. No new v0.5.2 live browser/Zotero
 verification is claimed; historical v0.5.1 evidence does not establish it.
 
+### Current v0.5.3 release preparation — unreleased
+
+The reviewed Browser Companion v2 implementation is committed at
+`21547260157f121a1efd2a5e8f930fad5f26959f` (`Implement v0.5.3 Browser Companion v2`).
+The prepared source uses Python package metadata and OpenAlex/Crossref Provider
+User-Agent identities **0.5.3**; the independent companion manifest remains
+**0.1.0**. v0.5.2 remains the latest RELEASED/completed baseline; v0.5.3 is
+unreleased. Release preparation is prepared and validated (SPEC §24.19).
+Independent release-preparation review and the preparation commit remain pending, as do the
+release transaction, tag, pushes and GitHub Release (SPEC §24.19).
+Scoped live evidence and residual boundaries remain as recorded in §38.13.
+
 ### Historical v0.5.1 release and live evidence
 
 v0.5.1 was the released and completed baseline at its closeout, with
@@ -159,12 +171,14 @@ The current source browser/acquisition lifecycle follows SPEC §38 for
 **v0.5.3 development**. Unaffected DOI-first identity, Provider, Paper,
 single-manifestation and Zotero parent behavior remain under §37; unaffected
 staging, authorization, writer, cancellation and partial-write safety remain
-under §36. The latest RELEASED/completed baseline and package metadata remain
-**v0.5.2 / 0.5.2**; the companion remains **0.1.0**, installed from the source
-repository. Implementation and automated acceptance are complete; scoped live
-normal-Chrome handoff/navigation/termination passed. Actual v0.5.3 target-PDF
-staging and Zotero registration remain unverified; the evidence boundaries are
-recorded in SPEC §38.13. Release preparation/release/tag remain incomplete.
+under §36. The latest RELEASED/completed baseline remains **v0.5.2**;
+prepared source package/Provider identities are **0.5.3**. The companion remains
+**0.1.0**, installed from the source repository. Implementation is committed and
+automated acceptance is complete; scoped live normal-Chrome
+handoff/navigation/termination passed. Actual v0.5.3 target-PDF staging and
+Zotero registration remain unverified; the evidence boundaries are recorded in
+SPEC §38.13. Release preparation is prepared and validated; independent
+preparation review/commit and release/tag/push/GitHub Release remain pending.
 Historical v0.5.1 live verification below remains historical.
 
 1. **Keep** a Paper and use **Copy DOI** in Kept detail.

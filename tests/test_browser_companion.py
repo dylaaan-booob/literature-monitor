@@ -328,7 +328,7 @@ def test_installation_and_guidance_are_truthful():
                  'publisher 已明确 exhausted', 'recordEvidence', 'ebsco_pdf_action',
                  '10 秒', '120 秒', 'navigation epoch', 'stage_download', 'StagedPdf',
                  'v0.5.2 是最新已发布版本', 'v0.5.3 development',
-                 'Python package metadata 保持 **0.5.2**',
+                 'Python package metadata prepared identity 为 **0.5.3**',
                  '历史 v0.5.1 证据不建立 v0.5.2 live 验证'):
         assert term in README
     template = (ROOT / 'src/literature_monitor/web/templates/browser_handoff.html').read_text()
