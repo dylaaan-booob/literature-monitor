@@ -1,9 +1,10 @@
 # Literature Monitor Connector
 
-This directory defines the independent browser component authorized for
-unreleased v0.6.1 development by SPEC §40. It is derived from the official
+This directory defines the independent browser component prepared for the
+unreleased v0.6.1 release under SPEC §40. It is derived from the official
 Zotero Connector source and is separate from the MIT Python
-`literature_monitor` package.
+`literature_monitor` package. The tracked build entry point generates the
+Chrome/MV3 artifact with version `0.6.1`.
 
 A1 establishes source provenance, licensing, reconstruction and Chrome/MV3
 build boundaries. A5 adds the independent Literature Monitor automatic-capture
@@ -50,8 +51,8 @@ From the repository root:
 
 The script reconstructs the pinned upstream source into
 `connector/.work/`, verifies and applies the tracked Literature Monitor
-delta, runs the upstream debug build, verifies a Manifest V3 Chrome artifact,
-and copies the result to:
+delta, runs the upstream debug build with release version `0.6.1`, verifies
+a Manifest V3 Chrome artifact, and copies the result to:
 
 ```text
 connector/build/chrome-mv3/
@@ -66,11 +67,16 @@ not already exist; an existing ordinary work-root directory itself is allowed.
 External symlink targets are rejected. This fail-closed rule keeps caller-owned
 directories from being treated as disposable Connector build state.
 
-For development-only Chrome verification, open `chrome://extensions/`,
-enable Developer Mode, choose **Load unpacked**, and select the generated
-`chrome-mv3` directory. This is only an unpacked-development loading path;
-A5 does not claim the full real Chrome + Zotero + publisher workflow has been
-product-validated.
+For local installation or verification, open `chrome://extensions/`, enable
+Developer Mode, choose **Load unpacked**, and select the generated `chrome-mv3`
+directory. This is a local install/test path, not a Chrome Web Store release.
+A7 recorded a successful toolbar-free automatic save in normal Chrome with
+Zotero Desktop and an existing institutional session; that scoped live acceptance
+does not constitute a Chrome Web Store or v0.6.1 release.
+See [SPEC §§40.14 and 40.15](../SPEC.md#4014-a7-implementation-and-validation-evidence-2026-10-07)
+for live validation and preparation evidence, and
+[AGENTS.md](../AGENTS.md#release-execution-and-verification-reuse) for release
+execution and validation reuse.
 
 ## Runtime test
 

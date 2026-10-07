@@ -8,135 +8,42 @@ safely updates durable Paper and Author Markdown, and exports kept papers.
 
 ## Release and development status
 
-**v0.6.0 is RELEASED and is the latest released/completed baseline.** The
-implementation commit is `f6600dd6d955699c0ce0a066f8d16067533d89ce`
-(`Implement v0.6.0 Zotero Connector workflow`), the independently reviewed
-release-preparation commit is
-`b2ee7fe34efff692e1e77fb612c24f3a05b83340`
-(`Prepare v0.6.0 release`), and permanent RELEASE_HEAD / annotated tag target is
-`df3d805f173b1a4b8f48264821a105df5613f822`. Python package and
-OpenAlex/Crossref Provider User-Agent identity are **0.6.0**.
+**v0.6.0 is the latest released baseline.** See
+[GitHub Release v0.6.0](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.0)
+for published assets and [SPEC §24.20](SPEC.md#2420-v060-zotero-connector-transition--publisher-access--completed-release-closeout)
+for the immutable release target and validation record.
 
-Final exact-release-HEAD validation used a clean Git export, frozen offline
-environment setup, and Node **v24.21.0**. Full pytest passed **2390 tests / 0
-skipped / 2 existing dependency warnings**; wheel/sdist metadata, the complete
-packaged `literature_monitor` payload, isolated installed-wheel behavior, and
-`uv pip check` also passed. The annotated `v0.6.0` tag and main/tag pushes are
-complete, and [GitHub Release v0.6.0](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.0)
-is published as a non-draft, non-prerelease release with exactly two assets.
-GitHub authoritative digests and independent re-download hashes match the
-validated retained artifacts:
+**v0.6.1 is implemented and release-prepared but remains unreleased.**
+The current candidate sets Python package, Provider User-Agent and generated
+Connector identities to `0.6.1`. [SPEC §40](SPEC.md#40-v061-automatic-zotero-connector-capture--current-development-contract)
+defines the automatic capture contract; §§40.14 and 40.15 record implementation,
+live acceptance, preparation and remaining verification limitations.
 
-- `literature_monitor-0.6.0-py3-none-any.whl`: SHA-256
-  `c38c50e7d813f8a2faa57096c7be527d1b9a7b6dc6d9f0180f171dafb7eb05ec`.
-- `literature_monitor-0.6.0.tar.gz`: SHA-256
-  `82d367a4975a48683810a66198a459da21b19053bc98f251e4c2ae491953b427`.
+A7 recorded a successful toolbar-free automatic save in normal Chrome with
+Zotero Desktop and an existing institutional session. Final authoritative
+exact-DOI reconciliation confirmed the bibliographic parent and changed the
+validation Paper to `in_zotero`; a PDF was observed without gating parent success.
+The optional pre-existing-parent live case and 17 upstream ItemSaver tests remain
+unverified, the latter because the required Puppeteer Chrome was unavailable.
+These are the recorded §40.14 acceptance boundaries, not new checks or publication.
 
-The released v0.6.0 workflow keeps the official Zotero Connector manually
-operated by the user. Literature Monitor performs read-only exact-DOI parent
-reconciliation; no PDF attachment is required for `in_zotero`; Publisher
-access remains read-only; and there is no automated Connector triggering or
-Zotero write path. Browser Companion/custom acquisition is historical only.
-This post-release documentation closeout is a separate later change outside the
-permanent `v0.6.0` tag target. SPEC §39 remains the current v0.6.0 product
-contract, while §§35–38 remain immutable historical release records.
+The released v0.6.0 workflow uses the official Zotero Connector manually and
+read-only exact-DOI reconciliation. The v0.6.1 candidate adds automatic
+Connector triggering under §40. Neither workflow requires a PDF attachment
+for `in_zotero`; publisher authentication remains manual in the normal browser.
+The retired Browser Companion/custom PDF acquisition path is historical only.
 
-For unreleased v0.6.1 development, `connector/` is a separate **Literature
-Monitor Connector** source/build component derived from a pinned
-`zotero/zotero-connectors` revision. Its upstream-derived source and
-Literature Monitor delta follow the AGPLv3 license/provenance boundary recorded
-in `connector/COPYING` and `connector/PROVENANCE.md`; they are not covered by
-the root MIT license for the Python application and are excluded from the
-Python wheel/sdist and runtime import graph. The automatic capture runtime,
-localhost bridge and exact-DOI reconciliation workflow are implemented under
-SPEC §40. A7 rebuilt the current Chrome/MV3 component and exercised deterministic
-completion/no-retry regressions. Real normal-Chrome toolbar-free automatic
-saving passed for an IEEE DOI using the user's existing Xiamen University
-session. Final authoritative My Library exact-DOI reconciliation verified the
-unique bibliographic parent and updated the external validation Paper to
-`in_zotero`. A PDF attachment was observed independently of parent acceptance.
-See SPEC §40.14 for the validation evidence.
-v0.6.1 remains unreleased; v0.6.0 is the latest released/completed baseline.
+The intended v0.6.1 deliverables are the Python wheel, Python sdist and a
+separate Chrome/MV3 Literature Monitor Connector artifact. The Python package
+is MIT; the Connector has its own AGPLv3 license/provenance boundary and is
+excluded from wheel/sdist and Python imports. See [connector/README.md](connector/README.md)
+and [connector/PROVENANCE.md](connector/PROVENANCE.md) for build/install details
+and provenance. Publication packaging is handled within the authorized release.
 
-**v0.5.3 is a historical released baseline.** Its released Python package and
-OpenAlex/Crossref Provider identities are **0.5.3**, and its Browser Companion
-v2/custom browser-PDF acquisition workflow remains historical release evidence
-under SPEC §38.
-
-For historical v0.5.3 release evidence, the reviewed implementation is committed at `21547260157f121a1efd2a5e8f930fad5f26959f`;
-the independently reviewed preparation commit/release HEAD is
-`4a2595e56bfcfb7d845216c5161e978628d3a71a`. Final exact-release-HEAD clean-export validation,
-offline wheel/sdist build and isolated installed-wheel smoke passed. The
-annotated `v0.5.3` tag, main/tag pushes and
-[GitHub Release v0.5.3](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.5.3) are complete.
-Exactly two release assets are attached and their authoritative SHA-256 digests
-match the final validated artifacts (SPEC §24.19). Post-release documentation
-closeout is a separate change to documentation and its static status assertion
-after the tag; the tag remains on the release HEAD.
-
-Scoped normal-Chrome fresh handoff/navigation, popup recovery and pre-freeze
-termination/slot release were live-verified. The two selected current-access
-paths yielded no target PDF; actual v0.5.3 target-PDF staging and Zotero
-registration remain unverified. EBSCO final action, eligible XMU full-text
-routing, post-freeze close and manual challenge continuation were not
-live-exercised; `HUMAN_VERIFICATION_NOT_PRESENT` (SPEC §38.13). Institutional
-authentication remains manual in the same claimed task tab; proactive/automatic
-authentication remains future scope. Historical evidence below remains tied to
-its original release baseline.
-
-### Historical v0.5.2 release and evidence
-
-**v0.5.2 was released and the latest completed baseline at its closeout**, with Python package
-metadata and Provider User-Agent identities **0.5.2**. It implements the DOI-first
-contract in SPEC §37. A0–A5 implementation, independent stage reviews, final
-integration audit and release-preparation review are complete. The annotated tag,
-main/tag pushes and [GitHub Release v0.5.2](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.5.2)
-are complete at release HEAD `d180c18` (SPEC §24.18).
-
-The separate final clean-export full validation was explicitly skipped by user
-choice. Prior implementation/final-audit/prepared-tree evidence and release
-artifact-integrity checks remain distinct. No new v0.5.2 live browser/Zotero
-verification is claimed; historical v0.5.1 evidence does not establish it.
-
-### Historical v0.5.1 release and live evidence
-
-v0.5.1 was the released and completed baseline at its closeout, with
-package metadata `0.5.1` and normal-Chrome PDF acquisition governed by SPEC §36. A0–A9
-implementation, independent final-audit Fix 1–3 review, full automated validation,
-and scoped live acquisition and actual Zotero file registration verification
-are complete under SPEC §36.14. The live audit verified normal Chrome,
-publisher→XMU, SmartLinks/Research, task-bound delayed blob attribution, private
-staging, `%PDF` validation, PUBLISHED qualification, Settings-owned remembered
-authorization, and a real registered PDF child. A separate institutional-path
-run naturally presented no human-verification challenge; it is recorded as
-`HUMAN_VERIFICATION_NOT_PRESENT`, with that branch not live-exercised and no
-challenge manufactured or verification bypass used. Implementation acceptance,
-final audit, release preparation, final clean-export release validation, annotated
-tag creation, main/tag pushes, and the GitHub Release are complete. Published
-wheel/sdist SHA-256 digests are verified. The initial documentation closeout
-at `125bfb7` completed product/release closeout after the release tag; that
-documentation commit is outside the v0.5.1 tag target (SPEC §24.17).
-
-Historical post-release v0.5.1 maintenance commit `0b69d4b`
-(`Simplify PDF acquisition guard and cancellation ownership`) hardened the
-then-current PDF acquisition guard/cancellation ownership while preserving that
-release line's Add PDF semantics. It had no new version, tag or release
-artifacts and was not included in the v0.5.1 tag, published wheel/sdist or
-GitHub Release artifacts. Its engineering verification record remains in
-SPEC §36. Historical v0.5.1 live evidence does not establish v0.5.2 live
-verification or the current v0.6.0 workflow.
-
-v0.5.0 previously released Institutional PDF Acquisition
-while preserving the existing four-state Markdown workflow. Its A0–A7
-implementation and independent reviews, final audit, release preparation,
-release transaction, and closeout are complete. Released package metadata is
-`0.5.0`.
-
-v0.4.7 completes Journals Organization &
-Bulk Import while preserving the durable workflow model and compatibility
-boundaries. Its A0–A7 implementation, independent stage reviews, final
-independent integration audit, release preparation, release transaction, and
-closeout are complete. Released package metadata is `0.4.7`.
+[AGENTS.md](AGENTS.md#release-execution-and-verification-reuse) defines continuous
+release execution and validation reuse. Detailed historical release and live
+evidence remain in SPEC; historical validation does not establish success for
+the current candidate.
 
 ## Current retrieval architecture
 

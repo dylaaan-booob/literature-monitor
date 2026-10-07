@@ -428,7 +428,7 @@ class OpenAlexClient:
         url = f"{self.base_url}{path}?{urlencode(params)}"
         headers = {
             "Accept": "application/json",
-            "User-Agent": "literature-monitor/0.6.0",
+            "User-Agent": "literature-monitor/0.6.1",
         }
         if self.api_key is not None:
             headers["Authorization"] = f"Bearer {self.api_key}"

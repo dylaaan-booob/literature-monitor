@@ -94,7 +94,7 @@ def test_singleton_requests_each_issn_independently_and_uses_bearer_key() -> Non
         for request in transport.requests
     )
     assert all(
-        request.headers["User-Agent"] == "literature-monitor/0.6.0"
+        request.headers["User-Agent"] == "literature-monitor/0.6.1"
         for request in transport.requests
     )
     assert all(request.extensions["timeout"]["read"] == 30 for request in transport.requests)

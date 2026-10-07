@@ -63,6 +63,12 @@ def test_connector_delta_does_not_live_in_python_package():
     assert not any(path.name == "connector" for path in PACKAGE.rglob("*"))
 
 
+def test_connector_build_pins_release_version():
+    script = BUILD_SCRIPT.read_text()
+    assert 'CONNECTOR_VERSION="0.6.1"' in script
+    assert './build.sh -d -v "$CONNECTOR_VERSION"' in script
+
+
 def _run_build_with_fake_git(
     tmp_path: Path,
     *,

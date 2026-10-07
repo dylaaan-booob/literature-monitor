@@ -3,6 +3,7 @@ set -euo pipefail
 
 CONNECTOR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPOSITORY_ROOT="$(cd "$CONNECTOR_ROOT/.." && pwd -P)"
+CONNECTOR_VERSION="0.6.1"
 DEFAULT_WORK_ROOT="$CONNECTOR_ROOT/.work"
 DEFAULT_OUTPUT_DIR="$CONNECTOR_ROOT/build/chrome-mv3"
 WORK_ROOT_IS_EXTERNAL=0
@@ -163,18 +164,22 @@ cmp -s "$EXPECTED_PATCH_PATHS" "$ACTUAL_PATCH_PATHS" \
 (
     cd "$SOURCE_DIR"
     npm ci --ignore-scripts --no-audit --no-fund
-    ./build.sh -d
+    ./build.sh -d -v "$CONNECTOR_VERSION"
 )
 
-node - "$UPSTREAM_BUILD_DIR/manifestv3/manifest.json" <<'NODE'
+node - "$UPSTREAM_BUILD_DIR/manifestv3/manifest.json" "$CONNECTOR_VERSION" <<'NODE'
 const fs = require('fs');
 const path = process.argv[2];
+const expectedVersion = process.argv[3];
 const manifest = JSON.parse(fs.readFileSync(path, 'utf8'));
 if (manifest.manifest_version !== 3) {
     throw new Error(`expected manifest_version 3, got ${manifest.manifest_version}`);
 }
 if (manifest.name !== 'Literature Monitor Connector') {
     throw new Error(`unexpected Connector name: ${manifest.name}`);
+}
+if (manifest.version !== expectedVersion) {
+    throw new Error(`expected Connector version ${expectedVersion}, got ${manifest.version}`);
 }
 NODE
 

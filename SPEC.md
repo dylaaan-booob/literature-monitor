@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.6.0 is RELEASED and is the latest released/completed baseline. Python package and OpenAlex/Crossref Provider identities are `0.6.0`. Permanent RELEASE_HEAD and annotated `v0.6.0` tag target are `df3d805f173b1a4b8f48264821a105df5613f822`. §§35–38 retain their released historical meaning and verification boundaries.
+**Status:** Active; v0.6.0 is the latest released/completed baseline. v0.6.1 is implemented and release-prepared but remains unreleased. Release facts and verification boundaries are recorded in §24.20 and §§40.14 and 40.15.
 
-**Stage:** v0.6.0 A1–A6 implementation, Final Audit Fix 1, final independent implementation audit, implementation commit `f6600dd6d955699c0ce0a066f8d16067533d89ce` (`Implement v0.6.0 Zotero Connector workflow`), independent release-preparation review, release-preparation commit `b2ee7fe34efff692e1e77fb612c24f3a05b83340` (`Prepare v0.6.0 release`), pre-validation documentation closeout at RELEASE_HEAD `df3d805f173b1a4b8f48264821a105df5613f822`, final exact-release-HEAD clean-export validation, annotated tag, remote-main/tag pushes, GitHub Release, and release-asset digest verification are complete. This post-release documentation closeout is a separate later change outside the permanent `v0.6.0` tag target. The unreleased v0.5.4 Automatic Institutional Access Orchestration + Candidate-Bound PDF Acquisition direction was terminated after product validation and is not production authority.
+**Stage:** v0.6.1 implementation and A7 live acceptance are complete (§40.14); the current prepared candidate and validation are recorded in §40.15. No v0.6.1 publication is claimed. Release execution and evidence reuse follow [AGENTS.md](AGENTS.md#release-execution-and-verification-reuse).
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 **Current contract:** §40 is the current unreleased v0.6.1 development contract for Automatic Zotero Connector Capture. v0.6.0 remains the latest released/completed baseline, and §39 remains its historical/released authority. §40 supersedes §39 only where §39 excludes automatic Zotero Connector triggering and the narrowly related bridge/orchestration needed for v0.6.1. §37 remains authoritative for unaffected DOI-first identity, Provider behavior, current Paper schema, single-manifestation and Zotero parent identity. Historical §§35–39 retain their release, live-verification, maintenance, and version-specific behavior records.
@@ -1957,6 +1957,12 @@ v0.5.1 is the latest released and completed baseline, with package metadata `0.5
 ---
 
 ## 24. Suggested Implementation Sequence
+
+The completed implementation/release sequences below are historical records.
+Their separate reviews, validation runs, commits and documentation closeouts
+are not mandatory stages for later versions. Current release execution and
+validation reuse follow [AGENTS.md](AGENTS.md#release-execution-and-verification-reuse).
+Historical results retain their original provenance and verification scope.
 
 ### 24.1 Completed v0.1.0 history
 
@@ -5078,7 +5084,20 @@ Evidence must be recorded only after the corresponding check has actually run. H
 
 A0 does not modify Python package version, Provider User-Agent version, Connector release version, tags, changelog/release assets or GitHub Release state.
 
-Package/Provider version changes and final Connector artifact versioning are deferred to the normal v0.6.1 release-preparation stage.
+The release-preparation worktree on top of implementation commit
+`b5f97adefac4c16f46a3383c92d768fefa8ac22b` now sets the Python package,
+OpenAlex/Crossref Provider User-Agent and generated Connector artifact
+identities to `0.6.1`. This release-preparation identity change does not alter
+the §40 behavior contract. v0.6.1 remains unreleased until an explicitly
+authorized release transaction publishes and verifies the release state.
+
+Follow [AGENTS.md](AGENTS.md#release-execution-and-verification-reuse) for
+continuous release execution, necessary artifact checks and evidence reuse.
+The existing §40.14 implementation/live acceptance and §40.15 preparation
+results may be reused where their inputs remain applicable. An actual input
+change requires affected checks; a commit or publication step alone does not
+require another full suite, independent audit or live capture. This changes
+only the operating procedure, not §40.12 acceptance or historical evidence.
 
 ### 40.14 A7 implementation and validation evidence (2026-10-07)
 
@@ -5175,3 +5194,64 @@ metadata, current README metadata and exclusion of Connector source/artifacts.
 `uv lock --check` and `git diff --check` passed. The protected historical
 worktree was read-only throughout A7; no commit, push, tag, release preparation
 or version bump was performed.
+
+### 40.15 v0.6.1 release-preparation evidence (2026-10-07)
+
+Release preparation is performed in the current worktree on top of implementation
+commit `b5f97adefac4c16f46a3383c92d768fefa8ac22b`
+(`Implement v0.6.1 automatic Zotero Connector capture`). A7 final audit and
+live acceptance remain the implementation evidence in §40.14. This preparation
+does not create a release-preparation commit and does not tag, push or publish
+v0.6.1.
+
+The prepared release identities are all `0.6.1`: the Python package, the
+OpenAlex and Crossref Provider User-Agent strings, and the generated Literature
+Monitor Connector manifest. The Connector build entry point keeps the reviewed
+upstream debug-build mode and supplies `0.6.1` through upstream `build.sh -v`;
+the pinned upstream revision and submodule set are unchanged.
+
+Direct release-preparation validation passed: Provider/version and Connector
+boundary pytest coverage **431 passed**, Connector Node **36/36**, the A7 focused
+Python suite **357 passed**, and full pytest **2506 passed**, with the same two
+existing dependency deprecation warnings. The focused/full totals are one test
+higher than A7 because release preparation adds one static regression for the
+tracked Connector version source. The applicable upstream ItemSaver E2E command
+was attempted again, but Mocha global setup stopped before test bodies because
+Puppeteer requires Chrome `150.0.7871.24`, which is not installed. Those 17
+tests therefore remain **NOT VERIFIED / existing environment limitation**; no
+browser was installed to bypass the limitation.
+
+A fresh repository-external Python build produced
+`literature_monitor-0.6.1-py3-none-any.whl` and
+`literature_monitor-0.6.1.tar.gz`. Wheel metadata reports version `0.6.1`
+and MIT licensing. Wheel and sdist both contain the current README and all 61
+current `literature_monitor` payload files byte-identically. Connector
+source/artifacts, AGPL `COPYING`, `monitor.yaml`, `src/.obsidian/` and
+retired Browser Companion paths are absent. A fresh external virtual
+environment installed the built wheel from site-packages; key application/Web
+imports, current templates/static assets, `literature-monitor --help` and
+`uv pip check` passed, with no Connector payload present.
+
+A separate fresh repository-external Connector build reconstructed exact
+upstream revision `876e41ad15139077f2e07b2f71a0fa94742e0b4a` and the five
+tracked top-level submodule pins. The generated artifact is named
+`Literature Monitor Connector`, uses Manifest V3, reports version `0.6.1`
+and uses `background-worker.js`. The runtime overlay and `COPYING` are
+byte-identical to their tracked sources; the A7 corrected pre-dispatch versus
+parent-acceptance `saveItems` markers are present; the Literature Monitor
+runtime authority remains only `http://127.0.0.1:8000`; no Python payload is
+present.
+
+The intended later v0.6.1 release artifact set consists of three separate
+deliverables: the Python wheel, the Python sdist and the independent generated
+Chrome/MV3 Literature Monitor Connector artifact. The Connector must remain
+outside wheel/sdist. No new ZIP or packaging mechanism is introduced by release
+preparation; any publication packaging belongs to the later reviewed release
+transaction.
+
+This release-preparation diff changes version/status identity and directly
+coupled assertions only. It does not change §40 runtime behavior, A7 automatic
+capture semantics, Provider retrieval behavior, dependency membership or the
+Python/Connector licensing boundary. No renewed live Chrome save is required
+for this version-only Connector change. v0.6.1 remains **UNRELEASED**, and
+v0.6.0 remains the latest released baseline.
