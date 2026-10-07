@@ -8,16 +8,14 @@ safely updates durable Paper and Author Markdown, and exports kept papers.
 
 ## Release and development status
 
-**v0.6.0 is the latest released baseline.** See
-[GitHub Release v0.6.0](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.0)
-for published assets and [SPEC §24.20](SPEC.md#2420-v060-zotero-connector-transition--publisher-access--completed-release-closeout)
-for the immutable release target and validation record.
-
-**v0.6.1 is implemented and release-prepared but remains unreleased.**
-The current candidate sets Python package, Provider User-Agent and generated
-Connector identities to `0.6.1`. [SPEC §40](SPEC.md#40-v061-automatic-zotero-connector-capture--current-development-contract)
-defines the automatic capture contract; §§40.14 and 40.15 record implementation,
-live acceptance, preparation and remaining verification limitations.
+**v0.6.1 is RELEASED and is the latest completed baseline.**
+[GitHub Release v0.6.1](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.1)
+contains the Python wheel, sdist and separate Chrome/MV3 Connector ZIP.
+Python package, Provider User-Agent and Connector identities are `0.6.1`.
+[SPEC §40](SPEC.md#40-v061-automatic-zotero-connector-capture-current-contract)
+defines the current contract; [SPEC §40.16](SPEC.md#4016-v061-release-and-documentation-closeout-2026-10-07)
+records the immutable release target and asset verification. §§40.14 and 40.15
+retain implementation/live acceptance and preparation evidence.
 
 A7 recorded a successful toolbar-free automatic save in normal Chrome with
 Zotero Desktop and an existing institutional session. Final authoritative
@@ -25,25 +23,26 @@ exact-DOI reconciliation confirmed the bibliographic parent and changed the
 validation Paper to `in_zotero`; a PDF was observed without gating parent success.
 The optional pre-existing-parent live case and 17 upstream ItemSaver tests remain
 unverified, the latter because the required Puppeteer Chrome was unavailable.
-These are the recorded §40.14 acceptance boundaries, not new checks or publication.
+These recorded §40.14 acceptance boundaries continue to apply to this release.
 
 The released v0.6.0 workflow uses the official Zotero Connector manually and
-read-only exact-DOI reconciliation. The v0.6.1 candidate adds automatic
+read-only exact-DOI reconciliation. The released v0.6.1 workflow adds automatic
 Connector triggering under §40. Neither workflow requires a PDF attachment
 for `in_zotero`; publisher authentication remains manual in the normal browser.
 The retired Browser Companion/custom PDF acquisition path is historical only.
 
-The intended v0.6.1 deliverables are the Python wheel, Python sdist and a
-separate Chrome/MV3 Literature Monitor Connector artifact. The Python package
+The v0.6.1 deliverables are the Python wheel, Python sdist and a
+separate Chrome/MV3 Literature Monitor Connector ZIP with corresponding source.
+The Python package
 is MIT; the Connector has its own AGPLv3 license/provenance boundary and is
 excluded from wheel/sdist and Python imports. See [connector/README.md](connector/README.md)
 and [connector/PROVENANCE.md](connector/PROVENANCE.md) for build/install details
-and provenance. Publication packaging is handled within the authorized release.
+and provenance. Extract the ZIP and load its `chrome-mv3/` directory locally in Chrome.
 
 [AGENTS.md](AGENTS.md#release-execution-and-verification-reuse) defines continuous
 release execution and validation reuse. Detailed historical release and live
 evidence remain in SPEC; historical validation does not establish success for
-the current candidate.
+the current release beyond its recorded scope.
 
 ## Current retrieval architecture
 
@@ -128,43 +127,45 @@ keeps its result summary and warning/error counts; full issues, diagnostics,
 coverage, and Provider-state usage appear in **Advanced & Diagnostics → Current
 run**. These details are process-local and are not restored after server restart.
 
-Kept Paper detail offers **Open DOI** and **Check Zotero** only when the Paper is
+Kept Paper detail offers **Save to Zotero**, **Open DOI** and **Check Zotero** when the Paper is
 `kept` and has a valid normalized DOI. The old Web Zotero export panel, Load
 export, and textarea workflow remain removed; CLI `export-kept` remains
 available and unchanged.
 
 Paper Markdown remains the durable workflow state. The GUI does not add a
-workflow/execution database, persistent run history, heartbeat, SSE, WebSocket,
-queue, or another source of Paper decision state.
+workflow/execution database, persistent run history, SSE, WebSocket, batch
+queue, or another source of Paper decision state. Connector heartbeat and one
+active capture attempt are transient process-local state.
 
-### Current v0.6.0 Zotero workflow
-
-The current development workflow is:
+### Current v0.6.1 Zotero workflow
 
 ```text
 Settings → Publisher access
 → optionally open relevant journal/publisher sites and authenticate manually
 
-Kept Paper
-→ Open DOI
-→ use the official Zotero Connector manually in the browser
-→ return to Literature Monitor
-→ one automatic exact-DOI reconciliation attempt
-→ Check Zotero if a retry is needed
-→ in_zotero
+Kept Paper → Save to Zotero
+→ authoritative exact-DOI My Library preflight
+→ if a unique parent exists: reconcile directly
+→ only if explicitly absent: automatic Connector save in a dedicated DOI tab
+→ after a confirmed or uncertain save: one final exact-DOI reconciliation
+→ in_zotero only after a unique bibliographic parent is verified
 ```
 
-Literature Monitor does not trigger or control the official Zotero Connector and
-does not detect Connector completion.
+**Open DOI** and **Check Zotero** remain the manual fallback and explicit
+reconciliation paths. Automatic capture supports one active Paper at a time;
+uncertain completion never automatically repeats a save.
 
 #### Prerequisites
 
 - **Zotero Desktop**, running with Local API access enabled.
-- The **official Zotero Connector**, installed and configured in the browser you
-  use for DOI pages and operated manually by you.
-- No Literature Monitor Browser Companion, source-checkout Chrome extension,
-  Developer Mode / Load unpacked step, Zotero write authorization, OS keyring
-  credential, or XMU-specific browser automation is required by v0.6.0.
+- For automatic capture, the **Literature Monitor Connector 0.6.1** in Chrome:
+  download and extract the Connector ZIP from the release, open
+  `chrome://extensions/`, enable Developer Mode, choose **Load unpacked**, and
+  select `chrome-mv3/`; see [Connector instructions](connector/README.md).
+- Run the local Web UI bridge at `http://127.0.0.1:8000`; Settings shows the
+  Connector readiness, which must be `connected` to start automatic capture.
+- The official Zotero Connector can coexist for ordinary manual saves.
+  Institutional authentication remains manual in the normal browser.
 
 #### Publisher access
 
@@ -190,7 +191,7 @@ Literature Monitor browser automation.
 On the DOI/publisher page, use the official Zotero Connector manually. When you
 return to Literature Monitor, the page makes at most one automatic reconciliation
 attempt for that Open DOI action. There is no fixed wait, background polling,
-Connector heartbeat, or attachment-ready check. If the Zotero parent is not yet
+attachment-ready check in this manual return path. If the Zotero parent is not yet
 visible, the Paper remains `kept`; use **Check Zotero** later to retry explicitly.
 
 #### Check Zotero and `in_zotero`
@@ -216,11 +217,13 @@ bibliographic parent linkage has been verified. Zero matches, duplicate matches,
 incomplete or unstable reads, and conflicting existing keys leave the Paper
 unchanged.
 
-#### v0.6.0 troubleshooting
+#### v0.6.1 troubleshooting
 
 | Result or symptom | Next step |
 | --- | --- |
-| Open DOI / Check Zotero absent | The Paper must be `kept` and have a valid DOI. |
+| Save to Zotero / Open DOI / Check Zotero absent | The Paper must be `kept` and have a valid DOI. |
+| Connector unavailable | Load the Literature Monitor Connector in Chrome, start Zotero Desktop and use the bridge at `127.0.0.1:8000`; **Open DOI** remains available. |
+| Save unconfirmed | Check the dedicated task tab and Zotero, then use **Check Zotero**; capture is not automatically repeated. |
 | Zotero unavailable / Local API unreadable | Start Zotero Desktop and enable Local API access. |
 | No exact DOI match | Finish the manual Zotero Connector save, then use **Check Zotero**. |
 | Duplicate exact DOI parents | Resolve the duplicate bibliographic parents in My Library, then retry. |
@@ -545,11 +548,11 @@ delta / “What's New” state, scheduler or daemon durable state, notifications
 run history, or a workflow/execution database. The last-run snapshot is
 observational metadata; Provider state is a reconstructible revision-validated
 optimization, and every Run still establishes live membership.
-In the current v0.6.0 development source tree, production Zotero integration is
-read-only and limited to exact-DOI bibliographic-parent reconciliation in My
-Library. Literature Monitor performs no production Zotero writes, custom PDF
-acquisition or staging, publisher-login automation, or Browser Companion
-workflow.
+In v0.6.1, Python Zotero integration remains read-only exact-DOI parent
+reconciliation in My Library. The separate Literature Monitor Connector may
+save automatically only after authoritative preflight confirms the parent is
+absent. Custom PDF acquisition/staging, publisher-login automation and the
+retired Browser Companion remain outside the current workflow.
 
 ## Validate configuration
 

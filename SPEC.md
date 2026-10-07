@@ -1,11 +1,11 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.6.0 is the latest released/completed baseline. v0.6.1 is implemented and release-prepared but remains unreleased. Release facts and verification boundaries are recorded in §24.20 and §§40.14 and 40.15.
+**Status:** Active; v0.6.1 is RELEASED and is the latest released/completed baseline. Python package, Provider User-Agent and Connector identities are `0.6.1`. Permanent RELEASE_HEAD and annotated tag target are `22bd1efb6c3534110850dfaae5a6239f74b16731`. Current release evidence is in §40.16; earlier records retain their original version and scope.
 
-**Stage:** v0.6.1 implementation and A7 live acceptance are complete (§40.14); the current prepared candidate and validation are recorded in §40.15. No v0.6.1 publication is claimed. Release execution and evidence reuse follow [AGENTS.md](AGENTS.md#release-execution-and-verification-reuse).
+**Stage:** v0.6.1 implementation, necessary preparation, artifact validation, annotated tag, remote-main/tag pushes, GitHub Release and authoritative asset-digest verification are complete (§40.16). This documentation closeout is a separate subsequent change outside the permanent tag target. Release execution and evidence reuse follow [AGENTS.md](AGENTS.md#release-execution-and-verification-reuse).
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
-**Current contract:** §40 is the current unreleased v0.6.1 development contract for Automatic Zotero Connector Capture. v0.6.0 remains the latest released/completed baseline, and §39 remains its historical/released authority. §40 supersedes §39 only where §39 excludes automatic Zotero Connector triggering and the narrowly related bridge/orchestration needed for v0.6.1. §37 remains authoritative for unaffected DOI-first identity, Provider behavior, current Paper schema, single-manifestation and Zotero parent identity. Historical §§35–39 retain their release, live-verification, maintenance, and version-specific behavior records.
+**Current contract:** §40 is the current released v0.6.1 contract for Automatic Zotero Connector Capture. §39 remains the historical/released v0.6.0 authority. §40 supersedes §39 only where §39 excludes automatic Zotero Connector triggering and the narrowly related bridge/orchestration needed for v0.6.1. §37 remains authoritative for unaffected DOI-first identity, Provider behavior, current Paper schema, single-manifestation and Zotero parent identity. Historical §§35 through 39 retain their release, live-verification, maintenance, and version-specific behavior records.
 
 ---
 
@@ -4775,15 +4775,15 @@ Final Audit Fix 1 closed the exact-parent proof gap: `ZoteroLocalClient.resolve_
 
 ---
 
-## 40. v0.6.1 Automatic Zotero Connector Capture — Current Development Contract
+## 40. v0.6.1 Automatic Zotero Connector Capture (Current Contract)
 
 ### 40.1 Authority, baseline and supersede boundary
 
-v0.6.0 remains RELEASED and is the latest released/completed baseline. §39 remains the historical/released authority for v0.6.0, including its implementation, validation and release evidence. v0.6.1 is not released. Development starts from the post-release `origin/main` state after v0.6.0.
+v0.6.1 is RELEASED and is the latest released/completed baseline (§40.16). §39 remains the historical/released authority for v0.6.0, including its implementation, validation and release evidence. v0.6.1 development started from the post-release `origin/main` state after v0.6.0.
 
-§40 is the current development contract for v0.6.1. It supersedes §39 only where §39 excludes automatic Zotero Connector triggering and the narrowly related Connector bridge, orchestration and completion observation authorized below. Unchanged §39 behavior continues to apply. §37 continues to govern unaffected DOI-first identity, Provider behavior, the current Paper schema, provenance, single-manifestation semantics and My Library bibliographic-parent identity.
+§40 is the current released contract for v0.6.1. It supersedes §39 only where §39 excludes automatic Zotero Connector triggering and the narrowly related Connector bridge, orchestration and completion observation authorized below. Unchanged §39 behavior continues to apply. §37 continues to govern unaffected DOI-first identity, Provider behavior, the current Paper schema, provenance, single-manifestation semantics and My Library bibliographic-parent identity.
 
-The terminated v0.5.x Browser Companion/custom acquisition direction is not an implementation baseline for v0.6.1. Historical §§35–39 remain version-specific records and must not be rewritten to match this development contract.
+The terminated v0.5.x Browser Companion/custom acquisition direction is not an implementation baseline for v0.6.1. Historical §§35 through 39 remain version-specific records and must not be rewritten to match this current contract.
 
 ### 40.2 Kept Paper workflow
 
@@ -5084,12 +5084,13 @@ Evidence must be recorded only after the corresponding check has actually run. H
 
 A0 does not modify Python package version, Provider User-Agent version, Connector release version, tags, changelog/release assets or GitHub Release state.
 
-The release-preparation worktree on top of implementation commit
-`b5f97adefac4c16f46a3383c92d768fefa8ac22b` now sets the Python package,
-OpenAlex/Crossref Provider User-Agent and generated Connector artifact
-identities to `0.6.1`. This release-preparation identity change does not alter
-the §40 behavior contract. v0.6.1 remains unreleased until an explicitly
-authorized release transaction publishes and verifies the release state.
+The released Python package, OpenAlex/Crossref Provider User-Agent and generated
+Connector artifact identities are `0.6.1`. Release-preparation commit and
+permanent annotated `v0.6.1` tag target are
+`22bd1efb6c3534110850dfaae5a6239f74b16731`, following implementation
+`b5f97adefac4c16f46a3383c92d768fefa8ac22b`. Publication and verification
+are complete (§40.16); this documentation closeout remains outside the tag.
+The version identity change does not alter the §40 behavior contract.
 
 Follow [AGENTS.md](AGENTS.md#release-execution-and-verification-reuse) for
 continuous release execution, necessary artifact checks and evidence reuse.
@@ -5255,3 +5256,70 @@ capture semantics, Provider retrieval behavior, dependency membership or the
 Python/Connector licensing boundary. No renewed live Chrome save is required
 for this version-only Connector change. v0.6.1 remains **UNRELEASED**, and
 v0.6.0 remains the latest released baseline.
+
+### 40.16 v0.6.1 release and documentation closeout (2026-10-07)
+
+The authorized release completed continuously in one conversation. The existing
+implementation commit is `b5f97adefac4c16f46a3383c92d768fefa8ac22b`.
+The scoped preparation commit, permanent RELEASE_HEAD and annotated `v0.6.1`
+tag target are `22bd1efb6c3534110850dfaae5a6239f74b16731`; the annotated
+tag object is `8e5bc8d5ead58f502d80d73065fe7e46d7a8f157`. Normal remote-main
+and tag pushes were verified against those exact objects before publication.
+
+[GitHub Release v0.6.1](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.1)
+was published at `2026-10-07T13:20:44Z` as the public latest stable release
+(non-draft, non-prerelease). The API readback confirms its tag, title, notes
+and exactly three uploaded assets. Their authoritative GitHub SHA-256 digests
+match the validated local artifacts:
+
+| Asset | SHA-256 |
+| --- | --- |
+| `literature-monitor-connector-0.6.1-chrome-mv3.zip` | `e88c5c8fd24cc2f3e608d3e8cb91903fd59c4fb07da12faa9c454bbf2594b754` |
+| `literature_monitor-0.6.1-py3-none-any.whl` | `71a8a1b2e3f05d838c54336e9a3ed216e0dc1b531f5e00b6cf8de2c6c3fb531e` |
+| `literature_monitor-0.6.1.tar.gz` | `c82f42aa4edcc5764deb42c15f069a7325d655632368cc8953186b1dec5d5ca8` |
+
+Validation reuse: §40.15's full pytest **2506 passed**, Connector Node **36/36**
+and directly coupled version/preparation checks remain applicable. Subsequent
+changes to the tested preparation inputs are documentation only; the Python
+runtime, Connector patches/overlay/build entry point, dependencies and version
+assertions were inspected and unchanged. §40.14's required scoped normal-Chrome,
+Zotero Desktop and established institutional-session automatic save remains
+live acceptance. These results were reused, not rerun during publication.
+The optional pre-existing-parent live case and 17 upstream ItemSaver tests
+remain **NOT VERIFIED** with their previously recorded scope/environment
+limitations. No live capture or blocked upstream setup was repeated.
+
+Checks run for this release: `uv lock --check`, version/identity consistency,
+complete preparation-diff review and `git diff --check` passed. An exact clean
+Git export of RELEASE_HEAD was built with `uv build --no-sources`; the final
+wheel/sdist contain all **61/61** application payload files byte-identically,
+version `0.6.1`, the current release-HEAD README and MIT license. Connector
+source/artifacts, AGPL `COPYING`, protected local paths, retired Browser
+Companion paths and cache noise are excluded. A fresh external Python 3.12.14
+virtual environment installed the wheel with frozen exported runtime requirements
+offline; site-packages imports, all packaged files, installed HTTP/template
+rendering, localhost state endpoint, `literature-monitor --help` and
+`uv pip check` passed. The HTTP smoke is not a new visual/browser live acceptance.
+
+The previously validated external Connector build was reused after proving
+exact upstream revision `876e41ad15139077f2e07b2f71a0fa94742e0b4a`, all five
+top-level submodule pins, all four patched source files, overlays, license and
+all **308** generated runtime files match the tracked release inputs and
+retained upstream build. Its manifest is MV3, version `0.6.1`, component name
+`Literature Monitor Connector`, with `background-worker.js`. The inspected ZIP
+contains `chrome-mv3/`, `INSTALL.txt` and **2006** corresponding-source files:
+the patched upstream source, initialized pinned top-level submodules and the
+Literature Monitor source locks, patches, overlays and build instructions.
+Archive readback, required executable modes and license/provenance separation
+passed. Local installation uses Chrome Developer Mode / **Load unpacked**;
+this publication does not claim Chrome Web Store or PyPI distribution.
+
+There are no configured repository CI workflows or required remote checks;
+GitHub reports zero check runs/status contexts, not a CI success. The published
+source, Python artifacts, independent Connector artifact and GitHub Release
+are verified separately. Build/validation output stays repository-external.
+`monitor.yaml`, `src/.obsidian/`, `workspace/` and unrelated local state are
+preserved, unstaged and excluded from published artifacts. The subsequent
+necessary documentation closeout uses affected content/diff checks only and
+keeps the release tag and assets fixed; it requires no new functional suite
+or package rebuild.

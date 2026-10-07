@@ -43,7 +43,7 @@ They are represented only by:
 - `delta.lock`: the expected upstream paths and overlay files changed by
   Literature Monitor.
 
-The current v0.6.1 release-prepared delta keeps the A1 Chrome/MV3 component-name
+The released v0.6.1 delta keeps the A1 Chrome/MV3 component-name
 and provenance changes and the A5 automatic-capture runtime. The tracked
 Literature Monitor build entry point supplies version `0.6.1` to the pinned
 upstream build through its supported `-v` option; the upstream revision,

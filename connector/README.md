@@ -1,7 +1,7 @@
 # Literature Monitor Connector
 
-This directory defines the independent browser component prepared for the
-unreleased v0.6.1 release under SPEC §40. It is derived from the official
+This directory defines the independent browser component released with
+v0.6.1 under SPEC §40. It is derived from the official
 Zotero Connector source and is separate from the MIT Python
 `literature_monitor` package. The tracked build entry point generates the
 Chrome/MV3 artifact with version `0.6.1`.
@@ -69,10 +69,14 @@ directories from being treated as disposable Connector build state.
 
 For local installation or verification, open `chrome://extensions/`, enable
 Developer Mode, choose **Load unpacked**, and select the generated `chrome-mv3`
-directory. This is a local install/test path, not a Chrome Web Store release.
+directory. Alternatively, extract the published
+[Connector ZIP](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.1)
+and select its `chrome-mv3/` directory; it includes corresponding source and
+license/build instructions. This is a local install path, not a Chrome Web Store release.
 A7 recorded a successful toolbar-free automatic save in normal Chrome with
 Zotero Desktop and an existing institutional session; that scoped live acceptance
-does not constitute a Chrome Web Store or v0.6.1 release.
+does not constitute a Chrome Web Store release. Publication and asset
+verification are recorded in [SPEC §40.16](../SPEC.md#4016-v061-release-and-documentation-closeout-2026-10-07).
 See [SPEC §§40.14 and 40.15](../SPEC.md#4014-a7-implementation-and-validation-evidence-2026-10-07)
 for live validation and preparation evidence, and
 [AGENTS.md](../AGENTS.md#release-execution-and-verification-reuse) for release
