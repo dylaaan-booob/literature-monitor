@@ -62,6 +62,18 @@
           <button type="submit" class="secondary">Reject</button>
         </form>
       {% elif paper.status.value == "kept" and open_doi_url %}
+        <form method="post"
+              action="/papers/{{ paper.paper_id }}/save-to-zotero"
+              hx-post="/papers/{{ paper.paper_id }}/save-to-zotero"
+              hx-target="#workspace-root"
+              hx-swap="outerHTML"
+              data-save-zotero-form>
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="expected_status" value="{{ paper.status.value }}">
+          <input type="hidden" name="view" value="{{ active_view }}">
+          <input type="hidden" name="position" value="{{ selected_position }}">
+          <button type="submit">Save to Zotero</button>
+        </form>
         <a class="button secondary"
            href="{{ open_doi_url }}"
            target="_blank"
@@ -78,7 +90,7 @@
           <input type="hidden" name="expected_status" value="{{ paper.status.value }}">
           <input type="hidden" name="view" value="{{ active_view }}">
           <input type="hidden" name="position" value="{{ selected_position }}">
-          <button type="submit">Check Zotero</button>
+          <button type="submit" class="secondary">Check Zotero</button>
         </form>
       {% endif %}
     </div>

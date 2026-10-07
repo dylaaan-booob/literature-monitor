@@ -1,0 +1,7 @@
+# Literature Monitor-owned delta applied to the pinned upstream tree/artifact.
+patch src/browserExt/background-worker.js
+patch src/browserExt/manifest-v3.json
+patch src/common/inject/pageSaving.js
+patch src/common/itemSaver.js
+overlay LITERATURE_MONITOR_PROVENANCE.txt
+overlay literature-monitor-runtime.js

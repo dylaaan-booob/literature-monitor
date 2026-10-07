@@ -28,3 +28,7 @@ __pycache__/
 
 # JavaScript dependencies, if that stack is selected later
 node_modules/
+
+# Literature Monitor Connector reconstruction and build output
+/connector/.work/
+/connector/build/

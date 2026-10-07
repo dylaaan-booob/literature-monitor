@@ -1,0 +1,4 @@
+# Preserve the pinned upstream license file byte-for-byte.
+COPYING -whitespace
+# Patch context preserves upstream whitespace; check the applied source instead.
+patches/*.patch -whitespace

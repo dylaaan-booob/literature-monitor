@@ -31,6 +31,7 @@ from literature_monitor.zotero_local import (
 __all__ = [
     "DecisionOutcome",
     "DecisionResult",
+    "ReconciliationGuard",
     "keep_paper",
     "reject_paper",
     "reconcile_paper_with_zotero",
@@ -50,6 +51,17 @@ class DecisionOutcome(str, Enum):
 
 
 @_dataclass(frozen=True)
+class ReconciliationGuard:
+    output_dir: Path
+    workspace_identity: tuple[int, int]
+    papers_directory_identity: tuple[int, int]
+    paper_path: Path
+    paper_file_identity: tuple[int, int]
+    paper_id: UUID
+    normalized_doi: str
+
+
+@_dataclass(frozen=True)
 class DecisionResult:
     outcome: DecisionOutcome
     paper_id: UUID
@@ -58,6 +70,8 @@ class DecisionResult:
     resulting_status: WorkflowStatus | None
     path: Path | None
     message: str
+    reconciled_doi: str | None = None
+    capture_guard: ReconciliationGuard | None = None
 
 
 def _failure(
@@ -68,6 +82,8 @@ def _failure(
     *,
     current_status: WorkflowStatus | None = None,
     path: Path | None = None,
+    reconciled_doi: str | None = None,
+    capture_guard: ReconciliationGuard | None = None,
 ) -> DecisionResult:
     return DecisionResult(
         outcome=outcome,
@@ -77,6 +93,8 @@ def _failure(
         resulting_status=None,
         path=path,
         message=message,
+        reconciled_doi=reconciled_doi,
+        capture_guard=capture_guard,
     )
 
 
@@ -85,6 +103,169 @@ class _ReconciliationRead:
     contents: str
     directory_identity: tuple[int, int]
     file_identity: tuple[int, int]
+
+
+def _absolute_path(path: Path) -> Path:
+    return Path(_os.path.abspath(_os.fspath(path)))
+
+
+def _open_reconciliation_context(
+    output_dir: Path,
+) -> tuple[int, int, tuple[int, int]]:
+    workspace: int | None = None
+    papers: int | None = None
+    try:
+        workspace = _os.open(output_dir, _os.O_RDONLY | _os.O_DIRECTORY)
+        workspace_stat = _os.fstat(workspace)
+        papers = _os.open(
+            "Papers",
+            _os.O_RDONLY | _os.O_DIRECTORY | _os.O_NOFOLLOW,
+            dir_fd=workspace,
+        )
+        return (
+            workspace,
+            papers,
+            (workspace_stat.st_dev, workspace_stat.st_ino),
+        )
+    except Exception:
+        if papers is not None:
+            _os.close(papers)
+        if workspace is not None:
+            _os.close(workspace)
+        raise
+
+
+def _revalidate_not_found_capture_state(
+    output_dir: Path,
+    paper_id: UUID,
+    expected_status: WorkflowStatus,
+    *,
+    capture_guard: ReconciliationGuard,
+) -> DecisionResult | None:
+    """Fail closed if the Paper changed while authoritative preflight was running."""
+
+    workspace: int | None = None
+    directory: int | None = None
+    reads: dict[Path, _ReconciliationRead] = {}
+    try:
+        workspace, directory, workspace_identity = _open_reconciliation_context(
+            output_dir,
+        )
+        current_path, failure = _locate_paper(
+            output_dir,
+            paper_id,
+            expected_status,
+            require_safe_candidates=True,
+            directory=directory,
+            reconciliation_reads=reads,
+        )
+    except FileNotFoundError:
+        return _failure(
+            DecisionOutcome.STATE_CONFLICT,
+            paper_id,
+            expected_status,
+            "Paper disappeared during Zotero preflight.",
+            path=capture_guard.paper_path,
+        )
+    except OSError:
+        return _failure(
+            DecisionOutcome.IO_FAILURE,
+            paper_id,
+            expected_status,
+            "Cannot safely verify Paper after Zotero preflight.",
+            path=capture_guard.paper_path,
+        )
+    finally:
+        if directory is not None:
+            _os.close(directory)
+        if workspace is not None:
+            _os.close(workspace)
+
+    if failure is not None:
+        return _failure(
+            failure.outcome,
+            paper_id,
+            expected_status,
+            failure.message,
+            current_status=failure.current_status,
+            path=failure.path,
+        )
+    assert current_path is not None
+    current_read = reads[current_path]
+    if (
+        _absolute_path(output_dir) != capture_guard.output_dir
+        or workspace_identity != capture_guard.workspace_identity
+        or current_read.directory_identity
+        != capture_guard.papers_directory_identity
+        or _absolute_path(current_path) != capture_guard.paper_path
+        or current_read.file_identity != capture_guard.paper_file_identity
+    ):
+        return _failure(
+            DecisionOutcome.STATE_CONFLICT,
+            paper_id,
+            expected_status,
+            "Paper location changed during Zotero preflight.",
+            path=current_path,
+        )
+
+    state = _parse_paper_state(
+        current_path,
+        current_read.contents,
+        output_dir / "Authors",
+    )
+    if (
+        state is None
+        or state.paper_id != paper_id
+        or state.problems
+        or not state.updateable
+        or state.frontmatter is None
+        or state.status is None
+        or state.external_ids is None
+    ):
+        return _failure(
+            DecisionOutcome.INVALID_PAPER,
+            paper_id,
+            expected_status,
+            "Paper changed into an invalid state during Zotero preflight.",
+            current_status=state.status if state is not None else None,
+            path=current_path,
+        )
+    if state.status is not expected_status:
+        return _failure(
+            DecisionOutcome.STATE_CONFLICT,
+            paper_id,
+            expected_status,
+            (
+                f"Paper status changed from expected {expected_status.value} "
+                f"to {state.status.value} during Zotero preflight."
+            ),
+            current_status=state.status,
+            path=current_path,
+        )
+    try:
+        current_doi = _normalize_doi(state.external_ids.doi)
+    except ValueError:
+        current_doi = None
+    if current_doi != capture_guard.normalized_doi:
+        return _failure(
+            DecisionOutcome.STATE_CONFLICT,
+            paper_id,
+            expected_status,
+            "Paper DOI changed during Zotero preflight.",
+            current_status=state.status,
+            path=current_path,
+        )
+    existing_key = state.frontmatter.get("zotero_key")
+    if existing_key is not None and not _re.fullmatch(r"[A-Z0-9]{8}", existing_key):
+        return _failure(
+            DecisionOutcome.INVALID_PAPER,
+            paper_id,
+            expected_status,
+            "Paper Zotero key is malformed; repair it before checking Zotero.",
+            current_status=state.status,
+            path=current_path,
+        )
+    return None
 
 
 def _read_reconciliation_candidate(path: Path, directory: int) -> _ReconciliationRead:
@@ -242,15 +423,20 @@ def _apply_decision(
     *,
     required_status: WorkflowStatus,
     target_status: WorkflowStatus,
+    expected_reconciliation_doi: str | None = None,
+    expected_capture_guard: ReconciliationGuard | None = None,
 ) -> DecisionResult:
     is_reconciliation = target_status is WorkflowStatus.IN_ZOTERO
     reconciliation_reads: dict[Path, _ReconciliationRead] = {}
+    workspace_identity: tuple[int, int] | None = None
     if is_reconciliation:
+        workspace = None
         directory = None
         try:
-            # One descriptor binds UUID enumeration and every safe candidate
-            # read to the original Papers directory (SPEC §36.2).
-            directory = _os.open(output_dir / "Papers", _os.O_RDONLY | _os.O_DIRECTORY | _os.O_NOFOLLOW)
+            # Bind the reconciliation read to one workspace/Papers directory pair.
+            workspace, directory, workspace_identity = _open_reconciliation_context(
+                output_dir,
+            )
             path, failure = _locate_paper(
                 output_dir, paper_id, expected_status, require_safe_candidates=True,
                 directory=directory, reconciliation_reads=reconciliation_reads,
@@ -263,6 +449,8 @@ def _apply_decision(
         finally:
             if directory is not None:
                 _os.close(directory)
+            if workspace is not None:
+                _os.close(workspace)
     else:
         path, failure = _locate_paper(output_dir, paper_id, expected_status)
     if failure is not None:
@@ -363,6 +551,7 @@ def _apply_decision(
 
     frontmatter = dict(state.frontmatter)
     if is_reconciliation:
+        assert workspace_identity is not None
         try:
             doi = _normalize_doi(state.external_ids.doi) if state.external_ids else None
         except ValueError:
@@ -372,6 +561,51 @@ def _apply_decision(
                 DecisionOutcome.INVALID_PAPER, paper_id, expected_status,
                 "A valid Paper DOI is required to check Zotero.",
                 current_status=current_status, path=path,
+            )
+        if expected_reconciliation_doi is not None:
+            try:
+                normalized_expected_doi = _normalize_doi(expected_reconciliation_doi)
+            except ValueError:
+                normalized_expected_doi = None
+            if normalized_expected_doi != expected_reconciliation_doi:
+                return _failure(
+                    DecisionOutcome.INVALID_PAPER,
+                    paper_id,
+                    expected_status,
+                    "Automatic Zotero reconciliation expected DOI is invalid.",
+                    current_status=current_status,
+                    path=path,
+                )
+            if doi != expected_reconciliation_doi:
+                return _failure(
+                    DecisionOutcome.STATE_CONFLICT,
+                    paper_id,
+                    expected_status,
+                    "Paper DOI changed after automatic capture started.",
+                    current_status=current_status,
+                    path=path,
+                )
+        action_read = reconciliation_reads[path]
+        current_capture_guard = ReconciliationGuard(
+            output_dir=_absolute_path(output_dir),
+            workspace_identity=workspace_identity,
+            papers_directory_identity=action_read.directory_identity,
+            paper_path=_absolute_path(path),
+            paper_file_identity=action_read.file_identity,
+            paper_id=paper_id,
+            normalized_doi=doi,
+        )
+        if (
+            expected_capture_guard is not None
+            and current_capture_guard != expected_capture_guard
+        ):
+            return _failure(
+                DecisionOutcome.STATE_CONFLICT,
+                paper_id,
+                expected_status,
+                "Paper or originating workspace identity changed after automatic capture started.",
+                current_status=current_status,
+                path=path,
             )
         existing_key = frontmatter.get("zotero_key")
         if existing_key is not None and not _re.fullmatch(r"[A-Z0-9]{8}", existing_key):
@@ -398,15 +632,31 @@ def _apply_decision(
                 DecisionOutcome.ZOTERO_FAILURE,
                 "Cannot verify complete Zotero My Library; check Zotero Desktop and its Local API setting.",
             ))
+            if outcome is DecisionOutcome.ZOTERO_NOT_FOUND:
+                preflight_failure = _revalidate_not_found_capture_state(
+                    output_dir,
+                    paper_id,
+                    expected_status,
+                    capture_guard=current_capture_guard,
+                )
+                if preflight_failure is not None:
+                    return preflight_failure
             return _failure(
                 outcome, paper_id, expected_status, message,
-                current_status=current_status, path=path,
+                current_status=current_status,
+                path=path,
+                reconciled_doi=doi,
+                capture_guard=(
+                    current_capture_guard
+                    if outcome is DecisionOutcome.ZOTERO_NOT_FOUND
+                    else None
+                ),
             )
         if existing_key is not None and existing_key != identity.item.key:
             return _failure(
                 DecisionOutcome.STATE_CONFLICT, paper_id, expected_status,
                 "Paper Zotero key conflicts with the unique DOI match; repair the linkage before checking Zotero.",
-                current_status=current_status, path=path,
+                current_status=current_status, path=path, reconciled_doi=doi,
             )
         frontmatter["zotero_key"] = identity.item.key
     frontmatter["status"] = target_status.value
@@ -419,6 +669,11 @@ def _apply_decision(
                 path, updated_contents, expected_contents=action_read.contents,
                 expected_directory_identity=action_read.directory_identity,
                 expected_file_identity=action_read.file_identity,
+                expected_workspace_identity=(
+                    expected_capture_guard.workspace_identity
+                    if expected_capture_guard is not None
+                    else None
+                ),
             )
         else:
             _replace_text_if_unchanged(path, updated_contents, expected_contents=current_contents)
@@ -469,6 +724,7 @@ def _apply_decision(
         resulting_status=target_status,
         path=path,
         message=message,
+        reconciled_doi=doi if is_reconciliation else None,
     )
 
 
@@ -504,6 +760,9 @@ def reconcile_paper_with_zotero(
     output_dir: Path,
     paper_id: UUID,
     expected_status: WorkflowStatus,
+    *,
+    expected_doi: str | None = None,
+    capture_guard: ReconciliationGuard | None = None,
 ) -> DecisionResult:
     return _apply_decision(
         output_dir,
@@ -511,4 +770,6 @@ def reconcile_paper_with_zotero(
         expected_status,
         required_status=WorkflowStatus.KEPT,
         target_status=WorkflowStatus.IN_ZOTERO,
+        expected_reconciliation_doi=expected_doi,
+        expected_capture_guard=capture_guard,
     )

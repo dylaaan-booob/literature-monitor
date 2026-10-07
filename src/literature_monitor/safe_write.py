@@ -186,18 +186,44 @@ def replace_regular_text_at_identity(
     expected_contents: str,
     expected_directory_identity: tuple[int, int],
     expected_file_identity: tuple[int, int],
+    expected_workspace_identity: tuple[int, int] | None = None,
 ) -> None:
-    """Legacy acquisition compare/write bound to the original action objects.
+    """Compare/write bound to the original directory and regular-file objects.
 
-    All file operations use the verified directory descriptor. This retains the
-    compare/replace model, not an OS-level transactional CAS.
+    When a workspace identity is supplied, the Papers directory is opened
+    relative to that verified workspace object as an additional causality
+    boundary. This retains the compare/replace model, not an OS-level
+    transactional CAS.
     """
+    workspace: int | None = None
     directory: int | None = None
     descriptor: int | None = None
     temporary: str | None = None
     try:
         try:
-            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            if expected_workspace_identity is None:
+                directory = os.open(
+                    path.parent,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                )
+            else:
+                workspace = os.open(
+                    path.parent.parent,
+                    os.O_RDONLY | os.O_DIRECTORY,
+                )
+                opened_workspace = os.fstat(workspace)
+                if (
+                    opened_workspace.st_dev,
+                    opened_workspace.st_ino,
+                ) != expected_workspace_identity:
+                    raise ContentChangedError(
+                        "original workspace identity changed"
+                    )
+                directory = os.open(
+                    path.parent.name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=workspace,
+                )
             parent = os.fstat(directory)
             if (parent.st_dev, parent.st_ino) != expected_directory_identity:
                 raise ContentChangedError("original directory identity changed")
@@ -220,6 +246,19 @@ def replace_regular_text_at_identity(
 
         def check_location() -> None:
             try:
+                if expected_workspace_identity is not None:
+                    current_workspace = path.parent.parent.stat()
+                    if (
+                        not stat.S_ISDIR(current_workspace.st_mode)
+                        or (
+                            current_workspace.st_dev,
+                            current_workspace.st_ino,
+                        )
+                        != expected_workspace_identity
+                    ):
+                        raise ContentChangedError(
+                            "original workspace identity changed"
+                        )
                 parent = path.parent.lstat()
                 target = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
             except OSError as error:
@@ -259,3 +298,5 @@ def replace_regular_text_at_identity(
                 pass
         if directory is not None:
             os.close(directory)
+        if workspace is not None:
+            os.close(workspace)

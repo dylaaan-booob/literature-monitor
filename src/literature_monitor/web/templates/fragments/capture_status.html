@@ -1,0 +1,30 @@
+{% if capture_presentation %}
+  {% if capture_presentation.poll %}
+    <form id="capture-status"
+          class="capture-status notice {{ capture_presentation.tone }}"
+          method="post"
+          action="/capture/poll"
+          hx-post="/capture/poll"
+          hx-trigger="load delay:1s"
+          hx-target="this"
+          hx-swap="outerHTML"
+          hx-sync="this:drop">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="view" value="{{ active_view }}">
+      {% if selected_position is not none %}
+        <input type="hidden" name="position" value="{{ selected_position }}">
+      {% endif %}
+      {% if selected_paper_id %}
+        <input type="hidden" name="paper" value="{{ selected_paper_id }}">
+      {% endif %}
+      <span>{{ capture_presentation.message }}</span>
+    </form>
+  {% else %}
+    <div id="capture-status"
+         class="capture-status notice {{ capture_presentation.tone }}">
+      {{ capture_presentation.message }}
+    </div>
+  {% endif %}
+{% else %}
+  <div id="capture-status" hidden></div>
+{% endif %}

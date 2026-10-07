@@ -5,7 +5,7 @@
 **Stage:** v0.6.0 A1–A6 implementation, Final Audit Fix 1, final independent implementation audit, implementation commit `f6600dd6d955699c0ce0a066f8d16067533d89ce` (`Implement v0.6.0 Zotero Connector workflow`), independent release-preparation review, release-preparation commit `b2ee7fe34efff692e1e77fb612c24f3a05b83340` (`Prepare v0.6.0 release`), pre-validation documentation closeout at RELEASE_HEAD `df3d805f173b1a4b8f48264821a105df5613f822`, final exact-release-HEAD clean-export validation, annotated tag, remote-main/tag pushes, GitHub Release, and release-asset digest verification are complete. This post-release documentation closeout is a separate later change outside the permanent `v0.6.0` tag target. The unreleased v0.5.4 Automatic Institutional Access Orchestration + Candidate-Bound PDF Acquisition direction was terminated after product validation and is not production authority.
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
-**Current contract:** §39 is the authoritative released v0.6.0 current contract. §37 remains authoritative for unaffected DOI-first identity, Provider behavior, current Paper schema, single-manifestation and Zotero parent identity. Conflicting Browser Companion, custom PDF acquisition, staging, institutional credential orchestration, and Zotero write requirements in historical §§35–38 do not constrain v0.6.0 implementation. Their release, live-verification, and maintenance records remain immutable version-specific evidence.
+**Current contract:** §40 is the current unreleased v0.6.1 development contract for Automatic Zotero Connector Capture. v0.6.0 remains the latest released/completed baseline, and §39 remains its historical/released authority. §40 supersedes §39 only where §39 excludes automatic Zotero Connector triggering and the narrowly related bridge/orchestration needed for v0.6.1. §37 remains authoritative for unaffected DOI-first identity, Provider behavior, current Paper schema, single-manifestation and Zotero parent identity. Historical §§35–39 retain their release, live-verification, maintenance, and version-specific behavior records.
 
 ---
 
@@ -4766,3 +4766,412 @@ Material final-audit evidence before the implementation commit: focused audit **
 Final clean-export release validation separately used exact RELEASE_HEAD `df3d805f173b1a4b8f48264821a105df5613f822`. A fresh Git archive contained **114 tracked files**, `uv sync --frozen --offline` passed, Node **v24.21.0** executed the v0.6 JavaScript harnesses, and full pytest passed **2390 / 0 skipped / 2 existing dependency warnings**. `uv lock --check`, wheel/sdist metadata verification, complete **58-file** packaged `literature_monitor` payload comparison, isolated installed-wheel smoke, and `uv pip check` all passed. This final evidence belongs to the permanent v0.6.0 RELEASE_HEAD; no live publisher login, automated Zotero Connector operation, or Zotero write validation is claimed.
 
 Final Audit Fix 1 closed the exact-parent proof gap: `ZoteroLocalClient.resolve_identity()` can return `VERIFIED` only for an exact normalized DOI match that is a top-level item and has an accepted bibliographic item type. Unknown exact-DOI item types and accepted bibliographic types carrying `parentItem` fail closed rather than authorizing `in_zotero` mutation.
+
+---
+
+## 40. v0.6.1 Automatic Zotero Connector Capture — Current Development Contract
+
+### 40.1 Authority, baseline and supersede boundary
+
+v0.6.0 remains RELEASED and is the latest released/completed baseline. §39 remains the historical/released authority for v0.6.0, including its implementation, validation and release evidence. v0.6.1 is not released. Development starts from the post-release `origin/main` state after v0.6.0.
+
+§40 is the current development contract for v0.6.1. It supersedes §39 only where §39 excludes automatic Zotero Connector triggering and the narrowly related Connector bridge, orchestration and completion observation authorized below. Unchanged §39 behavior continues to apply. §37 continues to govern unaffected DOI-first identity, Provider behavior, the current Paper schema, provenance, single-manifestation semantics and My Library bibliographic-parent identity.
+
+The terminated v0.5.x Browser Companion/custom acquisition direction is not an implementation baseline for v0.6.1. Historical §§35–39 remain version-specific records and must not be rewritten to match this development contract.
+
+### 40.2 Kept Paper workflow
+
+For a Paper whose current `status` is `kept` and whose DOI is valid under the existing `normalize_doi()` contract, the primary action becomes:
+
+```text
+Save to Zotero
+```
+
+`Open DOI` and `Check Zotero` remain available.
+
+The normal `Save to Zotero` flow is:
+
+```text
+Save to Zotero
+→ authoritative existing exact-DOI reconciliation
+→ if one unique exact-DOI My Library bibliographic parent already exists:
+     use the existing reconciliation path and enter in_zotero
+     do not start Connector capture
+→ only an explicit exact-DOI NOT_FOUND result may create an automatic capture attempt
+→ Connector claims the command
+→ Connector creates a dedicated task tab in the user's normal Chrome profile/session
+→ task tab opens the server-built DOI URL
+→ Zotero Connector uses its existing translator/save machinery
+→ observation reports CONFIRMED, UNCONFIRMED or FAILED
+→ CONFIRMED or UNCONFIRMED performs exactly one follow-up exact-DOI reconciliation
+→ only reconciliation finding one unique parent may enter in_zotero
+→ otherwise the Paper remains kept
+```
+
+Connector completion is never Paper or bibliographic identity authority. The final durable transition remains controlled by exact-DOI My Library reconciliation.
+
+### 40.3 Durable Paper state and process-local capture state
+
+The durable Paper workflow schema remains:
+
+```yaml
+status: candidate | rejected | kept | in_zotero
+zotero_key: <verified My Library parent key> | null
+```
+
+v0.6.1 must not add durable `capture_status`, `saving`, `connector_result`, `pdf_ready`, `attachment_state`, `publisher_login_state`, `capture_history` or equivalent capture history/state.
+
+An automatic capture attempt is process-local only. It must represent at least:
+
+- an opaque attempt/request identity;
+- Paper identity;
+- normalized DOI;
+- the server-built DOI URL;
+- stage;
+- start time;
+- claim/result state;
+- terminal outcome.
+
+The orchestration stages need cover only the actual process boundary, for example:
+
+```text
+WAITING_FOR_CONNECTOR
+CONNECTOR_ACTIVE
+FINISHED
+```
+
+Terminal outcomes must distinguish at least:
+
+```text
+CONFIRMED
+UNCONFIRMED
+FAILED
+```
+
+Attempt state must not be written to Paper Markdown, SQLite, Provider state, `last-run.json` or another durable store.
+
+Process-local Connector presence must maintain the most recent heartbeat, Connector version and a Zotero-reachable flag solely for readiness and fast failure. Readiness is `connected` only when the heartbeat is sufficiently recent and the Zotero-reachable flag is true. Automatic browser capture may begin only while readiness is `connected`. A missing or stale heartbeat, or a false Zotero-reachable flag, must return `unavailable` promptly and must not create a long-lived `WAITING_FOR_CONNECTOR` attempt. In that case the Paper remains `kept`, no automatic browser save starts, and `Open DOI` remains the manual fallback. Presence state remains process-local transient state and must not become durable history, diagnostics or an event log.
+
+### 40.4 Capture eligibility and authoritative preflight
+
+Automatic capture may begin only when all of the following hold:
+
+- the current Paper remains `kept`;
+- its normalized DOI is valid;
+- Zotero Desktop Local API/My Library is available for authoritative reconciliation;
+- Connector presence satisfies §40.3's recent-heartbeat `connected` readiness gate;
+- no other automatic capture attempt is active in the Literature Monitor process.
+
+Before any browser save starts, Literature Monitor must invoke the existing authoritative exact-DOI reconciliation boundary.
+
+Preflight results have these semantics:
+
+- one unique exact-DOI bibliographic parent: complete the existing reconciliation success path and do not trigger Connector capture;
+- duplicate exact-DOI bibliographic parents: fail closed and do not trigger Connector capture;
+- unreadable, incomplete or unstable Zotero state: fail closed and do not trigger Connector capture;
+- malformed or conflicting Paper state: fail closed;
+- explicit `NOT_FOUND`: automatic Connector capture may start.
+
+`candidate`, `rejected` and `in_zotero` Papers cannot start capture. A Paper with no DOI or an invalid DOI cannot start capture.
+
+`reconcile_paper_with_zotero()` continues to own the final authoritative chain:
+
+```text
+safe Paper identity
+→ current kept-state verification
+→ normalized DOI
+→ complete My Library enumeration
+→ exact DOI uniqueness
+→ existing zotero_key compatibility
+→ atomic status + zotero_key compare-write
+```
+
+The capture coordinator must not duplicate, weaken or bypass that authority.
+
+### 40.5 Localhost Connector bridge
+
+The existing Literature Monitor Web process on `127.0.0.1:8000` also hosts the Connector bridge. v0.6.1 does not add a second long-running daemon.
+
+The bridge has only the responsibilities needed for:
+
+- Connector heartbeat;
+- pending-command fetch/claim;
+- terminal-result submission;
+- Web UI capture snapshot/readiness observation.
+
+A command payload carries only the minimum task information, such as:
+
+- opaque request identity;
+- server-authoritative DOI target.
+
+The automatic DOI target must be derived from the server's current Paper and its normalized DOI using the same normalization and path-encoding safety boundary as §39.3. The only permitted external target form is:
+
+```text
+https://doi.org/<safely encoded normalized DOI path>
+```
+
+Reserved delimiters in the DOI must remain encoded path content and must not become a query string, fragment or second authority component. The browser or Connector must not submit, replace or override the target with an arbitrary external URL.
+
+The command must not send Paper Markdown, a Paper/filesystem path, `zotero_key`, CSRF tokens, Workspace content, institutional credentials or collection configuration.
+
+Connector-returned `item_key`, title, URL or success flags are observations, not bibliographic identity authority. The Connector result endpoint must not directly modify a Paper.
+
+A stale request, previous-attempt result, malformed result, oversized result or unrelated result must not terminate the current attempt.
+
+### 40.6 Browser and Zotero Connector boundary
+
+v0.6.1 supports automatic capture only in Chrome with an MV3 Connector. Firefox, Safari and Edge automatic capture are outside this version.
+
+The Literature Monitor Connector uses Zotero Connector upstream as the source of save capability. It must preserve upstream translators, page translation/save machinery, the user's normal browser cookies/session and normal Zotero Desktop connector-server interaction.
+
+Literature Monitor-specific changes must remain concentrated in command polling, task-tab orchestration, save triggering and completion reporting. v0.6.1 does not reimplement publisher translators, add publisher-specific DOM/runtime adapters or automatically enter institutional credentials.
+
+The official Zotero Connector and the Literature Monitor Connector may coexist in the same Chrome profile. They must not share Literature Monitor automatic command, attempt or completion state. The official Zotero Connector remains available for ordinary manual user operation.
+
+Every automatic capture creates its own task tab. It must not borrow or navigate an already open user tab.
+
+A confirmed safe terminal save may close the task-created tab. `FAILED` and `UNCONFIRMED` must leave the task-created tab open for inspection or manual recovery.
+
+### 40.7 Completion and reconciliation semantics
+
+Automatic capture does not require PDF attachment or Snapshot completion. Across the entire v0.6.1 automatic capture path, Literature Monitor must not call `ZoteroLocalClient.inspect_attachments()`, poll PDF attachments, poll Snapshots, check whether a PDF file has landed on disk, wait for attachment readiness, or add a fixed `sleep(5)` or equivalent fixed delay to guess save completion. It must not classify or gate on publisher PDF, OA PDF, arXiv PDF or any other attachment source/version.
+
+The only durable success authority is reconciliation against My Library finding one unique exact-DOI bibliographic parent.
+
+`CONFIRMED` completion performs exactly one follow-up exact-DOI reconciliation.
+
+`UNCONFIRMED` completion also performs exactly one follow-up exact-DOI reconciliation. If that reconciliation still returns `NOT_FOUND`, Literature Monitor must not automatically retrigger Connector capture.
+
+`FAILED` leaves the Paper `kept`, performs no automatic repeated save and preserves `Open DOI` and `Check Zotero` as manual recovery paths.
+
+If the Local API still exposes no unique parent after a `CONFIRMED` result, the Paper remains `kept`. If Connector activity creates duplicate exact-DOI parents, reconciliation fails closed and must not select one arbitrarily.
+
+If Zotero actually saves the item into a Group Library while My Library has no unique exact-DOI bibliographic parent, Literature Monitor reconciliation does not succeed. v0.6.1 must not add Group Library lookup or fallback to rescue that result.
+
+### 40.8 Concurrency, timeout and restart
+
+The Literature Monitor process permits at most one active automatic capture attempt at a time. v0.6.1 does not add a batch queue or concurrent multi-Paper capture.
+
+If `Save to Zotero` is invoked while an attempt is active, the system must not create a second attempt.
+
+An active attempt must have a finite timeout and cannot occupy the single capture slot indefinitely. Timeout ends only the process-local attempt lifecycle; it does not alter exact-DOI reconciliation authority.
+
+If a command has not been claimed by the Connector when its waiting timeout expires, Literature Monitor must release the active capture slot, leave the Paper unchanged in `kept`, perform no automatic save, and create no durable capture state.
+
+If the Connector has already claimed the command but the terminal result is lost or completion observation times out, Literature Monitor must not interpret that condition as ordinary `FAILED`. It follows `UNCONFIRMED`/uncertain-completion semantics: perform exactly one exact-DOI reconciliation, keep the Paper `kept` if no unique exact-DOI My Library parent is found, and do not automatically retrigger the Connector.
+
+v0.6.1 adds no Cancel workflow. Finite timeout is the mechanism that releases a lost or disconnected process-local attempt.
+
+Capture state exists only for the current Literature Monitor process. After restart:
+
+- no attempt is restored;
+- the system does not infer that an interrupted capture failed;
+- no automatic retry occurs;
+- no Paper is modified because of the lost attempt;
+- `Check Zotero` is the recovery path for an uncertain result.
+
+If a Paper is modified, moved, replaced or changes status during capture, any final mutation remains subject to the existing safe-read and compare-and-swap Paper boundary.
+
+### 40.9 Web UI and Settings
+
+For a valid `kept` Paper, the primary action is `Save to Zotero`. `Open DOI` and `Check Zotero` remain visible.
+
+`Open DOI` retains the v0.6.0 manual-fallback semantics. `Check Zotero` retains explicit reconciliation semantics. Successful reconciliation continues to use the current refreshed-view neighbor navigation.
+
+Settings adds only a compact Connector readiness indication:
+
+```text
+connected
+unavailable
+```
+
+v0.6.1 does not add Connector diagnostics history, an event log, publisher diagnostics or a troubleshooting dashboard.
+
+The v0.6.0 Publisher access behavior remains unchanged. Its purpose is to let the user open publisher pages early and establish a normal Chrome institutional session manually. v0.6.1 does not detect publisher login state.
+
+### 40.10 License, source and packaging boundary
+
+The Literature Monitor Connector is a separate AGPL-compatible browser component. Its source/build records must preserve:
+
+- Zotero Connector upstream copyright and license notices;
+- the exact upstream revision;
+- the Literature Monitor-specific patch boundary;
+- reproducible source provenance.
+
+Zotero Connector-derived code must not be represented as MIT-licensed Python-main-program code. The Python `literature_monitor` package remains MIT.
+
+The Connector is excluded from the Python wheel and Python runtime import graph. Connector build artifacts remain separate from the Python wheel/sdist.
+
+The exact source layout and vendoring/submodule strategy are deferred to a later implementation task, which must choose a reproducible-build approach that preserves the license boundary. A0 does not freeze unnecessary implementation details.
+
+### 40.11 Explicit v0.6.1 exclusions
+
+v0.6.1 does not include:
+
+- collection selection or automatic collection routing;
+- tag routing;
+- Group Library support;
+- Zotero Web API write credentials;
+- a Zotero Desktop plugin for collection routing;
+- batch/queue capture;
+- concurrent multi-Paper saves;
+- durable capture history;
+- restart recovery;
+- PDF/Snapshot success gating;
+- local PDF-file verification;
+- PDF-source/version diagnostics;
+- publisher session-expiry diagnostics;
+- institutional-login automation;
+- CARSI, Smart Gateway, WebVPN or XMU automatic login;
+- credential storage;
+- publisher-specific runtime adapters;
+- Firefox, Safari or Edge automatic capture;
+- automatic duplicate merge;
+- CLI `export-kept` changes;
+- DOI work-identity changes;
+- Provider or canonicalization redesign.
+
+Retired v0.5.x production modules must not be restored, including:
+
+```text
+application/acquisition.py
+browser_acquisition.py
+pdf_staging.py
+web/acquisition_coordinator.py
+web/browser_handoff.py
+zotero_write.py
+zotero_credentials.py
+browser_companion/
+```
+
+Historical cleanup tests should continue to prove that these old production paths remain retired.
+
+### 40.12 Verification contract
+
+This A0 section defines the verification boundary required for the completed v0.6.1 implementation. It does not claim that implementation, builds, tests or live verification have already occurred.
+
+Final implementation acceptance requires at least:
+
+- network-independent Python tests for coordinator, bridge and orchestration behavior;
+- executable Node/JavaScript Connector tests;
+- command polling;
+- heartbeat;
+- the single-active-task boundary;
+- safe DOI URL handling;
+- save triggering;
+- `CONFIRMED`, `UNCONFIRMED` and `FAILED` outcomes;
+- stale-result rejection;
+- existing v0.6.0 exact-DOI/Paper-safety regression tests;
+- full pytest;
+- applicable Zotero Connector upstream/build tests;
+- `uv lock --check`;
+- `git diff --check`;
+- verification that Python wheel/sdist and Connector artifacts remain separate;
+- live automatic save in normal Chrome with Zotero Desktop without a toolbar click;
+- at least one real publisher DOI using an already established normal-browser institutional session;
+- treatment of PDF/attachment results as observations rather than a release gate;
+- a synthetic completion-unconfirmed case proving that no automatic retry occurs.
+
+Evidence must be recorded only after the corresponding check has actually run. Historical v0.6.0 validation does not establish v0.6.1 implementation or live success.
+
+### 40.13 Release boundary
+
+A0 does not modify Python package version, Provider User-Agent version, Connector release version, tags, changelog/release assets or GitHub Release state.
+
+Package/Provider version changes and final Connector artifact versioning are deferred to the normal v0.6.1 release-preparation stage.
+
+### 40.14 A7 implementation and validation evidence (2026-10-07)
+
+A7 inspected the uncommitted A0 through A6 worktree on `v0.6.1-development`,
+with HEAD and `origin/main` at `7a7ffb5b842c41a317dd609b6dc3bcae9e53b2c3`.
+The runtime, bridge and orchestration are implemented. This evidence does not
+change the behavior contract above or the historical records in §§35 through 39.
+v0.6.1 remains unreleased. Required live acceptance passed and A7 is
+**READY FOR COMMIT**, subject to the explicitly recorded upstream harness
+environment limitation below; this is not release preparation or publication.
+
+The fresh external Connector build passed with upstream revision
+`876e41ad15139077f2e07b2f71a0fa94742e0b4a` and all five `upstream.lock`
+submodule pins verified. The artifact is named `Literature Monitor Connector`,
+uses Manifest V3 and `background-worker.js`, and includes the byte-identical
+current runtime overlay, upstream `COPYING` and provenance marker. The
+Literature Monitor runtime bridge authority is only `http://127.0.0.1:8000`.
+
+A7 reproduced and corrected one completion-observation defect: an exception
+after dispatching local `saveItems`, before receiving its response, could emit
+`FAILED` despite an uncertain bibliographic save. The upstream delta now tracks
+request dispatch separately from parent acceptance. Only a pre-dispatch error
+emits the deterministic failure signal; a lost post-dispatch response follows
+`UNCONFIRMED` observation semantics. The Connector regression
+`lost saveItems response is UNCONFIRMED while pre-dispatch failure is FAILED`
+failed on the previous delta (35/36) and passed after the correction (36/36).
+This changes only the declared Connector patch boundary; Python production code
+and package/Provider versions were not changed.
+
+Deterministic validation passed: Connector Node **36/36**, the requested focused
+Python suite **356 passed**, and full pytest **2505 passed**, with two existing
+dependency deprecation warnings. Explicit Python cases included
+`test_claimed_timeout_unconfirmed_uses_same_one_shot_reconciliation`,
+`test_terminal_completion_reconciles_exactly_once`,
+`test_claimed_timeout_unconfirmed_uses_same_poll_reconciliation`,
+`test_failed_capture_has_no_completion_reconciliation`, and
+`test_failed_capture_stops_polling_without_reconciliation_or_retry`.
+Supplemental synthetic checks exercised explicit `UNCONFIRMED` and a claimed
+command with a lost terminal result: each performed one final reconciliation,
+kept an unchanged Paper after `NOT_FOUND`, and issued no replacement command.
+Connector post-trigger timeout checks observed one task tab, one save trigger
+and zero automatic save retries, including later polling. Parent confirmation
+while the full attachment/save promise remained unresolved also passed.
+
+A real `kept` Paper and its three Author files were copied read-only into the
+repository-external workspace `/private/tmp/lm-a7-retest-hjcwgyga/validation-workspace`.
+Authoritative My Library preflight for `10.1109/tit.2026.3702696` returned
+explicit `NOT_FOUND`. Zotero Desktop 10.0.5 Local API and connector server were
+reachable. The current Web process used the external config on `127.0.0.1:8000`.
+
+Earlier attempts were blocked by Chrome GUI availability and an absent
+institutional session. Following the user's environment recovery and manual
+login, A7 rebuilt the corrected current source into the fresh external artifact
+`/private/tmp/lm-a7-retest-hjcwgyga/output`. It was loaded and enabled as the
+independent `Literature Monitor Connector` extension alongside the official
+Zotero Connector in the existing normal, non-incognito Chrome profile. The
+bridge reported `connected`, version `4.999.0` and `zotero_reachable=true`.
+Before capture, the direct IEEE page visibly displayed
+`Access provided by: Xiamen University`. No credentials, cookies, SSO or CAPTCHA
+were read or automated.
+
+One Web UI **Save to Zotero** click, with no Connector toolbar click, started
+the capture after authoritative `NOT_FOUND` preflight. The Connector claimed
+the command and opened a fresh normal task tab using the server-built
+`https://doi.org/10.1109/tit.2026.3702696` target. It redirected to
+`ieeexplore.ieee.org/document/11558502` and inherited the existing institutional
+session. The upstream translator/save path produced `CONFIRMED`; Web completion
+polling performed final exact-DOI reconciliation. The temporary Paper became
+`in_zotero` with key `M5ZJP5CE`. An independent authoritative My Library lookup
+verified the unique parent `M5ZJP5CE`; the Connector's returned item key was not
+identity authority. Both required toolbar-free and institutional-session live
+cases **PASS**. The original Paper remains `kept` and the new Zotero item is
+retained.
+
+Read-only attachment observation found an imported PDF child `4GLWIULE`
+(`application/pdf`, `Full Text PDF`) and no Snapshot. Attachment readiness was
+not awaited and did not gate bibliographic parent success.
+
+The optional pre-existing-parent live case was prepared in a separate external
+workspace but not executed: subsequent native Chrome navigation returned
+`windowNotFoundAtPosition` and intermittent empty accessibility state. Existing
+deterministic short-circuit regressions passed; this optional live case remains
+**NOT VERIFIED**. The validation Web processes were stopped and the personal
+`monitor.yaml` Web service was restored on port 8000 under the user's explicit
+authorization.
+
+The 17 applicable upstream ItemSaver tests remain **NOT VERIFIED**: the
+Puppeteer global setup failed before test bodies ran because its required Chrome
+`150.0.7871.24` was not installed. The harness and browser environment were not
+changed to bypass that limitation.
+
+Wheel/sdist builds and content inspection confirmed version `0.6.0`, MIT Python
+metadata, current README metadata and exclusion of Connector source/artifacts.
+`uv lock --check` and `git diff --check` passed. The protected historical
+worktree was read-only throughout A7; no commit, push, tag, release preparation
+or version bump was performed.

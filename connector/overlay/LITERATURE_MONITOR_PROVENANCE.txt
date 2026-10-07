@@ -1,0 +1,18 @@
+Literature Monitor Connector
+
+Derived from zotero/zotero-connectors:
+https://github.com/zotero/zotero-connectors.git
+Pinned upstream revision:
+876e41ad15139077f2e07b2f71a0fa94742e0b4a
+
+Literature Monitor source delta:
+connector/patches/
+connector/overlay/
+
+License and upstream notices:
+COPYING
+
+This artifact preserves the A1 source/license/build boundary and includes
+the v0.6.1 A5 Literature Monitor automatic-capture delta: localhost bridge
+runtime, dedicated DOI task-tab orchestration, pinned upstream translator save
+integration, and attachment-independent top-level save observation.

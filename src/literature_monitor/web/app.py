@@ -13,9 +13,10 @@ from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from literature_monitor.application.decisions import (
@@ -52,6 +53,14 @@ from literature_monitor.identifiers import normalize_doi
 from literature_monitor.models import WorkflowStatus
 from literature_monitor.openalex import OpenAlexClient, OpenAlexError
 from literature_monitor.zotero_local import ZoteroLocalClient
+from literature_monitor.web.capture_coordinator import (
+    CONNECTOR_VERSION_MAX_LENGTH,
+    REQUEST_ID_MAX_LENGTH,
+    CaptureCoordinator,
+    CaptureOutcome,
+    CaptureStage,
+    CaptureSnapshot,
+)
 from literature_monitor.web.run_coordinator import (
     CoordinatorSnapshot,
     CoordinatorStatus,
@@ -68,6 +77,12 @@ from literature_monitor.web.settings_form import (
     settings_form_from_draft,
     settings_form_from_submission,
 )
+from literature_monitor.web.zotero_capture import (
+    CompletionProcessOutcome,
+    SaveToZoteroOutcome,
+    process_capture_completion,
+    start_save_to_zotero,
+)
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _PACKAGE_DIR / "templates"
@@ -81,6 +96,24 @@ _VIEW_STATUSES = {
 }
 
 templates = Jinja2Templates(directory=_TEMPLATES_DIR)
+
+
+class _ConnectorHeartbeatBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: str = Field(min_length=1, max_length=CONNECTOR_VERSION_MAX_LENGTH)
+    zotero_reachable: StrictBool
+
+
+class _ConnectorClaimBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class _ConnectorResultBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=REQUEST_ID_MAX_LENGTH)
+    outcome: CaptureOutcome
 
 
 def _utc_now() -> datetime:
@@ -147,7 +180,9 @@ def _workspace_context(
     selected_paper_id: UUID | None = None,
     decision_result: DecisionResult | None = None,
     decision_message: str | None = None,
+    decision_message_tone: str = "warning",
     navigation_position: str | None = None,
+    capture_snapshot: CaptureSnapshot | None = None,
 ) -> dict[str, object]:
     workspace, config_error = _workspace_state(config_path)
     selected_view, view_papers = _view_papers(workspace, view)
@@ -186,13 +221,76 @@ def _workspace_context(
         "selection_stepped": selection_stepped,
         "decision_result": decision_result,
         "decision_message": decision_message,
+        "decision_message_tone": decision_message_tone,
+        "capture_presentation": _capture_presentation(
+            capture_snapshot,
+            selected_paper.paper_id if selected_paper is not None else None,
+        ),
     }
 
 
-def _zotero_integration_state() -> dict[str, object]:
+def _capture_presentation(
+    snapshot: CaptureSnapshot | None,
+    selected_paper_id: UUID | None,
+) -> dict[str, object] | None:
+    if snapshot is None or snapshot.attempt is None:
+        return None
+    attempt = snapshot.attempt
+    if snapshot.completion_pending:
+        return {
+            "message": "Finishing Zotero reconciliation…",
+            "poll": True,
+            "tone": "warning",
+        }
+    if attempt.stage in {
+        CaptureStage.WAITING_FOR_CONNECTOR,
+        CaptureStage.CONNECTOR_ACTIVE,
+    }:
+        return {
+            "message": (
+                "Saving to Zotero…"
+                if selected_paper_id == attempt.paper_id
+                else "An automatic Zotero save is in progress."
+            ),
+            "poll": True,
+            "tone": "warning",
+        }
+    if (
+        attempt.stage is CaptureStage.FINISHED
+        and attempt.terminal_outcome is CaptureOutcome.FAILED
+    ):
+        return {
+            "message": (
+                "Automatic Zotero save failed. "
+                "Use Open DOI or Check Zotero to recover."
+            ),
+            "poll": False,
+            "tone": "warning",
+        }
+    if (
+        attempt.stage is CaptureStage.FINISHED
+        and attempt.terminal_outcome is None
+    ):
+        return {
+            "message": (
+                "The Literature Monitor Connector did not claim the automatic "
+                "save. Use Open DOI or Check Zotero to recover."
+            ),
+            "poll": False,
+            "tone": "warning",
+        }
+    return None
+
+
+def _zotero_integration_state(
+    capture_snapshot: CaptureSnapshot,
+) -> dict[str, object]:
     with ZoteroLocalClient() as local:
         instance = local.current_instance()
-    return {"zotero_instance": instance}
+    return {
+        "zotero_instance": instance,
+        "connector_readiness": capture_snapshot.readiness.value,
+    }
 
 
 def _run_context(
@@ -208,6 +306,28 @@ def _run_context(
         "run_snapshot": snapshot,
         "run_progress": build_run_presentation(snapshot, now=_utc_now()),
         "run_start_result": start_result,
+    }
+
+
+def _capture_api_state(snapshot: CaptureSnapshot) -> dict[str, object]:
+    attempt = snapshot.attempt
+    return {
+        "readiness": snapshot.readiness.value,
+        "connector_version": snapshot.connector_version,
+        "zotero_reachable": snapshot.zotero_reachable,
+        "capture": (
+            None
+            if attempt is None
+            else {
+                "stage": attempt.stage.value,
+                "terminal_outcome": (
+                    attempt.terminal_outcome.value
+                    if attempt.terminal_outcome is not None
+                    else None
+                ),
+                "completion_pending": snapshot.completion_pending,
+            }
+        ),
     }
 
 
@@ -254,12 +374,56 @@ def create_app(config_path: Path) -> FastAPI:
     app.state.config_path = resolved_config_path
     app.state.csrf_token = csrf_token
     app.state.run_coordinator = RunCoordinator(resolved_config_path)
+    app.state.capture_coordinator = CaptureCoordinator()
 
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=_ALLOWED_HOSTS,
     )
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+
+    @app.post("/api/connector/heartbeat")
+    def connector_heartbeat(body: _ConnectorHeartbeatBody) -> JSONResponse:
+        try:
+            readiness = app.state.capture_coordinator.heartbeat(
+                connector_version=body.version,
+                zotero_reachable=body.zotero_reachable,
+            )
+        except ValueError:
+            return JSONResponse({"accepted": False}, status_code=422)
+        return JSONResponse({"readiness": readiness.value})
+
+    @app.post("/api/connector/claim")
+    def connector_claim(body: _ConnectorClaimBody) -> JSONResponse:
+        command = app.state.capture_coordinator.claim_command()
+        return JSONResponse(
+            {
+                "command": (
+                    None
+                    if command is None
+                    else {
+                        "request_id": command.request_id,
+                        "doi_url": command.doi_url,
+                    }
+                )
+            }
+        )
+
+    @app.post("/api/connector/result")
+    def connector_result(body: _ConnectorResultBody) -> JSONResponse:
+        accepted = app.state.capture_coordinator.submit_result(
+            body.request_id,
+            body.outcome,
+        )
+        return JSONResponse(
+            {"accepted": accepted},
+            status_code=200 if accepted else 409,
+        )
+
+    @app.get("/api/connector/state")
+    def connector_state() -> JSONResponse:
+        snapshot = app.state.capture_coordinator.snapshot()
+        return JSONResponse(_capture_api_state(snapshot))
 
     @app.get("/", response_class=HTMLResponse)
     def workspace_page(
@@ -273,6 +437,7 @@ def create_app(config_path: Path) -> FastAPI:
             csrf_token=csrf_token,
             view=view,
             selected_paper_id=paper,
+            capture_snapshot=app.state.capture_coordinator.snapshot(),
         )
         return templates.TemplateResponse(request, "workspace.html", context)
 
@@ -293,6 +458,9 @@ def create_app(config_path: Path) -> FastAPI:
         )
         context.update(_workspace_health_context(resolved_config_path))
         context["run_snapshot"] = app.state.run_coordinator.snapshot()
+        context["connector_readiness"] = (
+            app.state.capture_coordinator.snapshot().readiness.value
+        )
         return templates.TemplateResponse(
             request,
             "settings.html",
@@ -301,7 +469,12 @@ def create_app(config_path: Path) -> FastAPI:
 
     @app.get("/settings/zotero", response_class=HTMLResponse)
     def zotero_integration_status(request: Request) -> HTMLResponse:
-        context = {"request": request, **_zotero_integration_state()}
+        context = {
+            "request": request,
+            **_zotero_integration_state(
+                app.state.capture_coordinator.snapshot(),
+            ),
+        }
         return templates.TemplateResponse(request, "fragments/zotero_integration.html", context)
 
     @app.get("/settings/publisher-access", response_class=HTMLResponse)
@@ -579,6 +752,7 @@ def create_app(config_path: Path) -> FastAPI:
             csrf_token=csrf_token,
             view=view,
             selected_paper_id=paper,
+            capture_snapshot=app.state.capture_coordinator.snapshot(),
         )
         return templates.TemplateResponse(
             request,
@@ -596,6 +770,7 @@ def create_app(config_path: Path) -> FastAPI:
             config_path=resolved_config_path,
             csrf_token=csrf_token,
             view=view,
+            capture_snapshot=app.state.capture_coordinator.snapshot(),
         )
         return templates.TemplateResponse(
             request,
@@ -615,6 +790,7 @@ def create_app(config_path: Path) -> FastAPI:
             csrf_token=csrf_token,
             view=view,
             selected_paper_id=paper_id,
+            capture_snapshot=app.state.capture_coordinator.snapshot(),
         )
         if context["selected_paper"] is None:
             context["detail_message"] = "Paper not found in the current view."
@@ -632,20 +808,22 @@ def create_app(config_path: Path) -> FastAPI:
             _workspace_health_context(resolved_config_path),
         )
 
-    def apply_decision(
+    def prepare_paper_mutation(
         request: Request,
         *,
         paper_id: UUID,
         expected_status_value: str | None,
         submitted_csrf: str | None,
         view: str,
-        navigation_position: str | None,
-        action: Callable[[Path, UUID, WorkflowStatus], DecisionResult],
-    ) -> HTMLResponse:
+    ) -> tuple[Path | None, WorkflowStatus | None, HTMLResponse | None]:
         if not _csrf_valid(submitted_csrf, csrf_token):
-            return HTMLResponse(
-                "<p class=\"notice error\">Invalid or missing CSRF token.</p>",
-                status_code=403,
+            return (
+                None,
+                None,
+                HTMLResponse(
+                    '<p class="notice error">Invalid or missing CSRF token.</p>',
+                    status_code=403,
+                ),
             )
 
         output_dir, config_error = _resolve_output_dir(resolved_config_path)
@@ -656,12 +834,19 @@ def create_app(config_path: Path) -> FastAPI:
                 csrf_token=csrf_token,
                 view=view,
                 selected_paper_id=paper_id,
-                decision_message="Configuration needs attention before decisions can be saved.",
+                decision_message=(
+                    "Configuration needs attention before decisions can be saved."
+                ),
+                capture_snapshot=app.state.capture_coordinator.snapshot(),
             )
-            return templates.TemplateResponse(
-                request,
-                "fragments/workspace.html",
-                context,
+            return (
+                None,
+                None,
+                templates.TemplateResponse(
+                    request,
+                    "fragments/workspace.html",
+                    context,
+                ),
             )
 
         try:
@@ -674,13 +859,41 @@ def create_app(config_path: Path) -> FastAPI:
                 view=view,
                 selected_paper_id=paper_id,
                 decision_message="The submitted expected Paper status is invalid.",
+                capture_snapshot=app.state.capture_coordinator.snapshot(),
             )
-            return templates.TemplateResponse(
-                request,
-                "fragments/workspace.html",
-                context,
-                status_code=400,
+            return (
+                None,
+                None,
+                templates.TemplateResponse(
+                    request,
+                    "fragments/workspace.html",
+                    context,
+                    status_code=400,
+                ),
             )
+        return output_dir, expected_status, None
+
+    def apply_decision(
+        request: Request,
+        *,
+        paper_id: UUID,
+        expected_status_value: str | None,
+        submitted_csrf: str | None,
+        view: str,
+        navigation_position: str | None,
+        action: Callable[[Path, UUID, WorkflowStatus], DecisionResult],
+    ) -> HTMLResponse:
+        output_dir, expected_status, failure = prepare_paper_mutation(
+            request,
+            paper_id=paper_id,
+            expected_status_value=expected_status_value,
+            submitted_csrf=submitted_csrf,
+            view=view,
+        )
+        if failure is not None:
+            return failure
+        assert output_dir is not None
+        assert expected_status is not None
 
         result = action(output_dir, paper_id, expected_status)
         context = _workspace_context(
@@ -691,6 +904,198 @@ def create_app(config_path: Path) -> FastAPI:
             selected_paper_id=paper_id,
             decision_result=result,
             navigation_position=navigation_position,
+            capture_snapshot=app.state.capture_coordinator.snapshot(),
+        )
+        return templates.TemplateResponse(
+            request,
+            "fragments/workspace.html",
+            context,
+        )
+
+    def render_capture_status(
+        request: Request,
+        *,
+        snapshot: CaptureSnapshot,
+        view: str,
+        selected_paper_id: UUID | None,
+        navigation_position: str | None,
+    ) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "fragments/capture_status.html",
+            {
+                "request": request,
+                "csrf_token": csrf_token,
+                "capture_presentation": _capture_presentation(
+                    snapshot,
+                    selected_paper_id,
+                ),
+                "active_view": view if view in _VIEW_STATUSES else "inbox",
+                "selected_paper_id": selected_paper_id,
+                "selected_position": navigation_position,
+            },
+        )
+
+    @app.post("/capture/poll", response_class=HTMLResponse)
+    def capture_poll(
+        request: Request,
+        csrf_token_value: Annotated[str | None, Form(alias="csrf_token")] = None,
+        view: Annotated[str, Form()] = "kept",
+        position: Annotated[str | None, Form()] = None,
+        paper: Annotated[UUID | None, Form()] = None,
+    ) -> HTMLResponse:
+        if not _csrf_valid(csrf_token_value, csrf_token):
+            return HTMLResponse(
+                '<p class="notice error">Invalid or missing CSRF token.</p>',
+                status_code=403,
+            )
+
+        snapshot = app.state.capture_coordinator.snapshot()
+        if not snapshot.completion_pending:
+            return render_capture_status(
+                request,
+                snapshot=snapshot,
+                view=view,
+                selected_paper_id=paper,
+                navigation_position=position,
+            )
+
+        completion_result = process_capture_completion(
+            app.state.capture_coordinator,
+        )
+        if completion_result.outcome is CompletionProcessOutcome.NO_COMPLETION:
+            return render_capture_status(
+                request,
+                snapshot=app.state.capture_coordinator.snapshot(),
+                view=view,
+                selected_paper_id=paper,
+                navigation_position=position,
+            )
+
+        completion = completion_result.completion
+        reconciliation = completion_result.reconciliation
+        assert completion is not None
+        assert reconciliation is not None
+
+        selected_paper_id = paper
+        decision_result: DecisionResult | None = reconciliation
+        decision_message: str | None = None
+        decision_message_tone = "warning"
+        navigation_position = None
+        if completion_result.outcome is CompletionProcessOutcome.RECONCILED:
+            current_output_dir, config_error = _resolve_output_dir(
+                resolved_config_path,
+            )
+            current_workspace_is_origin = (
+                config_error is None
+                and current_output_dir is not None
+                and Path(
+                    os.path.abspath(os.fspath(current_output_dir)),
+                )
+                == completion.capture_guard.output_dir
+            )
+            if (
+                current_workspace_is_origin
+                and view == "kept"
+                and paper == completion.paper_id
+            ):
+                selected_paper_id = completion.paper_id
+                navigation_position = position
+            else:
+                # A completion can finish while the user is viewing another
+                # Paper/workspace; browser hints stay presentation-only.
+                decision_result = None
+                decision_message = reconciliation.message
+                decision_message_tone = "success"
+
+        context = _workspace_context(
+            request=request,
+            config_path=resolved_config_path,
+            csrf_token=csrf_token,
+            view=view,
+            selected_paper_id=selected_paper_id,
+            decision_result=decision_result,
+            decision_message=decision_message,
+            decision_message_tone=decision_message_tone,
+            navigation_position=navigation_position,
+            capture_snapshot=app.state.capture_coordinator.snapshot(),
+        )
+        response = templates.TemplateResponse(
+            request,
+            "fragments/workspace.html",
+            context,
+        )
+        response.headers["HX-Retarget"] = "#workspace-root"
+        response.headers["HX-Reswap"] = "outerHTML"
+        return response
+
+    @app.post("/papers/{paper_id}/save-to-zotero", response_class=HTMLResponse)
+    def save_to_zotero_route(
+        request: Request,
+        paper_id: UUID,
+        expected_status: Annotated[str | None, Form()] = None,
+        csrf_token_value: Annotated[str | None, Form(alias="csrf_token")] = None,
+        view: Annotated[str, Form()] = "kept",
+        position: Annotated[str | None, Form()] = None,
+    ) -> HTMLResponse:
+        output_dir, parsed_status, failure = prepare_paper_mutation(
+            request,
+            paper_id=paper_id,
+            expected_status_value=expected_status,
+            submitted_csrf=csrf_token_value,
+            view=view,
+        )
+        if failure is not None:
+            return failure
+        assert output_dir is not None
+        assert parsed_status is not None
+
+        result = start_save_to_zotero(
+            output_dir,
+            paper_id,
+            parsed_status,
+            app.state.capture_coordinator,
+        )
+        decision_result: DecisionResult | None = None
+        decision_message: str | None = None
+        decision_message_tone = "warning"
+        if result.outcome is SaveToZoteroOutcome.RECONCILED:
+            decision_result = result.preflight
+        elif result.outcome is SaveToZoteroOutcome.CONNECTOR_UNAVAILABLE:
+            decision_message = (
+                "Automatic Zotero capture is unavailable because the "
+                "Literature Monitor Connector is not connected. "
+                "Use Open DOI or Check Zotero to recover."
+            )
+        elif result.outcome is SaveToZoteroOutcome.CAPTURE_BUSY:
+            decision_message = (
+                "Another automatic Zotero save is in progress. "
+                "No second capture was started."
+            )
+        elif result.outcome is SaveToZoteroOutcome.COMPLETION_PENDING:
+            decision_message = (
+                "A previous automatic Zotero save is ready to finish. "
+                "No second capture was started."
+            )
+        elif result.outcome is SaveToZoteroOutcome.PRECHECK_FAILED:
+            decision_result = result.preflight
+        elif result.outcome is SaveToZoteroOutcome.CAPTURE_INVALID_DOI:
+            decision_message = (
+                "Automatic Zotero capture could not start because the "
+                "authoritative DOI was invalid."
+            )
+
+        context = _workspace_context(
+            request=request,
+            config_path=resolved_config_path,
+            csrf_token=csrf_token,
+            view=view,
+            selected_paper_id=paper_id,
+            decision_result=decision_result,
+            decision_message=decision_message,
+            decision_message_tone=decision_message_tone,
+            navigation_position=position,
+            capture_snapshot=app.state.capture_coordinator.snapshot(),
         )
         return templates.TemplateResponse(
             request,

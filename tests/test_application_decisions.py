@@ -274,12 +274,24 @@ def test_only_three_public_decision_actions_exist() -> None:
         "reconcile_paper_with_zotero",
     }
     assert not hasattr(decisions, "set_status")
-    for action_name in public_functions:
+    for action_name in ("keep_paper", "reject_paper"):
         assert tuple(inspect.signature(getattr(decisions, action_name)).parameters) == (
             "output_dir",
             "paper_id",
             "expected_status",
         )
+    reconcile_signature = inspect.signature(reconcile_paper_with_zotero)
+    assert tuple(reconcile_signature.parameters) == (
+        "output_dir",
+        "paper_id",
+        "expected_status",
+        "expected_doi",
+        "capture_guard",
+    )
+    assert reconcile_signature.parameters["expected_doi"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert reconcile_signature.parameters["expected_doi"].default is None
+    assert reconcile_signature.parameters["capture_guard"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert reconcile_signature.parameters["capture_guard"].default is None
 
 
 @pytest.mark.parametrize("action,status", [
@@ -963,6 +975,126 @@ def test_reconcile_invalid_doi_fails_before_zotero(tmp_path, doi):
     result = reconcile_paper_with_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
 
     assert result.outcome is DecisionOutcome.INVALID_PAPER and path.read_bytes() == before
+
+
+def test_reconcile_not_found_exposes_exact_normalized_doi_checked(
+    tmp_path,
+    zotero_reads,
+):
+    paper_id = UUID("30303030-3030-4030-8030-303030303030")
+    path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
+    values, _ = document_parts(path)
+    normalized_source = " HTTPS://DOI.ORG/10.5555/DECISION "
+    replace_frontmatter(
+        path,
+        doi=normalized_source,
+        external_ids={**values["external_ids"], "doi": normalized_source},
+    )
+    zotero_reads(library_page())
+
+    result = reconcile_paper_with_zotero(
+        tmp_path,
+        paper_id,
+        WorkflowStatus.KEPT,
+    )
+
+    assert result.outcome is DecisionOutcome.ZOTERO_NOT_FOUND
+    assert result.reconciled_doi == "10.5555/decision"
+    assert document_parts(path)[0]["status"] == "kept"
+
+
+def test_reconcile_not_found_revalidates_doi_before_authorizing_capture(
+    tmp_path,
+    monkeypatch,
+    zotero_reads,
+):
+    paper_id = UUID("31313131-3131-4131-8131-313131313131")
+    path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
+    zotero_reads(library_page())
+    resolve = ZoteroLocalClient.resolve_identity
+
+    def change_doi_during_preflight(client, doi, zotero_key=None):
+        result = resolve(client, doi, zotero_key)
+        values, _ = document_parts(path)
+        replacement = "10.5555/changed"
+        replace_frontmatter(
+            path,
+            doi=replacement,
+            external_ids={**values["external_ids"], "doi": replacement},
+        )
+        return result
+
+    monkeypatch.setattr(
+        ZoteroLocalClient,
+        "resolve_identity",
+        change_doi_during_preflight,
+    )
+
+    result = reconcile_paper_with_zotero(
+        tmp_path,
+        paper_id,
+        WorkflowStatus.KEPT,
+    )
+
+    assert result.outcome is DecisionOutcome.STATE_CONFLICT
+    assert result.reconciled_doi is None
+    assert "DOI changed during Zotero preflight" in result.message
+    assert document_parts(path)[0]["status"] == "kept"
+
+
+def test_reconcile_not_found_allows_unrelated_note_change_during_preflight(
+    tmp_path,
+    monkeypatch,
+    zotero_reads,
+):
+    paper_id = UUID("32323232-3232-4232-8232-323232323232")
+    path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
+    zotero_reads(library_page())
+    resolve = ZoteroLocalClient.resolve_identity
+
+    def add_note_during_preflight(client, doi, zotero_key=None):
+        result = resolve(client, doi, zotero_key)
+        path.write_text(
+            path.read_text(encoding="utf-8") + "\nHuman note added during preflight.\n",
+            encoding="utf-8",
+        )
+        return result
+
+    monkeypatch.setattr(
+        ZoteroLocalClient,
+        "resolve_identity",
+        add_note_during_preflight,
+    )
+
+    result = reconcile_paper_with_zotero(
+        tmp_path,
+        paper_id,
+        WorkflowStatus.KEPT,
+    )
+
+    assert result.outcome is DecisionOutcome.ZOTERO_NOT_FOUND
+    assert result.reconciled_doi == "10.5555/decision"
+    assert "Human note added during preflight." in path.read_text(encoding="utf-8")
+
+
+def test_reconcile_expected_doi_guard_blocks_stale_completion_before_zotero(
+    tmp_path,
+):
+    paper_id = UUID("33333333-3333-4333-8333-303030303030")
+    path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
+    before = path.read_bytes()
+
+    result = reconcile_paper_with_zotero(
+        tmp_path,
+        paper_id,
+        WorkflowStatus.KEPT,
+        expected_doi="10.5555/other",
+    )
+
+    assert result.outcome is DecisionOutcome.STATE_CONFLICT
+    assert result.reconciled_doi is None
+    assert "DOI changed after automatic capture started" in result.message
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize("key", ["", " ", "short", "parent01", " PARENT01 ", 123, {"key": "PARENT01"}])

@@ -507,6 +507,7 @@ def test_open_doi_and_check_zotero_are_server_normalized_kept_only_presentation(
             super().__init__()
             self.open_links = []
             self.check_forms = []
+            self.save_forms = []
 
         def handle_starttag(self, tag, attrs):
             attrs = dict(attrs)
@@ -514,6 +515,8 @@ def test_open_doi_and_check_zotero_are_server_normalized_kept_only_presentation(
                 self.open_links.append(attrs)
             if tag == "form" and "data-check-zotero-form" in attrs:
                 self.check_forms.append(attrs)
+            if tag == "form" and "data-save-zotero-form" in attrs:
+                self.save_forms.append(attrs)
 
     with TestClient(create_app(tmp_path / "monitor.yaml"), base_url="http://localhost") as client:
         responses = (
@@ -527,10 +530,30 @@ def test_open_doi_and_check_zotero_are_server_normalized_kept_only_presentation(
         assert "Copy DOI" not in response.text
         assert "Mark in Zotero" not in response.text
         if expected_url is None:
-            assert not parser.open_links and not parser.check_forms
+            assert (
+                not parser.open_links
+                and not parser.check_forms
+                and not parser.save_forms
+            )
+            assert "Save to Zotero" not in response.text
             assert "Open DOI" not in response.text and "Check Zotero" not in response.text
         else:
-            assert len(parser.open_links) == 1 and len(parser.check_forms) == 1
+            assert (
+                len(parser.open_links) == 1
+                and len(parser.check_forms) == 1
+                and len(parser.save_forms) == 1
+            )
+            assert response.text.index("Save to Zotero") < response.text.index("Open DOI")
+            assert response.text.index("Open DOI") < response.text.index("Check Zotero")
+            assert '<button type="submit">Save to Zotero</button>' in response.text
+            assert '<a class="button secondary"' in response.text
+            assert '<button type="submit" class="secondary">Check Zotero</button>' in response.text
+            save_form = parser.save_forms[0]
+            assert save_form["action"] == save_form["hx-post"] == (
+                f"/papers/{paper.paper_id}/save-to-zotero"
+            )
+            assert save_form["hx-target"] == "#workspace-root"
+            assert save_form["hx-swap"] == "outerHTML"
             link = parser.open_links[0]
             assert link["href"] == expected_url
             assert link["target"] == "_blank"
@@ -544,6 +567,10 @@ def test_open_doi_and_check_zotero_are_server_normalized_kept_only_presentation(
             assert form["hx-target"] == "#workspace-root" and form["hx-swap"] == "outerHTML"
             assert 'name="expected_status" value="kept"' in response.text
             assert 'name="csrf_token"' in response.text
+            assert 'name="doi"' not in response.text
+            assert 'name="output_dir"' not in response.text
+            assert 'name="request_id"' not in response.text
+            assert 'name="outcome"' not in response.text
             assert "<script>bad</script>" not in response.text
         assert "Add PDF to Zotero" not in response.text
         assert "HX-Trigger" not in response.headers

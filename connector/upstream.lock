@@ -1,0 +1,8 @@
+# Literature Monitor Connector upstream source lock.
+# Format: <kind> <path-or-repository> <40-hex Git revision>
+upstream https://github.com/zotero/zotero-connectors.git 876e41ad15139077f2e07b2f71a0fa94742e0b4a
+submodule src/translate 485ac36edbd66459e2aa3bad4d4b36921be2c7c2
+submodule src/utilities cccf1235a318c259345fc623d5e9d6770ba19df7
+submodule src/zotero 01ebeb183439bbd79797bbcd4a41e99aad099ab8
+submodule src/zotero-google-docs-integration a46413151134ad699c351ac42ecbbe9c76c8e6cc
+submodule src/zotero-schema b5b3f51217a99b3c41585d468ee1dc0837233d13

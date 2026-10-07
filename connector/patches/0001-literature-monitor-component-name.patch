@@ -1,0 +1,10 @@
+diff --git a/src/browserExt/manifest-v3.json b/src/browserExt/manifest-v3.json
+--- a/src/browserExt/manifest-v3.json
++++ b/src/browserExt/manifest-v3.json
+@@ -1,5 +1,5 @@
+ {
+-	"name": "Zotero Connector",
++	"name": "Literature Monitor Connector",
+ 	"manifest_version": 3,
+ 	"version": "AUTOFILLED",
+ 	"description": "__MSG_extension_description__",

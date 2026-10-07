@@ -10,8 +10,11 @@
       {{ decision_result.message }}
     </div>
   {% elif decision_message %}
-    <div class="notice warning">{{ decision_message }}</div>
+    <div class="notice {{ decision_message_tone }}">{{ decision_message }}</div>
   {% endif %}
+
+  {% set selected_paper_id = selected_paper.paper_id if selected_paper else none %}
+  {% include "fragments/capture_status.html" %}
 
   {% if config_error %}
     <div class="notice warning">

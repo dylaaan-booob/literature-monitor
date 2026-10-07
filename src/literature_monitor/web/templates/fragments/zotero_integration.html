@@ -1,5 +1,6 @@
 <section id="zotero-integration" class="panel"{% if zotero_instance is not defined %} hx-get="/settings/zotero" hx-trigger="load" hx-swap="outerHTML"{% endif %}>
   <h2>Zotero integration</h2>
+  <p>Literature Monitor Connector: <strong>{{ connector_readiness | default("unavailable") }}</strong></p>
   {% if zotero_instance is not defined %}
     <p>Checking Zotero Desktop Local API…</p>
   {% elif not zotero_instance.server_id %}

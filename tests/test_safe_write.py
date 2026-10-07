@@ -297,3 +297,23 @@ def test_identity_bound_replace_failure_preserves_original_and_cleans_temp(tmp_p
     with pytest.raises(OSError):
         safe_write_module.replace_regular_text_at_identity(path,'updated',expected_contents='original',**location)
     assert path.read_bytes()==b'original' and list(tmp_path.iterdir())==[path]
+
+
+def test_identity_bound_replace_can_bind_parent_directory_to_workspace_identity(tmp_path):
+    workspace=tmp_path/'workspace';directory=workspace/'Papers';directory.mkdir(parents=True)
+    path=directory/'state.txt';path.write_bytes(b'original')
+    location=original_location(path);workspace_stat=workspace.stat()
+    preserved=tmp_path/'workspace-preserved';workspace.rename(preserved);workspace.mkdir()
+    (preserved/'Papers').rename(workspace/'Papers')
+    current=workspace/'Papers'/'state.txt'
+
+    with pytest.raises(ContentChangedError):
+        safe_write_module.replace_regular_text_at_identity(
+            current,
+            'updated',
+            expected_contents='original',
+            expected_workspace_identity=(workspace_stat.st_dev,workspace_stat.st_ino),
+            **location,
+        )
+
+    assert current.read_bytes()==b'original'

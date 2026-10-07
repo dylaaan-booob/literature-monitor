@@ -41,6 +41,23 @@ This post-release documentation closeout is a separate later change outside the
 permanent `v0.6.0` tag target. SPEC §39 remains the current v0.6.0 product
 contract, while §§35–38 remain immutable historical release records.
 
+For unreleased v0.6.1 development, `connector/` is a separate **Literature
+Monitor Connector** source/build component derived from a pinned
+`zotero/zotero-connectors` revision. Its upstream-derived source and
+Literature Monitor delta follow the AGPLv3 license/provenance boundary recorded
+in `connector/COPYING` and `connector/PROVENANCE.md`; they are not covered by
+the root MIT license for the Python application and are excluded from the
+Python wheel/sdist and runtime import graph. The automatic capture runtime,
+localhost bridge and exact-DOI reconciliation workflow are implemented under
+SPEC §40. A7 rebuilt the current Chrome/MV3 component and exercised deterministic
+completion/no-retry regressions. Real normal-Chrome toolbar-free automatic
+saving passed for an IEEE DOI using the user's existing Xiamen University
+session. Final authoritative My Library exact-DOI reconciliation verified the
+unique bibliographic parent and updated the external validation Paper to
+`in_zotero`. A PDF attachment was observed independently of parent acceptance.
+See SPEC §40.14 for the validation evidence.
+v0.6.1 remains unreleased; v0.6.0 is the latest released/completed baseline.
+
 **v0.5.3 is a historical released baseline.** Its released Python package and
 OpenAlex/Crossref Provider identities are **0.5.3**, and its Browser Companion
 v2/custom browser-PDF acquisition workflow remains historical release evidence

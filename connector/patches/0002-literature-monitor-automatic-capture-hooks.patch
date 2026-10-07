@@ -1,0 +1,227 @@
+diff --git a/src/browserExt/background-worker.js b/src/browserExt/background-worker.js
+index 8af4320..05761f5 100644
+--- a/src/browserExt/background-worker.js
++++ b/src/browserExt/background-worker.js
+@@ -22,21 +22,22 @@
+ 	
+ 	***** END LICENSE BLOCK *****
+ */
+ 
+ // This is the Chrome MV3 background worker entrypoint script
+ 
+ // No way to inspect service-worker startup issues
+ // See https://groups.google.com/a/chromium.org/g/chromium-extensions/c/lLb3EJzjw0o
+ try {
+ 	var scriptsToImport = [
+ 		/*BACKGROUND SCRIPTS*/,
+ 		"keep-mv3-alive.js",
+-		"background.js"
++		"background.js",
++		"literature-monitor-runtime.js"
+ 	];
+ 
+ 	for (let script of scriptsToImport) {
+ 		self.importScripts('./'+script);
+ 	}
+ } catch (e) {
+ 	console.error(e);
+ }
+diff --git a/src/common/inject/pageSaving.js b/src/common/inject/pageSaving.js
+index 9e7105a..a023024 100644
+--- a/src/common/inject/pageSaving.js
++++ b/src/common/inject/pageSaving.js
+@@ -284,25 +284,34 @@ let PageSaving = {
+ 				Zotero.debug(`Saving with ${translators[0].label} failed. Falling back to saving as webpage`);
+ 				return this.saveAsWebpage({ snapshot: true });
+ 			}
+ 			throw e;
+ 		}
+ 		if (Zotero.isManifestV3) {
+ 			proxy = await translate.getProxy();
+ 			if (proxy) proxy = new Zotero.Proxy(proxy);
+ 		}
+ 		items = this._processNote(items);
+ 		this.sessionDetails.items = items;
+ 		let itemType = translators[0].itemType;
+-		let itemSaver = new Zotero.ItemSaver({ sessionID, itemType, baseURI: document.location.href, proxy });
++		let itemSaver = new Zotero.ItemSaver({
++			sessionID,
++			itemType,
++			baseURI: document.location.href,
++			proxy,
++			literatureMonitorAutomatic: !!(
++				this.sessionDetails.saveOptions
++				&& this.sessionDetails.saveOptions.literatureMonitorAutomatic
++			)
++		});
+ 		this.sessionDetails.itemSaver = itemSaver;
+ 		return itemSaver.saveItems(items, PageSaving._onAttachmentProgress, onItemsSaved)
+ 	},
+ 
+ 	/**
+ 	 * Saves the website without a translator which creates a webpage item in Zotero
+ 	 * and optionally attaches the snapshot using SingleFile
+ 	 * @param sessionID
+ 	 * @param title
+ 	 * @param saveSnapshot
+ 	 * @returns {Promise<*>}
+ 	 */
+@@ -516,25 +525,32 @@ let PageSaving = {
+ 			}
+ 			throw e;
+ 		}
+ 	},
+ 
+ 	/**
+ 	 * Entry point for translation initiated by clicking on the Zotero button or via the
+ 	 * browser extension context menu by selecting a specific translator or saving
+ 	 * with selection as a note.
+ 	 */
+ 	async onTranslate(translatorID, options={}) {
+ 		let result = await Zotero.Inject.checkActionToServer();
+-		if (!result) return;
++		if (!result) {
++			if (options.literatureMonitorAutomatic) {
++				void browser.runtime.sendMessage({
++					type: "literature-monitor-save-failed"
++				}).catch(() => {});
++			}
++			return;
++		}
+ 		let translatorIndex = this.translators.findIndex(t => t.translatorID === translatorID);
+ 		let translator = this.translators[translatorIndex];
+ 		Zotero.debug(`PageSaving.onTranslate: Translating with ${translator.label}, ${JSON.stringify(options)}`);
+ 		
+ 		// Always resave if a different translator/mode
+ 		if (this.sessionDetails.translatorID && translatorID != this.sessionDetails.translatorID) {
+ 			options.resave = true;
+ 		}
+ 		
+ 		// In some cases, we just reopen the popup instead of saving again
+ 		if (this._shouldReopenProgressWindow(translatorID, options, translator.itemType)) {
+ 			Zotero.debug(`PageSaving.onTranslate: Reopening popup`);
+@@ -574,24 +590,31 @@ let PageSaving = {
+ 		
+ 		try {
+ 			let translators = this.translators.slice(translatorIndex);
+ 			// If no fallback on failure, only provide the selected translator
+ 			if (!options.fallbackOnFailure) {
+ 				translators = translators.slice(0, 1)
+ 			}
+ 			let items = await this.translateAndSave(translators, options.fallbackOnFailure);
+ 			Zotero.Messaging.sendMessage("progressWindow.done", [true]);
+ 			return items;
+ 		} catch (e) {
+ 			Zotero.logError(e);
++			if (options.literatureMonitorAutomatic
++					&& !(this.sessionDetails.itemSaver
++						&& this.sessionDetails.itemSaver._literatureMonitorParentSaveStarted)) {
++				void browser.runtime.sendMessage({
++					type: "literature-monitor-save-failed"
++				}).catch(() => {});
++			}
+ 			// Clear session details on failure, so another save click tries again
+ 			this._clearSession();
+ 			// We delay opening the progressWindow for multiple items so we don't have to flash it
+ 			// for the select dialog. But it comes back to bite us in the butt if a translation
+ 			// error occurs immediately since the below command will execute before the progressWindow show,
+ 			// and then the delayed progressWindow.show will pop up another empty progress window.
+ 			// Cannot have that!
+ 			await Zotero.Promise.delay(500);
+ 			const isAccessLimitingTranslator = SITE_ACCESS_LIMIT_TRANSLATORS.has(translator.translatorID);
+ 			const errorMessage = e.toString();
+ 			let statusCode = '';
+ 			try {
+diff --git a/src/common/itemSaver.js b/src/common/itemSaver.js
+index eea69ce..9cee25a 100644
+--- a/src/common/itemSaver.js
++++ b/src/common/itemSaver.js
+@@ -36,24 +36,27 @@ const PRIMARY_ATTACHMENT_TYPES = new Set([
+  *         <li>proxy - A proxy to deproxify item URLs</li>
+  *         <li>baseURI - URI to which attachment paths should be relative</li>
+  *         <li>sessionID - A sessionID for the save session to allow changes later</li>
+  */
+ let ItemSaver = function(options) {
+ 	this.newItems = [];
+ 	this._sessionID = options.sessionID;
+ 	this._proxy = options.proxy;
+ 	this._baseURI = options.baseURI;
+ 	this._itemType = options.itemType;
+ 	this._items = [];
+ 	this._singleFile = false;
++	this._literatureMonitorAutomatic = !!options.literatureMonitorAutomatic;
++	this._literatureMonitorParentSaveStarted = false;
++	this._literatureMonitorParentAccepted = false;
+ 	
+ 	// Add listener for callbacks, but only for Safari or the bookmarklet. In Chrome, we
+ 	// (have to) save attachments from the inject page.
+ 	if(Zotero.Messaging && !ItemSaver._attachmentCallbackListenerAdded
+ 			&& Zotero.isSafari) {
+ 		Zotero.Messaging.addMessageListener("attachmentCallback", function(data) {
+ 			var id = data[0],
+ 				status = data[1];
+ 			var callback = ItemSaver._attachmentCallbacks[id];
+ 			if(callback) {
+ 				if(status === false || status === 100) {
+ 					delete ItemSaver._attachmentCallbacks[id];
+@@ -88,24 +91,27 @@ ItemSaver.prototype = {
+ 	 * @param {Function} [attachmentCallback] A callback that receives information about attachment
+ 	 *     save progress. The callback will be called as attachmentCallback(attachment, false, error)
+ 	 *     on failure or attachmentCallback(attachment, progressPercent) periodically during saving.
+ 	 * @param {Function} [itemsDoneCallback] A callback that receives progress for top-item saving.
+ 	 */
+ 	saveItems: async function (items, attachmentCallback, itemsDoneCallback=()=>0) {
+ 		Zotero.debug(`ItemSaver.saveItems: Saving ${items.length} items`);
+ 		try {
+ 			return await this._saveToZotero(items, attachmentCallback, itemsDoneCallback);
+ 		}
+ 		catch (e) {
+ 			if (e.status == 0) {
++				if (this._literatureMonitorAutomatic) {
++					throw e;
++				}
+ 				return this._saveToServer(items, attachmentCallback, itemsDoneCallback);
+ 			}
+   			throw e;
+ 		}
+ 	},
+ 	
+ 	_saveToZotero: async function (items, attachmentCallback, itemsDoneCallback=()=>0) {
+ 		this._items = items;
+ 		var payload = {
+ 			sessionID: this._sessionID,
+ 			uri: this._baseURI,
+ 		};
+@@ -170,25 +176,32 @@ ItemSaver.prototype = {
+ 			});
+ 		}
+ 		
+ 		payload.items = Zotero.Utilities.deepCopy(items);
+ 
+ 		// Only pass attachments that are to be saved by linking
+ 		for (let item of payload.items) {
+ 			item.attachments = item.attachments.filter((attachment) => {
+ 				return attachment.snapshot === false
+ 			});
+ 		}
+ 		
++		this._literatureMonitorParentSaveStarted = true;
+ 		await Zotero.Connector.callMethod("saveItems", payload)
++		this._literatureMonitorParentAccepted = true;
++		if (this._literatureMonitorAutomatic) {
++			void browser.runtime.sendMessage({
++				type: "literature-monitor-parent-saved"
++			}).catch(() => {});
++		}
+ 		// Update UI for top-level items
+ 		itemsDoneCallback(items);
+ 
+ 		Zotero.debug("Translate: Save via Zotero succeeded");
+ 		Zotero.Messaging.sendMessage("progressWindow.sessionCreated", { sessionID: this._sessionID });
+ 		
+ 		const response = await Zotero.Connector.callMethod("getSelectedCollection", {})
+ 		if (response.filesEditable) {
+ 			await this.saveAttachmentsToZotero(attachmentCallback);
+ 		}
+ 
+ 		return items;
