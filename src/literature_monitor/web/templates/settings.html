@@ -2,6 +2,16 @@
 {% block title %}Settings · Literature Monitor{% endblock %}
 {% block content %}
   {% include "fragments/settings_editor.html" %}
+  <section id="publisher-access"
+           class="panel"
+           hx-get="/settings/publisher-access"
+           hx-trigger="load"
+           hx-target="this"
+           hx-swap="outerHTML"
+           hx-sync="this:replace">
+    <h2>Publisher access</h2>
+    <p class="muted">Loading saved Journal publisher and site links…</p>
+  </section>
   <details id="advanced-diagnostics" class="panel">
     <summary>Advanced &amp; Diagnostics</summary>
     {% include "fragments/zotero_integration.html" %}

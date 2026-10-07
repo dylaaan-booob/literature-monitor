@@ -98,6 +98,27 @@ def test_singleton_requests_each_issn_independently_and_uses_bearer_key() -> Non
         for request in transport.requests
     )
     assert all(request.extensions["timeout"]["read"] == 30 for request in transport.requests)
+    assert all(
+        parse_qs(urlparse(str(request.url)).query)["select"]
+        == [openalex_module.SOURCE_FIELDS]
+        for request in transport.requests
+    )
+
+
+def test_source_fields_add_only_publisher_access_presentation_metadata() -> None:
+    assert openalex_module.SOURCE_FIELDS.split(",") == [
+        "id",
+        "display_name",
+        "issn_l",
+        "issn",
+        "type",
+        "alternate_titles",
+        "abbreviated_title",
+        "host_organization",
+        "host_organization_name",
+        "homepage_url",
+    ]
+    assert "host_organization_lineage" not in openalex_module.SOURCE_FIELDS
 
 
 def test_one_resolved_and_one_missing_issn_resolves_with_warning() -> None:
@@ -239,6 +260,97 @@ def test_normalized_name_allows_leading_the_and_punctuation() -> None:
 
     assert source is not None
     assert not issues
+
+
+def test_source_publisher_metadata_is_projected_without_changing_identity() -> None:
+    payload = fixture("source_biometrics_publisher.json")
+    client, _ = make_client(payload)
+
+    source, issues = resolve_journal_source(
+        client,
+        JournalConfig(name="Biometrics", issn=("0006-341X",)),
+    )
+
+    assert source is not None
+    assert not issues
+    assert source.openalex_id == "https://openalex.org/S8265502"
+    assert source.host_organization == "https://openalex.org/P4310320999"
+    assert source.host_organization_name == "Example Academic Publisher"
+    assert source.homepage_url == "https://journals.example.org/biometrics"
+    assert source.homepage_hostname == "journals.example.org"
+
+
+def test_old_source_payload_without_publisher_metadata_still_resolves() -> None:
+    client, _ = make_client(fixture("source_biometrics.json"))
+
+    source, issues = resolve_journal_source(
+        client,
+        JournalConfig(name="Biometrics", issn=("0006-341X",)),
+    )
+
+    assert source is not None
+    assert not issues
+    assert source.host_organization is None
+    assert source.host_organization_name is None
+    assert source.homepage_url is None
+    assert source.homepage_hostname is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "missing_field"),
+    [
+        ("host_organization", {"invalid": "shape"}, "host_organization"),
+        ("host_organization", "not-an-openalex-id", "host_organization"),
+        ("host_organization_name", ["invalid"], "host_organization_name"),
+        ("host_organization_name", "Publisher\nInjected", "host_organization_name"),
+        ("homepage_url", "ftp://journals.example.org/biometrics", "homepage_url"),
+        ("homepage_url", "https://user:secret@journals.example.org/biometrics", "homepage_url"),
+        ("homepage_url", "/relative/biometrics", "homepage_url"),
+        ("homepage_url", "https://journals.example.org/bio metrics", "homepage_url"),
+        ("homepage_url", "https://journals.example.org\\evil.example/path", "homepage_url"),
+        ("homepage_url", "http://localhost:23119/private", "homepage_url"),
+        ("homepage_url", "http://127.0.0.1/private", "homepage_url"),
+        ("homepage_url", "http://192.168.1.10/private", "homepage_url"),
+    ],
+)
+def test_invalid_optional_publisher_metadata_never_invalidates_source(
+    field: str,
+    value: object,
+    missing_field: str,
+) -> None:
+    payload = fixture("source_biometrics_publisher.json")
+    payload[field] = value
+    client, _ = make_client(payload)
+
+    source, issues = resolve_journal_source(
+        client,
+        JournalConfig(name="Biometrics", issn=("0006-341X",)),
+    )
+
+    assert source is not None
+    assert not issues
+    assert getattr(source, missing_field) is None
+
+
+def test_conflicting_optional_metadata_across_issns_is_dropped_not_failed() -> None:
+    first = fixture("source_biometrics_publisher.json")
+    second = deepcopy(first)
+    second["host_organization"] = "https://openalex.org/P9999999999"
+    second["host_organization_name"] = "Conflicting Publisher"
+    second["homepage_url"] = "https://other.example.org/biometrics"
+    client, _ = make_client(first, second)
+
+    source, issues = resolve_journal_source(
+        client,
+        JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420")),
+    )
+
+    assert source is not None
+    assert not issues
+    assert source.host_organization is None
+    assert source.host_organization_name is None
+    assert source.homepage_url is None
+    assert source.homepage_hostname is None
 
 
 def test_retry_backoff_is_injected_and_never_really_sleeps() -> None:
@@ -973,6 +1085,25 @@ def a4_work(work_id="W1", source_id="S8265502", **updates):
 def a4_journals():
     return (JournalConfig(name="Biometrics", issn=("0006-341X",)),
             JournalConfig(name="IEEE Transactions on Cybernetics", issn=("2168-2267",)))
+
+
+def test_a4_batched_source_projects_publisher_metadata_with_shared_select_contract():
+    client, transport = make_client(
+        a4_sources(fixture("source_biometrics_publisher.json"))
+    )
+
+    with client:
+        unit, = openalex_module.resolve_journal_sources_batched(
+            client,
+            a4_journals()[:1],
+        )
+
+    assert unit.source is not None
+    assert unit.source.host_organization == "https://openalex.org/P4310320999"
+    assert unit.source.host_organization_name == "Example Academic Publisher"
+    assert unit.source.homepage_url == "https://journals.example.org/biometrics"
+    assert unit.source.homepage_hostname == "journals.example.org"
+    assert transport.requests[0].url.params["select"] == openalex_module.SOURCE_FIELDS
 
 
 def a4_discover(client, journals=None):

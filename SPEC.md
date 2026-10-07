@@ -1,11 +1,11 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.5.3 Browser Companion v2 is RELEASED and the latest released/completed baseline, with package/Provider identities `0.5.3` and standalone companion manifest `0.1.0`. Implementation, independent reviews, final exact-release-HEAD validation and the release transaction are complete (§24.19). Scoped live normal-Chrome verification retains the partial boundary in §38.13; actual v0.5.3 target-PDF staging and Zotero registration remain unverified. §37 remains authoritative for unaffected DOI-first behavior; historical release/live and maintenance evidence remain separate
+**Status:** Active; v0.5.3 remains RELEASED and the latest released/completed baseline. v0.6.0 is the current development target and is not released. Package and Provider identities remain `0.5.3`; this contract reset does not change runtime code, package metadata, Provider User-Agent identity, tags, release state, or the historical standalone companion manifest. §§35–38 retain their released historical meaning and verification boundaries.
 
-**Stage:** v0.5.3 implementation, A0–A5 independent stage reviews, A6 automated integration/acceptance, final code/behavior audit, the reviewed storage-fault/fresh-handoff fixes and implementation documentation closeout are complete. Implementation commit is `21547260157f121a1efd2a5e8f930fad5f26959f`. Independent release-preparation review is complete; preparation commit/release HEAD is `4a2595e56bfcfb7d845216c5161e978628d3a71a`. Final exact-release-HEAD clean-export validation, offline artifact build and installed-wheel smoke passed. Annotated `v0.5.3`, main/tag pushes, GitHub Release and authoritative asset SHA-256 verification are complete (§24.19). Package/Provider identities are `0.5.3`; companion remains `0.1.0`. Scoped live handoff/navigation/pre-freeze termination passed with unchanged residual boundaries (§38.13). Post-release documentation closeout is a separate change to documentation and its directly coupled static status assertion after the release tag, outside its target. Historical v0.5.1/v0.5.2 release and live records remain historical; v0.5.2's separately skipped final clean-export full validation is not relabeled as complete
+**Stage:** v0.6.0 A1 contract reset. §39 defines the current development requirements for the Zotero Connector transition and Publisher access preparation. No v0.6.0 runtime implementation, automated test result, live validation, release preparation, or release completion is claimed by this A1 change. The unreleased v0.5.4 Automatic Institutional Access Orchestration + Candidate-Bound PDF Acquisition direction was terminated after product validation and is not production authority.
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
-**Current contract:** §38 is the authoritative current v0.5.3 browser/acquisition lifecycle contract, superseding conflicting earlier browser lifecycle, download ownership, popup and browser-evidence descriptions. §37's explicit supersede boundary continues to govern unaffected DOI-first identity, Provider behavior, current Paper schema, single-manifestation and Zotero parent identity. §36's staging, Zotero authorization/write safety, cancellation gate and partial-write semantics remain applicable wherever not superseded by §§37–38. Historical §§24, 36.14 and 37.10 acceptance, release and verification records retain their original version-specific meaning and do not establish v0.5.3 acceptance
+**Current contract:** §39 is the authoritative v0.6.0 current development contract. §37 remains authoritative for unaffected DOI-first identity, Provider behavior, current Paper schema, single-manifestation and Zotero parent identity. Conflicting Browser Companion, custom PDF acquisition, staging, institutional credential orchestration, and Zotero write requirements in historical §§35–38 do not constrain v0.6.0 implementation. Their release, live-verification, and maintenance records remain immutable version-specific evidence.
 
 ---
 
@@ -4554,3 +4554,190 @@ These are explicit residual verification boundaries accepted for this final audi
 Current scope note: v0.5.3 retains manual institutional login/CAPTCHA/MFA in the same claimed normal-Chrome task tab; login waits do not establish publisher exhaustion. Proactive/automatic institutional authentication is deferred to a future version.
 
 v0.5.3 is RELEASED and the latest RELEASED/completed baseline. Implementation commit `21547260157f121a1efd2a5e8f930fad5f26959f` and independently reviewed release-preparation commit/RELEASE_HEAD `4a2595e56bfcfb7d845216c5161e978628d3a71a` are complete. Package/Provider identities are `0.5.3`; companion manifest remains `0.1.0`. Final exact-release-HEAD validation, annotated tag, main/tag pushes, GitHub Release and authoritative asset digest verification are complete (§24.19). Post-release documentation closeout is separate from the permanent release tag target. The live residual boundaries above are unchanged; proactive/automatic institutional authentication remains future scope.
+
+---
+
+## 39. v0.6.0 Zotero Connector Transition & Publisher Access Preparation — Current Development Contract
+
+### 39.1 Authority and transition
+
+§39 is the current implementation source of truth for v0.6.0. v0.5.3 remains RELEASED and the latest released/completed baseline; v0.6.0 is a development target and is not released. Package metadata and Provider User-Agent identities remain `0.5.3` during this contract-reset task. A1 changes no runtime code, package version, Provider identity, tag, release artifact, or release state.
+
+The unreleased v0.5.4 Automatic Institutional Access Orchestration + Candidate-Bound PDF Acquisition direction was terminated after product validation. Experimental or dirty v0.5.4 work is research evidence only and does not define v0.6.0 production behavior.
+
+§§35–38 remain immutable historical contracts for their released baselines, including their Browser Companion, acquisition, staging, Zotero-write, release, live-verification, and residual-boundary records. They must not be rewritten to look as though those versions followed v0.6.0 behavior. Where their acquisition, browser, staging, credential, or Zotero-write requirements conflict with this section, §39 governs v0.6.0. §37 continues to govern unaffected DOI-first identity, Provider behavior, current Paper schema, single-manifestation semantics, provenance, and Zotero parent identity.
+
+### 39.2 Kept Paper capture workflow
+
+The v0.6.0 downstream workflow is:
+
+```text
+kept
+→ Open DOI
+→ user manually operates the official Zotero Connector in normal Chrome
+→ return to Literature Monitor
+→ one automatic reconciliation attempt
+→ optional Check Zotero retry
+→ in_zotero
+```
+
+`Open DOI` and `Check Zotero` are visible only when the current Paper has `status: kept` and its DOI is valid under the existing `normalize_doi()` contract. v0.6.0 exposes no user action named `Copy DOI`, `Mark in Zotero`, or `Add PDF to Zotero`.
+
+The official Zotero Connector remains a user-operated external product. Literature Monitor neither triggers the Connector nor treats Connector attachment progress as workflow state.
+
+### 39.3 Open DOI boundary
+
+For `Open DOI`, the server is authoritative for Paper identity and normalized DOI. It must derive the external target from the current Paper's server-side normalized DOI and construct only:
+
+```text
+https://doi.org/<safely encoded normalized DOI path>
+```
+
+Encode the normalized DOI as path content so reserved delimiters cannot become a query string, fragment, or second authority component. The browser cannot supply an arbitrary external target URL.
+
+The external DOI URL must not carry Paper UUID, filesystem path, `zotero_key`, CSRF token, internal capability, or other local authority. Open the target in an ordinary new browser tab. Do not start Browser Companion, call a Zotero Connector API, or mutate durable Paper state merely because the DOI was opened.
+
+### 39.4 Return reconciliation intent
+
+The page may hold only process/page-local transient intent indicating that a particular `Open DOI` action is awaiting one return reconciliation. Each Open DOI action may cause at most one automatic reconciliation attempt after the user returns to the Literature Monitor page. Repeated focus or visibility events must coalesce rather than create a request storm.
+
+The return path uses no fixed sleep, polling loop, attachment-readiness wait, Snapshot wait, or Full Text wait. If the Zotero parent is not yet visible, the Paper remains `kept`; the user may later invoke `Check Zotero`.
+
+This return intent may disappear on page refresh. Do not persist it in `localStorage`, `sessionStorage`, cookies, Paper Markdown, SQLite, runtime JSON, or another durable store.
+
+### 39.5 Exact-DOI Zotero reconciliation
+
+Automatic return reconciliation and explicit `Check Zotero` invoke the same application operation. That operation succeeds only when all of the following hold at the guarded mutation point:
+
+- the current Paper is still `kept`;
+- its DOI remains valid after `normalize_doi()`;
+- Zotero Desktop My Library can be completely enumerated;
+- exactly one bibliographic parent in My Library has the same normalized DOI;
+- the current Paper's `zotero_key` is absent/null or already equals that exact parent key.
+
+Preserve complete pagination and stable Zotero Server-ID/library-revision safety. Zero exact-DOI parents, duplicate exact-DOI parents, unreadable or incomplete enumeration, unstable enumeration, malformed/conflicting existing `zotero_key`, or concurrent Paper edit/path/location substitution all fail closed without changing the Paper.
+
+On success, atomically change only:
+
+```yaml
+status: in_zotero
+zotero_key: <verified parent key>
+```
+
+Preserve Notes, Sources/provenance, journal attribution, unknown/custom frontmatter, and all other human-authored body content. Reconciliation must use the existing safe Paper-write/concurrency boundary and, after a successful write, retain the existing refreshed-view neighbor-navigation behavior.
+
+The bibliographic parent itself is sufficient. A PDF child need not exist; a Snapshot need not be complete; Connector attachment saving may still be in progress. Reconciliation does not call attachment inspection. `in_zotero` means only that Literature Monitor verified a unique exact-DOI Zotero parent linkage.
+
+### 39.6 Zotero integration boundary
+
+For v0.6.0, Zotero Desktop Local API use is read-only and limited to My Library identity reconciliation. Literature Monitor may enumerate bibliographic parents and read the state required for complete-pagination/revision safety. It does not require Zotero write authorization, create bibliographic items, create PDF attachments, or upload attachment files.
+
+`ZoteroLocalClient.inspect_attachments()` may remain as an unused future read boundary if other cleanup does not require its removal, but the v0.6.0 production workflow must not call it.
+
+Group Libraries and Zotero Web API writes are outside v0.6.0.
+
+### 39.7 Publisher access projection
+
+Settings adds a read-only Publisher access projection derived only from saved Journals:
+
+```text
+saved Journals
+→ ISSNs
+→ existing OpenAlex Source resolution
+→ publisher identity + source homepage
+→ publisher/site presentation
+```
+
+Publisher access is a normal standalone Settings section/panel outside `Advanced & Diagnostics`. It is not part of the Settings form transaction and uses an independent read-only fragment refresh. The page may fetch that fragment independently on load and must fetch it again after a successful `settingsSaved` event. Unsaved Settings draft values and Validate do not alter the projection; Validate must not access OpenAlex, and the Settings Save transaction must not depend on Publisher resolution.
+
+OpenAlex or Publisher access resolution failure affects only the Publisher access panel. It must not create a Workspace issue/diagnostic or Run issue/diagnostic, write `last-run.json`, Provider-state, or other durable diagnostic/history state, or change the result of Settings Validate or Save.
+
+Publisher resolution writes nothing back to Journal durable state, adds no Publisher column to `list.md`, and introduces no database table, cache schema, or durable projection history.
+
+Request only OpenAlex Source fields needed for this projection, such as `host_organization`, `host_organization_name`, `homepage_url`, and, when needed for reliable identity presentation, `host_organization_lineage`.
+
+Group primarily by stable OpenAlex host-organization identity. Do not infer publisher identity from journal names, DOI prefixes, or hand-maintained string heuristics. Deduplicate the same Source reached through multiple ISSNs and deduplicate repeated publisher/site entries. When one publisher has distinct real journal/platform homepage hosts, preserve those distinct sites rather than collapsing them into a corporate homepage. When reliable publisher identity or homepage data is unavailable, present it as unavailable. Partial resolution retains successful results and compactly identifies saved Journals that could not be mapped.
+
+### 39.8 Publisher authentication boundary
+
+Publisher access helps the user open the real journal or publisher platform early and complete institutional authentication manually. Literature Monitor does not determine whether login succeeded, inspect cookies, inspect DOM login indicators, read account or institution identity, determine entitlement, persist login status or `checked_at`, diagnose session expiration, or maintain publisher-specific runtime adapters.
+
+v0.6.0 performs no automatic CARSI, Smart Gateway, WebVPN, XMU credential submission, credential exchange, or credential-store orchestration.
+
+### 39.9 Retired production responsibilities
+
+The following are not v0.6.0 production responsibilities:
+
+- Literature Monitor Browser Companion;
+- publisher PDF discovery or browser download attribution;
+- PDF staging or staged-artifact ownership;
+- Zotero write authorization;
+- bibliographic-item creation or PDF attachment create/upload;
+- institutional credential store or exchange;
+- Smart Gateway orchestration;
+- XMU IdP automatic login;
+- publisher-family runtime adapters.
+
+Removing these responsibilities does not alter the historical truth of §§35–38. Their old implementation and verification records remain version-specific evidence.
+
+Automatic Zotero Connector triggering, Connector forks, localhost Connector command bridges, completion/heartbeat signals, target collection routing, and related automation are possible future v0.6.x work only. They are not authorized by the v0.6.0 contract.
+
+### 39.10 Durable workflow state
+
+The durable workflow schema remains:
+
+```yaml
+status: candidate | rejected | kept | in_zotero
+zotero_key: <Zotero item key> | null
+```
+
+Do not add `pending_capture`, `saving`, `pdf_ready`, publisher-login state, capture history, or another durable workflow status/database. Existing historical `in_zotero` Papers are not migrated and are not rechecked for attachments merely because v0.6.0 changes the capture workflow.
+
+### 39.11 Explicit v0.6.0 exclusions
+
+v0.6.0 does not include:
+
+- automatic Zotero Connector triggering;
+- a Connector fork or localhost Connector command bridge;
+- Connector heartbeat or save-completion observation;
+- collection/tag routing;
+- PDF/Snapshot readiness validation;
+- attachment polling or sleep-based save-completion logic;
+- publisher login validation or credential/session/cookie automation;
+- PDF-source provenance or fallback diagnostics;
+- Group Library support;
+- Zotero Web API writes;
+- CLI `export-kept` redesign;
+- a new workflow status;
+- unrelated retrieval, canonicalization, or Provider redesign.
+
+### 39.12 Future implementation acceptance
+
+The following are v0.6.0 implementation acceptance requirements for later implementation tasks. Their presence here does not claim that A1 implemented or tested them.
+
+Later A2–A6 work must demonstrate, as applicable:
+
+- removal of the old Browser Companion/custom acquisition/staging/Zotero-write production path without leaving retired production imports or active entry points;
+- action visibility limited to valid `kept` Papers with valid normalized DOI, with obsolete capture/write actions absent;
+- server-authoritative, safely encoded DOI navigation with no arbitrary external URL or leaked local authority;
+- one-shot return reconciliation with focus/visibility deduplication and no polling/sleep dependency;
+- explicit `Check Zotero` retry using the same application reconciliation operation;
+- exact-DOI parent-only success, with attachment inspection/readiness unnecessary;
+- complete-pagination and stable-revision safety, zero/duplicate/incomplete/unstable cases failing without mutation;
+- atomic two-field Paper update preserving human content and rejecting concurrent Paper/path substitution;
+- preserved refreshed-view next-neighbor behavior after successful reconciliation;
+- Publisher access derivation from saved Journals, stable publisher grouping, distinct site-host preservation, partial-failure presentation, and no Journal-state writeback;
+- Publisher access presented as normal Settings content outside `Advanced & Diagnostics`, using independent read-only fragment loading on page load and refresh after `settingsSaved`;
+- Settings Validate/Save isolation from Publisher resolution, with unsaved drafts and Validate leaving the projection unchanged;
+- Publisher access/OpenAlex resolution failure isolated to its panel, with no Workspace or Run diagnostic and no durable diagnostic/history write;
+- read-only Zotero integration with no production Zotero write authorization or create/upload path;
+- removal of keyring integration if no production caller remains after retired credential functionality is removed;
+- unchanged CLI `export-kept` behavior;
+- no new durable workflow state or capture/login history;
+- relevant Python and executable JavaScript tests for changed behavior;
+- full `pytest` at final integration scope;
+- Node-executed JavaScript tests where such tests remain applicable;
+- `uv lock --check`;
+- `git diff --check`.
+
+These acceptance requirements must be reported as future implementation evidence when they are actually executed. A1 itself is documentation/instruction reset only and establishes no v0.6.0 runtime, automated-test, live-browser, Zotero, or release PASS claim.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import time
@@ -11,7 +12,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from pydantic import Field, ValidationError, field_validator
@@ -41,7 +42,8 @@ from literature_monitor.progress import (
 
 OPENALEX_BASE_URL = "https://api.openalex.org"
 SOURCE_FIELDS = (
-    "id,display_name,issn_l,issn,type,alternate_titles,abbreviated_title"
+    "id,display_name,issn_l,issn,type,alternate_titles,abbreviated_title,"
+    "host_organization,host_organization_name,homepage_url"
 )
 THIN_WORK_FIELDS = (
     "id,doi,title,publication_date,abstract_inverted_index,authorships,"
@@ -85,6 +87,10 @@ class ResolvedSource:
     display_name: str
     issn_l: str | None
     issn: tuple[str, ...]
+    host_organization: str | None = None
+    host_organization_name: str | None = None
+    homepage_url: str | None = None
+    homepage_hostname: str | None = None
 
 
 class OpenAlexMetadata(DomainModel):
@@ -531,6 +537,10 @@ class _SourceHit:
     issn: tuple[str, ...]
     alternate_titles: tuple[str, ...]
     abbreviated_title: str | None
+    host_organization: str | None = None
+    host_organization_name: str | None = None
+    homepage_url: str | None = None
+    homepage_hostname: str | None = None
 
 
 def _canonical_openalex_id(value: Any, prefix: str) -> str:
@@ -560,6 +570,75 @@ def _parse_string_tuple(value: Any, field: str) -> tuple[str, ...]:
     return tuple(item.strip().upper() for item in value)
 
 
+def _optional_host_organization(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(
+        r"(?:https://openalex\.org/)?([A-Z]\d+)",
+        value.strip(),
+        flags=re.IGNORECASE,
+    )
+    return f"https://openalex.org/{match.group(1).upper()}" if match else None
+
+
+def _optional_display_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized or any(
+        ord(character) < 0x20 or ord(character) == 0x7F
+        for character in normalized
+    ):
+        return None
+    return normalized
+
+
+def _optional_homepage(value: Any) -> tuple[str | None, str | None]:
+    if not isinstance(value, str):
+        return None, None
+    url = value.strip()
+    if not url or any(
+        character.isspace()
+        or character == "\\"
+        or ord(character) < 0x20
+        or ord(character) == 0x7F
+        for character in url
+    ):
+        return None, None
+    try:
+        parsed = urlsplit(url)
+        hostname = parsed.hostname
+        parsed.port
+    except ValueError:
+        return None, None
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None, None
+    normalized_hostname = hostname.lower().rstrip(".")
+    if normalized_hostname == "localhost" or normalized_hostname.endswith(".localhost"):
+        return None, None
+    try:
+        address = ipaddress.ip_address(normalized_hostname)
+    except ValueError:
+        pass
+    else:
+        if not address.is_global:
+            return None, None
+    return url, normalized_hostname
+
+
+def _stable_optional(values: Sequence[str | None]) -> str | None:
+    distinct: list[str] = []
+    for value in values:
+        if value is not None and value not in distinct:
+            distinct.append(value)
+    return distinct[0] if len(distinct) == 1 else None
+
+
 def _parse_source(payload: dict[str, Any], queried_issn: str) -> _SourceHit:
     if payload.get("type") != "journal":
         raise OpenAlexRecordError(
@@ -581,6 +660,7 @@ def _parse_source(payload: dict[str, Any], queried_issn: str) -> _SourceHit:
     issn_l_raw = payload.get("issn_l")
     if issn_l_raw is not None and not isinstance(issn_l_raw, str):
         raise OpenAlexRecordError("invalid source issn_l")
+    homepage_url, homepage_hostname = _optional_homepage(payload.get("homepage_url"))
     return _SourceHit(
         queried_issn=queried_issn,
         openalex_id=_canonical_openalex_id(payload.get("id"), "S"),
@@ -591,6 +671,10 @@ def _parse_source(payload: dict[str, Any], queried_issn: str) -> _SourceHit:
             title.strip() for title in alternate_titles_raw if title.strip()
         ),
         abbreviated_title=(abbreviated_title_raw.strip() if abbreviated_title_raw else None),
+        host_organization=_optional_host_organization(payload.get("host_organization")),
+        host_organization_name=_optional_display_string(payload.get("host_organization_name")),
+        homepage_url=homepage_url,
+        homepage_hostname=homepage_hostname,
     )
 
 
@@ -791,6 +875,13 @@ def _finish_journal_source(
         )
         return None, tuple(issues), CoverageStatus.FAILED
 
+    homepage_url = _stable_optional([hit.homepage_url for hit in hits])
+    homepage_hostname = (
+        _stable_optional([hit.homepage_hostname for hit in hits])
+        if homepage_url is not None
+        else None
+    )
+
     return (
         ResolvedSource(
             journal=journal.name,
@@ -801,6 +892,14 @@ def _finish_journal_source(
             display_name=source.display_name,
             issn_l=source.issn_l,
             issn=source.issn,
+            host_organization=_stable_optional(
+                [hit.host_organization for hit in hits]
+            ),
+            host_organization_name=_stable_optional(
+                [hit.host_organization_name for hit in hits]
+            ),
+            homepage_url=homepage_url,
+            homepage_hostname=homepage_hostname,
         ),
         tuple(issues),
         None,

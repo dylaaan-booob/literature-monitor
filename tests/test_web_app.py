@@ -457,10 +457,11 @@ def test_paper_detail_is_uuid_addressed_and_renders_existing_projection(
 
 
 @pytest.mark.parametrize(
-    "status, doi, arxiv, expected",
+    "status, doi, arxiv, expected_url",
     [
-        (WorkflowStatus.KEPT, " 10.1000/EXAMPLE ", None, "10.1000/example"),
-        (WorkflowStatus.KEPT, " https://doi.org/10.1000/EXAMPLE ", None, "10.1000/example"),
+        (WorkflowStatus.KEPT, " 10.1000/EXAMPLE ", None, "https://doi.org/10.1000/example"),
+        (WorkflowStatus.KEPT, " https://doi.org/10.1000/EXAMPLE ", None, "https://doi.org/10.1000/example"),
+        (WorkflowStatus.KEPT, "10.1000/a?b#c(d)", None, "https://doi.org/10.1000/a%3Fb%23c%28d%29"),
         (WorkflowStatus.CANDIDATE, "10.1000/example", None, None),
         (WorkflowStatus.REJECTED, "10.1000/example", None, None),
         (WorkflowStatus.IN_ZOTERO, "10.1000/example", None, None),
@@ -469,18 +470,28 @@ def test_paper_detail_is_uuid_addressed_and_renders_existing_projection(
         (WorkflowStatus.KEPT, 123, None, None),
         (WorkflowStatus.KEPT, "https://doi.org/", None, None),
         (WorkflowStatus.KEPT, None, "2609.12345", None),
-        (WorkflowStatus.KEPT, '10.1000/"<script>bad</script>', None, '10.1000/"<script>bad</script>'),
+        (
+            WorkflowStatus.KEPT,
+            '10.1000/"<script>bad</script>',
+            None,
+            "https://doi.org/10.1000/%22%3Cscript%3Ebad%3C/script%3E",
+        ),
     ],
 )
 @pytest.mark.filterwarnings("ignore:Pydantic serializer warnings:UserWarning")
-def test_copy_doi_is_server_normalized_kept_only_presentation(tmp_path, monkeypatch, status, doi, arxiv, expected):
+def test_open_doi_and_check_zotero_are_server_normalized_kept_only_presentation(
+    tmp_path, monkeypatch, status, doi, arxiv, expected_url,
+):
     # Bypass model validation to exercise malformed adapter input without changing the domain schema.
     paper = replace(make_paper(status=status), external_ids=ExternalIds.model_construct(doi=doi, arxiv=arxiv))
     snapshot = WorkspaceSnapshot(papers=(paper,), issues=())
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
     monkeypatch.setattr(web_app, "load_workspace", lambda path, *, journals: snapshot)
-    for action in ("keep_paper", "reject_paper", "mark_paper_in_zotero"):
-        monkeypatch.setattr(web_app, action, lambda *args: pytest.fail("Copy presentation must not mutate"))
+    monkeypatch.setattr(
+        web_app,
+        "reconcile_paper_with_zotero",
+        lambda *args: pytest.fail("Open DOI presentation must not mutate"),
+    )
     normalized_inputs = []
     original_normalize = web_app.normalize_doi
 
@@ -491,22 +502,18 @@ def test_copy_doi_is_server_normalized_kept_only_presentation(tmp_path, monkeypa
     monkeypatch.setattr(web_app, "normalize_doi", normalize)
     view = {WorkflowStatus.CANDIDATE: "inbox", WorkflowStatus.IN_ZOTERO: "in-zotero"}.get(status, status.value)
 
-    class CopyButtons(HTMLParser):
+    class CaptureActions(HTMLParser):
         def __init__(self):
             super().__init__()
-            self.form_depth = 0
-            self.buttons = []
+            self.open_links = []
+            self.check_forms = []
 
         def handle_starttag(self, tag, attrs):
             attrs = dict(attrs)
-            if tag == "form":
-                self.form_depth += 1
-            if tag == "button" and "data-copy-doi" in attrs:
-                self.buttons.append((attrs, self.form_depth))
-
-        def handle_endtag(self, tag):
-            if tag == "form":
-                self.form_depth -= 1
+            if tag == "a" and "data-open-doi" in attrs:
+                self.open_links.append(attrs)
+            if tag == "form" and "data-check-zotero-form" in attrs:
+                self.check_forms.append(attrs)
 
     with TestClient(create_app(tmp_path / "monitor.yaml"), base_url="http://localhost") as client:
         responses = (
@@ -515,87 +522,111 @@ def test_copy_doi_is_server_normalized_kept_only_presentation(tmp_path, monkeypa
         )
     for response in responses:
         assert response.status_code == 200
-        parser = CopyButtons()
+        parser = CaptureActions()
         parser.feed(response.text)
-        if expected is None:
-            assert not parser.buttons and "Copy DOI" not in response.text
+        assert "Copy DOI" not in response.text
+        assert "Mark in Zotero" not in response.text
+        if expected_url is None:
+            assert not parser.open_links and not parser.check_forms
+            assert "Open DOI" not in response.text and "Check Zotero" not in response.text
         else:
-            assert len(parser.buttons) == 1
-            attrs, form_depth = parser.buttons[0]
-            assert attrs["data-copy-doi"] == expected
-            assert attrs["type"] == "button" and form_depth == 0
-            assert not any(key.startswith("hx-") or key in ("form", "formaction", "disabled") for key in attrs)
-            assert "<script>bad</script>" not in response.text
-        assert ("Mark in Zotero" in response.text) == (status is WorkflowStatus.KEPT)
-        if status is WorkflowStatus.KEPT:
-            assert f'hx-post="/papers/{paper.paper_id}/mark-in-zotero"' in response.text
+            assert len(parser.open_links) == 1 and len(parser.check_forms) == 1
+            link = parser.open_links[0]
+            assert link["href"] == expected_url
+            assert link["target"] == "_blank"
+            assert set(link["rel"].split()) == {"noopener", "noreferrer"}
+            assert link["referrerpolicy"] == "no-referrer"
+            assert set(link) == {
+                "class", "href", "target", "rel", "referrerpolicy", "data-open-doi"
+            }
+            form = parser.check_forms[0]
+            assert form["action"] == form["hx-post"] == f"/papers/{paper.paper_id}/check-zotero"
+            assert form["hx-target"] == "#workspace-root" and form["hx-swap"] == "outerHTML"
             assert 'name="expected_status" value="kept"' in response.text
             assert 'name="csrf_token"' in response.text
+            assert "<script>bad</script>" not in response.text
+        assert "Add PDF to Zotero" not in response.text
         assert "HX-Trigger" not in response.headers
-    assert normalized_inputs == ([doi, doi] if status in (WorkflowStatus.KEPT, WorkflowStatus.IN_ZOTERO) else [])
+    assert normalized_inputs == ([doi, doi] if status is WorkflowStatus.KEPT else [])
     assert paper.status is status and paper.zotero_key is None
 
 
-@pytest.mark.parametrize("clipboard_outcome", ["success", "rejected", "unavailable"])
-def test_delegated_copy_doi_clipboard_feedback_without_workflow_requests(tmp_path, clipboard_outcome):
+def test_open_doi_return_reconciliation_is_one_shot_page_local_js(tmp_path):
     node = shutil.which("node")
     if node is None:
-        pytest.skip("Node is unavailable for the executable browser-handler test")
+        pytest.skip("Node is unavailable for the executable Open DOI return-flow test")
     with TestClient(create_app(tmp_path / "monitor.yaml"), base_url="http://localhost") as client:
         javascript = client.get("/static/app.js").text
-    assert "navigator.clipboard.writeText(button.dataset.copyDoi)" in javascript
-    for forbidden in ("alert(", "localStorage", "sessionStorage", "doi.org"):
+    assert 'htmx.ajax("POST", pending.form.action' in javascript
+    for forbidden in ("localStorage", "sessionStorage", "document.cookie", "indexedDB"):
         assert forbidden not in javascript
-    copy_handler = javascript.split("async function copyDoi(button)", 1)[1].split("function syncRunAnnouncement", 1)[0]
-    for forbidden in (".trim(", ".toLowerCase(", ".toLocaleLowerCase("):
-        assert forbidden not in copy_handler
+    return_flow = javascript.split("function rememberOpenDoi(link)", 1)[1].split("function syncRunAnnouncement", 1)[0]
+    for forbidden in ("setTimeout", "setInterval", "inspect_attachments"):
+        assert forbidden not in return_flow
     harness = r"""
 const vm = require("node:vm");
 const assert = require("node:assert/strict");
 const handlers = {};
-const timers = [];
-const copies = [];
+const windowHandlers = {};
+const requests = [];
 class Element {}
-class Button extends Element {
-  constructor() { super(); this.dataset = {copyDoi: "10.1000/example"}; this.textContent = "Copy DOI"; this.disabled = false; }
-  closest(selector) { return selector === "button[data-copy-doi]" ? this : null; }
+class Form extends Element {
+  constructor() {
+    super();
+    this.action = "/papers/paper-1/check-zotero";
+    this.values = [["csrf_token", "csrf"], ["expected_status", "kept"], ["view", "kept"], ["position", "0"]];
+  }
+}
+class Link extends Element {
+  constructor(form) { super(); this.form = form; }
+  closest(selector) {
+    if (selector === "[data-open-doi]") return this;
+    if (selector === ".decision-actions") return {querySelector: () => this.form};
+    return null;
+  }
+}
+class FormData {
+  constructor(form) { this.values = form.values; }
+  entries() { return this.values[Symbol.iterator](); }
 }
 const document = {
   documentElement: {dataset: {}},
+  visibilityState: "visible",
   getElementById: () => null,
   querySelector: () => null,
   addEventListener: (name, handler) => { handlers[name] = handler; },
   body: {addEventListener: () => {}},
 };
-const navigator = OUTCOME === "unavailable" ? {} : {clipboard: {writeText: async (value) => {
-  copies.push(value);
-  if (OUTCOME === "rejected") throw new Error("Permission denied");
-}}};
+const htmx = {ajax: (method, path, options) => {
+  requests.push({method, path, options});
+  return Promise.resolve();
+}};
 vm.runInNewContext(SOURCE, {
-  document, navigator, Element, HTMLElement: Element, HTMLDetailsElement: Element,
-  window: {location: {hash: ""}, addEventListener: () => {}, setTimeout: (fn, delay) => {
-    assert.ok(delay > 0 && delay <= 3000); timers.push(fn);
-  }},
-  fetch: () => assert.fail("Copy must not request the server"),
-  alert: () => assert.fail("Copy must not alert"),
+  document, Element, HTMLElement: Element, HTMLDetailsElement: Element, FormData, htmx,
+  window: {location: {hash: ""}, innerWidth: 1024, innerHeight: 800,
+           addEventListener: (name, handler) => { windowHandlers[name] = handler; }},
 });
 (async () => {
-  // Both buttons are created after script initialization, including a replaced detail.
-  for (let i = 0; i < 2; i++) {
-    const button = new Button();
-    handlers.click({target: button});
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(button.textContent, OUTCOME === "success" ? "Copied" : "Copy failed");
-    if (OUTCOME === "success") {
-      timers.shift()();
-      assert.equal(button.textContent, "Copy DOI");
-    }
-    assert.equal(button.disabled, false);
-  }
-  assert.deepEqual(copies, OUTCOME === "unavailable" ? [] : ["10.1000/example", "10.1000/example"]);
+  const form = new Form();
+  handlers.click({target: new Link(form)});
+  windowHandlers.focus();
+  assert.equal(requests.length, 0);
+  windowHandlers.blur();
+  windowHandlers.focus();
+  handlers.visibilitychange();
+  windowHandlers.focus();
+  await Promise.resolve();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, "POST");
+  assert.equal(requests[0].path, form.action);
+  assert.equal(requests[0].options.target, "#workspace-root");
+  assert.equal(requests[0].options.swap, "outerHTML");
+  assert.deepEqual({...requests[0].options.values}, {
+    csrf_token: "csrf", expected_status: "kept", view: "kept", position: "0"
+  });
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """
-    harness = "const SOURCE = " + json.dumps(javascript) + "; const OUTCOME = " + json.dumps(clipboard_outcome) + ";\n" + harness
+    harness = "const SOURCE = " + json.dumps(javascript) + ";\n" + harness
     result = subprocess.run([node], input=harness, text=True, capture_output=True)
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -718,7 +749,7 @@ def test_valid_csrf_reaches_keep_boundary_with_submitted_expected_status(
     (
         ("keep", "keep_paper", WorkflowStatus.CANDIDATE),
         ("reject", "reject_paper", WorkflowStatus.CANDIDATE),
-        ("mark-in-zotero", "mark_paper_in_zotero", WorkflowStatus.KEPT),
+        ("check-zotero", "reconcile_paper_with_zotero", WorkflowStatus.KEPT),
     ),
 )
 def test_each_decision_route_calls_exact_application_action(
@@ -1084,7 +1115,7 @@ def test_web_zotero_export_is_removed(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("duplicate", [False, True])
-def test_mark_route_verifies_zotero_and_refreshes_real_workspace_without_false_navigation(
+def test_check_zotero_route_verifies_zotero_and_refreshes_real_workspace_without_false_navigation(
     tmp_path, monkeypatch, duplicate,
 ):
     config_path, output_dir = write_valid_config(tmp_path)
@@ -1094,7 +1125,7 @@ def test_mark_route_verifies_zotero_and_refreshes_real_workspace_without_false_n
     for ordinal in (1, 2):
         paper = CanonicalPaper(
             id=UUID(int=ordinal), metadata=CanonicalMetadata(title=f"Kept {ordinal}", journal="Biometrics"),
-            external_ids=ExternalIds(doi=f"10.5555/mark-{ordinal}"), authors=(Author(name="Ada Author"),),
+            external_ids=ExternalIds(doi=f"10.5555/reconcile-{ordinal}"), authors=(Author(name="Ada Author"),),
             workflow=Workflow(status=WorkflowStatus.KEPT, discovered_at=datetime(2026, 9, 20, tzinfo=timezone.utc),
                               zotero_key="PARENT01" if ordinal == 1 else None),
         )
@@ -1113,7 +1144,7 @@ def test_mark_route_verifies_zotero_and_refreshes_real_workspace_without_false_n
         return httpx.Response(200, headers={
             "Zotero-Server-ID": "local-instance", "Last-Modified-Version": "4", "Total-Results": str(len(keys)),
         }, json=[{"key": key, "data": {
-            "key": key, "itemType": "journalArticle", "DOI": "HTTPS://DOI.ORG/10.5555/MARK-1",
+            "key": key, "itemType": "journalArticle", "DOI": "HTTPS://DOI.ORG/10.5555/RECONCILE-1",
         }} for key in keys])
 
     def factory():
@@ -1124,12 +1155,14 @@ def test_mark_route_verifies_zotero_and_refreshes_real_workspace_without_false_n
     monkeypatch.setattr(decisions, "_ZoteroLocalClient", factory)
     with TestClient(create_app(config_path), base_url="http://localhost") as client:
         page = client.get("/", params={"view": "kept", "paper": str(UUID(int=1))})
-        response = client.post(f"/papers/{UUID(int=1)}/mark-in-zotero", data={
+        form = {
             "csrf_token": csrf_from_html(page.text), "expected_status": "kept", "view": "kept", "position": "0",
-        })
+        }
+        response = client.post(f"/papers/{UUID(int=1)}/check-zotero", data=form)
+        retry = client.post(f"/papers/{UUID(int=1)}/check-zotero", data=form) if duplicate else None
         in_zotero = client.get("/fragments/workspace", params={"view": "in-zotero"})
 
-    assert response.status_code == 200 and len(requests) == 1
+    assert response.status_code == 200 and len(requests) == (2 if duplicate else 1)
     assert all(client._http.is_closed for client in clients)
     state = parse_paper_state(paths[0], paths[0].read_text(), output_dir / "Authors")
     assert state is not None and state.updateable
@@ -1139,6 +1172,9 @@ def test_mark_route_verifies_zotero_and_refreshes_real_workspace_without_false_n
         assert "Multiple exact DOI matches" in response.text
         assert selected_id(response.text) == str(UUID(int=1))
         assert 'data-selection-stepped="false"' in response.text
+        assert retry is not None and retry.status_code == 200
+        assert "Multiple exact DOI matches" in retry.text
+        assert selected_id(retry.text) == str(UUID(int=1))
         assert listed_ids(in_zotero.text) == []
     else:
         assert state.status is WorkflowStatus.IN_ZOTERO and state.zotero_key == "PARENT01"

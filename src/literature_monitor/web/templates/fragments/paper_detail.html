@@ -1,12 +1,6 @@
 <section class="panel paper-detail" id="paper-detail"
          data-active-view="{{ active_view }}"
-         data-selected-paper-id="{{ selected_paper.paper_id if selected_paper else '' }}"
-         {% if selected_paper %}
-         hx-get="/fragments/papers/{{ selected_paper.paper_id }}?view={{ active_view }}"
-         hx-trigger="acquisitionCompleted from:body"
-         hx-target="this"
-         hx-swap="outerHTML"
-         {% endif %}>
+         data-selected-paper-id="{{ selected_paper.paper_id if selected_paper else '' }}">
   {% if selected_paper %}
     {% set paper = selected_paper %}
     <h2>{{ paper.title }}</h2>
@@ -67,34 +61,27 @@
           <input type="hidden" name="position" value="{{ selected_position }}">
           <button type="submit" class="secondary">Reject</button>
         </form>
-      {% elif paper.status.value == "kept" %}
-        {% if copy_doi %}
-          <button type="button" class="secondary" data-copy-doi="{{ copy_doi }}">Copy DOI</button>
-        {% endif %}
+      {% elif paper.status.value == "kept" and open_doi_url %}
+        <a class="button secondary"
+           href="{{ open_doi_url }}"
+           target="_blank"
+           rel="noopener noreferrer"
+           referrerpolicy="no-referrer"
+           data-open-doi>Open DOI</a>
         <form method="post"
-              action="/papers/{{ paper.paper_id }}/mark-in-zotero"
-              hx-post="/papers/{{ paper.paper_id }}/mark-in-zotero"
+              action="/papers/{{ paper.paper_id }}/check-zotero"
+              hx-post="/papers/{{ paper.paper_id }}/check-zotero"
               hx-target="#workspace-root"
-              hx-swap="outerHTML">
+              hx-swap="outerHTML"
+              data-check-zotero-form>
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="expected_status" value="{{ paper.status.value }}">
           <input type="hidden" name="view" value="{{ active_view }}">
           <input type="hidden" name="position" value="{{ selected_position }}">
-          <button type="submit">Mark in Zotero</button>
-        </form>
-      {% elif acquisition_eligible %}
-        <form method="post"
-              action="/papers/{{ paper.paper_id }}/acquire-pdf"
-              hx-post="/papers/{{ paper.paper_id }}/acquire-pdf"
-              hx-target="#acquisition-panel"
-              hx-swap="outerHTML">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="view" value="{{ active_view }}">
-          <button type="submit"{% if acquisition_busy %} disabled{% endif %}>Add PDF to Zotero</button>
+          <button type="submit">Check Zotero</button>
         </form>
       {% endif %}
     </div>
-    {% include "fragments/acquisition.html" %}
   {% else %}
     <h2>Paper detail</h2>
     <p class="empty-state">{{ detail_message if detail_message else "Select a Paper to review its details." }}</p>

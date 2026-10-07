@@ -1,10 +1,13 @@
-"""Read-only Zotero My Library identity and PDF file boundary (§35)."""
+"""Read-only Zotero My Library identity and attachment-inspection boundary."""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
+import logging
 from pathlib import Path
 import re
 import stat
@@ -13,13 +16,41 @@ from urllib.parse import unquote, urlsplit
 import httpx
 
 from literature_monitor.identifiers import normalize_doi
-from literature_monitor.zotero_credentials import _without_secret_logs
 
 
 LOCAL_API_BASE = "http://localhost:23119/api"
 _ITEM_KEY = re.compile(r"[A-Z0-9]{8}")
-# Bibliographic types from https://api.zotero.org/itemTypes; used only by strict
-# acquisition reads, so unknown item types cannot authorize parent mutation.
+_sensitive_local_read = ContextVar("zotero_sensitive_local_read", default=False)
+
+
+class _SensitiveReadLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _sensitive_local_read.get()
+
+
+_log_filter = _SensitiveReadLogFilter()
+for _logger_name in (
+    "httpx",
+    "httpcore.connection",
+    "httpcore.http11",
+    "httpcore.http2",
+    "httpcore.proxy",
+    "httpcore.socks",
+):
+    logging.getLogger(_logger_name).addFilter(_log_filter)
+
+
+@contextmanager
+def _without_local_read_logs():
+    token = _sensitive_local_read.set(True)
+    try:
+        yield
+    finally:
+        _sensitive_local_read.reset(token)
+
+
+# Bibliographic types from https://api.zotero.org/itemTypes. Strict identity
+# reads reject unknown item types before treating an item as a verified parent.
 _BIBLIOGRAPHIC_TYPES = frozenset({
     "artwork", "audioRecording", "bill", "blogPost", "book", "bookSection", "case",
     "conferencePaper", "dataset", "dictionaryEntry", "document", "email",
@@ -29,6 +60,7 @@ _BIBLIOGRAPHIC_TYPES = frozenset({
     "radioBroadcast", "report", "computerProgram", "standard", "statute",
     "tvBroadcast", "thesis", "videoRecording", "webpage",
 })
+_KNOWN_NON_BIBLIOGRAPHIC_TYPES = frozenset({"attachment", "note", "annotation"})
 
 
 class ZoteroReadOutcome(str, Enum):
@@ -91,7 +123,23 @@ class _Item:
     content_type: str | None
 
     def matches_doi(self, doi: str) -> bool:
-        return self.item_type not in {"attachment", "note", "annotation"} and self.doi == doi
+        return self.doi == doi
+
+    def is_bibliographic_parent(self) -> bool:
+        return self.parent_key is None and self.item_type in _BIBLIOGRAPHIC_TYPES
+
+
+def _matches_exact_bibliographic_parent(item: _Item, doi: str) -> bool:
+    if not item.matches_doi(doi):
+        return False
+    if item.is_bibliographic_parent():
+        return True
+    if item.item_type in _KNOWN_NON_BIBLIOGRAPHIC_TYPES:
+        return False
+    raise _invalid(
+        "Zotero returned an exact-DOI item whose bibliographic parent identity "
+        "cannot be verified."
+    )
 
 
 class _ReadFailure(Exception):
@@ -261,7 +309,7 @@ class ZoteroLocalClient:
     def current_instance(self) -> ZoteroInstanceResult:
         """Read the current Local API instance without authorization or item access."""
         try:
-            with _without_secret_logs():
+            with _without_local_read_logs():
                 _, server_id = self._get(httpx.URL(LOCAL_API_BASE + "/"), None)
             return ZoteroInstanceResult(ZoteroReadOutcome.VERIFIED, server_id, "Zotero Local API is reachable.")
         except _ReadFailure as failure:
@@ -289,7 +337,7 @@ class ZoteroLocalClient:
                     item = _item(_json(response))
                     if item.key != zotero_key:
                         raise _invalid("Zotero returned a different item than the requested key.")
-                    if item.matches_doi(normalized):
+                    if _matches_exact_bibliographic_parent(item, normalized):
                         return ZoteroIdentityResult(
                             ZoteroReadOutcome.VERIFIED,
                             VerifiedZoteroItem(item.key, normalized, server_id),
@@ -297,7 +345,7 @@ class ZoteroLocalClient:
                         )
             matches = []
             for item, server_id in self._items("/users/0/items", server_id, bibliographic=True):
-                if item.matches_doi(normalized):
+                if _matches_exact_bibliographic_parent(item, normalized):
                     matches.append(item.key)
             if not matches:
                 return ZoteroIdentityResult(ZoteroReadOutcome.NOT_FOUND, None, "No exact DOI match exists in Zotero My Library.")
@@ -332,8 +380,7 @@ class ZoteroLocalClient:
             if response.status_code == 404:
                 return ZoteroIdentityResult(ZoteroReadOutcome.NOT_FOUND, None, "The Zotero parent key no longer exists.")
             item = _item(_json(response))
-            if (item.key != zotero_key or item.parent_key is not None
-                    or item.item_type not in _BIBLIOGRAPHIC_TYPES or not item.matches_doi(normalized)):
+            if item.key != zotero_key or not _matches_exact_bibliographic_parent(item, normalized):
                 raise _invalid("The current Zotero parent does not match the frozen key and DOI.")
             return ZoteroIdentityResult(
                 ZoteroReadOutcome.VERIFIED, VerifiedZoteroItem(item.key, normalized, current_id),
@@ -345,7 +392,7 @@ class ZoteroLocalClient:
     def _has_pdf_file(self, key: str, server_id: str) -> bool:
         # Never follow the HTTP redirect or let debug logging expose its path.
         # A file URL is only a location hint; inspect current storage below.
-        with _without_secret_logs():
+        with _without_local_read_logs():
             try:
                 response, _ = self._get(
                     httpx.URL(f"{LOCAL_API_BASE}/users/0/items/{key}/file"),

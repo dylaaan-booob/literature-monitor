@@ -16,7 +16,7 @@ import literature_monitor.safe_write as safe_write_module
 from literature_monitor.application.decisions import (
     DecisionOutcome,
     keep_paper,
-    mark_paper_in_zotero,
+    reconcile_paper_with_zotero,
     reject_paper,
 )
 from literature_monitor.markdown_state import parse_paper_state
@@ -32,7 +32,6 @@ from literature_monitor.models import (
 )
 from literature_monitor.safe_write import ContentChangedError
 from literature_monitor.zotero_local import LOCAL_API_BASE, ZoteroLocalClient
-import literature_monitor.zotero_credentials as zotero_credentials
 
 
 NOW = datetime(2026, 9, 22, 10, 0, tzinfo=timezone.utc)
@@ -43,7 +42,6 @@ def forbid_unconfigured_zotero_access(monkeypatch: pytest.MonkeyPatch) -> None:
     def forbidden():
         pytest.fail("Ineligible/local-only decisions must not contact Zotero")
     monkeypatch.setattr(decisions, "_ZoteroLocalClient", forbidden)
-    monkeypatch.setattr(zotero_credentials, "_os_backend", forbidden)
 
 
 @pytest.fixture
@@ -79,8 +77,16 @@ def zotero_reads(monkeypatch: pytest.MonkeyPatch):
     assert all(client._http.is_closed for client in clients)
 
 
-def zotero_item(key="PARENT01", doi="10.5555/decision", item_type="journalArticle"):
-    return {"key": key, "data": {"key": key, "itemType": item_type, "DOI": doi}}
+def zotero_item(
+    key="PARENT01",
+    doi="10.5555/decision",
+    item_type="journalArticle",
+    **metadata,
+):
+    return {
+        "key": key,
+        "data": {"key": key, "itemType": item_type, "DOI": doi, **metadata},
+    }
 
 
 def library_page(items=(), *, total=None, next_start=None, server="local-instance", version="4"):
@@ -171,7 +177,7 @@ def replace_frontmatter(path: Path, **updates: object) -> None:
             WorkflowStatus.REJECTED,
         ),
         (
-            mark_paper_in_zotero,
+            reconcile_paper_with_zotero,
             WorkflowStatus.KEPT,
             WorkflowStatus.KEPT,
             WorkflowStatus.IN_ZOTERO,
@@ -193,7 +199,7 @@ def test_successful_transitions_change_only_workflow_status(
         status=initial,
         zotero_key="PARENT01",
     )
-    if action is mark_paper_in_zotero:
+    if action is reconcile_paper_with_zotero:
         zotero_reads(library_page([zotero_item()]))
     before_frontmatter, before_body = document_parts(path)
 
@@ -265,7 +271,7 @@ def test_only_three_public_decision_actions_exist() -> None:
     assert public_functions == {
         "keep_paper",
         "reject_paper",
-        "mark_paper_in_zotero",
+        "reconcile_paper_with_zotero",
     }
     assert not hasattr(decisions, "set_status")
     for action_name in public_functions:
@@ -278,7 +284,7 @@ def test_only_three_public_decision_actions_exist() -> None:
 
 @pytest.mark.parametrize("action,status", [
     (keep_paper, WorkflowStatus.CANDIDATE),
-    (mark_paper_in_zotero, WorkflowStatus.KEPT),
+    (reconcile_paper_with_zotero, WorkflowStatus.KEPT),
 ])
 def test_unknown_uuid_returns_not_found_without_writes(tmp_path: Path, action, status) -> None:
     existing_id = UUID("33333333-3333-4333-8333-333333333333")
@@ -556,7 +562,7 @@ def test_paper_becoming_invalid_between_relocation_and_second_parse_is_rejected(
         (
             WorkflowStatus.IN_ZOTERO,
             WorkflowStatus.KEPT,
-            mark_paper_in_zotero,
+            reconcile_paper_with_zotero,
         ),
     ),
 )
@@ -582,10 +588,10 @@ def test_expected_status_mismatch_is_state_conflict(
     (
         (WorkflowStatus.KEPT, reject_paper),
         (WorkflowStatus.REJECTED, keep_paper),
-        (WorkflowStatus.CANDIDATE, mark_paper_in_zotero),
+        (WorkflowStatus.CANDIDATE, reconcile_paper_with_zotero),
         (WorkflowStatus.IN_ZOTERO, keep_paper),
         (WorkflowStatus.IN_ZOTERO, reject_paper),
-        (WorkflowStatus.IN_ZOTERO, mark_paper_in_zotero),
+        (WorkflowStatus.IN_ZOTERO, reconcile_paper_with_zotero),
     ),
 )
 def test_disallowed_transition_is_invalid_transition_when_expectation_matches(
@@ -784,12 +790,12 @@ def test_decision_result_matches_authoritative_parser_after_update(
 @pytest.mark.parametrize("action,initial,target", [
     (keep_paper, WorkflowStatus.CANDIDATE, WorkflowStatus.KEPT),
     (reject_paper, WorkflowStatus.CANDIDATE, WorkflowStatus.REJECTED),
-    (mark_paper_in_zotero, WorkflowStatus.KEPT, WorkflowStatus.IN_ZOTERO),
+    (reconcile_paper_with_zotero, WorkflowStatus.KEPT, WorkflowStatus.IN_ZOTERO),
 ])
 def test_decisions_preserve_valid_or_malformed_raw_attribution(tmp_path, attribution, action, initial, target, zotero_reads):
     paper_id = UUID("16161616-1616-4616-8616-161616161616")
     path = write_paper(tmp_path, paper_id, status=initial, zotero_key="PARENT01")
-    if action is mark_paper_in_zotero:
+    if action is reconcile_paper_with_zotero:
         zotero_reads(library_page([zotero_item()]))
     replace_frontmatter(path, journal_issns=attribution, custom_field={"nested": ["retain", 3]})
     path.write_text(path.read_text() + "\nHuman note.\n\n## Custom\n\nPreserve this.\n")
@@ -804,7 +810,7 @@ def test_decisions_preserve_valid_or_malformed_raw_attribution(tmp_path, attribu
 
 
 @pytest.mark.parametrize("existing_key", [None, "missing", "PARENT01"])
-def test_mark_atomically_persists_unique_key_and_status_preserving_all_other_content(
+def test_reconcile_atomically_persists_unique_key_and_status_preserving_all_other_content(
     tmp_path, monkeypatch, zotero_reads, existing_key,
 ):
     paper_id = UUID("17171717-1717-4717-8717-171717171717")
@@ -841,7 +847,7 @@ def test_mark_atomically_persists_unique_key_and_status_preserving_all_other_con
 
     monkeypatch.setattr(decisions, "_replace_regular_text_at_identity", record_atomic)
 
-    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+    result = reconcile_paper_with_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
 
     assert result.outcome is DecisionOutcome.UPDATED and len(writes) == 1
     assert result.current_status is WorkflowStatus.KEPT
@@ -859,7 +865,7 @@ def test_mark_atomically_persists_unique_key_and_status_preserving_all_other_con
     "no_match", "duplicate", "incomplete", "invalid_json", "invalid_item",
     "missing_server", "missing_version", "changed_server", "unavailable",
 ])
-def test_mark_zotero_verification_failure_preserves_complete_paper(
+def test_reconcile_zotero_verification_failure_preserves_complete_paper(
     tmp_path, zotero_reads, existing_key, failure,
 ):
     paper_id = UUID("18181818-1818-4818-8818-181818181818")
@@ -896,21 +902,50 @@ def test_mark_zotero_verification_failure_preserves_complete_paper(
         replies = [httpx.ConnectError("secret-error-details")]
     requests = zotero_reads(*replies)
 
-    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+    result = reconcile_paper_with_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
 
     assert result.outcome is expected and result.resulting_status is None
     assert path.read_bytes() == before and requests
     assert "secret" not in result.message and "unreadable-item" not in result.message
 
 
+@pytest.mark.parametrize("invalid_parent", [
+    zotero_item(item_type="mysteryFutureType"),
+    zotero_item(item_type="journalArticle", parentItem="PARENT02"),
+])
+def test_reconcile_unprovable_exact_doi_parent_never_mutates_paper(
+    tmp_path,
+    zotero_reads,
+    invalid_parent,
+):
+    paper_id = UUID("29292929-2929-4929-8929-292929292929")
+    path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
+    before = path.read_bytes()
+    requests = zotero_reads(library_page([invalid_parent]))
+
+    result = reconcile_paper_with_zotero(
+        tmp_path,
+        paper_id,
+        WorkflowStatus.KEPT,
+    )
+
+    assert result.outcome is DecisionOutcome.ZOTERO_FAILURE
+    assert result.resulting_status is None
+    assert path.read_bytes() == before
+    values, _ = document_parts(path)
+    assert values["status"] == "kept"
+    assert values["zotero_key"] is None
+    assert len(requests) == 1
+
+
 @pytest.mark.parametrize("key", ["WRONG001", "STALE001"])
-def test_mark_never_replaces_non_null_conflicting_key(tmp_path, zotero_reads, key):
+def test_reconcile_never_replaces_non_null_conflicting_key(tmp_path, zotero_reads, key):
     paper_id = UUID("19191919-1919-4919-8919-191919191919")
     path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT, zotero_key=key)
     before = path.read_bytes()
     requests = zotero_reads(library_page([zotero_item()]))
 
-    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+    result = reconcile_paper_with_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
 
     assert result.outcome is DecisionOutcome.STATE_CONFLICT
     assert result.resulting_status is None and path.read_bytes() == before
@@ -918,26 +953,26 @@ def test_mark_never_replaces_non_null_conflicting_key(tmp_path, zotero_reads, ke
 
 
 @pytest.mark.parametrize("doi", [None, "", "   ", 123])
-def test_mark_invalid_doi_fails_before_zotero(tmp_path, doi):
+def test_reconcile_invalid_doi_fails_before_zotero(tmp_path, doi):
     paper_id = UUID("20202020-2020-4020-8020-202020202020")
     path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
     values, _ = document_parts(path)
     replace_frontmatter(path, doi=doi, external_ids={**values["external_ids"], "doi": doi})
     before = path.read_bytes()
 
-    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+    result = reconcile_paper_with_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
 
     assert result.outcome is DecisionOutcome.INVALID_PAPER and path.read_bytes() == before
 
 
 @pytest.mark.parametrize("key", ["", " ", "short", "parent01", " PARENT01 ", 123, {"key": "PARENT01"}])
-def test_mark_malformed_non_null_key_fails_before_zotero(tmp_path, key):
+def test_reconcile_malformed_non_null_key_fails_before_zotero(tmp_path, key):
     paper_id = UUID("21212121-2121-4121-8121-212121212121")
     path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
     replace_frontmatter(path, zotero_key=key)
     before = path.read_bytes()
 
-    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+    result = reconcile_paper_with_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
 
     assert result.outcome is DecisionOutcome.INVALID_PAPER and path.read_bytes() == before
 
@@ -945,7 +980,7 @@ def test_mark_malformed_non_null_key_fails_before_zotero(tmp_path, key):
 @pytest.mark.parametrize("mode", [
     "duplicate", "unreadable", "symlink", "non_regular", "unsafe_sibling", "malformed",
 ])
-def test_mark_unsafe_paper_location_fails_before_zotero(tmp_path, monkeypatch, mode):
+def test_reconcile_unsafe_paper_location_fails_before_zotero(tmp_path, monkeypatch, mode):
     paper_id = UUID("22222222-2222-4222-8222-222222222222")
     path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
     before = path.read_bytes()
@@ -967,7 +1002,7 @@ def test_mark_unsafe_paper_location_fails_before_zotero(tmp_path, monkeypatch, m
         replace_frontmatter(path, title=None)
         before = path.read_bytes()
 
-    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+    result = reconcile_paper_with_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
 
     assert result.outcome in (DecisionOutcome.INVALID_PAPER, DecisionOutcome.IO_FAILURE)
     assert result.resulting_status is None
@@ -978,7 +1013,7 @@ def test_mark_unsafe_paper_location_fails_before_zotero(tmp_path, monkeypatch, m
 
 
 @pytest.mark.parametrize("change", ["edit", "disappear"])
-def test_mark_compare_replace_conflict_never_retries_or_partially_updates(
+def test_reconcile_compare_replace_conflict_never_retries_or_partially_updates(
     tmp_path, monkeypatch, zotero_reads, change,
 ):
     paper_id = UUID("23232323-2323-4323-8323-232323232323")
@@ -999,7 +1034,7 @@ def test_mark_compare_replace_conflict_never_retries_or_partially_updates(
 
     monkeypatch.setattr(decisions, "_replace_regular_text_at_identity", race)
 
-    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+    result = reconcile_paper_with_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
 
     assert result.outcome is DecisionOutcome.STATE_CONFLICT and len(calls) == 1
     assert result.resulting_status is None
@@ -1012,7 +1047,7 @@ def test_mark_compare_replace_conflict_never_retries_or_partially_updates(
 
 
 @pytest.mark.parametrize("replacement", ["symlink", "directory"])
-def test_mark_target_becoming_unsafe_during_zotero_read_never_mutates(
+def test_reconcile_target_becoming_unsafe_during_zotero_read_never_mutates(
     tmp_path, monkeypatch, zotero_reads, replacement,
 ):
     paper_id = UUID("24242424-2424-4424-8424-242424242424")
@@ -1034,7 +1069,7 @@ def test_mark_target_becoming_unsafe_during_zotero_read_never_mutates(
 
     monkeypatch.setattr(ZoteroLocalClient, "resolve_identity", replace_target)
 
-    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+    result = reconcile_paper_with_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
 
     assert result.outcome is DecisionOutcome.STATE_CONFLICT
     if replacement == "symlink":
@@ -1043,7 +1078,7 @@ def test_mark_target_becoming_unsafe_during_zotero_read_never_mutates(
         assert path.is_dir() and not list(path.iterdir())
 
 
-def test_mark_local_read_error_is_sanitized_and_does_not_contact_zotero(tmp_path, monkeypatch):
+def test_reconcile_local_read_error_is_sanitized_and_does_not_contact_zotero(tmp_path, monkeypatch):
     paper_id = UUID("25252525-2525-4525-8525-252525252525")
     path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
     before = path.read_bytes()
@@ -1051,16 +1086,16 @@ def test_mark_local_read_error_is_sanitized_and_does_not_contact_zotero(tmp_path
     def unreadable(target, directory):
         raise PermissionError("secret-filesystem-detail")
 
-    monkeypatch.setattr(decisions, "_read_mark_candidate", unreadable)
+    monkeypatch.setattr(decisions, "_read_reconciliation_candidate", unreadable)
 
-    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+    result = reconcile_paper_with_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
 
     assert result.outcome is DecisionOutcome.IO_FAILURE
     assert "secret" not in result.message and path.read_bytes() == before
 
 
 @pytest.mark.parametrize("replacement", ["symlink", "directory", "fifo", "missing"])
-def test_mark_final_compare_boundary_rejects_location_substitution(
+def test_reconcile_final_compare_boundary_rejects_location_substitution(
     tmp_path, monkeypatch, zotero_reads, replacement,
 ):
     paper_id = UUID("26262626-2626-4626-8626-262626262626")
@@ -1087,7 +1122,7 @@ def test_mark_final_compare_boundary_rejects_location_substitution(
 
     monkeypatch.setattr(decisions, "_replace_regular_text_at_identity", substitute_at_compare)
 
-    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+    result = reconcile_paper_with_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
 
     assert result.outcome is DecisionOutcome.STATE_CONFLICT and len(calls) == 1
     assert result.resulting_status is None and preserved.read_bytes() == original
@@ -1108,26 +1143,25 @@ def test_mark_final_compare_boundary_rejects_location_substitution(
     )
 
 
-def test_mark_uses_readable_identity_without_any_write_authorization(tmp_path, monkeypatch, zotero_reads):
-    from literature_monitor import zotero_credentials, zotero_write
+def test_reconcile_unique_parent_succeeds_without_attachment_inspection(tmp_path, monkeypatch, zotero_reads):
     def forbidden(*args, **kwargs):
-        raise AssertionError('Mark must not access write authorization')
-    monkeypatch.setattr(zotero_credentials, '_os_backend', forbidden)
-    for operation in ('credential', 'establish', 'invalidate'):
-        monkeypatch.setattr(zotero_credentials.ZoteroAuthorizationRuntime, operation, forbidden)
-    monkeypatch.setattr(zotero_write.ZoteroAuthorizationClient, 'authorize', forbidden)
-    paper_id = UUID('27272727-2727-4727-8727-272727272727')
+        raise AssertionError("Reconciliation must not inspect Zotero attachments")
+
+    monkeypatch.setattr(ZoteroLocalClient, "inspect_attachments", forbidden)
+    paper_id = UUID("27272727-2727-4727-8727-272727272727")
     path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
     requests = zotero_reads(library_page([zotero_item()]))
-    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+
+    result = reconcile_paper_with_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+
     assert result.outcome is DecisionOutcome.UPDATED
     after, _ = document_parts(path)
-    assert after['status'] == 'in_zotero' and after['zotero_key'] == 'PARENT01'
-    assert requests and all(r.method == 'GET' for r in requests)
+    assert after["status"] == "in_zotero" and after["zotero_key"] == "PARENT01"
+    assert requests and all(request.method == "GET" for request in requests)
 
 
 @pytest.mark.parametrize('replacement', ['file', 'papers_directory'])
-def test_mark_rejects_same_bytes_at_replaced_original_location(tmp_path, monkeypatch, zotero_reads, replacement):
+def test_reconcile_rejects_same_bytes_at_replaced_original_location(tmp_path, monkeypatch, zotero_reads, replacement):
     paper_id = UUID('28282828-2828-4828-8828-282828282828')
     path = write_paper(tmp_path, paper_id, status=WorkflowStatus.KEPT)
     original = path.read_bytes()
@@ -1136,7 +1170,7 @@ def test_mark_rejects_same_bytes_at_replaced_original_location(tmp_path, monkeyp
     requests = zotero_reads(library_page([zotero_item()]))
     resolve = ZoteroLocalClient.resolve_identity
     locate = decisions._locate_paper
-    read = decisions._read_mark_candidate
+    read = decisions._read_reconciliation_candidate
     compare = decisions._replace_regular_text_at_identity
     locations = []
     reads = []
@@ -1169,10 +1203,10 @@ def test_mark_rejects_same_bytes_at_replaced_original_location(tmp_path, monkeyp
         assert path.stat().st_ino != original_file.st_ino
         return identity
     monkeypatch.setattr(decisions, '_locate_paper', locate_once)
-    monkeypatch.setattr(decisions, '_read_mark_candidate', read_once)
+    monkeypatch.setattr(decisions, '_read_reconciliation_candidate', read_once)
     monkeypatch.setattr(decisions, '_replace_regular_text_at_identity', compare_once)
     monkeypatch.setattr(ZoteroLocalClient, 'resolve_identity', replace_during_lookup)
-    result = mark_paper_in_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
+    result = reconcile_paper_with_zotero(tmp_path, paper_id, WorkflowStatus.KEPT)
     assert result.outcome is DecisionOutcome.STATE_CONFLICT
     assert result.resulting_status is None
     assert locations == [paper_id] and len(requests) == 1

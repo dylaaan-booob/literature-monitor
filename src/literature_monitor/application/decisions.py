@@ -33,7 +33,7 @@ __all__ = [
     "DecisionResult",
     "keep_paper",
     "reject_paper",
-    "mark_paper_in_zotero",
+    "reconcile_paper_with_zotero",
 ]
 
 
@@ -81,13 +81,13 @@ def _failure(
 
 
 @_dataclass(frozen=True)
-class _MarkRead:
+class _ReconciliationRead:
     contents: str
     directory_identity: tuple[int, int]
     file_identity: tuple[int, int]
 
 
-def _read_mark_candidate(path: Path, directory: int) -> _MarkRead:
+def _read_reconciliation_candidate(path: Path, directory: int) -> _ReconciliationRead:
     descriptor = _os.open(path.name, _os.O_RDONLY | _os.O_NOFOLLOW | _os.O_NONBLOCK, dir_fd=directory)
     try:
         parent = _os.fstat(directory)
@@ -97,7 +97,7 @@ def _read_mark_candidate(path: Path, directory: int) -> _MarkRead:
         with _os.fdopen(descriptor, "rb") as handle:
             descriptor = None
             contents = handle.read().decode("utf-8")
-        return _MarkRead(contents, (parent.st_dev, parent.st_ino), (target.st_dev, target.st_ino))
+        return _ReconciliationRead(contents, (parent.st_dev, parent.st_ino), (target.st_dev, target.st_ino))
     finally:
         if descriptor is not None:
             _os.close(descriptor)
@@ -110,7 +110,7 @@ def _locate_paper(
     *,
     require_safe_candidates: bool = False,
     directory: int | None = None,
-    mark_reads: dict[Path, _MarkRead] | None = None,
+    reconciliation_reads: dict[Path, _ReconciliationRead] | None = None,
 ) -> tuple[Path | None, DecisionResult | None]:
     papers_dir = output_dir / "Papers"
     if papers_dir.is_symlink():
@@ -171,8 +171,8 @@ def _locate_paper(
 
         try:
             if directory is not None:
-                action_read = _read_mark_candidate(path, directory)
-                assert mark_reads is not None
+                action_read = _read_reconciliation_candidate(path, directory)
+                assert reconciliation_reads is not None
                 contents = action_read.contents
             else:
                 contents = _read_text_exact(path)
@@ -197,7 +197,7 @@ def _locate_paper(
         if state.paper_id != paper_id:
             continue
         if directory is not None:
-            mark_reads[path] = action_read
+            reconciliation_reads[path] = action_read
         matches.append(path)
 
     if len(matches) > 1:
@@ -243,9 +243,9 @@ def _apply_decision(
     required_status: WorkflowStatus,
     target_status: WorkflowStatus,
 ) -> DecisionResult:
-    is_mark = target_status is WorkflowStatus.IN_ZOTERO
-    mark_reads: dict[Path, _MarkRead] = {}
-    if is_mark:
+    is_reconciliation = target_status is WorkflowStatus.IN_ZOTERO
+    reconciliation_reads: dict[Path, _ReconciliationRead] = {}
+    if is_reconciliation:
         directory = None
         try:
             # One descriptor binds UUID enumeration and every safe candidate
@@ -253,7 +253,7 @@ def _apply_decision(
             directory = _os.open(output_dir / "Papers", _os.O_RDONLY | _os.O_DIRECTORY | _os.O_NOFOLLOW)
             path, failure = _locate_paper(
                 output_dir, paper_id, expected_status, require_safe_candidates=True,
-                directory=directory, mark_reads=mark_reads,
+                directory=directory, reconciliation_reads=reconciliation_reads,
             )
         except FileNotFoundError:
             return _failure(DecisionOutcome.NOT_FOUND, paper_id, expected_status, "Paper UUID was not found")
@@ -266,7 +266,7 @@ def _apply_decision(
     else:
         path, failure = _locate_paper(output_dir, paper_id, expected_status)
     if failure is not None:
-        if is_mark and failure.outcome is DecisionOutcome.IO_FAILURE:
+        if is_reconciliation and failure.outcome is DecisionOutcome.IO_FAILURE:
             return _failure(
                 failure.outcome, paper_id, expected_status,
                 "Cannot safely read or locate the requested Paper.", path=failure.path,
@@ -274,7 +274,7 @@ def _apply_decision(
         return failure
     assert path is not None
 
-    if not is_mark and (path.is_symlink() or not path.is_file()):
+    if not is_reconciliation and (path.is_symlink() or not path.is_file()):
         return _failure(
             DecisionOutcome.INVALID_PAPER,
             paper_id,
@@ -284,13 +284,13 @@ def _apply_decision(
         )
 
     try:
-        current_contents = mark_reads[path].contents if is_mark else _read_text_exact(path)
+        current_contents = reconciliation_reads[path].contents if is_reconciliation else _read_text_exact(path)
     except (OSError, UnicodeError) as error:
         return _failure(
             DecisionOutcome.IO_FAILURE,
             paper_id,
             expected_status,
-            "Cannot read Paper before marking." if is_mark else f"cannot read Paper before decision: {error}",
+            "Cannot read Paper before Zotero reconciliation." if is_reconciliation else f"cannot read Paper before decision: {error}",
             path=path,
         )
 
@@ -324,8 +324,8 @@ def _apply_decision(
             if state.problems
             else "Paper cannot be safely updated"
         )
-        if is_mark:
-            message = "Paper cannot be safely updated; repair its invalid state before marking."
+        if is_reconciliation:
+            message = "Paper cannot be safely updated; repair its invalid state before checking Zotero."
         return _failure(
             DecisionOutcome.INVALID_PAPER,
             paper_id,
@@ -362,7 +362,7 @@ def _apply_decision(
         )
 
     frontmatter = dict(state.frontmatter)
-    if is_mark:
+    if is_reconciliation:
         try:
             doi = _normalize_doi(state.external_ids.doi) if state.external_ids else None
         except ValueError:
@@ -370,18 +370,18 @@ def _apply_decision(
         if doi is None:
             return _failure(
                 DecisionOutcome.INVALID_PAPER, paper_id, expected_status,
-                "A valid Paper DOI is required to Mark in Zotero.",
+                "A valid Paper DOI is required to check Zotero.",
                 current_status=current_status, path=path,
             )
         existing_key = frontmatter.get("zotero_key")
         if existing_key is not None and not _re.fullmatch(r"[A-Z0-9]{8}", existing_key):
             return _failure(
                 DecisionOutcome.INVALID_PAPER, paper_id, expected_status,
-                "Paper Zotero key is malformed; repair it before marking.",
+                "Paper Zotero key is malformed; repair it before checking Zotero.",
                 current_status=current_status, path=path,
             )
-        # Mark requires complete DOI uniqueness, including for an existing key.
-        # Passing that key would permit the acquisition client's keyed fast path.
+        # Reconciliation always proves DOI uniqueness by complete My Library
+        # enumeration; an existing key must never enable the keyed fast path.
         with _ZoteroLocalClient() as client:
             identity = client.resolve_identity(doi)
         if identity.outcome is not _ZoteroReadOutcome.VERIFIED or identity.item is None:
@@ -405,7 +405,7 @@ def _apply_decision(
         if existing_key is not None and existing_key != identity.item.key:
             return _failure(
                 DecisionOutcome.STATE_CONFLICT, paper_id, expected_status,
-                "Paper Zotero key conflicts with the unique DOI match; repair the linkage before marking.",
+                "Paper Zotero key conflicts with the unique DOI match; repair the linkage before checking Zotero.",
                 current_status=current_status, path=path,
             )
         frontmatter["zotero_key"] = identity.item.key
@@ -413,8 +413,8 @@ def _apply_decision(
     updated_contents = _serialize_document(frontmatter, state.body)
 
     try:
-        if is_mark:
-            action_read = mark_reads[path]
+        if is_reconciliation:
+            action_read = reconciliation_reads[path]
             _replace_regular_text_at_identity(
                 path, updated_contents, expected_contents=action_read.contents,
                 expected_directory_identity=action_read.directory_identity,
@@ -432,17 +432,17 @@ def _apply_decision(
             path=path,
         )
     except _CompareReadError as error:
-        if is_mark and isinstance(error.__cause__, FileNotFoundError):
+        if is_reconciliation and isinstance(error.__cause__, FileNotFoundError):
             return _failure(
                 DecisionOutcome.STATE_CONFLICT, paper_id, expected_status,
-                "Paper disappeared before marking could be written.",
+                "Paper disappeared before Zotero reconciliation could be written.",
                 current_status=current_status, path=path,
             )
         return _failure(
             DecisionOutcome.IO_FAILURE,
             paper_id,
             expected_status,
-            "Cannot verify Paper before marking." if is_mark else f"cannot verify Paper before decision: {error}",
+            "Cannot verify Paper before Zotero reconciliation." if is_reconciliation else f"cannot verify Paper before decision: {error}",
             current_status=current_status,
             path=path,
         )
@@ -451,11 +451,16 @@ def _apply_decision(
             DecisionOutcome.IO_FAILURE,
             paper_id,
             expected_status,
-            "Cannot write Paper marking." if is_mark else f"cannot write Paper decision: {error}",
+            "Cannot write Zotero reconciliation result." if is_reconciliation else f"cannot write Paper decision: {error}",
             current_status=current_status,
             path=path,
         )
 
+    message = (
+        "Zotero exact DOI match verified; Paper linked in Zotero."
+        if is_reconciliation
+        else f"Paper status updated to {target_status.value}"
+    )
     return DecisionResult(
         outcome=DecisionOutcome.UPDATED,
         paper_id=paper_id,
@@ -463,7 +468,7 @@ def _apply_decision(
         current_status=current_status,
         resulting_status=target_status,
         path=path,
-        message=f"Paper status updated to {target_status.value}",
+        message=message,
     )
 
 
@@ -495,7 +500,7 @@ def reject_paper(
     )
 
 
-def mark_paper_in_zotero(
+def reconcile_paper_with_zotero(
     output_dir: Path,
     paper_id: UUID,
     expected_status: WorkflowStatus,

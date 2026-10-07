@@ -18,6 +18,12 @@ from starlette.datastructures import FormData
 
 import literature_monitor.web.app as web_app
 import literature_monitor.web.settings_form as settings_form
+from literature_monitor.application.publisher_access import (
+    PublisherAccessGroup,
+    PublisherAccessProjection,
+    PublisherAccessSite,
+    PublisherAccessUnavailableJournal,
+)
 from literature_monitor.application.monitor import (
     MonitorIssue,
     MonitorIssueComponent,
@@ -2005,6 +2011,53 @@ def health_config(tmp_path: Path) -> Path:
     return config_path
 
 
+def web_publisher_projection() -> PublisherAccessProjection:
+    first = JournalConfig(name='Journal <One>', issn=("1111-1111",))
+    second = JournalConfig(name="Journal Two", issn=("2222-2222",))
+    missing = JournalConfig(name="Missing Homepage", issn=("3333-3333",))
+    unavailable = JournalConfig(name='Unavailable <Journal>', issn=("4444-4444",))
+    return PublisherAccessProjection(
+        publishers=(
+            PublisherAccessGroup(
+                publisher_id="https://openalex.org/P1",
+                publisher_name='Publisher <One>',
+                sites=(
+                    PublisherAccessSite(
+                        source_ids=("https://openalex.org/S1",),
+                        source_names=('Source <One>',),
+                        homepage_url="https://journals.example.org/one?x=1&y=2",
+                        hostname="journals.example.org",
+                        journals=(first,),
+                    ),
+                    PublisherAccessSite(
+                        source_ids=("https://openalex.org/S2",),
+                        source_names=("Source Two",),
+                        homepage_url="https://journals.example.org/two",
+                        hostname="journals.example.org",
+                        journals=(second,),
+                    ),
+                ),
+            ),
+            PublisherAccessGroup(
+                publisher_id=None,
+                publisher_name=None,
+                sites=(
+                    PublisherAccessSite(
+                        source_ids=("https://openalex.org/S3",),
+                        source_names=("Source Missing",),
+                        homepage_url=None,
+                        hostname=None,
+                        journals=(missing,),
+                    ),
+                ),
+            ),
+        ),
+        unavailable_journals=(
+            PublisherAccessUnavailableJournal(journal=unavailable),
+        ),
+    )
+
+
 def broken_health_paper(config_path: Path, workspace: str) -> Path:
     papers = config_path.parent / workspace / "Papers"
     papers.mkdir(parents=True)
@@ -2066,12 +2119,385 @@ def test_advanced_is_collapsed_sibling_with_zotero_health_and_run(
     advanced = re.search(r'<details id="advanced-diagnostics"([^>]*)>(.*?)</details>', text, re.S)
     assert advanced is not None
     assert "open" not in advanced.group(1)
-    assert re.search(r'</form>\s*</section>\s*<details id="advanced-diagnostics"', text)
+    assert re.search(
+        r'</form>\s*</section>\s*<section id="publisher-access".*?</section>\s*'
+        r'<details id="advanced-diagnostics"',
+        text,
+        re.S,
+    )
     assert 'Zotero integration' in advanced.group(2)
     assert 'hx-get="/settings/zotero"' in advanced.group(2)
     assert 'Current run' in advanced.group(2)
     assert 'hx-get="/fragments/workspace-health"' in advanced.group(2)
     assert 'hx-trigger="settingsSaved from:body"' in advanced.group(2)
+
+
+def test_publisher_access_is_lazy_normal_settings_content_outside_advanced(
+    health_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("GET /settings must not access OpenAlex Publisher projection")
+
+    monkeypatch.setattr(web_app, "OpenAlexClient", forbidden)
+    monkeypatch.setattr(web_app, "resolve_publisher_access", forbidden)
+    app = create_app(health_config)
+
+    with TestClient(app, base_url="http://localhost") as client:
+        page = client.get("/settings")
+
+    assert page.status_code == 200
+    assert (
+        page.text.index("</form>")
+        < page.text.index('id="publisher-access"')
+        < page.text.index('id="advanced-diagnostics"')
+    )
+    advanced = re.search(
+        r'<details id="advanced-diagnostics"([^>]*)>(.*?)</details>',
+        page.text,
+        re.S,
+    )
+    assert advanced is not None
+    assert "Publisher access" not in advanced.group(2)
+    placeholder = page.text[
+        page.text.index('id="publisher-access"'):
+        page.text.index('id="advanced-diagnostics"')
+    ]
+    assert 'hx-get="/settings/publisher-access"' in placeholder
+    assert 'hx-trigger="load"' in placeholder
+    assert 'hx-target="this"' in placeholder
+    assert 'hx-swap="outerHTML"' in placeholder
+
+
+def test_publisher_fragment_renders_projection_and_refreshes_only_after_saved_event(
+    health_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projection = web_publisher_projection()
+    captured_journals: list[tuple[JournalConfig, ...]] = []
+    api_keys: list[str | None] = []
+    closed: list[bool] = []
+
+    class FakeClient:
+        def __init__(self, *, api_key: str | None = None) -> None:
+            api_keys.append(api_key)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            closed.append(True)
+
+    def resolve(client: object, journals: tuple[JournalConfig, ...]):
+        captured_journals.append(tuple(journals))
+        return projection
+
+    monkeypatch.setenv("OPENALEX_API_KEY", "publisher-test-key")
+    monkeypatch.setattr(web_app, "OpenAlexClient", FakeClient)
+    monkeypatch.setattr(web_app, "resolve_publisher_access", resolve)
+    app = create_app(health_config)
+
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get(
+            "/settings/publisher-access",
+            params={
+                "homepage_url": "https://attacker.example/",
+                "journal": "Injected Journal",
+                "publisher_id": "P999",
+            },
+        )
+        post = client.post(
+            "/settings/publisher-access",
+            data={"journal": "Injected Journal"},
+        )
+
+    assert response.status_code == 200
+    assert post.status_code == 405
+    assert captured_journals == [
+        (JournalConfig(name="Biometrics", issn=("0006-341X",)),)
+    ]
+    assert api_keys == ["publisher-test-key"]
+    assert closed == [True]
+    assert 'hx-get="/settings/publisher-access"' in response.text
+    assert 'hx-trigger="settingsSaved from:body"' in response.text
+    assert 'hx-trigger="load"' not in response.text
+    assert "Publisher &lt;One&gt;" in response.text
+    assert "Journal &lt;One&gt;" in response.text
+    assert "Source &lt;One&gt;" in response.text
+    assert 'Publisher <One>' not in response.text
+    assert 'Journal <One>' not in response.text
+    assert 'Source <One>' not in response.text
+    assert response.text.count('>journals.example.org</a>') == 2
+    assert 'href="https://journals.example.org/one?x=1&amp;y=2"' in response.text
+    assert 'href="https://journals.example.org/two"' in response.text
+    assert response.text.count('target="_blank"') == 2
+    assert response.text.count('rel="noopener noreferrer"') == 2
+    assert response.text.count('referrerpolicy="no-referrer"') == 2
+    assert "Publisher name unavailable" in response.text
+    assert "Publisher identity unavailable" in response.text
+    assert "Site link unavailable" in response.text
+    assert "Publisher access unavailable for: Unavailable &lt;Journal&gt;" in response.text
+    assert "https://attacker.example/" not in response.text
+    for forbidden in (
+        str(health_config),
+        "csrf_token",
+        "zotero_key",
+        "Logged in",
+        "Logged out",
+        "Session valid",
+        "Access granted",
+        "Institutional access detected",
+        "Entitled",
+        "Last checked login",
+        "session expiry",
+    ):
+        assert forbidden not in response.text
+
+
+def test_unsaved_validate_does_not_drive_publisher_projection(
+    health_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved_state = load_settings(health_config)
+    draft_journal = JournalConfig(name="Draft Journal", issn=("0090-5364",))
+    unsaved_state = replace(
+        saved_state,
+        draft=replace(saved_state.draft, journals=(draft_journal,)),
+    )
+    captured_journals: list[tuple[JournalConfig, ...]] = []
+
+    class FakeClient:
+        def __init__(self, *, api_key: str | None = None) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+    def resolve(client: object, journals: tuple[JournalConfig, ...]):
+        captured_journals.append(tuple(journals))
+        return PublisherAccessProjection((), ())
+
+    monkeypatch.setattr(web_app, "load_settings", lambda path: unsaved_state)
+    monkeypatch.setattr(web_app, "validate_settings", lambda path, draft: make_validation())
+    monkeypatch.setattr(web_app, "OpenAlexClient", FakeClient)
+    monkeypatch.setattr(web_app, "resolve_publisher_access", resolve)
+    app = create_app(health_config)
+
+    with TestClient(app, base_url="http://localhost") as client:
+        page = client.get("/settings")
+        assert 'value="Draft Journal"' in page.text
+        validated = client.post(
+            "/settings/validate",
+            data=valid_settings_form(
+                csrf_from_html(page.text),
+                journal_name=draft_journal.name,
+                journal_issns=draft_journal.issn[0],
+            ),
+        )
+        assert captured_journals == []
+        fragment = client.get("/settings/publisher-access")
+
+    assert validated.status_code == 200
+    assert "settingsSaved" not in validated.headers.get("HX-Trigger", "")
+    assert fragment.status_code == 200
+    assert captured_journals == [
+        (JournalConfig(name="Biometrics", issn=("0006-341X",)),)
+    ]
+
+
+def test_successful_save_refresh_boundary_reads_new_saved_journals_only(
+    health_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_journals: list[tuple[JournalConfig, ...]] = []
+
+    class FakeClient:
+        def __init__(self, *, api_key: str | None = None) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+    def resolve(client: object, journals: tuple[JournalConfig, ...]):
+        captured_journals.append(tuple(journals))
+        return PublisherAccessProjection((), ())
+
+    monkeypatch.setattr(web_app, "OpenAlexClient", FakeClient)
+    monkeypatch.setattr(web_app, "resolve_publisher_access", resolve)
+    app = create_app(health_config)
+
+    with TestClient(app, base_url="http://localhost") as client:
+        page = client.get("/settings")
+        data = browser_settings_submission(page.text)
+        data["journal_name"] = ["Annals of Statistics"]
+        data["journal_issns"] = ["0090-5364"]
+        saved = client.post("/settings/save", data=data)
+        assert captured_journals == []
+        fragment = client.get("/settings/publisher-access")
+
+    assert saved.status_code == 200
+    assert saved.headers["HX-Trigger"] == "settingsSaved"
+    assert fragment.status_code == 200
+    assert captured_journals == [
+        (JournalConfig(name="Annals of Statistics", issn=("0090-5364",)),)
+    ]
+    assert load_config(health_config).journals == captured_journals[0]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    (
+        SettingsSaveOutcome.REVISION_CONFLICT,
+        SettingsSaveOutcome.PARTIAL_SAVE,
+        SettingsSaveOutcome.WRITE_FAILED,
+    ),
+)
+def test_unsuccessful_save_never_feeds_attempted_journals_to_publisher_projection(
+    outcome: SettingsSaveOutcome,
+    health_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempted_journal = JournalConfig(name="Attempted Journal", issn=("0090-5364",))
+    result = make_save_result(
+        health_config.parent,
+        outcome=outcome,
+        state_draft=make_draft(journals=(attempted_journal,)),
+        journal_written=(outcome is SettingsSaveOutcome.PARTIAL_SAVE),
+    )
+    captured_journals: list[tuple[JournalConfig, ...]] = []
+
+    class FakeClient:
+        def __init__(self, *, api_key: str | None = None) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+    monkeypatch.setattr(web_app, "save_settings", lambda path, draft: result)
+    monkeypatch.setattr(web_app, "OpenAlexClient", FakeClient)
+    monkeypatch.setattr(
+        web_app,
+        "resolve_publisher_access",
+        lambda client, journals: (
+            captured_journals.append(tuple(journals))
+            or PublisherAccessProjection((), ())
+        ),
+    )
+    app = create_app(health_config)
+
+    with TestClient(app, base_url="http://localhost") as client:
+        page = client.get("/settings")
+        response = client.post(
+            "/settings/save",
+            data=valid_settings_form(
+                csrf_from_html(page.text),
+                journal_name=attempted_journal.name,
+                journal_issns=attempted_journal.issn[0],
+            ),
+        )
+        assert captured_journals == []
+        fragment = client.get("/settings/publisher-access")
+
+    assert response.status_code == 200
+    assert response.headers.get("HX-Trigger") != "settingsSaved"
+    assert fragment.status_code == 200
+    assert captured_journals == [
+        (JournalConfig(name="Biometrics", issn=("0006-341X",)),)
+    ]
+
+
+@pytest.mark.parametrize("mode", ("missing", "invalid", "unreadable"))
+def test_publisher_fragment_invalid_saved_config_never_uses_recovery_draft(
+    mode: str,
+    health_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = health_config.parent / "publisher-unavailable.yaml"
+    if mode == "invalid":
+        config_path.write_text("keyword_expression: [\n", encoding="utf-8")
+    elif mode == "unreadable":
+        config_path.mkdir()
+    recovery = replace(
+        load_settings(health_config),
+        draft=replace(
+            load_settings(health_config).draft,
+            journals=(JournalConfig(name="Recovery Journal", issn=("0090-5364",)),),
+        ),
+    )
+    monkeypatch.setattr(web_app, "load_settings", lambda path: recovery)
+
+    def forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("Invalid saved config must not reach OpenAlex")
+
+    monkeypatch.setattr(web_app, "OpenAlexClient", forbidden)
+    monkeypatch.setattr(web_app, "resolve_publisher_access", forbidden)
+    app = create_app(config_path)
+
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get("/settings/publisher-access")
+
+    assert response.status_code == 200
+    assert "Publisher access unavailable right now." in response.text
+    assert "Recovery Journal" not in response.text
+
+
+def test_publisher_provider_failure_is_panel_local_and_read_only(
+    health_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = {
+        path.relative_to(health_config.parent): path.read_bytes()
+        for path in health_config.parent.rglob("*")
+        if path.is_file()
+    }
+    coordinator = StubCoordinator()
+
+    class FakeClient:
+        def __init__(self, *, api_key: str | None = None) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+    def fail(client: object, journals: tuple[JournalConfig, ...]) -> object:
+        raise web_app.OpenAlexError("private provider failure")
+
+    def forbidden_workspace(*args: object, **kwargs: object) -> object:
+        raise AssertionError("Publisher access must not scan Workspace diagnostics")
+
+    monkeypatch.setattr(web_app, "OpenAlexClient", FakeClient)
+    monkeypatch.setattr(web_app, "resolve_publisher_access", fail)
+    monkeypatch.setattr(web_app, "load_workspace", forbidden_workspace)
+    app = create_app(health_config)
+    app.state.run_coordinator = coordinator
+
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get("/settings/publisher-access")
+
+    after = {
+        path.relative_to(health_config.parent): path.read_bytes()
+        for path in health_config.parent.rglob("*")
+        if path.is_file()
+    }
+    assert response.status_code == 200
+    assert "Publisher access unavailable right now." in response.text
+    assert "private provider failure" not in response.text
+    assert "Workspace health" not in response.text
+    assert "Current run" not in response.text
+    assert coordinator.snapshot_calls == 0
+    assert before == after
 
 
 def test_unsaved_output_and_validate_do_not_change_saved_workspace_health(
@@ -3070,181 +3496,84 @@ const swap = (tree, top = 419, event = null) => {
 
 @pytest.fixture
 def zotero_settings(health_config, monkeypatch):
-    """Real HTTP clients/runtime, synthetic Local API and fake OS backend only."""
+    """Synthetic read-only Zotero Local API status boundary."""
     from types import SimpleNamespace
     import httpx
-    import logging
-    from literature_monitor import zotero_credentials as credentials
     from literature_monitor.zotero_local import ZoteroLocalClient
-    from literature_monitor.zotero_write import ZoteroAuthorizationClient
 
-    s = SimpleNamespace(server='settings-instance-A', remember=False, status=200,
-                        requests=[], values={}, calls=[], fail=None, response_server=None, probe_status=200,
-                        secret='SETTINGSSENTINELSECRET'.ljust(32, '0'))
-    class Backend:
-        def record(self, action, service, server):
-            s.calls.append((action, service, server))
-            logging.getLogger("keyring").warning("backend key %s", s.secret)
-            if s.fail == action:
-                raise RuntimeError(s.secret + ' private backend details')
-        def get_password(self, service, server):
-            self.record('get', service, server)
-            return s.values.get((service, server))
-        def set_password(self, service, server, key):
-            self.record('set', service, server)
-            s.values[service, server] = key
-        def delete_password(self, service, server):
-            self.record('delete', service, server)
-            s.values.pop((service, server), None)
+    state = SimpleNamespace(
+        server="settings-instance-A",
+        probe_status=200,
+        requests=[],
+        secret="SETTINGSSENTINELSECRET",
+    )
+
     def respond(request):
-        s.requests.append(request)
-        logging.getLogger("httpx").warning("private Local API payload %s", s.secret)
-        headers = {'Zotero-Server-ID': s.server}
-        assert request.url.host == 'localhost' and request.url.port == 23119
-        assert 'Cookie' not in request.headers and 'Authorization' not in request.headers
-        if request.method == 'GET':
-            assert request.url.path == '/api/'
-            return httpx.Response(s.probe_status, headers=headers, json={'private': s.secret})
-        assert request.method == 'POST' and request.url.path == '/api/local/authorize'
-        assert request.headers['Zotero-Server-ID'] == s.server
-        assert 'Zotero-API-Key' not in request.headers
-        assert json.loads(request.content) == {'appName': 'Literature Monitor'}
-        headers.update({'Retry-After': '30'})
-        if s.response_server is not None:
-            headers['Zotero-Server-ID'] = s.response_server
-        return httpx.Response(s.status, headers=headers, json={'key': s.secret, 'remember': s.remember})
+        state.requests.append(request)
+        assert request.method == "GET"
+        assert request.url.host == "localhost" and request.url.port == 23119
+        assert request.url.path == "/api/"
+        assert "Cookie" not in request.headers
+        assert "Authorization" not in request.headers
+        assert "Zotero-API-Key" not in request.headers
+        return httpx.Response(
+            state.probe_status,
+            headers={"Zotero-Server-ID": state.server},
+            json={"private": state.secret},
+        )
+
     transport = httpx.MockTransport(respond)
-    monkeypatch.setattr(credentials, '_os_backend', Backend)
-    monkeypatch.setattr(web_app, 'ZoteroLocalClient', lambda: ZoteroLocalClient(transport=transport))
-    monkeypatch.setattr(web_app, 'ZoteroAuthorizationClient', lambda server, **kwargs:
-                        ZoteroAuthorizationClient(server, transport=transport, **kwargs))
-    s.app = create_app(health_config)
-    s.config = health_config
-    s.post = lambda client, **data: client.post('/settings/zotero/authorize',
-        data={'csrf_token': s.app.state.csrf_token, **data})
-    return s
+    monkeypatch.setattr(
+        web_app,
+        "ZoteroLocalClient",
+        lambda: ZoteroLocalClient(transport=transport),
+    )
+    state.app = create_app(health_config)
+    return state
 
 
 def test_zotero_settings_get_and_status_are_read_only(zotero_settings):
-    s = zotero_settings
-    with TestClient(s.app, base_url='http://localhost') as client:
-        page = client.get('/settings')
-        assert 'Zotero integration' in page.text and not s.requests
-        status = client.get('/settings/zotero')
-    assert status.status_code == 200 and s.server in status.text
-    assert 'Authorize Zotero writes' in status.text
-    assert 'name="csrf_token"' in status.text
-    assert 'Settings → Advanced &amp; Diagnostics → Zotero integration' in status.text
-    assert all(r.method == 'GET' for r in s.requests)
-    assert s.secret not in page.text + status.text + repr(status.headers)
+    state = zotero_settings
+    with TestClient(state.app, base_url="http://localhost") as client:
+        page = client.get("/settings")
+        assert "Zotero integration" in page.text and not state.requests
+        status = client.get("/settings/zotero")
+
+    assert status.status_code == 200 and state.server in status.text
+    assert "Zotero Local API is reachable" in status.text
+    for retired in (
+        "Authorize Zotero writes",
+        "One-time Allow",
+        "Remembered write authorization",
+        "credential",
+        'name="csrf_token"',
+    ):
+        assert retired not in status.text
+    assert all(request.method == "GET" for request in state.requests)
+    assert state.secret not in page.text + status.text + repr(status.headers)
 
 
-@pytest.mark.parametrize('mode', ['missing_csrf', 'wrong_csrf', 'get', 'host'])
-def test_zotero_settings_authorization_requires_post_csrf_and_local_host(zotero_settings, mode):
-    s = zotero_settings
-    with TestClient(s.app, base_url='http://localhost') as client:
-        if mode == 'get':
-            result = client.get('/settings/zotero/authorize')
-            assert result.status_code == 405
-        else:
-            data = {} if mode == 'missing_csrf' else {'csrf_token': 'wrong'}
-            headers = {}
-            if mode == 'host':
-                data = {'csrf_token': s.app.state.csrf_token}
-                headers = {'Host': 'untrusted.example'}
-            result = client.post('/settings/zotero/authorize', data=data, headers=headers)
-            assert result.status_code == (400 if mode == 'host' else 403)
-    assert not s.requests and not s.calls
+@pytest.mark.parametrize("status", [403, 500])
+def test_zotero_settings_unavailable_reports_read_only_health(zotero_settings, status):
+    state = zotero_settings
+    state.probe_status = status
+
+    with TestClient(state.app, base_url="http://localhost") as client:
+        observed = client.get("/settings/zotero")
+
+    assert observed.status_code == 200
+    assert "enable its Local API" in observed.text
+    assert "Authorize Zotero writes" not in observed.text
+    assert len(state.requests) == 1 and state.requests[0].method == "GET"
+    assert state.secret not in observed.text
 
 
-@pytest.mark.parametrize('remember', [False, True])
-def test_zotero_settings_explicit_action_uses_verified_instance_and_runtime_only(zotero_settings, remember, caplog):
-    from literature_monitor.zotero_credentials import SERVICE_NAME
-    s = zotero_settings; s.remember = remember
-    before = {p: p.read_bytes() for p in s.config.parent.rglob('*') if p.is_file()}
-    with TestClient(s.app, base_url='http://localhost') as client:
-        authorized = s.post(client, server_id='forged-instance')
-        status = client.get('/settings/zotero')
-        s.app = create_app(s.config)
-        with TestClient(s.app, base_url='http://localhost') as fresh:
-            restarted = fresh.get('/settings/zotero')
-    assert authorized.status_code == 200
-    label = 'Remembered write authorization is available' if remember else 'One-time Allow is ready'
-    assert label in authorized.text and label in status.text
-    assert ('Remembered write authorization is available' in restarted.text) is remember
-    if not remember:
-        assert 'Authorize Zotero writes' in restarted.text and 'One-time Allow is ready' not in restarted.text
-    assert len([r for r in s.requests if r.method == 'POST']) == 1
-    assert s.values == ({(SERVICE_NAME, s.server): s.secret} if remember else {})
-    assert all(service == SERVICE_NAME and server == s.server for _, service, server in s.calls)
-    assert sum(action == 'set' for action, _, _ in s.calls) == int(remember)
-    assert before == {p: p.read_bytes() for p in s.config.parent.rglob('*') if p.is_file()}
-    assert s.secret not in authorized.text + status.text + restarted.text + caplog.text + repr(authorized.headers)
+def test_zotero_write_authorization_route_is_removed(zotero_settings):
+    state = zotero_settings
+    with TestClient(state.app, base_url="http://localhost") as client:
+        get_result = client.get("/settings/zotero/authorize")
+        post_result = client.post("/settings/zotero/authorize", data={"csrf_token": "unused"})
 
-
-@pytest.mark.parametrize('remember', [False, True])
-def test_zotero_settings_instance_change_never_reuses_prior_authorization(zotero_settings, remember):
-    s = zotero_settings; s.remember = remember
-    with TestClient(s.app, base_url='http://localhost') as client:
-        s.post(client)
-        s.server = 'settings-instance-B'; s.calls.clear()
-        changed = client.get('/settings/zotero')
-        assert s.server in changed.text
-        assert 'One-time Allow is ready' not in changed.text
-        assert 'Remembered write authorization is available' not in changed.text
-        assert all(server == s.server for _, _, server in s.calls)
-        if not remember:
-            s.server = 'settings-instance-A'
-            assert 'One-time Allow is ready' not in client.get('/settings/zotero').text
-
-
-@pytest.mark.parametrize('action', ['get', 'set'])
-def test_zotero_settings_secure_store_failure_is_sanitized_without_fallback(zotero_settings, action, caplog):
-    s = zotero_settings; s.fail = action; s.remember = True
-    before = {p: p.read_bytes() for p in s.config.parent.rglob('*') if p.is_file()}
-    with TestClient(s.app, base_url='http://localhost') as client:
-        result = s.post(client) if action == 'set' else client.get('/settings/zotero')
-        again = client.get('/settings/zotero')
-    assert 'OS credential store' in result.text and 'OS credential store' in again.text
-    assert 'Remembered write authorization is available' not in result.text + again.text
-    assert 'One-time Allow is ready' not in result.text + again.text
-    assert s.values == {}
-    assert s.secret not in result.text + again.text + caplog.text
-    assert 'private backend details' not in result.text + again.text
-    assert before == {p: p.read_bytes() for p in s.config.parent.rglob('*') if p.is_file()}
-
-
-@pytest.mark.parametrize('status,label', [(403, 'denied'), (429, 'rate limited')])
-def test_zotero_settings_denial_and_rate_limit_do_not_loop(zotero_settings, status, label):
-    s = zotero_settings; s.status = status
-    with TestClient(s.app, base_url='http://localhost') as client:
-        result = s.post(client)
-        assert label in result.text
-        if status == 429:
-            repeated = s.post(client)
-            assert 'disabled' in repeated.text and 'rate limited' in repeated.text
-    assert not s.values
-    assert len([r for r in s.requests if r.method == 'POST']) == 1
-    assert s.secret not in result.text
-
-
-def test_zotero_settings_changed_instance_during_dialog_saves_nothing(zotero_settings):
-    s = zotero_settings; s.remember = True; s.response_server = 'settings-instance-B'
-    with TestClient(s.app, base_url='http://localhost') as client:
-        result = s.post(client)
-    assert 'instance changed' in result.text
-    assert not s.values and not s.calls
-    assert s.secret not in result.text
-
-
-@pytest.mark.parametrize('status', [403, 500])
-def test_zotero_settings_unavailable_cannot_read_credentials_or_authorize(zotero_settings, status):
-    s = zotero_settings; s.probe_status = status
-    with TestClient(s.app, base_url='http://localhost') as client:
-        observed = client.get('/settings/zotero')
-        action = s.post(client)
-    assert 'enable its Local API' in observed.text + action.text
-    assert 'Authorize Zotero writes' not in observed.text + action.text
-    assert all(r.method == 'GET' for r in s.requests)
-    assert not s.calls and not s.values
-    assert s.secret not in observed.text + action.text
+    assert get_result.status_code == 404
+    assert post_result.status_code == 404
+    assert not state.requests

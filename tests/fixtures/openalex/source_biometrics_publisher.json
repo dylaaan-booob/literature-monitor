@@ -1,0 +1,12 @@
+{
+  "id": "https://openalex.org/S8265502",
+  "display_name": "Biometrics",
+  "issn_l": "0006-341X",
+  "issn": ["0006-341X", "1541-0420"],
+  "type": "journal",
+  "alternate_titles": [],
+  "abbreviated_title": null,
+  "host_organization": "https://openalex.org/P4310320999",
+  "host_organization_name": "Example Academic Publisher",
+  "homepage_url": "https://journals.example.org/biometrics"
+}

@@ -90,6 +90,18 @@ def test_existing_key_is_read_and_verified_by_normalized_doi():
     assert requests[0].url.path == "/api/users/0/items/PARENT01"
 
 
+@pytest.mark.parametrize("payload", [
+    item(item_type="mysteryFutureType"),
+    item(item_type="journalArticle", parentItem="PARENT02"),
+])
+def test_existing_key_exact_doi_requires_top_level_known_bibliographic_parent(payload):
+    result, requests = resolve(response(payload), key=PARENT)
+
+    assert result.outcome is ZoteroReadOutcome.INVALID_RESPONSE
+    assert result.item is None
+    assert len(requests) == 1
+
+
 @pytest.mark.parametrize("old", [
     response(None, status=404),
     response(item(item_type="attachment")),
@@ -129,6 +141,18 @@ def test_fallback_zero_matches_ignores_non_bibliographic_and_unusable_dois():
     ]
     result, _ = resolve(page(entries))
     assert result.outcome is ZoteroReadOutcome.NOT_FOUND
+    assert result.item is None
+
+
+@pytest.mark.parametrize("candidate", [
+    item(item_type="mysteryFutureType"),
+    item(item_type="mysteryChildType", parentItem="PARENT02"),
+    item(item_type="journalArticle", parentItem="PARENT02"),
+])
+def test_complete_enumeration_fails_closed_for_unprovable_exact_doi_parent(candidate):
+    result, _ = resolve(page([candidate]))
+
+    assert result.outcome is ZoteroReadOutcome.INVALID_RESPONSE
     assert result.item is None
 
 
