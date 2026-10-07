@@ -8,18 +8,21 @@ safely updates durable Paper and Author Markdown, and exports kept papers.
 
 ## Release and development status
 
-**v0.5.3 is RELEASED and the latest released/completed baseline**, with Python
-package metadata and OpenAlex/Crossref Provider User-Agent identities **0.5.3**.
-Its Browser Companion v2 and custom browser/PDF acquisition workflow belong to
-that historical release contract under SPEC §38; they are not the current
-v0.6.0 source workflow.
+**v0.5.3 is RELEASED and remains the latest released/completed baseline.** Its
+released Python package and OpenAlex/Crossref Provider identities are **0.5.3**,
+and its Browser Companion v2/custom browser-PDF acquisition workflow remains
+historical release evidence under SPEC §38.
 
-**v0.6.0 is the current development target and is not released or tagged.**
-Until release preparation, Python package metadata and OpenAlex/Crossref
-Provider User-Agent identities remain **0.5.3**. SPEC §39 is the current
-v0.6.0 development contract, while §§35–38 remain historical release records.
+**v0.6.0 is the current prepared but unreleased target.** Implementation commit
+`f6600dd6d955699c0ce0a066f8d16067533d89ce`
+(`Implement v0.6.0 Zotero Connector workflow`) is complete and passed final
+independent audit. This prepared source uses Python package and
+OpenAlex/Crossref Provider User-Agent identity **0.6.0**. No v0.6.0 tag, push,
+or GitHub Release has been created; release-preparation review and commit still
+precede any release transaction. SPEC §39 remains the current v0.6.0 product
+contract, while §§35–38 remain immutable historical release records.
 
-The reviewed implementation is committed at `21547260157f121a1efd2a5e8f930fad5f26959f`;
+For historical v0.5.3 release evidence, the reviewed implementation is committed at `21547260157f121a1efd2a5e8f930fad5f26959f`;
 the independently reviewed preparation commit/release HEAD is
 `4a2595e56bfcfb7d845216c5161e978628d3a71a`. Final exact-release-HEAD clean-export validation,
 offline wheel/sdist build and isolated installed-wheel smoke passed. The

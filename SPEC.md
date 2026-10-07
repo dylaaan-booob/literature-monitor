@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.5.3 remains RELEASED and the latest released/completed baseline. v0.6.0 is the current development target and is not released. Package and Provider identities remain `0.5.3`; this contract reset does not change runtime code, package metadata, Provider User-Agent identity, tags, release state, or the historical standalone companion manifest. §§35–38 retain their released historical meaning and verification boundaries.
+**Status:** Active; v0.5.3 remains RELEASED and the latest released/completed baseline. v0.6.0 implementation is complete and the current source is in release preparation, but v0.6.0 is not released or tagged. Prepared package and OpenAlex/Crossref Provider identities are `0.6.0`. §§35–38 retain their released historical meaning and verification boundaries.
 
-**Stage:** v0.6.0 A1 contract reset. §39 defines the current development requirements for the Zotero Connector transition and Publisher access preparation. No v0.6.0 runtime implementation, automated test result, live validation, release preparation, or release completion is claimed by this A1 change. The unreleased v0.5.4 Automatic Institutional Access Orchestration + Candidate-Bound PDF Acquisition direction was terminated after product validation and is not production authority.
+**Stage:** v0.6.0 A1–A6 implementation, Final Audit Fix 1, final independent audit, implementation commit `f6600dd6d955699c0ce0a066f8d16067533d89ce` (`Implement v0.6.0 Zotero Connector workflow`), and post-commit automated verification are complete. Release preparation is now in progress; the prepared source has not been independently release-prep reviewed or committed, and no v0.6.0 tag, push, GitHub Release, or release transaction is complete. The unreleased v0.5.4 Automatic Institutional Access Orchestration + Candidate-Bound PDF Acquisition direction was terminated after product validation and is not production authority.
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 **Current contract:** §39 is the authoritative v0.6.0 current development contract. §37 remains authoritative for unaffected DOI-first identity, Provider behavior, current Paper schema, single-manifestation and Zotero parent identity. Conflicting Browser Companion, custom PDF acquisition, staging, institutional credential orchestration, and Zotero write requirements in historical §§35–38 do not constrain v0.6.0 implementation. Their release, live-verification, and maintenance records remain immutable version-specific evidence.
@@ -2402,6 +2402,18 @@ The pre-release remote guard verified repository `dylaaan-booob/literature-monit
 
 v0.5.3 is RELEASED and the latest released/completed baseline. This post-release documentation closeout is a separate change after the release tag, outside the v0.5.3 tag target and release artifacts. The annotated tag remains permanently on RELEASE_HEAD. The closeout changes only current-state documentation and its directly coupled static status assertion; release artifacts, package/runtime behavior, live-evidence boundaries and historical evidence are unchanged. Protected local objects remain untouched, untracked and excluded. Historical v0.5.1/v0.5.2 evidence retains its original baseline meaning.
 
+### 24.20 v0.6.0 Zotero Connector Transition & Publisher Access — release preparation
+
+The completed v0.6.0 implementation commit is `f6600dd6d955699c0ce0a066f8d16067533d89ce` (`Implement v0.6.0 Zotero Connector workflow`). It retires the Literature Monitor Browser Companion, custom browser/PDF acquisition and Zotero write path; adds Open DOI plus read-only exact-DOI Zotero parent reconciliation; adds the saved-Journal Publisher access projection and Settings UI; closes current-state documentation; and includes Final Audit Fix 1 so `resolve_identity()` verifies only exact-DOI top-level accepted bibliographic parents.
+
+Release preparation is deliberately narrower than the implementation commit. It changes only package version identity `0.5.3` → `0.6.0`, OpenAlex/Crossref User-Agent identity `literature-monitor/0.5.3` → `literature-monitor/0.6.0`, directly coupled version assertions, the local editable package version in `uv.lock`, and current-state/release-preparation documentation. It must not change product functionality, dependency membership, Open DOI/reconciliation behavior, Publisher grouping/UI behavior, Local API behavior, CLI behavior, or the retired-path boundary.
+
+Implementation/final-audit evidence is distinct from release-preparation validation. The completed final audit recorded focused **912 passed / 9 skipped / 2 warnings**, full pytest **2381 passed / 9 skipped / 2 warnings**, `uv lock --check` PASS and `git diff --check` PASS; Node was unavailable in the independent AgentDock environment and therefore no executable JavaScript PASS is claimed. Post-commit full pytest again recorded **2381 passed / 9 skipped / 2 warnings**. No live v0.6.0 browser, publisher-login, or Zotero Connector automation validation is claimed, and historical v0.5.x browser/PDF live evidence remains historical.
+
+Current release-preparation validation against this prepared source passed: focused OpenAlex/Crossref pytest **419 passed**, full pytest **2381 passed / 9 skipped / 2 existing dependency warnings**, `uv lock --check` PASS, and `git diff --check` PASS. Node remains unavailable in this AgentDock environment, so the Node-dependent skipped JavaScript test is not reported as executable JS PASS. A repository-external build produced `literature_monitor-0.6.0-py3-none-any.whl` and `literature_monitor-0.6.0.tar.gz`; both metadata versions are `0.6.0`, required Literature Monitor modules/templates/static assets are present, and Browser Companion plus protected `monitor.yaml`/`workspace/`/`.obsidian` objects are absent. Isolated installed-wheel smoke passed representative imports, Web app/template availability, `literature-monitor --help`, and `uv pip check`. Build/install artifacts remained outside the repository and were not published. These are release-preparation results, not an independent release-preparation review or a release transaction.
+
+Release state at this point: v0.5.3 remains the latest RELEASED baseline; v0.6.0 is prepared/unreleased. The release-preparation diff still requires independent review and has not been committed. No v0.6.0 tag, push, GitHub Release, or release asset publication has occurred.
+
 ---
 
 ## 25. v0.4.0 Python Local Web UI Application Contract
@@ -4561,7 +4573,7 @@ v0.5.3 is RELEASED and the latest RELEASED/completed baseline. Implementation co
 
 ### 39.1 Authority and transition
 
-§39 is the current implementation source of truth for v0.6.0. v0.5.3 remains RELEASED and the latest released/completed baseline; v0.6.0 is a development target and is not released. Package metadata and Provider User-Agent identities remain `0.5.3` during this contract-reset task. A1 changes no runtime code, package version, Provider identity, tag, release artifact, or release state.
+§39 is the current implementation source of truth for v0.6.0. v0.5.3 remains RELEASED and the latest released/completed baseline; v0.6.0 implementation commit `f6600dd6d955699c0ce0a066f8d16067533d89ce` is complete and the current source is in release preparation, but v0.6.0 is not released. Prepared package metadata and OpenAlex/Crossref Provider User-Agent identities are `0.6.0`; no v0.6.0 tag, push, GitHub Release, or release transaction is complete.
 
 The unreleased v0.5.4 Automatic Institutional Access Orchestration + Candidate-Bound PDF Acquisition direction was terminated after product validation. Experimental or dirty v0.5.4 work is research evidence only and does not define v0.6.0 production behavior.
 
@@ -4711,11 +4723,9 @@ v0.6.0 does not include:
 - a new workflow status;
 - unrelated retrieval, canonicalization, or Provider redesign.
 
-### 39.12 Future implementation acceptance
+### 39.12 Implementation acceptance and evidence
 
-The following are v0.6.0 implementation acceptance requirements for later implementation tasks. Their presence here does not claim that A1 implemented or tested them.
-
-Later A2–A6 work must demonstrate, as applicable:
+The following v0.6.0 implementation acceptance requirements retain the semantics established by A1. A2–A6 plus Final Audit Fix 1 implemented them as applicable and the completed implementation was independently reviewed:
 
 - removal of the old Browser Companion/custom acquisition/staging/Zotero-write production path without leaving retired production imports or active entry points;
 - action visibility limited to valid `kept` Papers with valid normalized DOI, with obsolete capture/write actions absent;
@@ -4740,4 +4750,6 @@ Later A2–A6 work must demonstrate, as applicable:
 - `uv lock --check`;
 - `git diff --check`.
 
-These acceptance requirements must be reported as future implementation evidence when they are actually executed. A1 itself is documentation/instruction reset only and establishes no v0.6.0 runtime, automated-test, live-browser, Zotero, or release PASS claim.
+Material final-audit evidence before the implementation commit: focused audit **912 passed / 9 skipped / 2 warnings** and full pytest **2381 passed / 9 skipped / 2 warnings**; `uv lock --check` and `git diff --check` passed. Post-commit full pytest again passed **2381 / 9 skipped / 2 warnings**. Node was unavailable in the independent AgentDock environment, so Node-dependent executable JavaScript coverage remains an explicit validation gap and is not claimed as a JS PASS. No live browser/Zotero Connector validation is claimed for v0.6.0, and historical v0.5.x browser/PDF live evidence does not establish v0.6.0 behavior.
+
+Final Audit Fix 1 closed the exact-parent proof gap: `ZoteroLocalClient.resolve_identity()` can return `VERIFIED` only for an exact normalized DOI match that is a top-level item and has an accepted bibliographic item type. Unknown exact-DOI item types and accepted bibliographic types carrying `parentItem` fail closed rather than authorizing `in_zotero` mutation.
