@@ -8,23 +8,43 @@ safely updates durable Paper and Author Markdown, and exports kept papers.
 
 ## Release and development status
 
-**v0.5.3 is RELEASED and remains the latest released/completed baseline.** Its
-released Python package and OpenAlex/Crossref Provider identities are **0.5.3**,
-and its Browser Companion v2/custom browser-PDF acquisition workflow remains
-historical release evidence under SPEC §38.
+**v0.6.0 is RELEASED and is the latest released/completed baseline.** The
+implementation commit is `f6600dd6d955699c0ce0a066f8d16067533d89ce`
+(`Implement v0.6.0 Zotero Connector workflow`), the independently reviewed
+release-preparation commit is
+`b2ee7fe34efff692e1e77fb612c24f3a05b83340`
+(`Prepare v0.6.0 release`), and permanent RELEASE_HEAD / annotated tag target is
+`df3d805f173b1a4b8f48264821a105df5613f822`. Python package and
+OpenAlex/Crossref Provider User-Agent identity are **0.6.0**.
 
-**v0.6.0 is the current prepared but unreleased target.** Implementation commit
-`f6600dd6d955699c0ce0a066f8d16067533d89ce`
-(`Implement v0.6.0 Zotero Connector workflow`) is complete and passed final
-independent audit. Release preparation was independently reviewed and committed
-as `b2ee7fe34efff692e1e77fb612c24f3a05b83340`
-(`Prepare v0.6.0 release`). The prepared package and OpenAlex/Crossref Provider
-User-Agent identity are **0.6.0**. The next release gate is final
-exact-release-HEAD clean-export validation. The annotated `v0.6.0` tag, main
-push, tag push, GitHub Release, and release asset publication remain incomplete.
-The current candidate release source is therefore still unreleased and untagged.
-SPEC §39 remains the current v0.6.0 product contract, while §§35–38 remain
-immutable historical release records.
+Final exact-release-HEAD validation used a clean Git export, frozen offline
+environment setup, and Node **v24.21.0**. Full pytest passed **2390 tests / 0
+skipped / 2 existing dependency warnings**; wheel/sdist metadata, the complete
+packaged `literature_monitor` payload, isolated installed-wheel behavior, and
+`uv pip check` also passed. The annotated `v0.6.0` tag and main/tag pushes are
+complete, and [GitHub Release v0.6.0](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.0)
+is published as a non-draft, non-prerelease release with exactly two assets.
+GitHub authoritative digests and independent re-download hashes match the
+validated retained artifacts:
+
+- `literature_monitor-0.6.0-py3-none-any.whl`: SHA-256
+  `c38c50e7d813f8a2faa57096c7be527d1b9a7b6dc6d9f0180f171dafb7eb05ec`.
+- `literature_monitor-0.6.0.tar.gz`: SHA-256
+  `82d367a4975a48683810a66198a459da21b19053bc98f251e4c2ae491953b427`.
+
+The released v0.6.0 workflow keeps the official Zotero Connector manually
+operated by the user. Literature Monitor performs read-only exact-DOI parent
+reconciliation; no PDF attachment is required for `in_zotero`; Publisher
+access remains read-only; and there is no automated Connector triggering or
+Zotero write path. Browser Companion/custom acquisition is historical only.
+This post-release documentation closeout is a separate later change outside the
+permanent `v0.6.0` tag target. SPEC §39 remains the current v0.6.0 product
+contract, while §§35–38 remain immutable historical release records.
+
+**v0.5.3 is a historical released baseline.** Its released Python package and
+OpenAlex/Crossref Provider identities are **0.5.3**, and its Browser Companion
+v2/custom browser-PDF acquisition workflow remains historical release evidence
+under SPEC §38.
 
 For historical v0.5.3 release evidence, the reviewed implementation is committed at `21547260157f121a1efd2a5e8f930fad5f26959f`;
 the independently reviewed preparation commit/release HEAD is
