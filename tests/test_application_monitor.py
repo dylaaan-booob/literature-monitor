@@ -96,12 +96,7 @@ def write_monitor(
 ) -> Path:
     whitelist = tmp_path / "journals.md"
     whitelist.write_text(
-        "# List\n\n"
-        "## Journals\n\n"
-        "| Journal | ISSN/EISSN |\n"
-        "|---|---|\n"
-        "| Biometrics | 0006-341X / 1541-0420 |\n"
-        "| Annals of Statistics | 0090-5364 |\n",
+        '# List\n\n## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  |  |\n| Annals of Statistics | 0090-5364 |  |  |\n',
         encoding="utf-8",
     )
     config_path = tmp_path / "monitor.yaml"
@@ -125,16 +120,7 @@ def canonical_paper() -> CanonicalPaper:
 
 
 def resolved_source(journal: JournalConfig) -> ResolvedSource:
-    return ResolvedSource(
-        journal=journal.name,
-        configured_issns=journal.issn,
-        resolved_issns=journal.issn,
-        unresolved_issns=(),
-        openalex_id=f"https://openalex.org/S-{journal.name.replace(' ', '-')}",
-        display_name=journal.name,
-        issn_l=journal.issn[0],
-        issn=journal.issn,
-    )
+    return ResolvedSource(journal=journal.name, configured_issn_l=journal.issn_l, openalex_id=f"https://openalex.org/S-{journal.name.replace(' ', '-')}", display_name=journal.name, provider_issn_l=journal.issn_l, aliases=(journal.issn_l,))
 
 
 def install_core_mocks(
@@ -181,6 +167,7 @@ def install_core_mocks(
         *,
         progress_callback: ProgressCallback | None = None,
     ) -> DiscoveryResult:
+        journals = tuple(unit.journal for unit in journals)
         if progress_callbacks is not None:
             progress_callbacks.append(progress_callback)
         if emit_provider_activity and progress_callback is not None:
@@ -311,7 +298,7 @@ def install_core_mocks(
             self.client = client
             self.callback = progress_callback
 
-        def discover(self, journals, from_date, to_date):
+        def discover(self, journals, from_date, to_date, *, resolved_sources=()):
             return SimpleNamespace(discovery=discover_crossref(
                 self.client, journals, from_date, to_date, progress_callback=self.callback,
             ), reused_dois=(), refreshed_dois=(), new_dois=())
@@ -322,7 +309,9 @@ def install_core_mocks(
                                    issues=result.issues, coverage=result.coverage,
                                    reused_dois=(), refreshed_dois=(), new_dois=())
 
-    monkeypatch.setattr(monitor, "discover_journals_batched", discover_openalex)
+    monkeypatch.setattr(monitor, "resolve_journal_sources_batched", lambda client, journals, **kw:
+                        tuple(SourceResolutionUnit(j, resolved_source(j), (), None) for j in journals))
+    monkeypatch.setattr(monitor, "discover_resolved_sources", discover_openalex)
     monkeypatch.setattr(monitor, "CrossrefRetrieval", CrossrefExecution)
     monkeypatch.setattr(monitor, "assemble_live_provider_evidence", lambda oa, cr, supplied, **kw: supplied)
     # These orchestration tests use opaque records; scope decisions have dedicated tests.
@@ -481,7 +470,7 @@ def test_canonical_core_applies_diagnostic_journal_and_keyword_overrides(
 
     result = _run_canonical_core(
         config_path,
-        journal_name="Biometrics",
+        issn_l="0006-341X",
         keyword_expression='"diagnostic phrase"',
     )
 
@@ -1143,7 +1132,7 @@ def test_validate_monitor_success_and_only_resolves_sources(
         raise AssertionError("validation must not enter Works or materialization paths")
 
     for name in (
-        "discover_journals_batched",
+        "discover_resolved_sources",
         "CrossrefClient",
         "CrossrefRetrieval",
         "materialize_papers",
@@ -1182,7 +1171,7 @@ def test_validate_monitor_success_and_only_resolves_sources(
         "validation_source_resolution:1",
     ]
     assert result.configured_journal_count == 2
-    assert result.configured_issn_count == 3
+    assert result.configured_issn_l_count == 2
     assert len(result.resolved_sources) == 2
     assert not last_run_snapshot_path(config.output_dir).exists()
 
@@ -1216,7 +1205,7 @@ def test_validate_monitor_reuses_openalex_request_retry_progress(
         raise AssertionError("validation must not expand beyond Source resolution")
 
     for name in (
-        "discover_journals_batched",
+        "discover_resolved_sources",
         "CrossrefClient",
         "CrossrefRetrieval",
         "materialize_papers",
@@ -1346,8 +1335,8 @@ def test_validate_mixed_source_success_uses_final_remote_failure_severity(
             if alternate == "recovered":
                 return httpx.Response(500)
             primary = dict(source, issn=["0006-341X"])
-            return httpx.Response(200, json={"meta": {"count": 2}, "results": [primary, annals]})
-        if request.url.path == "/sources/issn:1541-0420" and alternate != "recovered":
+            return httpx.Response(200, json={"meta": {"count": 1}, "results": [annals]})
+        if request.url.path == "/sources/issn:0006-341X" and alternate != "recovered":
             return httpx.Response(500 if alternate == "remote" else 404)
         assert alternate == "recovered"
         return httpx.Response(200, json=annals if request.url.path.endswith("0090-5364") else source)
@@ -1358,14 +1347,14 @@ def test_validate_mixed_source_success_uses_final_remote_failure_severity(
 
     assert result.outcome is expected
     assert [source.journal for source in result.resolved_sources] == (
-        ["Annals of Statistics"] if alternate == "remote" else ["Biometrics", "Annals of Statistics"]
+        ["Annals of Statistics"] if alternate in {"remote", "absent"} else ["Biometrics", "Annals of Statistics"]
     )
     assert bool(result.errors) is (alternate == "remote")
     assert bool(result.warnings) is (alternate == "absent")
     if alternate == "remote":
         assert all(issue.component is MonitorIssueComponent.OPENALEX for issue in result.errors)
-        assert any("remote/API failure" in issue.message for issue in result.errors)
-    assert len(requests) == {"remote": 4, "absent": 2, "recovered": 6}[alternate]
+        assert any("configured ISSN-L" in issue.message for issue in result.errors)
+    assert len(requests) == {"remote": 4, "absent": 2, "recovered": 5}[alternate]
     assert client._http_client.is_closed
     assert not (tmp_path / "workspace").exists()
 
@@ -1457,7 +1446,7 @@ def install_owned_clients(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[tup
 
 
 @pytest.mark.parametrize("entrypoint", [run_monitor, _run_canonical_core])
-@pytest.mark.parametrize("failure_at", [None, "discover_journals_batched", "CrossrefRetrieval", "crossref_supplement", "assemble_live_provider_evidence", "match_searchable_projections", "canonicalize_records"])
+@pytest.mark.parametrize("failure_at", [None, "discover_resolved_sources", "CrossrefRetrieval", "crossref_supplement", "assemble_live_provider_evidence", "match_searchable_projections", "canonicalize_records"])
 def test_canonical_execution_closes_owned_clients_on_all_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

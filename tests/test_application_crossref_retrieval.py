@@ -12,14 +12,15 @@ from literature_monitor.config import JournalConfig
 from literature_monitor.coverage import CoverageStatus
 from literature_monitor.crossref import CrossrefClient, normalize_crossref_discovered_work, retrieve_crossref_manifests
 from literature_monitor.models import CanonicalMetadata, ExternalIds, MetadataSource
-from literature_monitor.openalex import OpenAlexWorkRecord
+from literature_monitor.openalex import OpenAlexWorkRecord, ResolvedSource
 
 A, B = "0006-341X", "2168-2267"
 DAY = date(2026, 1, 1)
 NOW = datetime(2026, 2, 1, tzinfo=timezone.utc)
 REV = "2026-01-02T00:00:00Z"
 NEW_REV = "2026-01-03T00:00:00Z"
-JOURNAL = JournalConfig(name="Biometrics", issn=(A, B))
+JOURNAL = JournalConfig(name="Biometrics", issn_l=A)
+SOURCE = ResolvedSource(A, "https://openalex.org/S1", "Biometrics", (A, B), A)
 
 
 def member(doi="10.1234/a", issns=(A,), revision=REV):
@@ -188,7 +189,7 @@ def test_failed_partition_keeps_successful_sibling_evidence():
             return work_list([member()])
         return work_list([full()])
     http = HTTP(respond)
-    result = http.retrieval().discover((JOURNAL,), DAY, DAY)
+    result = http.retrieval().discover((JOURNAL,), DAY, DAY, resolved_sources=(SOURCE,))
     assert [u.status for u in result.discovery.coverage] == [CoverageStatus.COMPLETE, CoverageStatus.FAILED]
     assert [r.doi for r in result.discovery.records] == ["10.1234/a"]
     assert len(http.requests) == 11  # three bounded HTTP attempts per failed partition/cursor
@@ -212,7 +213,7 @@ def test_manifest_internal_batch_limit():
 def test_matching_revision_reuses_only_current_manifest_rows():
     http = HTTP(lambda r: work_list([member(revision="2026-01-02T01:00:00+01:00")]))
     current, history = state(), state("10.1234/history")
-    result = http.retrieval((current, history)).discover((JournalConfig(name="Biometrics", issn=(A,)),), DAY, DAY)
+    result = http.retrieval((current, history)).discover((JournalConfig(name="Biometrics", issn_l=A),), DAY, DAY)
     assert result.discovery.records == (current.record,)
     assert result.reused_dois == (current.doi,) and not result.pending_changes
     assert not result.refreshed_dois and not result.new_dois and not http.full_requests
@@ -224,7 +225,7 @@ def test_changed_or_new_full_hydration_retains_every_consumed_field(historical):
     http = HTTP(lambda r: work_list([member(issns=(A, B), revision=NEW_REV)]) if "select" in r.url.params
                 else work_list([full(issns=(A, B), revision=NEW_REV)]))
     previous = state(issns=(A, B))
-    result = http.retrieval((previous,) if historical else ()).discover((JOURNAL,), DAY, DAY)
+    result = http.retrieval((previous,) if historical else ()).discover((JOURNAL,), DAY, DAY, resolved_sources=(SOURCE,))
     assert len(http.full_requests) == 1 and len(result.discovery.records) == len(result.pending_changes) == 1
     record, = result.discovery.records
     assert record.title and record.journal and record.abstract and record.authors and record.dates and record.relations
@@ -241,7 +242,7 @@ def test_changed_or_new_full_hydration_retains_every_consumed_field(historical):
 @pytest.mark.parametrize("revision", [None, "bad", "2026-01-02T00:00:00"])
 def test_unusable_manifest_revision_never_reuses_and_keeps_coverage_conservative(revision):
     http = HTTP(lambda r: work_list([member(revision=revision)]) if "select" in r.url.params else work_list([full()]))
-    result = http.retrieval((state(),)).discover((JournalConfig(name="Biometrics", issn=(A,)),), DAY, DAY)
+    result = http.retrieval((state(),)).discover((JournalConfig(name="Biometrics", issn_l=A),), DAY, DAY)
     assert not result.reused_dois and result.refreshed_dois == ("10.1234/a",)
     assert len(http.full_requests) == 1 and len(result.pending_changes) == 1
     assert result.discovery.coverage[0].status is CoverageStatus.PARTIAL
@@ -249,17 +250,17 @@ def test_unusable_manifest_revision_never_reuses_and_keeps_coverage_conservative
 
 def test_full_record_without_revision_is_transient_and_not_pending():
     http = HTTP(lambda r: work_list([member()]) if "select" in r.url.params else work_list([full(revision=None)]))
-    result = http.retrieval().discover((JournalConfig(name="Biometrics", issn=(A,)),), DAY, DAY)
+    result = http.retrieval().discover((JournalConfig(name="Biometrics", issn_l=A),), DAY, DAY)
     assert len(result.discovery.records) == 1 and not result.pending_changes
 
 
 @pytest.mark.parametrize("full_issns", [(B,), ("1234-5679",), ()])
-def test_wrong_queried_issn_or_venue_cannot_yield_complete(full_issns):
+def test_record_membership_uses_verified_aliases_and_marks_disjoint_evidence_partial(full_issns):
     http = HTTP(lambda r: work_list([member()]) if "select" in r.url.params else work_list([full(issns=full_issns)]))
-    result = http.retrieval().discover((JOURNAL,), DAY, DAY)
-    assert result.discovery.coverage[0].status is CoverageStatus.FAILED
-    assert not result.discovery.records and not result.pending_changes
-    assert any(i.stage == "venue_validation" for i in result.discovery.issues)
+    result = http.retrieval().discover((JOURNAL,), DAY, DAY, resolved_sources=(SOURCE,))
+    assert result.discovery.coverage[0].status is (CoverageStatus.COMPLETE if B in full_issns else CoverageStatus.PARTIAL)
+    assert result.discovery.records and result.pending_changes
+    assert any(i.stage == "venue_validation" for i in result.discovery.issues) == (B not in full_issns)
 
 
 @pytest.mark.parametrize("usable_peer", [False, True])
@@ -272,14 +273,14 @@ def test_confirmed_members_with_hydration_failure_are_partial_or_failed(usable_p
             return work_list([full("10.1234/b")])
         return httpx.Response(500)
     http = HTTP(respond)
-    result = http.retrieval().discover((JournalConfig(name="Biometrics", issn=(A,)),), DAY, DAY)
+    result = http.retrieval().discover((JournalConfig(name="Biometrics", issn_l=A),), DAY, DAY)
     assert result.discovery.coverage[0].status is (CoverageStatus.PARTIAL if usable_peer else CoverageStatus.FAILED)
     assert "10.1234/a" not in result.new_dois
 
 
 def test_zero_member_live_manifest_complete_ignores_history():
     http = HTTP(lambda r: work_list())
-    result = http.retrieval((state(),)).discover((JOURNAL,), DAY, DAY)
+    result = http.retrieval((state(),)).discover((JOURNAL,), DAY, DAY, resolved_sources=(SOURCE,))
     assert not result.discovery.records and not http.full_requests
     assert all(u.status is CoverageStatus.COMPLETE for u in result.discovery.coverage)
 
@@ -292,7 +293,7 @@ def test_full_batch_failure_splits_and_keeps_successful_sibling():
             return httpx.Response(500)
         return work_list([full("10.1234/b")])
     http = HTTP(respond)
-    result = http.retrieval().discover((JournalConfig(name="Biometrics", issn=(A,)),), DAY, DAY)
+    result = http.retrieval().discover((JournalConfig(name="Biometrics", issn_l=A),), DAY, DAY)
     assert [r.doi for r in result.discovery.records] == ["10.1234/b"]
     assert result.discovery.coverage[0].status is CoverageStatus.PARTIAL
 
@@ -395,7 +396,7 @@ def test_alias_prime_absent_probe_can_use_current_singleton_200():
 def test_successful_discovery_doi_is_not_supplemented(historical):
     http = HTTP(lambda r: work_list([member()]) if "select" in r.url.params else work_list([full()]))
     execution = http.retrieval((state(),) if historical else ())
-    discovered = execution.discover((JournalConfig(name="Biometrics", issn=(A,)),), DAY, DAY)
+    discovered = execution.discover((JournalConfig(name="Biometrics", issn_l=A),), DAY, DAY)
     request_count = len(http.requests)
     classifications = execution._classification.copy()
     revisions = execution._revisions.copy()
@@ -425,7 +426,7 @@ def test_mixed_openalex_dois_supplement_only_the_discovery_gap(mode):
     history = () if mode == "new" else (state(gap, revision=REV if mode == "reused" else NEW_REV),)
     http = HTTP(respond)
     execution = http.retrieval(history)
-    discovered = execution.discover((JournalConfig(name="Biometrics", issn=(A,)),), DAY, DAY)
+    discovered = execution.discover((JournalConfig(name="Biometrics", issn_l=A),), DAY, DAY)
     supplement_start = len(http.requests)
     supplemented = execution.supplement((oa(), oa(gap, "W2"), oa(gap, "W3")))
     assert [u.doi for u in supplemented.coverage] == [gap]
@@ -443,9 +444,9 @@ def test_venue_rejected_discovery_doi_remains_supplement_eligible(issns):
     http = HTTP(lambda request: work_list([member()]) if "select" in request.url.params
                 else work_list([full(issns=issns)]))
     execution = http.retrieval()
-    discovered = execution.discover((JournalConfig(name="Biometrics", issn=(A,)),), DAY, DAY)
-    assert not discovered.discovery.records and not discovered.pending_changes
-    assert discovered.discovery.coverage[0].status is CoverageStatus.FAILED
+    discovered = execution.discover((JournalConfig(name="Biometrics", issn_l=A),), DAY, DAY)
+    assert discovered.discovery.records and discovered.pending_changes
+    assert discovered.discovery.coverage[0].status is CoverageStatus.PARTIAL
     supplemented = execution.supplement((oa(),))
     assert len(http.requests) == 3 and len(http.full_requests) == 1
     assert http.requests[-1].url.params["filter"] == "doi:10.1234/a"
@@ -458,7 +459,7 @@ def test_venue_rejected_discovery_doi_remains_supplement_eligible(issns):
 def test_duplicate_doi_across_separate_manifest_batches_hydrates_once(monkeypatch):
     monkeypatch.setattr(crossref, "_CROSSREF_MANIFEST_BATCH_SIZE", 1)
     http = HTTP(lambda r: work_list([member(issns=(A, B))]) if "select" in r.url.params else work_list([full(issns=(A, B))]))
-    result = http.retrieval().discover((JOURNAL,), DAY, DAY)
+    result = http.retrieval().discover((JOURNAL,), DAY, DAY, resolved_sources=(SOURCE,))
     assert len(http.full_requests) == 1 and len(result.pending_changes) == 1
     assert all(u.status is CoverageStatus.COMPLETE for u in result.discovery.coverage)
 
@@ -487,7 +488,7 @@ def test_pending_changes_are_only_returned_in_memory_and_crossref_serialization_
     import literature_monitor.application.provider_state as provider_state
     monkeypatch.chdir(tmp_path)
     http = HTTP(lambda r: work_list([member()]) if "select" in r.url.params else work_list([full()]))
-    result = http.retrieval().discover((JournalConfig(name="Biometrics", issn=(A,)),), DAY, DAY)
+    result = http.retrieval().discover((JournalConfig(name="Biometrics", issn_l=A),), DAY, DAY)
     assert len(result.pending_changes) == 1 and not list(tmp_path.iterdir())
     assert provider_state.SCHEMA_VERSION == 3
     assert provider_state.CROSSREF_SERIALIZATION_VERSION == 1
@@ -501,7 +502,7 @@ def test_conflicting_duplicate_manifest_revisions_require_live_hydration_and_par
             return work_list([member(issns=(A, B), revision=revision)])
         return work_list([full(issns=(A, B), revision=NEW_REV)])
     http = HTTP(respond)
-    result = http.retrieval((state(issns=(A, B)),)).discover((JOURNAL,), DAY, DAY)
+    result = http.retrieval((state(issns=(A, B)),)).discover((JOURNAL,), DAY, DAY, resolved_sources=(SOURCE,))
     assert len(http.full_requests) == 1 and not result.reused_dois
     assert all(u.status is CoverageStatus.PARTIAL for u in result.discovery.coverage)
 
@@ -514,7 +515,7 @@ def test_missing_total_preserves_safe_live_members_but_cannot_claim_complete():
         del payload["message"]["total-results"]
         return payload
     http = HTTP(respond)
-    result = http.retrieval().discover((JournalConfig(name="Biometrics", issn=(A,)),), DAY, DAY)
+    result = http.retrieval().discover((JournalConfig(name="Biometrics", issn_l=A),), DAY, DAY)
     assert len(result.discovery.records) == 1
     assert result.discovery.coverage[0].status is CoverageStatus.PARTIAL
 
@@ -522,7 +523,7 @@ def test_missing_total_preserves_safe_live_members_but_cannot_claim_complete():
 def test_current_full_hydration_rejects_unrequested_doi_and_conflicting_records():
     http = HTTP(lambda r: work_list([member()]) if "select" in r.url.params else work_list([
         full("10.1234/unrequested"), full(), {**full(), "title": ["Conflicting"]}]))
-    result = http.retrieval().discover((JournalConfig(name="Biometrics", issn=(A,)),), DAY, DAY)
+    result = http.retrieval().discover((JournalConfig(name="Biometrics", issn_l=A),), DAY, DAY)
     assert not result.discovery.records and not result.pending_changes
     assert result.discovery.coverage[0].status is CoverageStatus.FAILED
 
@@ -586,7 +587,7 @@ def test_repeated_revision_observation_change_never_rehydrates_or_reuses_stale_r
         return work_list([full()])
     http = HTTP(respond)
     execution = http.retrieval()
-    execution.discover((JournalConfig(name="Biometrics", issn=(A,)),), DAY, DAY)
+    execution.discover((JournalConfig(name="Biometrics", issn_l=A),), DAY, DAY)
     # An undiscovered alias still requires a current live probe of its discovered prime.
     result = execution.supplement((oa("10.1234/alias"),))
     assert len(http.full_requests) == 1 and not result.records
@@ -654,7 +655,7 @@ def test_hydrated_revision_advancement_survives_later_matching_probe(historical)
     http = HTTP(respond)
     previous = state(revision="2026-01-01T00:00:00Z")
     execution = http.retrieval((previous,) if historical else ())
-    discovered = execution.discover((JournalConfig(name="Biometrics", issn=(A,)),), DAY, DAY)
+    discovered = execution.discover((JournalConfig(name="Biometrics", issn_l=A),), DAY, DAY)
     current, = discovered.discovery.records
     pending, = discovered.pending_changes
     assert current.indexed_at == pending.indexed_at == datetime(2026, 1, 3, tzinfo=timezone.utc)
@@ -691,7 +692,7 @@ def test_singleton_success_replaces_cached_discovery_hydration_failure(history):
     previous = state(revision="2026-01-01T00:00:00Z" if history == "stale" else REV)
     http = HTTP(respond)
     execution = http.retrieval(()) if history == "none" else http.retrieval((previous,))
-    discovered = execution.discover((JournalConfig(name="Biometrics", issn=(A,)),), DAY, DAY)
+    discovered = execution.discover((JournalConfig(name="Biometrics", issn_l=A),), DAY, DAY)
     assert discovered.discovery.coverage[0].status is CoverageStatus.FAILED
     assert not discovered.discovery.records and not discovered.pending_changes
     failed_attempts = len(http.full_requests)
@@ -746,7 +747,7 @@ def test_supplied_recovery_without_revision_remains_transient():
         return work_list()
     http = HTTP(respond)
     execution = http.retrieval((state(revision="2026-01-01T00:00:00Z"),))
-    execution.discover((JournalConfig(name="Biometrics", issn=(A,)),), DAY, DAY)
+    execution.discover((JournalConfig(name="Biometrics", issn_l=A),), DAY, DAY)
     supplemented = execution.supplement((oa(),))
     assert supplemented.coverage[0].status is CoverageStatus.COMPLETE
     assert supplemented.records[0].indexed_at is None

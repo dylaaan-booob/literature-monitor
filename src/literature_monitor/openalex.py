@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import ipaddress
 import json
 import re
 import time
-import unicodedata
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
@@ -17,7 +15,8 @@ from urllib.parse import urlencode, urlsplit
 import httpx
 from pydantic import Field, ValidationError, field_validator
 
-from literature_monitor.config import JournalConfig
+from literature_monitor.config import JournalConfig, normalize_journal_issn, normalize_publisher_id
+from literature_monitor.url_safety import normalize_public_http_url
 from literature_monitor.coverage import (
     CoverageComponent,
     CoverageStatus,
@@ -79,15 +78,13 @@ class DiscoveryIssue:
 
 @dataclass(frozen=True)
 class ResolvedSource:
-    journal: str
-    configured_issns: tuple[str, ...]
-    resolved_issns: tuple[str, ...]
-    unresolved_issns: tuple[str, ...]
+    configured_issn_l: str
     openalex_id: str
     display_name: str
-    issn_l: str | None
-    issn: tuple[str, ...]
-    host_organization: str | None = None
+    aliases: tuple[str, ...]
+    provider_issn_l: str | None
+    publisher_id: str | None = None
+    journal: str = ""  # Presentation only; configured_issn_l owns the relationship.
     host_organization_name: str | None = None
     homepage_url: str | None = None
     homepage_hostname: str | None = None
@@ -300,6 +297,14 @@ class OpenAlexClient:
                                     operation="source_resolution:batch", label="Resolving OpenAlex sources", unit="issn"),
         )
 
+    def get_publishers_by_ids(self, publisher_ids: Sequence[str]) -> dict[str, Any]:
+        ids = tuple(dict.fromkeys(normalize_publisher_id(p) for p in publisher_ids))
+        if not 1 <= len(ids) <= _OPENALEX_BATCH_SIZE:
+            raise ValueError("Publisher batch requires 1–100 IDs")
+        return self._request_json("/publishers", {
+            "filter": "ids.openalex:" + "|".join(p.rsplit("/", 1)[-1] for p in ids), "select": "id,display_name,homepage_url", "per_page": "100",
+        })
+
     def iter_thin_work_pages(
         self, source_ids: Sequence[str], from_date: date, to_date: date, *,
         progress_callback: ProgressCallback | None = None,
@@ -428,7 +433,7 @@ class OpenAlexClient:
         url = f"{self.base_url}{path}?{urlencode(params)}"
         headers = {
             "Accept": "application/json",
-            "User-Agent": "literature-monitor/0.6.1",
+            "User-Agent": "literature-monitor/0.6.2",
         }
         if self.api_key is not None:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -528,21 +533,6 @@ class OpenAlexClient:
         raise AssertionError("unreachable")
 
 
-@dataclass(frozen=True)
-class _SourceHit:
-    queried_issn: str
-    openalex_id: str
-    display_name: str
-    issn_l: str | None
-    issn: tuple[str, ...]
-    alternate_titles: tuple[str, ...]
-    abbreviated_title: str | None
-    host_organization: str | None = None
-    host_organization_name: str | None = None
-    homepage_url: str | None = None
-    homepage_hostname: str | None = None
-
-
 def _canonical_openalex_id(value: Any, prefix: str) -> str:
     if not isinstance(value, str):
         raise OpenAlexRecordError(f"missing OpenAlex {prefix} identifier")
@@ -596,39 +586,11 @@ def _optional_display_string(value: Any) -> str | None:
 def _optional_homepage(value: Any) -> tuple[str | None, str | None]:
     if not isinstance(value, str):
         return None, None
-    url = value.strip()
-    if not url or any(
-        character.isspace()
-        or character == "\\"
-        or ord(character) < 0x20
-        or ord(character) == 0x7F
-        for character in url
-    ):
-        return None, None
     try:
-        parsed = urlsplit(url)
-        hostname = parsed.hostname
-        parsed.port
+        url = normalize_public_http_url(value.strip())
     except ValueError:
         return None, None
-    if (
-        parsed.scheme.lower() not in {"http", "https"}
-        or not hostname
-        or parsed.username is not None
-        or parsed.password is not None
-    ):
-        return None, None
-    normalized_hostname = hostname.lower().rstrip(".")
-    if normalized_hostname == "localhost" or normalized_hostname.endswith(".localhost"):
-        return None, None
-    try:
-        address = ipaddress.ip_address(normalized_hostname)
-    except ValueError:
-        pass
-    else:
-        if not address.is_global:
-            return None, None
-    return url, normalized_hostname
+    return (url, urlsplit(url).hostname.lower().rstrip(".")) if url else (None, None)
 
 
 def _stable_optional(values: Sequence[str | None]) -> str | None:
@@ -639,271 +601,24 @@ def _stable_optional(values: Sequence[str | None]) -> str | None:
     return distinct[0] if len(distinct) == 1 else None
 
 
-def _parse_source(payload: dict[str, Any], queried_issn: str) -> _SourceHit:
-    if payload.get("type") != "journal":
-        raise OpenAlexRecordError(
-            f"ISSN {queried_issn} resolved to non-journal source type {payload.get('type')!r}"
-        )
-    source_issns = _parse_string_tuple(payload.get("issn"), "source ISSNs")
-    if queried_issn not in source_issns:
-        raise OpenAlexRecordError(
-            f"ISSN {queried_issn} is absent from the returned source ISSNs"
-        )
-    alternate_titles_raw = payload.get("alternate_titles", [])
-    if not isinstance(alternate_titles_raw, list) or any(
-        not isinstance(title, str) for title in alternate_titles_raw
-    ):
-        raise OpenAlexRecordError("invalid source alternate_titles")
-    abbreviated_title_raw = payload.get("abbreviated_title")
-    if abbreviated_title_raw is not None and not isinstance(abbreviated_title_raw, str):
-        raise OpenAlexRecordError("invalid source abbreviated_title")
-    issn_l_raw = payload.get("issn_l")
-    if issn_l_raw is not None and not isinstance(issn_l_raw, str):
-        raise OpenAlexRecordError("invalid source issn_l")
-    homepage_url, homepage_hostname = _optional_homepage(payload.get("homepage_url"))
-    return _SourceHit(
-        queried_issn=queried_issn,
-        openalex_id=_canonical_openalex_id(payload.get("id"), "S"),
-        display_name=_nonempty_string(payload.get("display_name"), "source display_name"),
-        issn_l=issn_l_raw.strip().upper() if issn_l_raw else None,
-        issn=source_issns,
-        alternate_titles=tuple(
-            title.strip() for title in alternate_titles_raw if title.strip()
-        ),
-        abbreviated_title=(abbreviated_title_raw.strip() if abbreviated_title_raw else None),
-        host_organization=_optional_host_organization(payload.get("host_organization")),
-        host_organization_name=_optional_display_string(payload.get("host_organization_name")),
-        homepage_url=homepage_url,
-        homepage_hostname=homepage_hostname,
-    )
-
-
-def _normalized_journal_name(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value).casefold().replace("&", " and ")
-    words = re.findall(r"[^\W_]+", normalized, flags=re.UNICODE)
-    if words and words[0] == "the":
-        words = words[1:]
-    return "".join(words)
-
-
-def _journal_name_matches(journal_name: str, source: _SourceHit) -> bool:
-    expected = _normalized_journal_name(journal_name)
-    candidates = (source.display_name, *source.alternate_titles)
-    if source.abbreviated_title is not None:
-        candidates += (source.abbreviated_title,)
-    return expected in {_normalized_journal_name(candidate) for candidate in candidates}
-
-
 def _resolve_journal_source(
-    client: OpenAlexClient,
-    journal: JournalConfig,
-    *,
-    progress_callback: ProgressCallback | None = None,
-    operation: str | None = None,
-) -> tuple[
-    ResolvedSource | None,
-    tuple[DiscoveryIssue, ...],
-    CoverageStatus | None,
-]:
-    hits: list[_SourceHit] = []
-    unresolved: list[str] = []
-    request_failures: list[tuple[str, str]] = []
-    source_validation_failures: list[tuple[str, str]] = []
-    issues: list[DiscoveryIssue] = []
-    operation = operation or f"source_resolution:{_normalized_journal_name(journal.name)}"
-    total_issns = len(journal.issn)
-
-    for issn_index, issn in enumerate(journal.issn):
-        activity = ActivityUpdate(
-            kind=ActivityKind.WORKING,
-            source="openalex",
-            operation=operation,
-            label="Resolving OpenAlex journal source",
-            detail=f"{journal.name} · ISSN {issn}",
-            current=issn_index,
-            total=total_issns,
-            unit="issn",
-        )
-        _report_activity(progress_callback, activity)
-        try:
-            if progress_callback is None:
-                payload = client.get_source_by_issn(issn)
-            else:
-                payload = client.get_source_by_issn(
-                    issn,
-                    progress_callback=progress_callback,
-                    activity=activity,
-                )
-        except OpenAlexNotFoundError:
-            unresolved.append(issn)
-        except OpenAlexRequestError as error:
-            request_failures.append((issn, str(error)))
-        else:
-            try:
-                hits.append(_parse_source(payload, issn))
-            except OpenAlexRecordError as error:
-                source_validation_failures.append((issn, str(error)))
-        _report_activity(
-            progress_callback,
-            replace(
-                activity,
-                label="Checked OpenAlex ISSN",
-                current=issn_index + 1,
-            ),
-        )
-
-    if journal.issn:
-        _report_activity(
-            progress_callback,
-            ActivityUpdate(
-                kind=ActivityKind.WORKING,
-                source="openalex",
-                operation=operation,
-                label="Completed OpenAlex source resolution",
-                detail=journal.name,
-                current=total_issns,
-                total=total_issns,
-                unit="issn",
-            ),
-        )
-
-    return _finish_journal_source(journal, hits, unresolved, request_failures, source_validation_failures)
-
-
-def _finish_journal_source(
-    journal: JournalConfig, hits: list[_SourceHit], unresolved: list[str],
-    request_failures: list[tuple[str, str]], source_validation_failures: list[tuple[str, str]],
+    client: OpenAlexClient, journal: JournalConfig, *,
+    progress_callback: ProgressCallback | None = None, operation: str | None = None,
 ) -> tuple[ResolvedSource | None, tuple[DiscoveryIssue, ...], CoverageStatus | None]:
-    issues: list[DiscoveryIssue] = []
-    if not hits:
-        details: list[str] = []
-        if unresolved:
-            details.append(f"unresolved ISSNs: {', '.join(unresolved)}")
-        if request_failures:
-            failures = "; ".join(
-                f"{issn}: {message}" for issn, message in request_failures
-            )
-            details.append(f"incomplete ISSN verification: {failures}")
-        if source_validation_failures:
-            failures = "; ".join(
-                f"{issn}: {message}" for issn, message in source_validation_failures
-            )
-            details.append(f"Source validation failures: {failures}")
-        status = (
-            CoverageStatus.UNAVAILABLE
-            if unresolved
-            and not request_failures
-            and not source_validation_failures
-            else CoverageStatus.FAILED
+    try:
+        evidence = _parse_identity_source(client.get_source_by_issn(
+            journal.issn_l, progress_callback=progress_callback,
+        ), journal.issn_l)
+        outcome = SourceEvidenceResolution(journal.issn_l, evidence, SourceEvidenceStatus.RESOLVED)
+    except OpenAlexError as error:
+        outcome = SourceEvidenceResolution(
+            journal.issn_l, None,
+            SourceEvidenceStatus.NOT_FOUND if isinstance(error, OpenAlexNotFoundError)
+            else SourceEvidenceStatus.INVALID_SOURCE if isinstance(error, OpenAlexRecordError)
+            else SourceEvidenceStatus.REQUEST_FAILED, str(error),
         )
-        issues.append(
-            DiscoveryIssue(
-                severity=(IssueSeverity.WARNING if status is CoverageStatus.UNAVAILABLE
-                          else IssueSeverity.ERROR),
-                stage="source_resolution",
-                journal=journal.name,
-                message=(
-                    "no configured ISSN resolved in OpenAlex"
-                    + (f" ({'; '.join(details)})" if details else "")
-                ),
-            )
-        )
-        return None, tuple(issues), status
-
-    for issn in unresolved:
-        issues.append(
-            DiscoveryIssue(
-                severity=IssueSeverity.WARNING,
-                stage="source_resolution",
-                journal=journal.name,
-                issn=issn,
-                message=f"ISSN {issn} is unresolved; using the consistent resolved Source",
-            )
-        )
-    for issn, message in request_failures:
-        issues.append(
-            DiscoveryIssue(
-                severity=IssueSeverity.ERROR,
-                stage="source_resolution",
-                journal=journal.name,
-                issn=issn,
-                message=f"incomplete ISSN verification after remote/API failure: {message}",
-            )
-        )
-    for issn, message in source_validation_failures:
-        issues.append(
-            DiscoveryIssue(
-                severity=IssueSeverity.ERROR,
-                stage="source_resolution",
-                journal=journal.name,
-                issn=issn,
-                message=f"resolved Source failed validation: {message}",
-            )
-        )
-
-    source_ids = {hit.openalex_id for hit in hits}
-    if len(source_ids) != 1:
-        mappings = ", ".join(f"{hit.queried_issn} -> {hit.openalex_id}" for hit in hits)
-        issues.append(
-            DiscoveryIssue(
-                severity=IssueSeverity.ERROR,
-                stage="source_resolution",
-                journal=journal.name,
-                message=(
-                    "configured ISSNs resolve to conflicting OpenAlex Sources: "
-                    f"{mappings}"
-                ),
-            )
-        )
-        return None, tuple(issues), CoverageStatus.FAILED
-
-    if request_failures or source_validation_failures:
-        return None, tuple(issues), CoverageStatus.FAILED
-
-    source = hits[0]
-    if not _journal_name_matches(journal.name, source):
-        issues.append(
-            DiscoveryIssue(
-                severity=IssueSeverity.ERROR,
-                stage="source_resolution",
-                journal=journal.name,
-                message=(
-                    f"configured journal name does not match OpenAlex source "
-                    f"{source.display_name!r} ({source.openalex_id})"
-                ),
-            )
-        )
-        return None, tuple(issues), CoverageStatus.FAILED
-
-    homepage_url = _stable_optional([hit.homepage_url for hit in hits])
-    homepage_hostname = (
-        _stable_optional([hit.homepage_hostname for hit in hits])
-        if homepage_url is not None
-        else None
-    )
-
-    return (
-        ResolvedSource(
-            journal=journal.name,
-            configured_issns=journal.issn,
-            resolved_issns=tuple(hit.queried_issn for hit in hits),
-            unresolved_issns=tuple(unresolved),
-            openalex_id=source.openalex_id,
-            display_name=source.display_name,
-            issn_l=source.issn_l,
-            issn=source.issn,
-            host_organization=_stable_optional(
-                [hit.host_organization for hit in hits]
-            ),
-            host_organization_name=_stable_optional(
-                [hit.host_organization_name for hit in hits]
-            ),
-            homepage_url=homepage_url,
-            homepage_hostname=homepage_hostname,
-        ),
-        tuple(issues),
-        None,
-    )
+    unit = _configured_source_unit(journal, outcome)
+    return unit.source, unit.issues, unit.status
 
 
 def resolve_journal_source(
@@ -1094,7 +809,7 @@ def discover_openalex_journal(
                 provider="openalex",
                 component=CoverageComponent.OPENALEX_DISCOVERY,
                 status=resolution_status or CoverageStatus.FAILED,
-                journal=journal.name,
+                journal=journal.issn_l,
             )
         )
         return OpenAlexDiscoveryUnitResult(
@@ -1175,7 +890,7 @@ def discover_openalex_journal(
                     if completed_pages
                     else CoverageStatus.FAILED
                 ),
-                journal=journal.name,
+                journal=journal.issn_l,
             )
         )
     else:
@@ -1188,7 +903,7 @@ def discover_openalex_journal(
                     if dropped_record
                     else CoverageStatus.COMPLETE
                 ),
-                journal=journal.name,
+                journal=journal.issn_l,
             )
         )
 
@@ -1245,38 +960,170 @@ class SourceResolutionUnit:
     status: CoverageStatus | None
 
 
-def resolve_journal_sources_batched(
-    client: OpenAlexClient, journals: Sequence[JournalConfig], *,
+class OpenAlexAmbiguousSourceError(OpenAlexRecordError):
+    """More than one Source identity supports a queried identifier."""
+
+
+@dataclass(frozen=True)
+class SourceEvidence:
+    source_id: str
+    display_name: str
+    aliases: tuple[str, ...]
+    provider_issn_l: str | None
+    publisher_id: str | None = None
+    diagnostics: tuple[str, ...] = ()
+    host_organization_name: str | None = None
+    homepage_url: str | None = None
+    homepage_hostname: str | None = None
+
+
+class SourceEvidenceStatus(str, Enum):
+    RESOLVED = "resolved"
+    INVALID_IDENTIFIER = "invalid_identifier"
+    NOT_FOUND = "not_found"
+    INVALID_SOURCE = "invalid_source"
+    AMBIGUOUS_SOURCE = "ambiguous_source"
+    REQUEST_FAILED = "request_failed"
+
+
+@dataclass(frozen=True)
+class SourceEvidenceResolution:
+    requested_issn: str
+    evidence: SourceEvidence | None
+    status: SourceEvidenceStatus
+    diagnostic: str | None = None
+    request_failure_kind: OpenAlexFailureKind | None = None
+
+
+def _usable_source_aliases(payload: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    raw = payload.get("issn")
+    if not isinstance(raw, list):
+        raise OpenAlexRecordError("invalid Source ISSN membership structure")
+    aliases, diagnostics = set(), []
+    for value in raw:
+        try:
+            aliases.add(normalize_journal_issn(value))
+        except (ValueError, TypeError, AttributeError):
+            diagnostics.append(f"excluded malformed Source alias {value!r}")
+    return tuple(sorted(aliases)), tuple(diagnostics)
+
+
+def _parse_identity_source(payload: dict[str, Any], queried_issn: str) -> SourceEvidence:
+    """Verify direct membership; Provider canonical metadata cannot redefine identity."""
+    aliases, diagnostics = _usable_source_aliases(payload)
+    if queried_issn not in aliases:
+        raise OpenAlexRecordError(f"ISSN {queried_issn} is absent from the returned source ISSNs")
+    if payload.get("type") != "journal":
+        raise OpenAlexRecordError(f"ISSN {queried_issn} resolved to non-journal Source")
+    source_id = _canonical_openalex_id(payload.get("id"), "S")
+    display_name = _optional_display_string(payload.get("display_name"))
+    if display_name is None:
+        raise OpenAlexRecordError("invalid Source display_name")
+    candidate = None
+    raw_candidate = payload.get("issn_l")
+    try:
+        candidate = normalize_journal_issn(raw_candidate)
+    except (ValueError, TypeError, AttributeError):
+        diagnostics += (f"unavailable Provider ISSN-L {raw_candidate!r}",)
+    else:
+        if candidate not in aliases:
+            diagnostics += (f"Provider ISSN-L {candidate} is outside usable Source aliases",)
+            candidate = None
+    publisher = _optional_host_organization(payload.get("host_organization"))
+    if publisher is not None and not publisher.startswith("https://openalex.org/P"):
+        publisher = None
+    homepage_url, homepage_hostname = _optional_homepage(payload.get("homepage_url"))
+    return SourceEvidence(source_id, display_name, aliases, candidate, publisher, diagnostics,
+                          _optional_display_string(payload.get("host_organization_name")),
+                          homepage_url, homepage_hostname)
+
+
+def reconcile_source_evidence(observations: Sequence[SourceEvidence]) -> SourceEvidence:
+    """Reconcile observations of one Source without choosing arbitrary metadata."""
+    if len({item.source_id for item in observations}) != 1:
+        raise OpenAlexAmbiguousSourceError("multiple distinct OpenAlex Sources support the identifier")
+    if len({item.aliases for item in observations}) != 1:
+        raise OpenAlexRecordError("Source-data conflict: same Source ID has contradictory membership")
+    first = observations[0]
+    diagnostics = set(message for item in observations for message in item.diagnostics)
+    names = {item.display_name for item in observations}
+    if len(names) > 1:
+        diagnostics.add("same Source ID has varying display metadata; "
+                        "lexical display choice only: " + ", ".join(sorted(names)))
+    candidates = {item.provider_issn_l for item in observations}
+    publishers = {item.publisher_id for item in observations}
+    if len(candidates) > 1:
+        diagnostics.add("Provider ISSN-L disagreement for same Source: " +
+                        ", ".join(sorted(str(value) for value in candidates)))
+    if len(publishers) > 1:
+        diagnostics.add("inconsistent optional Publisher metadata for same Source")
+    return replace(first, display_name=min(names), provider_issn_l=first.provider_issn_l if len(candidates) == 1 else None,
+                   publisher_id=first.publisher_id if len(publishers) == 1 else None,
+                   diagnostics=tuple(sorted(diagnostics)))
+
+
+def _resolve_source_hits_batched(
+    client: OpenAlexClient, issns: Sequence[str], *,
     progress_callback: ProgressCallback | None = None,
-) -> tuple[SourceResolutionUnit, ...]:
-    """Resolve the complete configured sequence without changing legacy entrypoints."""
-    issns = tuple(dict.fromkeys(issn for journal in journals for issn in journal.issn))
-    outcomes: dict[str, _SourceHit | OpenAlexError] = {}
+) -> dict[str, SourceEvidence | OpenAlexError]:
+    """Share bounded batch/singleton lookup between production and §41 analysis."""
+    issns = tuple(dict.fromkeys(issns))
+    outcomes: dict[str, SourceEvidence | OpenAlexError] = {}
     for offset in range(0, len(issns), _OPENALEX_BATCH_SIZE):
         batch = issns[offset:offset + _OPENALEX_BATCH_SIZE]
-        candidates: dict[str, list[_SourceHit]] = {issn: [] for issn in batch}
+        candidates: dict[str, list[SourceEvidence]] = {issn: [] for issn in batch}
         try:
             payload = client.get_sources_by_issns(batch, progress_callback=progress_callback)
             results = payload.get("results")
             if not isinstance(results, list):
                 raise OpenAlexRequestError("OpenAlex Sources response lacks results")
             count = _progress_total(payload.get("meta", {}).get("count")) if isinstance(payload.get("meta"), dict) else None
+            if count is None:
+                raise OpenAlexRequestError("OpenAlex Source batch lacks a valid total count")
             if count is not None and count != len(results):
                 raise OpenAlexRequestError("incomplete OpenAlex Source batch")
             unsafe: set[str] = set()
+            recovery: set[str] = set()
+            source_ids: dict[str, set[str]] = {issn: set() for issn in batch}
             for raw in results:
-                if not isinstance(raw, dict) or not isinstance(raw.get("issn"), list):
+                try:
+                    if not isinstance(raw, dict):
+                        raise OpenAlexRecordError("Source is not an object")
+                    raw_issns, _ = _usable_source_aliases(raw)
+                    if not set(raw_issns).intersection(batch):
+                        raise OpenAlexRecordError("Source has no assignable queried ISSN alias")
+                except OpenAlexRecordError:
+                    recovery.update(batch)
                     continue
                 for issn in batch:
-                    if issn not in raw["issn"]:
+                    if issn not in raw_issns:
                         continue
                     try:
-                        candidates[issn].append(_parse_source(raw, issn))
+                        source_ids[issn].add(_canonical_openalex_id(raw.get("id"), "S"))
                     except OpenAlexRecordError:
+                        pass  # Parsing below retains the invalid-record failure.
+                    try:
+                        candidates[issn].append(
+                            _parse_identity_source(raw, issn)
+                        )
+                    except OpenAlexRecordError as error:
                         unsafe.add(issn)
+                        outcomes[issn] = error
             for issn, hits in candidates.items():
-                if issn not in unsafe and hits and len({hit.openalex_id for hit in hits}) == 1:
-                    outcomes[issn] = hits[0]
+                if len(source_ids[issn]) > 1:
+                    outcomes[issn] = OpenAlexAmbiguousSourceError(
+                        "multiple distinct OpenAlex Sources support the identifier")
+                    continue
+                if issn in unsafe:
+                    continue
+                if hits:
+                    try:
+                        merged = reconcile_source_evidence(hits)
+                    except OpenAlexRecordError as error:
+                        outcomes[issn] = error
+                    else:
+                        if issn not in recovery:
+                            outcomes[issn] = merged
         except OpenAlexRequestError as error:
             if error.terminal:
                 outcomes.update((issn, error) for issn in batch)
@@ -1285,31 +1132,95 @@ def resolve_journal_sources_batched(
                 continue
             try:
                 raw = client.get_source_by_issn(issn, progress_callback=progress_callback)
-                outcomes[issn] = _parse_source(raw, issn)
+                outcomes[issn] = (
+                    _parse_identity_source(raw, issn)
+                )
             except OpenAlexError as error:
                 outcomes[issn] = error
                 if isinstance(error, OpenAlexRequestError) and error.terminal:
                     outcomes.update((remaining, error) for remaining in batch if remaining not in outcomes)
                     break
-    units = []
-    for journal in journals:
-        hits, unresolved, requests, validation = [], [], [], []
-        for issn in journal.issn:
-            outcome = outcomes[issn]
-            if isinstance(outcome, _SourceHit):
-                if _journal_name_matches(journal.name, outcome):
-                    hits.append(outcome)
-                else:
-                    validation.append((issn, f"configured journal name does not match OpenAlex source {outcome.display_name!r}"))
-            elif isinstance(outcome, OpenAlexNotFoundError):
-                unresolved.append(issn)
-            elif isinstance(outcome, OpenAlexRecordError):
-                validation.append((issn, str(outcome)))
-            else:
-                requests.append((issn, str(outcome)))
-        source, issues, status = _finish_journal_source(journal, hits, unresolved, requests, validation)
-        units.append(SourceResolutionUnit(journal, source, issues, status))
-    return tuple(units)
+    return outcomes
+
+
+def resolve_source_identities(
+    client: OpenAlexClient, identifiers: Sequence[str], *,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[SourceEvidenceResolution, ...]:
+    """Verify identifier membership independently of names and Provider ISSN-L choice."""
+    normalized: dict[str, str | ValueError] = {}
+    for raw in identifiers:
+        try:
+            normalized[raw] = normalize_journal_issn(raw)
+        except ValueError as error:
+            normalized[raw] = error
+    outcomes = _resolve_source_hits_batched(
+        client, tuple(value for value in normalized.values() if isinstance(value, str)),
+        progress_callback=progress_callback,
+    )
+    results = []
+    seen: set[str] = set()
+    for raw, value in normalized.items():
+        if isinstance(value, ValueError):
+            results.append(SourceEvidenceResolution(
+                raw, None, SourceEvidenceStatus.INVALID_IDENTIFIER, str(value),
+            ))
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        outcome = outcomes[value]
+        if isinstance(outcome, SourceEvidence):
+            results.append(SourceEvidenceResolution(value, outcome, SourceEvidenceStatus.RESOLVED))
+            continue
+        status = (SourceEvidenceStatus.NOT_FOUND if isinstance(outcome, OpenAlexNotFoundError)
+                  else SourceEvidenceStatus.AMBIGUOUS_SOURCE if isinstance(outcome, OpenAlexAmbiguousSourceError)
+                  else SourceEvidenceStatus.INVALID_SOURCE if isinstance(outcome, OpenAlexRecordError)
+                  else SourceEvidenceStatus.REQUEST_FAILED)
+        results.append(SourceEvidenceResolution(
+            value, None, status, str(outcome),
+            outcome.kind if isinstance(outcome, OpenAlexRequestError) else None,
+        ))
+    return tuple(results)
+
+
+def resolve_journal_sources_batched(
+    client: OpenAlexClient, journals: Sequence[JournalConfig], *,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[SourceResolutionUnit, ...]:
+    """Share identifier-first Source evidence without any name or canonical-field veto."""
+    outcomes = {result.requested_issn: result for result in resolve_source_identities(
+        client, tuple(journal.issn_l for journal in journals), progress_callback=progress_callback,
+    )}
+    return tuple(_configured_source_unit(journal, outcomes[journal.issn_l]) for journal in journals)
+
+
+def _configured_source_unit(journal: JournalConfig, outcome: SourceEvidenceResolution) -> SourceResolutionUnit:
+    evidence = outcome.evidence
+    issues = []
+    source, status = None, None
+    if evidence is not None:
+        source = ResolvedSource(
+            configured_issn_l=journal.issn_l, openalex_id=evidence.source_id,
+            display_name=evidence.display_name, aliases=evidence.aliases,
+            provider_issn_l=evidence.provider_issn_l, publisher_id=evidence.publisher_id,
+            journal=journal.name, host_organization_name=evidence.host_organization_name,
+            homepage_url=evidence.homepage_url, homepage_hostname=evidence.homepage_hostname,
+        )
+        diagnostics = list(evidence.diagnostics)
+        if evidence.provider_issn_l is not None and evidence.provider_issn_l != journal.issn_l:
+            diagnostics.append(f"Provider ISSN-L {evidence.provider_issn_l} differs from configured ISSN-L {journal.issn_l}")
+        issues.extend(DiscoveryIssue(IssueSeverity.WARNING, "source_resolution", journal.name,
+                                     message, issn=journal.issn_l) for message in diagnostics)
+    else:
+        status = (CoverageStatus.UNAVAILABLE if outcome.status is SourceEvidenceStatus.NOT_FOUND
+                  else CoverageStatus.FAILED)
+        issues.append(DiscoveryIssue(
+            IssueSeverity.WARNING if status is CoverageStatus.UNAVAILABLE else IssueSeverity.ERROR,
+            "source_resolution", journal.name,
+            f"configured ISSN-L {journal.issn_l}: {outcome.diagnostic}", issn=journal.issn_l,
+        ))
+    return SourceResolutionUnit(journal, source, tuple(issues), status)
 
 
 def _record_order(record: OpenAlexWorkRecord) -> tuple[date, str]:
@@ -1401,18 +1312,17 @@ def _fetch_thin_sources(
     return result
 
 
-def discover_journals_batched(
-    client: OpenAlexClient, journals: Sequence[JournalConfig], from_date: date, to_date: date, *,
+def discover_resolved_sources(
+    client: OpenAlexClient, resolutions: Sequence[SourceResolutionUnit], from_date: date, to_date: date, *,
     retrieved_at: datetime | None = None, progress_callback: ProgressCallback | None = None,
 ) -> DiscoveryResult:
-    """v0.4.3 live thin discovery, still separate from production Run/validate."""
+    """Retrieve Works from the shared resolution result; perform no Source lookup."""
     if from_date > to_date:
         raise ValueError("from_date must not be after to_date")
     timestamp = retrieved_at or datetime.now(timezone.utc)
     if timestamp.utcoffset() is None:
         raise ValueError("retrieved_at must include a timezone")
     timestamp = timestamp.astimezone(timezone.utc)
-    resolutions = resolve_journal_sources_batched(client, journals, progress_callback=progress_callback)
     sources = {unit.source.openalex_id: unit.source for unit in resolutions if unit.source is not None}
     keys = tuple(sources)
     fetched = {}
@@ -1427,7 +1337,7 @@ def discover_journals_batched(
         issues = tuple(replace(issue, journal=resolution.journal.name) for issue in issues)
         units.append(OpenAlexDiscoveryUnitResult(
             resolution.journal,
-            CoverageUnit("openalex", CoverageComponent.OPENALEX_DISCOVERY, status, journal=resolution.journal.name),
+            CoverageUnit("openalex", CoverageComponent.OPENALEX_DISCOVERY, status, journal=resolution.journal.issn_l),
             source, records, (*resolution.issues, *issues),
         ))
     return DiscoveryResult(
@@ -1436,3 +1346,59 @@ def discover_journals_batched(
         tuple(issue for unit in units for issue in unit.issues),
         tuple(unit.coverage for unit in units), tuple(units),
     )
+
+
+def discover_journals_batched(
+    client: OpenAlexClient, journals: Sequence[JournalConfig], from_date: date, to_date: date, *,
+    retrieved_at: datetime | None = None, progress_callback: ProgressCallback | None = None,
+) -> DiscoveryResult:
+    """Diagnostic convenience entrypoint: resolve once, then retrieve Works."""
+    resolutions = resolve_journal_sources_batched(client, journals, progress_callback=progress_callback)
+    return discover_resolved_sources(client, resolutions, from_date, to_date,
+                                     retrieved_at=retrieved_at, progress_callback=progress_callback)
+
+
+@dataclass(frozen=True)
+class PublisherMetadata:
+    publisher_id: str
+    display_name: str
+    homepage_url: str | None
+    diagnostics: tuple[str, ...] = ()
+
+
+def resolve_publisher_metadata(client: OpenAlexClient, publisher_ids: Sequence[str]) -> tuple[PublisherMetadata, ...]:
+    """Resolve every direct ID strictly; no name, lineage, cache or partial result authority."""
+    ids = tuple(dict.fromkeys(normalize_publisher_id(p) for p in publisher_ids))
+    resolved = {}
+    for offset in range(0, len(ids), _OPENALEX_BATCH_SIZE):
+        batch = ids[offset:offset + _OPENALEX_BATCH_SIZE]
+        payload = client.get_publishers_by_ids(batch)
+        results = payload.get("results")
+        count = _progress_total(payload.get("meta", {}).get("count")) if isinstance(payload.get("meta"), dict) else None
+        if not isinstance(results, list) or count != len(results):
+            raise OpenAlexRecordError("incomplete Publisher batch")
+        for raw in results:
+            if not isinstance(raw, dict) or not isinstance(raw.get("id"), str):
+                raise OpenAlexRecordError("malformed Publisher object/ID")
+            try:
+                identity = normalize_publisher_id(raw["id"])
+            except ValueError as error:
+                raise OpenAlexRecordError(str(error)) from error
+            if identity not in batch or identity in resolved:
+                raise OpenAlexRecordError("unexpected or duplicate Publisher ID")
+            name = raw.get("display_name")
+            if not isinstance(name, str) or not name.strip() or any(c == "|" or ord(c) < 32 or ord(c) == 127 for c in name):
+                raise OpenAlexRecordError("unusable canonical Publisher display_name")
+            homepage = raw.get("homepage_url")
+            diagnostics = ()
+            try:
+                if homepage is not None and not isinstance(homepage, str):
+                    raise ValueError("homepage is not a string")
+                url = normalize_public_http_url(homepage)
+            except ValueError:
+                url = None
+                diagnostics = ("unsafe/malformed Publisher homepage ignored",)
+            resolved[identity] = PublisherMetadata(identity, name.strip(), url, diagnostics)
+        if any(p not in resolved for p in batch):
+            raise OpenAlexRecordError("missing requested Publisher metadata")
+    return tuple(resolved[p] for p in ids)

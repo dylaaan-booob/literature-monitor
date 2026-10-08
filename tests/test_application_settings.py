@@ -7,6 +7,15 @@ from pathlib import Path
 
 import pytest
 
+from literature_monitor.openalex import OpenAlexClient, OpenAlexRequestError
+
+@pytest.fixture(autouse=True)
+def unavailable_metadata(monkeypatch):
+    def fail(*args, **kwargs):
+        raise OpenAlexRequestError("requires metadata resolution: test Provider unavailable")
+    monkeypatch.setattr(OpenAlexClient, "_request_json", fail)
+
+
 import literature_monitor.application.monitor as monitor_module
 import literature_monitor.application.settings as settings_module
 import literature_monitor.config as config_module
@@ -29,33 +38,16 @@ from literature_monitor.date_range import DateRangeSpec
 from literature_monitor.search import SearchBackendError
 
 
-JOURNAL_DOCUMENT = """\
-# Venues
-
-Intro text that is not owned by Settings.
-
-## Journals
-
-| Journal | ISSN/EISSN |
-|---|---|
-| Biometrics | 0006-341X |
-| Annals of Applied Statistics | 1932-6157 / 1941-7330 |
-
-## Conferences
-
-| Abbreviation | Full Name |
-|---|---|
-| TESTCONF | Test Conference |
-"""
+JOURNAL_DOCUMENT = '# Venues\n\nIntro text that is not owned by Settings.\n\n## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  |  |\n| Annals of Applied Statistics | 1932-6157 |  |  |\n\n## Conferences\n\n| Abbreviation | Full Name |\n|---|---|\n| TESTCONF | Test Conference |\n'
 
 
 GROUPED_JOURNAL_DOCUMENT = JOURNAL_DOCUMENT.replace(
-    "| Journal | ISSN/EISSN |", "| Journal | ISSN/EISSN | Group |",
-).replace("|---|---|", "|---|---|---|", 1).replace(
-    "| Biometrics | 0006-341X |", "| Biometrics | 0006-341X | Biostatistics |",
+    '| Journal | ISSN-L | Publisher ID | Group |', '| Journal | ISSN-L | Publisher ID | Group |',
+).replace('|---|---|---|---|', '|---|---|---|---|', 1).replace(
+    '| Biometrics | 0006-341X |  |  |', '| Biometrics | 0006-341X |  | Biostatistics |',
 ).replace(
-    "| Annals of Applied Statistics | 1932-6157 / 1941-7330 |",
-    "| Annals of Applied Statistics | 1932-6157 / 1941-7330 | |",
+    '| Annals of Applied Statistics | 1932-6157 |  |  |',
+    '| Annals of Applied Statistics | 1932-6157 |  |  |',
 )
 
 
@@ -90,11 +82,8 @@ def sha256(path: Path) -> str:
 
 def valid_journals() -> tuple[JournalConfig, ...]:
     return (
-        JournalConfig(name="Biometrics", issn=("0006-341X",)),
-        JournalConfig(
-            name="Annals of Applied Statistics",
-            issn=("1932-6157", "1941-7330"),
-        ),
+        JournalConfig(name="Biometrics", issn_l="0006-341X"),
+        JournalConfig(name="Annals of Applied Statistics", issn_l="1932-6157"),
     )
 
 
@@ -339,19 +328,19 @@ def test_runtime_date_overflow_fails_draft_validation(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("journals", "message"),
     (
-        ((JournalConfig(name="Bad", issn=("1234-5678",)),), "checksum"),
-        ((JournalConfig(name="Bad", issn=("not-an-issn",)),), "invalid ISSN"),
+        ((JournalConfig.model_construct(name="Bad", issn_l="1234-5678"),), "checksum"),
+        ((JournalConfig.model_construct(name="Bad", issn_l="not-an-issn"),), "invalid ISSN"),
         (
             (
-                JournalConfig(name="Biometrics", issn=("0006-341X",)),
-                JournalConfig(name="biometrics", issn=("1932-6157",)),
+                JournalConfig(name="Biometrics", issn_l="0006-341X"),
+                JournalConfig(name="biometrics", issn_l="0006-341X"),
             ),
-            "duplicate Journal",
+            "duplicate ISSN-L",
         ),
         (
             (
-                JournalConfig(name="One", issn=("0006-341X",)),
-                JournalConfig(name="Two", issn=("0006-341X",)),
+                JournalConfig(name="One", issn_l="0006-341X"),
+                JournalConfig(name="Two", issn_l="0006-341X"),
             ),
             "duplicate ISSN",
         ),
@@ -422,8 +411,8 @@ def test_save_writes_journal_then_monitor_and_rereads_disk_state(
         name="Edited Monitor",
         keyword_expression="statistics",
         journals=(
-            JournalConfig(name="Biometrics", issn=("0006-341X",)),
-            JournalConfig(name="Biostatistics", issn=("1465-4644",)),
+            JournalConfig(name="Biometrics", issn_l="0006-341X"),
+            JournalConfig(name="Annals of Applied Statistics", issn_l="1932-6157", group="Methods"),
         ),
         date_spec=DateRangeSpec(
             from_date=date(2026, 9, 1),
@@ -466,7 +455,7 @@ def test_save_writes_journal_then_monitor_and_rereads_disk_state(
     )
     assert [journal.name for journal in parse_journal_whitelist(journal_path)] == [
         "Biometrics",
-        "Biostatistics",
+        "Annals of Applied Statistics",
     ]
 
 
@@ -481,7 +470,7 @@ def test_save_preserves_non_journals_content(tmp_path: Path) -> None:
         config_path,
         replace(
             opened.draft,
-            journals=(JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+            journals=(JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         ),
     )
 
@@ -588,7 +577,7 @@ def test_monitor_write_failure_after_journal_success_is_partial_save_and_reread(
     config_before = config_path.read_bytes()
     draft = replace(
         opened.draft,
-        journals=(JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        journals=(JournalConfig(name="Biometrics", issn_l="0006-341X"),),
     )
     original_write = settings_module._write_snapshot_target
 
@@ -642,7 +631,7 @@ def test_externally_created_previously_missing_file_conflicts_before_save(
     draft = replace(
         opened.draft,
         keyword_expression="causal",
-        journals=(JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        journals=(JournalConfig(name="Biometrics", issn_l="0006-341X"),),
     )
     created = tmp_path / created_name
     created.write_text("", encoding="utf-8")
@@ -661,23 +650,22 @@ def test_externally_created_previously_missing_file_conflicts_before_save(
         assert other.read_bytes() == other_before
 
 
-def test_missing_monitor_and_journal_can_be_created_after_valid_edit(tmp_path: Path) -> None:
+def test_missing_settings_cannot_persist_unresolved_new_journal_before_a4(tmp_path: Path) -> None:
     config_path = tmp_path / "monitor.yaml"
     opened = load_settings(config_path)
     draft = replace(
         opened.draft,
         name="Recovered",
         keyword_expression="causal",
-        journals=(JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        journals=(JournalConfig(name="Biometrics", issn_l="0006-341X"),),
     )
 
     result = save_settings(config_path, draft)
 
-    assert result.outcome is SettingsSaveOutcome.SAVED
-    assert result.journal_written
-    assert result.monitor_written
-    assert load_config(config_path).name == "Recovered"
-    assert parse_journal_whitelist(tmp_path / "list.md") == draft.journals
+    assert result.outcome is SettingsSaveOutcome.INVALID_DRAFT
+    assert not result.journal_written and not result.monitor_written
+    assert any("requires metadata resolution" in issue.message for issue in result.issues)
+    assert not config_path.exists() and not (tmp_path / "list.md").exists()
 
 
 def test_grouped_settings_load_validate_save_and_reread_preserve_groups(tmp_path: Path) -> None:
@@ -726,8 +714,7 @@ def test_settings_save_keeps_existing_column_shape_with_ungrouped_journals(
 
     assert saved.outcome is SettingsSaveOutcome.SAVED
     after = journal_path.read_text()
-    assert ("| Journal | ISSN/EISSN | Group |" in after) == originally_grouped
-    assert ("| Journal | ISSN/EISSN |\n" in after) == (not originally_grouped)
+    assert '| Journal | ISSN-L | Publisher ID | Group |' in after
     assert saved.state.draft.journals == load_config(config_path).journals == valid_journals()
 
 
@@ -737,7 +724,7 @@ def test_settings_rejects_unsafe_group_without_writing(tmp_path: Path, group: st
     opened = load_settings(config_path)
     before = (config_path.read_bytes(), journal_path.read_bytes())
     draft = replace(opened.draft, journals=(
-        JournalConfig(name="Biometrics", issn=("0006-341X",), group=group),
+        JournalConfig(name="Biometrics", issn_l="0006-341X", group=group),
     ))
 
     validation = validate_settings(config_path, draft)
@@ -748,4 +735,18 @@ def test_settings_rejects_unsafe_group_without_writing(tmp_path: Path, group: st
     assert "journal group" in validation.issues[0].message
     assert saved.outcome is SettingsSaveOutcome.INVALID_DRAFT
     assert not saved.journal_written and not saved.monitor_written
+    assert (config_path.read_bytes(), journal_path.read_bytes()) == before
+
+
+def test_legacy_settings_require_migration_and_cannot_be_overwritten_by_target_draft(tmp_path):
+    legacy = "## Journals\n\n| Journal | ISSN/EISSN |\n|---|---|\n| Biometrics | 1541-0420 / 0006-341X |\n"
+    config_path, journal_path = write_valid_settings_files(tmp_path, journal_contents=legacy)
+    before = config_path.read_bytes(), journal_path.read_bytes()
+    opened = load_settings(config_path)
+    assert opened.draft.journals == ()
+    assert len(opened.draft.legacy_journals) == 1
+    result = save_settings(config_path, replace(opened.draft, journals=valid_journals()))
+    assert result.outcome is SettingsSaveOutcome.INVALID_DRAFT
+    assert any("partially migrate" in issue.message for issue in result.issues)
+    assert not result.journal_written and not result.monitor_written
     assert (config_path.read_bytes(), journal_path.read_bytes()) == before

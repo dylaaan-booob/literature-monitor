@@ -65,44 +65,6 @@ def make_client(*outcomes: dict[str, Any] | httpx.Response | Exception) -> tuple
     return OpenAlexClient(transport=transport, sleep=lambda _: None), transport
 
 
-def test_singleton_requests_each_issn_independently_and_uses_bearer_key() -> None:
-    payload = fixture("source_cybernetics.json")
-    transport = SequenceTransport(payload, payload)
-    client = OpenAlexClient(api_key="secret", transport=transport, sleep=lambda _: None)
-    journal = JournalConfig(
-        name="IEEE Transactions on Cybernetics",
-        issn=("2168-2267", "2168-2275"),
-    )
-
-    source, issues = resolve_journal_source(client, journal)
-
-    assert source is not None
-    assert source.openalex_id == "https://openalex.org/S4210191041"
-    assert source.resolved_issns == journal.issn
-    assert not issues
-    assert len(transport.requests) == 2
-    assert [urlparse(str(request.url)).path for request in transport.requests] == [
-        "/sources/issn:2168-2267",
-        "/sources/issn:2168-2275",
-    ]
-    assert all(
-        "filter" not in parse_qs(urlparse(str(request.url)).query)
-        for request in transport.requests
-    )
-    assert all(
-        request.headers["Authorization"] == "Bearer secret"
-        for request in transport.requests
-    )
-    assert all(
-        request.headers["User-Agent"] == "literature-monitor/0.6.1"
-        for request in transport.requests
-    )
-    assert all(request.extensions["timeout"]["read"] == 30 for request in transport.requests)
-    assert all(
-        parse_qs(urlparse(str(request.url)).query)["select"]
-        == [openalex_module.SOURCE_FIELDS]
-        for request in transport.requests
-    )
 
 
 def test_source_fields_add_only_publisher_access_presentation_metadata() -> None:
@@ -121,109 +83,37 @@ def test_source_fields_add_only_publisher_access_presentation_metadata() -> None
     assert "host_organization_lineage" not in openalex_module.SOURCE_FIELDS
 
 
-def test_one_resolved_and_one_missing_issn_resolves_with_warning() -> None:
-    client, _ = make_client(fixture("source_cybernetics.json"), http_error(404))
-    journal = JournalConfig(
-        name="IEEE Transactions on Cybernetics",
-        issn=("2168-2267", "2168-2275"),
-    )
-
-    source, issues = resolve_journal_source(client, journal)
-
-    assert source is not None
-    assert source.unresolved_issns == ("2168-2275",)
-    assert [(issue.severity, issue.issn) for issue in issues] == [
-        (IssueSeverity.WARNING, "2168-2275")
-    ]
 
 
-def test_conflicting_source_ids_are_an_error() -> None:
-    client, _ = make_client(
-        fixture("source_cybernetics.json"), fixture("source_conflict.json")
-    )
-    journal = JournalConfig(
-        name="IEEE Transactions on Cybernetics",
-        issn=("2168-2267", "0018-9472"),
-    )
-
-    source, issues = resolve_journal_source(client, journal)
-
-    assert source is None
-    assert len(issues) == 1
-    assert issues[0].severity is IssueSeverity.ERROR
-    assert "conflicting" in issues[0].message
 
 
 def test_no_successful_issn_is_an_error() -> None:
     client, _ = make_client(http_error(404), http_error(404))
-    journal = JournalConfig(name="Missing Journal", issn=("2168-2267", "2168-2275"))
+    journal = JournalConfig(name="Missing Journal", issn_l="2168-2267")
 
     source, issues = resolve_journal_source(client, journal)
 
     assert source is None
     assert len(issues) == 1
-    assert "no configured ISSN resolved" in issues[0].message
+    assert "configured ISSN-L" in issues[0].message
 
 
-def test_remote_failure_is_not_treated_as_an_unresolved_issn() -> None:
-    client, transport = make_client(
-        fixture("source_cybernetics.json"),
-        httpx.ReadTimeout("timed out"),
-        httpx.ReadTimeout("timed out"),
-        httpx.ReadTimeout("timed out"),
-    )
-    journal = JournalConfig(
-        name="IEEE Transactions on Cybernetics",
-        issn=("2168-2267", "2168-2275"),
-    )
-
-    source, issues = resolve_journal_source(client, journal)
-
-    assert source is None
-    assert len(issues) == 1
-    assert issues[0].issn == "2168-2275"
-    assert issues[0].severity is IssueSeverity.ERROR
-    assert "incomplete ISSN verification" in issues[0].message
-    assert "timed out" in issues[0].message
-    assert len(transport.requests) == 4
 
 
-def test_success_plus_source_semantic_failure_rejects_the_journal() -> None:
-    non_journal = fixture("source_cybernetics.json")
-    non_journal["type"] = "conference"
-    client, _ = make_client(fixture("source_cybernetics.json"), non_journal)
-    journal = JournalConfig(
-        name="IEEE Transactions on Cybernetics",
-        issn=("2168-2267", "2168-2275"),
-    )
-
-    source, issues = resolve_journal_source(client, journal)
-
-    assert source is None
-    assert len(issues) == 1
-    assert issues[0].issn == "2168-2275"
-    assert issues[0].severity is IssueSeverity.ERROR
-    assert "non-journal" in issues[0].message
-    assert "remote/API failure" not in issues[0].message
 
 
 def test_no_successful_issn_after_remote_failures_is_a_journal_error() -> None:
     client, _ = make_client(*(http_error(500) for _ in range(6)))
-    journal = JournalConfig(
-        name="IEEE Transactions on Cybernetics",
-        issn=("2168-2267", "2168-2275"),
-    )
+    journal = JournalConfig(name="IEEE Transactions on Cybernetics", issn_l="2168-2267")
 
     source, issues = resolve_journal_source(client, journal)
 
     assert source is None
     assert len(issues) == 1
-    assert issues[0].issn is None
+    assert issues[0].issn == "2168-2267"
     assert issues[0].severity is IssueSeverity.ERROR
-    assert "no configured ISSN resolved" in issues[0].message
-    assert "incomplete ISSN verification" in issues[0].message
+    assert "configured ISSN-L" in issues[0].message
     assert "2168-2267" in issues[0].message
-    assert "2168-2275" in issues[0].message
 
 
 @pytest.mark.parametrize(
@@ -231,7 +121,6 @@ def test_no_successful_issn_after_remote_failures_is_a_journal_error() -> None:
     [
         ({"type": "conference"}, "non-journal"),
         ({"issn": ["1541-0420"]}, "absent"),
-        ({"display_name": "A Different Journal"}, "does not match"),
     ],
 )
 def test_source_consistency_failures_are_explicit(change: dict[str, Any], message: str) -> None:
@@ -240,7 +129,7 @@ def test_source_consistency_failures_are_explicit(change: dict[str, Any], messag
     client, _ = make_client(payload)
 
     source, issues = resolve_journal_source(
-        client, JournalConfig(name="Biometrics", issn=("0006-341X",))
+        client, JournalConfig(name="Biometrics", issn_l="0006-341X")
     )
 
     assert source is None
@@ -255,7 +144,7 @@ def test_normalized_name_allows_leading_the_and_punctuation() -> None:
     client, _ = make_client(payload)
 
     source, issues = resolve_journal_source(
-        client, JournalConfig(name="Annals of Statistics", issn=("0090-5364",))
+        client, JournalConfig(name="Annals of Statistics", issn_l="0090-5364")
     )
 
     assert source is not None
@@ -268,13 +157,13 @@ def test_source_publisher_metadata_is_projected_without_changing_identity() -> N
 
     source, issues = resolve_journal_source(
         client,
-        JournalConfig(name="Biometrics", issn=("0006-341X",)),
+        JournalConfig(name="Biometrics", issn_l="0006-341X"),
     )
 
     assert source is not None
     assert not issues
     assert source.openalex_id == "https://openalex.org/S8265502"
-    assert source.host_organization == "https://openalex.org/P4310320999"
+    assert source.publisher_id == "https://openalex.org/P4310320999"
     assert source.host_organization_name == "Example Academic Publisher"
     assert source.homepage_url == "https://journals.example.org/biometrics"
     assert source.homepage_hostname == "journals.example.org"
@@ -285,12 +174,12 @@ def test_old_source_payload_without_publisher_metadata_still_resolves() -> None:
 
     source, issues = resolve_journal_source(
         client,
-        JournalConfig(name="Biometrics", issn=("0006-341X",)),
+        JournalConfig(name="Biometrics", issn_l="0006-341X"),
     )
 
     assert source is not None
     assert not issues
-    assert source.host_organization is None
+    assert source.publisher_id is None
     assert source.host_organization_name is None
     assert source.homepage_url is None
     assert source.homepage_hostname is None
@@ -299,8 +188,8 @@ def test_old_source_payload_without_publisher_metadata_still_resolves() -> None:
 @pytest.mark.parametrize(
     ("field", "value", "missing_field"),
     [
-        ("host_organization", {"invalid": "shape"}, "host_organization"),
-        ("host_organization", "not-an-openalex-id", "host_organization"),
+        ("host_organization", {"invalid": "shape"}, "publisher_id"),
+        ("host_organization", "not-an-openalex-id", "publisher_id"),
         ("host_organization_name", ["invalid"], "host_organization_name"),
         ("host_organization_name", "Publisher\nInjected", "host_organization_name"),
         ("homepage_url", "ftp://journals.example.org/biometrics", "homepage_url"),
@@ -324,7 +213,7 @@ def test_invalid_optional_publisher_metadata_never_invalidates_source(
 
     source, issues = resolve_journal_source(
         client,
-        JournalConfig(name="Biometrics", issn=("0006-341X",)),
+        JournalConfig(name="Biometrics", issn_l="0006-341X"),
     )
 
     assert source is not None
@@ -332,25 +221,6 @@ def test_invalid_optional_publisher_metadata_never_invalidates_source(
     assert getattr(source, missing_field) is None
 
 
-def test_conflicting_optional_metadata_across_issns_is_dropped_not_failed() -> None:
-    first = fixture("source_biometrics_publisher.json")
-    second = deepcopy(first)
-    second["host_organization"] = "https://openalex.org/P9999999999"
-    second["host_organization_name"] = "Conflicting Publisher"
-    second["homepage_url"] = "https://other.example.org/biometrics"
-    client, _ = make_client(first, second)
-
-    source, issues = resolve_journal_source(
-        client,
-        JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420")),
-    )
-
-    assert source is not None
-    assert not issues
-    assert source.host_organization is None
-    assert source.host_organization_name is None
-    assert source.homepage_url is None
-    assert source.homepage_hostname is None
 
 
 def test_retry_backoff_is_injected_and_never_really_sleeps() -> None:
@@ -475,7 +345,7 @@ def test_discovery_pages_normalizes_records_and_builds_venue_first_query() -> No
 
     result = discover_journals(
         client,
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 9, 18),
         retrieved_at=timestamp,
@@ -486,7 +356,7 @@ def test_discovery_pages_normalizes_records_and_builds_venue_first_query() -> No
     assert len(result.coverage) == 1
     assert result.coverage[0].component is CoverageComponent.OPENALEX_DISCOVERY
     assert result.coverage[0].status is CoverageStatus.COMPLETE
-    assert result.coverage[0].journal == "Biometrics"
+    assert result.coverage[0].journal == "0006-341X"
     assert [record.external_ids.openalex for record in result.records] == [
         "https://openalex.org/W4389363697",
         "https://openalex.org/W7125247299",
@@ -529,66 +399,8 @@ def test_discovery_pages_normalizes_records_and_builds_venue_first_query() -> No
     )
 
 
-def test_source_resolution_and_discovery_report_natural_progress_without_extra_requests() -> None:
-    client, transport = make_client(
-        fixture("source_biometrics.json"),
-        fixture("works_page_1.json"),
-        fixture("works_page_2.json"),
-    )
-    events: list[ProgressEvent] = []
-
-    result = discover_journals(
-        client,
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
-        date(2026, 1, 1),
-        date(2026, 9, 18),
-        progress_callback=events.append,
-    )
-
-    assert not result.has_errors
-    assert len(transport.requests) == 3
-    activities = [event.activity for event in events if event.activity is not None]
-    source_checks = [
-        item for item in activities if item.label == "Checked OpenAlex ISSN"
-    ]
-    assert [(item.current, item.total) for item in source_checks] == [(1, 1)]
-
-    works = [item for item in activities if item.operation == "works_discovery:0"]
-    assert works[0].label == "Discovering OpenAlex works"
-    assert (works[0].current, works[0].total) == (0, None)
-    first_request = next(item for item in works if item.label == "Requesting OpenAlex")
-    assert (first_request.current, first_request.total) == (0, None)
-    pages = [item for item in works if item.label == "Retrieved OpenAlex page"]
-    assert [(item.current, item.total) for item in pages] == [(1, 2), (2, 2)]
-    assert works[-1].label == "Completed OpenAlex journal discovery"
-    assert (works[-1].current, works[-1].total) == (2, 2)
 
 
-def test_discovery_zero_results_and_unresolved_alternate_issn_are_complete() -> None:
-    empty_page = deepcopy(fixture("works_page_1.json"))
-    empty_page["results"] = []
-    empty_page["meta"]["count"] = 0
-    empty_page["meta"]["next_cursor"] = None
-    client, _ = make_client(
-        fixture("source_cybernetics.json"),
-        http_error(404),
-        empty_page,
-    )
-
-    result = discover_journals(
-        client,
-        (
-            JournalConfig(
-                name="IEEE Transactions on Cybernetics",
-                issn=("2168-2267", "2168-2275"),
-            ),
-        ),
-        date(2026, 1, 1),
-        date(2026, 1, 31),
-    )
-
-    assert result.records == ()
-    assert result.coverage[0].status is CoverageStatus.COMPLETE
 
 
 def test_discovery_later_page_failure_is_partial() -> None:
@@ -602,7 +414,7 @@ def test_discovery_later_page_failure_is_partial() -> None:
 
     result = discover_journals(
         client,
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 1, 31),
     )
@@ -617,7 +429,7 @@ def test_discovery_source_absence_is_unavailable() -> None:
 
     result = discover_journals(
         client,
-        (JournalConfig(name="Missing Journal", issn=("0006-341X",)),),
+        (JournalConfig(name="Missing Journal", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 1, 31),
     )
@@ -635,7 +447,7 @@ def test_discovery_source_request_failure_is_failed() -> None:
 
     result = discover_journals(
         client,
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 1, 31),
     )
@@ -651,7 +463,7 @@ def test_discovery_source_validation_failure_is_failed() -> None:
 
     result = discover_journals(
         client,
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 1, 31),
     )
@@ -673,7 +485,7 @@ def test_discovery_unusable_meta_count_stays_indeterminate(count: object) -> Non
 
     result = discover_journals(
         client,
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 1, 31),
         progress_callback=events.append,
@@ -749,7 +561,7 @@ def test_normalization_preserves_author_order_orcid_and_abstract_positions() -> 
 
     result = discover_journals(
         client,
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 1, 31),
     )
@@ -797,7 +609,7 @@ def test_model_validation_failure_skips_only_the_bad_record(
 
     result = discover_journals(
         client,
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 1, 31),
     )
@@ -826,18 +638,14 @@ def test_bad_record_in_one_journal_does_not_stop_later_journals() -> None:
         fixture("source_biometrics.json"),
         bad_page,
         fixture("source_cybernetics.json"),
-        fixture("source_cybernetics.json"),
         later_page,
     )
 
     result = discover_journals(
         client,
         (
-            JournalConfig(name="Biometrics", issn=("0006-341X",)),
-            JournalConfig(
-                name="IEEE Transactions on Cybernetics",
-                issn=("2168-2267", "2168-2275"),
-            ),
+            JournalConfig(name="Biometrics", issn_l="0006-341X"),
+            JournalConfig(name="IEEE Transactions on Cybernetics", issn_l="2168-2267"),
         ),
         date(2026, 1, 1),
         date(2026, 1, 31),
@@ -867,7 +675,7 @@ def test_partial_records_preserve_usable_result_without_ingestion_issues() -> No
 
     result = discover_journals(
         client,
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 1, 31),
     )
@@ -894,7 +702,7 @@ def test_failed_later_page_keeps_successful_earlier_records() -> None:
 
     result = discover_journals(
         client,
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 1, 31),
     )
@@ -910,7 +718,7 @@ def test_reverse_date_range_is_rejected_before_requests() -> None:
     with pytest.raises(ValueError, match="from_date"):
         discover_journals(
             client,
-            (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+            (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
             date(2026, 2, 1),
             date(2026, 1, 1),
         )
@@ -1053,10 +861,7 @@ def test_client_does_not_fallback_for_unrelated_construction_errors(
 
 
 def test_default_record_serialization_contains_ordinary_provider_metadata() -> None:
-    source = openalex_module.ResolvedSource(
-        "Biometrics", ("0006-341X",), ("0006-341X",), (),
-        "https://openalex.org/S8265502", "Biometrics", "0006-341X", ("0006-341X",),
-    )
+    source = openalex_module.ResolvedSource(journal="Biometrics", configured_issn_l="0006-341X", openalex_id="https://openalex.org/S8265502", display_name="Biometrics", provider_issn_l="0006-341X", aliases=("0006-341X",))
     record, _ = openalex_module._normalize_work(
         fixture("works_page_1.json")["results"][0], source,
         datetime(2026, 9, 26, tzinfo=timezone.utc),
@@ -1083,8 +888,8 @@ def a4_work(work_id="W1", source_id="S8265502", **updates):
 
 
 def a4_journals():
-    return (JournalConfig(name="Biometrics", issn=("0006-341X",)),
-            JournalConfig(name="IEEE Transactions on Cybernetics", issn=("2168-2267",)))
+    return (JournalConfig(name="Biometrics", issn_l="0006-341X"),
+            JournalConfig(name="IEEE Transactions on Cybernetics", issn_l="2168-2267"))
 
 
 def test_a4_batched_source_projects_publisher_metadata_with_shared_select_contract():
@@ -1099,7 +904,7 @@ def test_a4_batched_source_projects_publisher_metadata_with_shared_select_contra
         )
 
     assert unit.source is not None
-    assert unit.source.host_organization == "https://openalex.org/P4310320999"
+    assert unit.source.publisher_id == "https://openalex.org/P4310320999"
     assert unit.source.host_organization_name == "Example Academic Publisher"
     assert unit.source.homepage_url == "https://journals.example.org/biometrics"
     assert unit.source.homepage_hostname == "journals.example.org"
@@ -1115,8 +920,8 @@ def a4_discover(client, journals=None):
 
 @pytest.mark.parametrize("size", [1, 2, 100, 101, 205])
 def test_a4_source_batches_are_bounded_and_ordered(size):
-    journals = tuple(JournalConfig(name=f"Journal {i}", issn=(f"{i:04d}-000X",)) for i in range(size))
-    sources = [dict(fixture("source_biometrics.json"), id=f"S{i}", display_name=j.name, issn=list(j.issn)) for i, j in enumerate(journals)]
+    journals = tuple(JournalConfig(name=f"Journal {i}", issn_l=checksum_issn(i)) for i in range(size))
+    sources = [dict(fixture("source_biometrics.json"), id=f"S{i}", display_name=j.name, issn_l=j.issn_l, issn=[j.issn_l]) for i, j in enumerate(journals)]
     client, transport = make_client(*(a4_sources(*sources[offset:offset + 100]) for offset in range(0, size, 100)))
     with client:
         units = openalex_module.resolve_journal_sources_batched(client, journals)
@@ -1130,54 +935,13 @@ def test_a4_source_batches_are_bounded_and_ordered(size):
         assert len(batch) <= 100
         assert params["select"] == openalex_module.SOURCE_FIELDS
         requested.extend(batch)
-    assert requested == [j.issn[0] for j in journals]
+    assert requested == [j.issn_l for j in journals]
 
 
-def test_a4_one_source_satisfies_two_issns_without_singletons():
-    journal = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"))
-    client, transport = make_client(a4_sources(fixture("source_biometrics.json")))
-    with client:
-        unit, = openalex_module.resolve_journal_sources_batched(client, (journal,))
-    assert unit.source.resolved_issns == journal.issn
-    assert not unit.issues
-    assert len(transport.requests) == 1
 
 
-@pytest.mark.parametrize("damage", ["missing", "malformed", "ambiguous"])
-def test_a4_source_recovery_requests_only_unsafe_issn(damage):
-    biometrics, cyber = fixture("source_biometrics.json"), fixture("source_cybernetics.json")
-    raws = [biometrics]
-    if damage == "malformed":
-        raws.append(dict(cyber, type="repository"))
-    if damage == "ambiguous":
-        raws.extend([cyber, dict(cyber, id="S999")])
-    client, transport = make_client(a4_sources(*raws), cyber)
-    with client:
-        units = openalex_module.resolve_journal_sources_batched(client, a4_journals())
-    assert all(unit.source and not unit.issues for unit in units)
-    assert len(transport.requests) == 2
-    assert transport.requests[-1].url.path == "/sources/issn:2168-2267"
 
 
-@pytest.mark.parametrize("damage", ["conflict", "name", "issn", "type", "id"])
-def test_a4_source_identity_validation_is_preserved(damage):
-    first = fixture("source_biometrics.json")
-    other = dict(first, id="S999", issn=["1541-0420"])
-    journal = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"))
-    if damage == "conflict":
-        first["issn"] = ["0006-341X"]
-        client, _ = make_client(a4_sources(first, other))
-    else:
-        bad = dict(first)
-        bad[{"name": "display_name", "issn": "issn", "type": "type", "id": "id"}[damage]] = {
-            "name": "Other", "issn": ["9999-9999"], "type": "repository", "id": "bad",
-        }[damage]
-        client, _ = make_client(a4_sources(bad), bad, bad)
-    with client:
-        unit, = openalex_module.resolve_journal_sources_batched(client, (journal,))
-    assert unit.source is None
-    assert unit.status is CoverageStatus.FAILED
-    assert any(issue.severity is IssueSeverity.ERROR for issue in unit.issues)
 
 
 @pytest.mark.parametrize("status,requests", [(401, 1), (403, 1), (429, 3)])
@@ -1222,11 +986,11 @@ def test_a4_thin_discovery_fields_mapping_and_searchable_metadata():
 def test_a4_same_source_preserves_both_journal_reporting_units():
     source = fixture("source_biometrics.json")
     source["alternate_titles"] = ["Biometrics Alias"]
-    journals = (a4_journals()[0], JournalConfig(name="Biometrics Alias", issn=("1541-0420",)))
+    journals = (a4_journals()[0], JournalConfig(name="Biometrics Alias", issn_l="1541-0420"))
     client, transport = make_client(a4_sources(source), a4_page(a4_work()))
     with client:
         result = a4_discover(client, journals)
-    assert [unit.coverage.journal for unit in result.units] == [journal.name for journal in journals]
+    assert [unit.coverage.journal for unit in result.units] == [journal.issn_l for journal in journals]
     assert all(unit.records for unit in result.units)
     assert len(transport.requests) == 2
 
@@ -1306,95 +1070,17 @@ def test_a4_duplicate_work_traversal_is_conservative_and_keeps_one_record():
     assert result.coverage[0].status is CoverageStatus.PARTIAL
 
 
-def test_a4_unresolved_issn_preserves_existing_warning_semantics():
-    source = fixture("source_biometrics.json")
-    source["issn"] = ["0006-341X"]
-    journal = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"))
-    client, transport = make_client(a4_sources(source), http_error(404))
-    with client:
-        unit, = openalex_module.resolve_journal_sources_batched(client, (journal,))
-    assert unit.source.resolved_issns == ("0006-341X",)
-    assert unit.status is None
-    assert len(unit.issues) == 1
-    assert unit.issues[0].severity is IssueSeverity.WARNING
-    assert unit.issues[0].issn == "1541-0420"
-    assert len(transport.requests) == 2
 
 
-@pytest.mark.parametrize("failure", ["timeout", "server", "api"])
-def test_batched_mixed_source_success_and_remote_failure_is_failed(failure):
-    source = fixture("source_biometrics.json")
-    source["issn"] = ["0006-341X"]
-    journal = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"))
-    failures = ([httpx.ReadTimeout("timed out")] * 3 if failure == "timeout" else
-                [http_error(500)] * 3 if failure == "server" else [http_error(400)])
-    client, transport = make_client(a4_sources(source), *failures)
-    with client:
-        unit, = openalex_module.resolve_journal_sources_batched(client, (journal,))
-    assert unit.source is None
-    assert unit.status is CoverageStatus.FAILED
-    assert [(issue.severity, issue.issn) for issue in unit.issues] == [
-        (IssueSeverity.ERROR, "1541-0420")
-    ]
-    assert "remote/API failure" in unit.issues[0].message
-    assert len(transport.requests) == 1 + len(failures)
 
 
-@pytest.mark.parametrize("batched", [False, True])
-@pytest.mark.parametrize("alternate", ["remote", "absent"])
-def test_mixed_source_resolution_controls_works_retrieval(batched, alternate):
-    source = fixture("source_biometrics.json")
-    source["issn"] = ["0006-341X"]
-    journal = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"))
-    outcomes = [a4_sources(source) if batched else source]
-    outcomes += [http_error(500)] * 3 if alternate == "remote" else [http_error(404), a4_page()]
-    client, transport = make_client(*outcomes)
-    with client:
-        result = (a4_discover(client, (journal,)) if batched else discover_journals(
-            client, (journal,), date(2026, 1, 1), date(2026, 1, 31),
-            retrieved_at=datetime(2026, 1, 31, tzinfo=timezone.utc)))
-    assert not result.records
-    assert result.coverage[0].status is (
-        CoverageStatus.FAILED if alternate == "remote" else CoverageStatus.COMPLETE
-    )
-    assert bool(result.sources) is (alternate == "absent")
-    assert (result.units[0].source is None) is (alternate == "remote")
-    assert [(issue.severity, issue.issn) for issue in result.issues] == [
-        (IssueSeverity.ERROR if alternate == "remote" else IssueSeverity.WARNING, "1541-0420")
-    ]
-    works_requests = [request for request in transport.requests if request.url.path == "/works"]
-    assert len(works_requests) == (0 if alternate == "remote" else 1)
-    assert not transport.outcomes
 
 
-@pytest.mark.parametrize("discovery", [False, True])
-def test_source_batch_remote_failure_recovered_by_singletons_remains_usable(discovery):
-    source = fixture("source_biometrics.json")
-    journal = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"))
-    outcomes = [http_error(500)] * 3 + [source, source]
-    if discovery:
-        outcomes.append(a4_page())
-    client, transport = make_client(*outcomes)
-    with client:
-        if discovery:
-            result = a4_discover(client, (journal,))
-            unit, = result.units
-            assert unit.coverage.status is CoverageStatus.COMPLETE
-        else:
-            unit, = openalex_module.resolve_journal_sources_batched(client, (journal,))
-            assert unit.status is None
-        assert unit.source is not None
-        assert unit.source.resolved_issns == journal.issn
-        assert not unit.issues
-    assert [request.url.path for request in transport.requests] == [
-        "/sources", "/sources", "/sources",
-        "/sources/issn:0006-341X", "/sources/issn:1541-0420",
-    ] + (["/works"] if discovery else [])
 
 
 def test_a4_works_batches_are_bounded_and_same_client_is_reused():
-    journals = tuple(JournalConfig(name=f"Journal {i}", issn=(f"{i:04d}-000X",)) for i in range(101))
-    sources = [dict(fixture("source_biometrics.json"), id=f"S{i}", display_name=j.name, issn=list(j.issn)) for i, j in enumerate(journals)]
+    journals = tuple(JournalConfig(name=f"Journal {i}", issn_l=checksum_issn(i)) for i in range(101))
+    sources = [dict(fixture("source_biometrics.json"), id=f"S{i}", display_name=j.name, issn_l=j.issn_l, issn=[j.issn_l]) for i, j in enumerate(journals)]
     client, transport = make_client(a4_sources(*sources[:100]), a4_sources(*sources[100:]), a4_page(), a4_page())
     with client:
         pooled = client._http_client
@@ -1660,11 +1346,318 @@ def test_complete_traversal_coverage_is_independent_of_field_completeness(batche
 def test_normal_source_absence_is_unavailable_with_warning(batched):
     outcomes = [a4_sources()] if batched else []
     client, transport = make_client(*outcomes, http_error(404), http_error(404))
-    journal = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"))
+    journal = JournalConfig(name="Biometrics", issn_l="0006-341X")
     with client:
         result = (a4_discover(client, (journal,)) if batched else discover_journals(
             client, (journal,), date(2026, 1, 1), date(2026, 1, 31)))
     assert result.coverage[0].status is CoverageStatus.UNAVAILABLE
     assert not result.sources and not result.records and not result.has_errors
     assert all(issue.severity is IssueSeverity.WARNING for issue in result.issues)
-    assert len(transport.requests) == (3 if batched else 2)
+    assert len(transport.requests) == (2 if batched else 1)
+
+
+# §41 identity lookup is separate from the legacy configured-name authority.
+def test_issn_l_identity_ignores_legacy_name_and_retains_complete_evidence():
+    raw = fixture("source_biometrics_publisher.json")
+    with make_client(a4_sources(raw))[0] as client:
+        result, = openalex_module.resolve_source_identities(
+            client, (" 0006-341x ", "0006-341X"),
+        )
+    assert result.status is openalex_module.SourceEvidenceStatus.RESOLVED
+    assert result.evidence.provider_issn_l == "0006-341X"
+    assert result.evidence.aliases == ("0006-341X", "1541-0420")
+    assert result.evidence.source_id == "https://openalex.org/S8265502"
+    assert result.evidence.display_name == "Biometrics"
+    assert result.evidence.publisher_id == "https://openalex.org/P4310320999"
+    # Production now shares the accepted A2 membership semantics.
+    client, _ = make_client(a4_sources(raw))
+    unit, = openalex_module.resolve_journal_sources_batched(
+        client, (JournalConfig(name="Deliberately unrelated title", issn_l="0006-341X"),),
+    )
+    assert unit.source.configured_issn_l == "0006-341X"
+    assert not unit.issues
+
+
+@pytest.mark.parametrize("updates", [
+    {"type": "repository"},
+    {"id": "invalid"}, {"display_name": " "}, {"display_name": "bad\nname"},
+])
+def test_strict_source_identity_rejects_malformed_identity_without_fallback(updates):
+    raw = dict(fixture("source_biometrics.json"), **updates)
+    client, transport = make_client(a4_sources(raw))
+    result, = openalex_module.resolve_source_identities(client, ("0006-341X",))
+    assert result.evidence is None
+    assert result.status is openalex_module.SourceEvidenceStatus.INVALID_SOURCE
+    assert result.diagnostic
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize("candidate", [None, "bad", "0006-3410", "2168-2267", "1541-0420", 42])
+def test_provider_candidate_never_invalidates_direct_membership(candidate):
+    raw = dict(fixture("source_biometrics.json"), issn_l=candidate)
+    client, transport = make_client(a4_sources(raw))
+    result, = openalex_module.resolve_source_identities(client, ("0006-341X",))
+    assert result.status is openalex_module.SourceEvidenceStatus.RESOLVED
+    assert result.evidence.provider_issn_l == (candidate if candidate == "1541-0420" else None)
+    assert len(transport.requests) == 1
+    if candidate != "1541-0420":
+        assert result.evidence.diagnostics
+
+
+def test_configured_alias_membership_does_not_require_provider_candidate_equality():
+    client, _ = make_client(a4_sources(fixture("source_biometrics.json")))
+    result, = openalex_module.resolve_source_identities(client, ("1541-0420",))
+    assert result.status is openalex_module.SourceEvidenceStatus.RESOLVED
+    assert result.evidence.provider_issn_l == "0006-341X"
+
+
+def test_distinct_source_ambiguity_is_not_arbitrated_by_singleton():
+    raw = fixture("source_biometrics.json")
+    client, transport = make_client(a4_sources(raw, dict(raw, id="S999")))
+    result, = openalex_module.resolve_source_identities(client, ("0006-341X",))
+    assert result.status is openalex_module.SourceEvidenceStatus.AMBIGUOUS_SOURCE
+    assert result.evidence is None
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize("updates", [
+    {"issn_l": "1541-0420"}, {"issn": ["1541-0420", "0006-341X"]},
+    {"host_organization": "P123"}, {"display_name": "Different display metadata"},
+])
+def test_same_source_duplicates_reconcile_without_false_identity_ambiguity(updates):
+    raw = fixture("source_biometrics.json")
+    client, transport = make_client(a4_sources(raw, dict(raw, **updates)))
+    result, = openalex_module.resolve_source_identities(client, ("0006-341X",))
+    assert result.status is openalex_module.SourceEvidenceStatus.RESOLVED
+    assert result.evidence.source_id == "https://openalex.org/S8265502"
+    assert len(transport.requests) == 1
+    if "issn_l" in updates:
+        assert result.evidence.provider_issn_l is None
+        assert any("disagreement" in message for message in result.evidence.diagnostics)
+
+
+def test_same_source_contradictory_membership_is_explicit_data_conflict():
+    raw = fixture("source_biometrics.json")
+    client, _ = make_client(a4_sources(raw, dict(raw, issn=["0006-341X"])))
+    result, = openalex_module.resolve_source_identities(client, ("0006-341X",))
+    assert result.status is openalex_module.SourceEvidenceStatus.INVALID_SOURCE
+    assert "Source-data conflict" in result.diagnostic
+
+
+def test_identity_input_validation_prevents_any_request():
+    client, transport = make_client()
+    results = openalex_module.resolve_source_identities(client, ("bad", "0006-3410"))
+    assert all(result.status is openalex_module.SourceEvidenceStatus.INVALID_IDENTIFIER for result in results)
+    assert not transport.requests
+
+
+def test_identity_not_found_is_distinct_from_quota_failure():
+    client, transport = make_client(a4_sources(), http_error(404))
+    missing, = openalex_module.resolve_source_identities(client, ("0006-341X",))
+    assert missing.status is openalex_module.SourceEvidenceStatus.NOT_FOUND
+    assert len(transport.requests) == 2
+    client, transport = make_client(*[http_error(429)] * 3)
+    failed = openalex_module.resolve_source_identities(client, ("0006-341X", "1541-0420"))
+    assert all(result.status is openalex_module.SourceEvidenceStatus.REQUEST_FAILED for result in failed)
+    assert all(result.request_failure_kind is openalex_module.OpenAlexFailureKind.QUOTA for result in failed)
+    assert len(transport.requests) == 3
+
+
+def test_identity_timeout_and_incomplete_batch_fail_closed_when_singleton_fails():
+    client, _ = make_client({"meta": {"count": 1}, "results": []},
+                           *[httpx.ReadTimeout("timeout")] * 3)
+    result, = openalex_module.resolve_source_identities(client, ("0006-341X",))
+    assert result.status is openalex_module.SourceEvidenceStatus.REQUEST_FAILED
+    assert result.evidence is None
+    assert "timeout" in result.diagnostic
+
+
+def test_legacy_identity_batches_deduplicated_aliases_without_name_checks():
+    client, transport = make_client(a4_sources(fixture("source_biometrics.json")))
+    results = openalex_module.resolve_source_identities(
+        client, ("0006-341X", "1541-0420", "0006-341X"),
+    )
+    assert len(results) == 2
+    assert results[0].evidence == results[1].evidence
+    assert len(transport.requests) == 1
+    assert parse_qs(urlparse(str(transport.requests[0].url)).query)["filter"] == ["issn:0006-341X|1541-0420"]
+
+
+def test_nonpublisher_host_organization_is_not_a_direct_publisher_id():
+    raw = dict(fixture("source_biometrics.json"), host_organization="https://openalex.org/I123")
+    client, _ = make_client(a4_sources(raw))
+    result, = openalex_module.resolve_source_identities(client, ("0006-341X",))
+    assert result.evidence.publisher_id is None
+
+
+def test_singleton_identity_rejects_source_without_queried_alias():
+    raw = dict(fixture("source_biometrics.json"), issn=["1541-0420"])
+    client, _ = make_client(a4_sources(), raw)
+    result, = openalex_module.resolve_source_identities(client, ("0006-341X",))
+    assert result.status is openalex_module.SourceEvidenceStatus.INVALID_SOURCE
+    assert "absent from the returned source ISSNs" in result.diagnostic
+
+
+@pytest.mark.parametrize("malformed", [None, {"id": "S999"}, {"issn": []}, {"issn": ["bad"]}])
+def test_unassignable_batch_evidence_uses_bounded_singleton_recovery(malformed):
+    raw = fixture("source_biometrics.json")
+    client, transport = make_client(a4_sources(raw, malformed), raw)
+    result, = openalex_module.resolve_source_identities(client, ("0006-341X",))
+    assert result.status is openalex_module.SourceEvidenceStatus.RESOLVED
+    assert len(transport.requests) == 2
+
+
+def test_unassignable_batch_with_failed_recovery_remains_unproven_and_bounded():
+    raw = fixture("source_biometrics.json")
+    client, transport = make_client(a4_sources(raw, None), *[httpx.ReadTimeout("timeout")] * 3)
+    result, = openalex_module.resolve_source_identities(client, ("0006-341X",))
+    assert result.evidence is None
+    assert result.status is openalex_module.SourceEvidenceStatus.REQUEST_FAILED
+    assert len(transport.requests) == 4
+
+
+def test_unassignable_record_does_not_erase_known_distinct_source_ambiguity():
+    raw = fixture("source_biometrics.json")
+    client, transport = make_client(a4_sources(raw, dict(raw, id="S999"), None))
+    result, = openalex_module.resolve_source_identities(client, ("0006-341X",))
+    assert result.status is openalex_module.SourceEvidenceStatus.AMBIGUOUS_SOURCE
+    assert len(transport.requests) == 1
+
+
+def test_strict_batches_preserve_success_when_later_batch_hits_quota():
+    identifiers = []
+    raws = []
+    for index in range(101):
+        digits = f"{index:07d}"
+        check = (-sum(int(digit) * weight for digit, weight in zip(digits, range(8, 1, -1)))) % 11
+        issn = digits[:4] + "-" + digits[4:] + ("X" if check == 10 else str(check))
+        identifiers.append(issn)
+        raws.append(dict(fixture("source_biometrics.json"), id=f"S{index + 1}", issn_l=issn, issn=[issn]))
+    client, transport = make_client(a4_sources(*raws[:100]), *[http_error(429)] * 3)
+    results = openalex_module.resolve_source_identities(client, identifiers)
+    assert len(results) == 101
+    assert all(result.evidence is not None for result in results[:100])
+    assert results[-1].status is openalex_module.SourceEvidenceStatus.REQUEST_FAILED
+    assert len(transport.requests) == 4
+    assert len(transport.requests[0].url.params["filter"].removeprefix("issn:").split("|")) == 100
+
+
+def test_malformed_alias_in_one_assignable_source_preserves_other_source_evidence():
+    invalid = dict(fixture("source_cybernetics.json"), issn=["2168-2267", "2168-2275", "1526-5489"])
+    client, transport = make_client(a4_sources(fixture("source_biometrics.json"), invalid))
+    results = openalex_module.resolve_source_identities(client, ("0006-341X", "2168-2267"))
+    assert results[0].evidence is not None
+    assert results[1].status is openalex_module.SourceEvidenceStatus.RESOLVED
+    assert "1526-5489" not in results[1].evidence.aliases
+    assert any("1526-5489" in message for message in results[1].evidence.diagnostics)
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize("bad", ["1526-5489", None, 42, ""])
+def test_msom_bad_additional_alias_is_excluded_individually(bad):
+    raw = dict(fixture("source_biometrics.json"), issn_l="1523-4614",
+               issn=["1523-4614", "1526-5498", bad, " 1526-5498 "])
+    client, _ = make_client(a4_sources(raw))
+    result, = openalex_module.resolve_source_identities(client, ("1523-4614",))
+    assert result.status.value == "resolved"
+    assert result.evidence.aliases == ("1523-4614", "1526-5498")
+    assert result.evidence.provider_issn_l == "1523-4614"
+    assert result.evidence.diagnostics
+
+
+def test_assignable_invalid_record_affects_only_its_own_identifier():
+    invalid = dict(fixture("source_cybernetics.json"), type="repository")
+    client, transport = make_client(a4_sources(fixture("source_biometrics.json"), invalid))
+    results = openalex_module.resolve_source_identities(client, ("0006-341X", "2168-2267"))
+    assert results[0].status is openalex_module.SourceEvidenceStatus.RESOLVED
+    assert results[1].status is openalex_module.SourceEvidenceStatus.INVALID_SOURCE
+    assert len(transport.requests) == 1
+
+
+def test_assignable_malformed_distinct_source_preserves_known_ambiguity():
+    raw = fixture("source_biometrics.json")
+    client, transport = make_client(a4_sources(raw, dict(raw, id="S999", type="repository")))
+    result, = openalex_module.resolve_source_identities(client, ("0006-341X",))
+    assert result.status is openalex_module.SourceEvidenceStatus.AMBIGUOUS_SOURCE
+    assert len(transport.requests) == 1
+
+
+def checksum_issn(number):
+    stem = f"{number:07d}"
+    check = (-sum(int(c) * w for c, w in zip(stem, range(8, 1, -1)))) % 11
+    return stem[:4] + "-" + stem[4:] + ("X" if check == 10 else str(check))
+
+
+
+def test_canonical_singleton_checks_only_configured_identity_with_bearer_key():
+    payload = fixture('source_cybernetics.json')
+    transport = SequenceTransport(payload)
+    with OpenAlexClient(api_key='secret', transport=transport, sleep=lambda _: None) as client:
+        journal = JournalConfig(name='Different display metadata', issn_l='2168-2267')
+        source, issues = resolve_journal_source(client, journal)
+    assert source.configured_issn_l == '2168-2267'
+    assert source.aliases == ('2168-2267', '2168-2275')
+    assert not issues and len(transport.requests) == 1
+    assert transport.requests[0].url.path == '/sources/issn:2168-2267'
+    assert transport.requests[0].headers['Authorization'] == 'Bearer secret'
+    assert transport.requests[0].headers['User-Agent'] == 'literature-monitor/0.6.2'
+
+
+@pytest.mark.parametrize('damage', ['name', 'provider_issn_l', 'malformed_alias', 'absent', 'type', 'id', 'ambiguous'])
+def test_canonical_batched_membership_contract(damage):
+    source = fixture('source_biometrics.json')
+    if damage == 'name': source['display_name'] = 'Unrelated title'
+    if damage == 'provider_issn_l': source['issn_l'] = '1541-0420'
+    if damage == 'malformed_alias': source['issn'].append('1526-5489')
+    if damage == 'absent': source['issn'] = ['1541-0420']
+    if damage == 'type': source['type'] = 'repository'
+    if damage == 'id': source['id'] = 'bad'
+    raws = [source] + ([dict(source, id='S999')] if damage == 'ambiguous' else [])
+    client, transport = make_client(a4_sources(*raws), source)
+    with client:
+        unit, = openalex_module.resolve_journal_sources_batched(client, a4_journals()[:1])
+    if damage in ('name', 'provider_issn_l', 'malformed_alias'):
+        assert unit.source.configured_issn_l == '0006-341X'
+        assert '1526-5489' not in unit.source.aliases
+        assert len(transport.requests) == 1
+        assert all(issue.severity is IssueSeverity.WARNING for issue in unit.issues)
+    else:
+        assert unit.source is None and unit.status is CoverageStatus.FAILED
+        assert any(issue.severity is IssueSeverity.ERROR for issue in unit.issues)
+        if damage == 'ambiguous': assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize('discovery', [False, True])
+def test_batch_failure_recovers_only_configured_issn_l(discovery):
+    source = fixture('source_biometrics.json')
+    outcomes = [http_error(500)] * 3 + [source] + ([a4_page()] if discovery else [])
+    client, transport = make_client(*outcomes)
+    with client:
+        if discovery:
+            unit, = a4_discover(client, a4_journals()[:1]).units
+            assert unit.coverage.status is CoverageStatus.COMPLETE
+        else:
+            unit, = openalex_module.resolve_journal_sources_batched(client, a4_journals()[:1])
+        assert unit.source.configured_issn_l == '0006-341X' and not unit.issues
+    assert [r.url.path for r in transport.requests] == ['/sources'] * 3 + ['/sources/issn:0006-341X'] + (['/works'] if discovery else [])
+
+
+def test_alias_absence_does_not_create_configured_verification_failure():
+    source = fixture('source_biometrics.json');source['issn'] = ['0006-341X']
+    client, transport = make_client(a4_sources(source), a4_page())
+    with client: result = a4_discover(client, a4_journals()[:1])
+    assert result.sources[0].aliases == ('0006-341X',)
+    assert result.coverage[0].status is CoverageStatus.COMPLETE and not result.issues
+    assert len(transport.requests) == 2
+
+
+@pytest.mark.parametrize('status', [404, 500])
+def test_source_failure_prevents_works_but_preserves_other_journals(status):
+    bio, cyber = fixture('source_biometrics.json'), fixture('source_cybernetics.json')
+    failures = [http_error(status)] * (3 if status == 500 else 1)
+    client, transport = make_client(a4_sources(bio), *failures, a4_page(a4_work()))
+    with client: result = a4_discover(client)
+    assert len(result.sources) == len(result.records) == 1
+    assert result.coverage[0].status is CoverageStatus.COMPLETE
+    assert result.coverage[1].status is (CoverageStatus.UNAVAILABLE if status == 404 else CoverageStatus.FAILED)
+    assert transport.requests[-1].url.params['filter'].startswith('primary_location.source.id:S8265502,')

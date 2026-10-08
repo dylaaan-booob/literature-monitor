@@ -30,7 +30,7 @@ from literature_monitor.application.run_state import (
     read_last_run_snapshot,
 )
 from literature_monitor.cli_progress import _CliProgressRenderer
-from literature_monitor.config import ConfigurationError, load_config
+from literature_monitor.config import ConfigurationError, load_config, normalize_journal_issn
 from literature_monitor.crossref import (
     CrossrefClient,
     CrossrefDiscoveryIssue,
@@ -91,8 +91,8 @@ def _add_monitor_date_arguments(parser: argparse.ArgumentParser) -> None:
 def _add_discovery_arguments(parser: argparse.ArgumentParser) -> None:
     _add_monitor_date_arguments(parser)
     parser.add_argument(
-        "--journal",
-        help="limit diagnostics to one exact configured journal name",
+        "--issn-l",
+        help="limit diagnostics to one exact configured ISSN-L",
     )
 
 
@@ -572,10 +572,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if validation.outcome is ValidationOutcome.INVALID_CONFIGURATION:
             return 2
         logger.info(
-            "Validation completed: %d configured journals, %d configured ISSNs, "
+            "Validation completed: %d configured journals, %d configured ISSN-L identities, "
             "%d resolved sources, %d warnings, %d errors",
             validation.configured_journal_count,
-            validation.configured_issn_count,
+            validation.configured_issn_l_count,
             len(validation.resolved_sources),
             len(validation.warnings),
             len(validation.errors),
@@ -614,7 +614,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         core = _run_canonical_core(
             args.config,
             date_override=_date_override_from_args(args),
-            journal_name=args.journal,
+            issn_l=args.issn_l,
             keyword_expression=args.keyword_expression,
         )
         if core.log_level is not None:
@@ -709,14 +709,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
 
         journals = config.journals
-        if args.journal is not None:
+        if args.issn_l is not None:
+            try:
+                identity = normalize_journal_issn(args.issn_l)
+            except ValueError as error:
+                logger.error("--issn-l: %s", error)
+                return 2
             journals = tuple(
                 journal
                 for journal in journals
-                if journal.name.casefold() == args.journal.strip().casefold()
+                if journal.issn_l == identity
             )
             if not journals:
-                logger.error("unknown configured journal %r", args.journal)
+                logger.error("unknown configured ISSN-L %r", identity)
                 return 2
 
         with ExitStack() as clients:

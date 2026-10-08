@@ -24,6 +24,7 @@ from literature_monitor.crossref import (
     EnrichmentIssue,
     EnrichmentIssueSeverity,
     crossref_record_matches_journal,
+    plan_crossref_queries,
     hydrate_crossref_records,
     normalize_crossref_manifest_member,
     normalize_crossref_work,
@@ -32,7 +33,7 @@ from literature_monitor.crossref import (
     validate_normalized_crossref_record,
 )
 from literature_monitor.models import ProviderRecordRef, ProviderWorkEvidence
-from literature_monitor.openalex import OpenAlexWorkRecord
+from literature_monitor.openalex import OpenAlexWorkRecord, ResolvedSource
 from literature_monitor.progress import ProgressCallback
 
 
@@ -173,9 +174,11 @@ class CrossrefRetrieval:
                                                           (*result.issues, f"record cannot be persisted: {error}"))
 
     def discover(
-        self, journals: Sequence[JournalConfig], from_date: date, to_date: date,
+        self, journals: Sequence[JournalConfig], from_date: date, to_date: date, *,
+        resolved_sources: Sequence[ResolvedSource] = (),
     ) -> CrossrefRetrievalResult:
-        ordered_issns = tuple(dict.fromkeys(issn for journal in journals for issn in journal.issn))
+        plans = plan_crossref_queries(journals, resolved_sources)
+        ordered_issns = tuple(dict.fromkeys(issn for plan in plans for issn in plan.query_aliases))
         manifests = retrieve_crossref_manifests(self.client, ordered_issns, from_date, to_date,
                                                progress_callback=self.progress_callback)
         members = tuple(member for unit in manifests for member in unit.members)
@@ -184,8 +187,10 @@ class CrossrefRetrieval:
         self._resolve(merged)
         by_issn = {unit.issn: unit for unit in manifests}
         units, flat = [], {}
-        for journal in journals:
-            for issn in journal.issn:
+        venue_supported_dois = set()
+        for plan in plans:
+            journal = plan.journal
+            for issn in plan.query_aliases:
                 manifest = by_issn[issn]
                 severity = (EnrichmentIssueSeverity.ERROR if not manifest.complete and not manifest.members
                             else EnrichmentIssueSeverity.WARNING)
@@ -205,22 +210,25 @@ class CrossrefRetrieval:
                     if record is None:
                         failed = True
                         continue
-                    if not crossref_record_matches_journal(record, journal) or issn not in record.issns:
+                    if not crossref_record_matches_journal(record, journal, query_aliases=plan.query_aliases):
                         failed = True
                         issues.append(CrossrefDiscoveryIssue(EnrichmentIssueSeverity.WARNING, "venue_validation",
-                            journal.name, issn, "full record does not support the current queried ISSN", doi=member.doi))
-                        continue
+                            journal.name, issn, "full record lacks usable verified venue identifiers", doi=member.doi))
+                    else:
+                        venue_supported_dois.add(record.doi)
                     records.append(record)
                     flat.setdefault(record.doi, record)
                 complete = manifest.complete and not failed
                 status = CoverageStatus.COMPLETE if complete else (CoverageStatus.PARTIAL if records else CoverageStatus.FAILED)
                 coverage = CoverageUnit("crossref", CoverageComponent.CROSSREF_DISCOVERY, status,
-                                        journal=journal.name, issn=issn)
+                                        journal=journal.issn_l, issn=issn)
                 units.append(CrossrefDiscoveryUnitResult(journal, issn, coverage, tuple(records), tuple(issues)))
-        discovery = CrossrefDiscoveryResult(tuple(flat.values()), tuple(i for u in units for i in u.issues),
+        discovery = CrossrefDiscoveryResult(tuple(flat.values()),
+                                            (*tuple(i for plan in plans for i in plan.diagnostics),
+                                             *tuple(i for u in units for i in u.issues)),
                                             tuple(u.coverage for u in units), tuple(units))
         # Only final usable discovery output closes an OpenAlex DOI gap.
-        self._discovered_dois.update(record.doi for record in discovery.records)
+        self._discovered_dois.update(venue_supported_dois)
         return CrossrefRetrievalResult(discovery, *self._usage(discovery.records))
 
     def _probe(self, dois: Sequence[str]):

@@ -6,7 +6,6 @@ import json
 import math
 import re
 import time
-import unicodedata
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -37,7 +36,7 @@ from literature_monitor.models import (
     ProviderRecordRef,
     ProviderWorkEvidence,
 )
-from literature_monitor.openalex import OpenAlexWorkRecord
+from literature_monitor.openalex import OpenAlexWorkRecord, ResolvedSource
 from literature_monitor.provider_revision import parse_revision_timestamp
 from literature_monitor.progress import (
     ActivityKind,
@@ -657,7 +656,7 @@ class CrossrefClient:
             url = f"{url}?{urlencode(query)}"
         headers = {
             "Accept": "application/json",
-            "User-Agent": "literature-monitor/0.6.1",
+            "User-Agent": "literature-monitor/0.6.2",
         }
 
         # Classify HTTP shape, independently of the caller's Activity operation.
@@ -1394,20 +1393,53 @@ def normalize_crossref_discovered_work(
         ) from error
 
 
-def _normalize_journal_name(value: str) -> str:
-    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+@dataclass(frozen=True)
+class CrossrefJournalQuery:
+    journal: JournalConfig
+    query_aliases: tuple[str, ...]
+    excluded_aliases: tuple[str, ...] = ()
+    diagnostics: tuple[CrossrefDiscoveryIssue, ...] = ()
 
 
-def crossref_record_matches_journal(record: CrossrefWorkRecord, journal: JournalConfig) -> bool:
-    """Match configured venue identity, using journal name only without ISSNs."""
+def plan_crossref_queries(
+    journals: Sequence[JournalConfig], sources: Sequence[ResolvedSource] = (),
+) -> tuple[CrossrefJournalQuery, ...]:
+    """Reconcile transient ownership over the complete configured set (§41.3)."""
+    configured = {journal.issn_l for journal in journals}
+    resolved = {}
+    owners: dict[str, set[tuple[str, str]]] = {}
+    for journal in journals:
+        matching = tuple(source for source in sources if source.configured_issn_l == journal.issn_l)
+        if len(matching) == 1:
+            source = matching[0]
+            resolved[journal.issn_l] = source
+            for alias in source.aliases:
+                owners.setdefault(alias, set()).add((journal.issn_l, source.openalex_id))
+    plans = []
+    for journal in journals:
+        source = resolved.get(journal.issn_l)
+        aliases = source.aliases if source is not None else ()
+        excluded = tuple(sorted({alias for alias in aliases if alias != journal.issn_l and (
+            alias in configured or len({target for target, _ in owners[alias]}) > 1
+        )}))
+        diagnostics = tuple(CrossrefDiscoveryIssue(
+            EnrichmentIssueSeverity.WARNING, "alias_reconciliation", journal.name, alias,
+            f"Excluded conflicting Source alias {alias}; "
+            + (f"durable configured owner is {alias}; " if alias in configured else "")
+            + "Source claims: " + ", ".join(f"{target} ({source_id})" for target, source_id in sorted(owners[alias])),
+        ) for alias in excluded)
+        usable = tuple(alias for alias in aliases if alias not in excluded)
+        plans.append(CrossrefJournalQuery(
+            journal, tuple(dict.fromkeys((journal.issn_l, *usable))), excluded, diagnostics,
+        ))
+    return tuple(plans)
 
-    if record.issns:
-        return bool(set(record.issns) & set(journal.issn))
-    return (
-        record.journal is not None
-        and _normalize_journal_name(record.journal)
-        == _normalize_journal_name(journal.name)
-    )
+
+def crossref_record_matches_journal(
+    record: CrossrefWorkRecord, journal: JournalConfig, *, query_aliases: Sequence[str] = (),
+) -> bool:
+    """Only usable identifiers can support configured venue membership (§41.3)."""
+    return bool(set(record.issns).intersection((journal.issn_l, *query_aliases)))
 
 
 def discover_crossref_journal_issn(
@@ -1421,10 +1453,11 @@ def discover_crossref_journal_issn(
     progress_callback: ProgressCallback | None = None,
     journal_index: int = 0,
     issn_index: int = 0,
+    query_aliases: tuple[str, ...] = (),
 ) -> CrossrefDiscoveryUnitResult:
     """Execute one ISSN query against the full configured venue identity."""
 
-    if issn not in journal.issn:
+    if issn not in (journal.issn_l, *query_aliases):
         raise ValueError("queried ISSN must belong to the configured journal")
     if from_date > to_date:
         raise ValueError("from_date must not be after to_date")
@@ -1494,7 +1527,7 @@ def discover_crossref_journal_issn(
                     )
                     for warning in warnings
                 )
-                if not crossref_record_matches_journal(record, journal):
+                if not crossref_record_matches_journal(record, journal, query_aliases=query_aliases):
                     identity = (
                         f"ISSNs {', '.join(record.issns)}"
                         if record.issns
@@ -1557,7 +1590,7 @@ def discover_crossref_journal_issn(
             provider="crossref",
             component=CoverageComponent.CROSSREF_DISCOVERY,
             status=status,
-            journal=journal.name,
+            journal=journal.issn_l,
             issn=issn,
         )
     )
@@ -1579,6 +1612,7 @@ def discover_crossref_journals(
     *,
     retrieved_at: datetime | None = None,
     progress_callback: ProgressCallback | None = None,
+    resolved_sources: Sequence[ResolvedSource] = (),
 ) -> CrossrefDiscoveryResult:
     if from_date > to_date:
         raise ValueError("from_date must not be after to_date")
@@ -1588,14 +1622,16 @@ def discover_crossref_journals(
     timestamp = timestamp.astimezone(timezone.utc)
 
     units: list[CrossrefDiscoveryUnitResult] = []
-    for journal_index, journal in enumerate(journals):
-        for issn_index, issn in enumerate(journal.issn):
+    plans = plan_crossref_queries(journals, resolved_sources)
+    for journal_index, plan in enumerate(plans):
+        journal = plan.journal
+        for issn_index, issn in enumerate(plan.query_aliases):
             units.append(discover_crossref_journal_issn(
                 client, journal, issn, from_date, to_date,
                 retrieved_at=timestamp, progress_callback=progress_callback,
-                journal_index=journal_index, issn_index=issn_index,
+                journal_index=journal_index, issn_index=issn_index, query_aliases=plan.query_aliases,
             ))
-        if journal.issn:
+        if plan.query_aliases:
             _report_activity(
                 progress_callback,
                 ActivityUpdate(
@@ -1604,12 +1640,13 @@ def discover_crossref_journals(
                     operation=f"journal_completion:{journal_index}",
                     label="Completed Crossref journal discovery",
                     detail=journal.name,
-                    current=len(journal.issn), total=len(journal.issn), unit="issn",
+                    current=len(plan.query_aliases), total=len(plan.query_aliases), unit="issn",
                 ),
             )
     return CrossrefDiscoveryResult(
-        records=tuple(record for unit in units for record in unit.records),
-        issues=tuple(issue for unit in units for issue in unit.issues),
+        records=tuple({record.doi: record for unit in units for record in unit.records}.values()),
+        issues=(*tuple(issue for plan in plans for issue in plan.diagnostics),
+                *tuple(issue for unit in units for issue in unit.issues)),
         coverage=tuple(unit.coverage for unit in units),
         units=tuple(units),
     )

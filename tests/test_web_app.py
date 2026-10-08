@@ -46,14 +46,7 @@ from literature_monitor.zotero_local import ZoteroLocalClient
 def write_valid_config(tmp_path: Path) -> tuple[Path, Path]:
     journal_path = tmp_path / "list.md"
     journal_path.write_text(
-        """# Venues
-
-## Journals
-
-| Journal | ISSN/EISSN |
-|---|---|
-| Biometrics | 0006-341X |
-""",
+        '# Venues\n\n## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  |  |\n',
         encoding="utf-8",
     )
     config_path = tmp_path / "monitor.yaml"
@@ -1119,7 +1112,7 @@ def test_no_generic_status_and_run_settings_routes_are_explicit(tmp_path: Path) 
     assert not any("copy" in path or path == "/fragments/zotero-export" for path, _ in route_methods)
     assert ("/run", "POST") in route_methods
     assert ("/fragments/run", "GET") in route_methods
-    assert ("/settings/validate", "POST") in route_methods
+    assert ("/settings/validate", "POST") not in route_methods
     assert ("/settings/save", "POST") in route_methods
 
 
@@ -1247,12 +1240,7 @@ def test_vendored_htmx_is_local_and_package_relative(
 def seed_grouped_workspace(tmp_path: Path) -> tuple[Path, Path]:
     config_path, output_dir = write_valid_config(tmp_path)
     (tmp_path / "list.md").write_text(
-        "## Journals\n| Journal | ISSN/EISSN | Group |\n|---|---|---|\n"
-        "| Biometrics | 0006-341X | Z Statistics |\n"
-        "| Annals of Statistics | 0090-5364 | |\n"
-        "| JASA | 0162-1459 | A Methods |\n"
-        "| Psychometrika | 0033-3123 | Z Statistics |\n"
-        "| Unused | 0092-5853 | Empty group |\n",
+        '## Journals\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  | Z Statistics |\n| Annals of Statistics | 0090-5364 |  |  |\n| JASA | 0162-1459 |  | A Methods |\n| Psychometrika | 0033-3123 |  | Z Statistics |\n| Unused | 0092-5853 |  | Empty group |\n',
     )
     for ordinal, title, issn, status in (
         (1, "Z grouped", "0006-341X", WorkflowStatus.CANDIDATE),

@@ -11,9 +11,9 @@ safely updates durable Paper and Author Markdown, and exports kept papers.
 **v0.6.1 is RELEASED and is the latest completed baseline.**
 [GitHub Release v0.6.1](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.1)
 contains the Python wheel, sdist and separate Chrome/MV3 Connector ZIP.
-Python package, Provider User-Agent and Connector identities are `0.6.1`.
+Published v0.6.1 Python package, Provider User-Agent and Connector identities are `0.6.1`.
 [SPEC §40](SPEC.md#40-v061-automatic-zotero-connector-capture-current-contract)
-defines the current contract; [SPEC §40.16](SPEC.md#4016-v061-release-and-documentation-closeout-2026-10-07)
+defines the released capture contract; [SPEC §40.16](SPEC.md#4016-v061-release-and-documentation-closeout-2026-10-07)
 records the immutable release target and asset verification. §§40.14 and 40.15
 retain implementation/live acceptance and preparation evidence.
 
@@ -44,9 +44,56 @@ release execution and validation reuse. Detailed historical release and live
 evidence remain in SPEC; historical validation does not establish success for
 the current release beyond its recorded scope.
 
+**v0.6.2 is implemented on the development branch and remains UNRELEASED.**
+The usage instructions below describe that branch under
+[SPEC §41](SPEC.md#41-v062-issn-l-venue-identity--journalspublishers-settings---development-contract).
+For the released configuration and Settings interface, use the
+[v0.6.1 README](https://github.com/dylaaan-booob/literature-monitor/blob/v0.6.1/README.md).
+Current Python package, Provider User-Agent and Connector release identities are
+`0.6.2`. **A6_FINAL_REVIEW: PASSED.** A7 prepares repository-external Python
+and Chrome/MV3 candidates for final review; v0.6.1 remains the latest published
+release until v0.6.2 publication is verified.
+
+A6_FIX_1 closed all five code findings (F1–F5): URL host normalization,
+import identity, legacy Web import, damaged Journal-storage recovery and
+reintroducing saved Journals. **CODE_FINDINGS: CLOSED; BROWSER_ACCEPTANCE:
+PASSED (desktop Chrome and 550px responsive Chrome);
+A6_FINAL_REVIEW: PASSED.** On 2026-10-08, real macOS Chrome acceptance
+used an isolated `/settings` service and configuration, rendering 74 Journals,
+20 Publishers and 19 Open links. The desktop view (1470px content width)
+passed independent list scrolling and no-overflow checks; a 550px Chrome
+window passed single-column layout and normal page scrolling. Real-browser
+Preview/Apply/Save, URL and ISSN-L rejection, revision conflict, HTMX state
+preservation and Remove → Add → Save also passed, with writes confined to
+isolated test files. This responsive-window check is not a physical mobile
+touch test.
+
+An independent rerun of `tests/test_a6_fix1.py` passed 56 tests. The
+previous Codex full `uv run pytest` result was 2720 passed with two existing
+dependency deprecation warnings; the browser closeout did not rerun the
+full suite. Physical mobile testing and a new live OpenAlex/Crossref
+end-to-end Run remain unverified. See
+[SPEC §41.14](SPEC.md#4114-a6-integration-audit-and-product-acceptance-2026-10-08)
+for the historical BLOCKED findings and subsequent acceptance record.
+v0.6.2 remains **UNRELEASED**. A7 release preparation and its current status,
+validation, artifact paths and SHA-256 values are recorded in
+[SPEC §41.15](SPEC.md#4115-a7-release-preparation-2026-10-08).
+Final candidate review follows preparation.
+
 ## Current retrieval architecture
 
+Each configured Journal has exactly one normalized, valid ISSN-L owned by the
+user/configuration. Journal names are presentation metadata, never identity,
+duplicate-detection or Provider-matching authority. OpenAlex `issn_l` is
+Provider evidence and cannot replace the configured identity.
+
 The workflow establishes live journal/date candidate membership on every Run.
+Source resolution runs once; OpenAlex and Crossref retrieval share its evidence.
+Valid Source aliases can support bounded transient Crossref queries; malformed
+aliases are diagnosed individually and conflicting evidence cannot expand the
+query set. Source-resolution failure falls back to the configured ISSN-L only.
+Crossref can corroborate venue membership, but cannot select canonical ISSN-L.
+Aliases are neither configured state nor a persistent identity registry.
 OpenAlex provides primary discovery through batched Source resolution and thin
 Works retrieval; it performs no retained-work location hydration. Crossref
 provides secondary discovery and bibliographic evidence, using live manifests
@@ -81,24 +128,97 @@ literature-monitor gui --config monitor.yaml
 
 The GUI is local-only and binds to `127.0.0.1:8000`; v0.4.0 provides no LAN
 serving mode. Missing or invalid monitor/journal configuration does not block
-startup, so it can be repaired through Settings. GUI Run always uses the
-persisted Monitor date policy and exposes no temporary date override.
+startup and Settings remains accessible. Save can repair a missing or damaged
+Journals section from an explicit valid draft, preserving readable Publishers
+and unrelated sections. Untrusted Journal metadata requires OpenAlex resolution;
+unsafe or unreadable files remain blocked. GUI Run always
+uses the persisted Monitor date policy and exposes no temporary date override.
 
-In Settings → Journals, create, rename, or delete Journal Groups, use **Up** /
-**Down** to order them, and assign each Journal to a Group or **Ungrouped**.
-Deleting a Group moves its Journals to Ungrouped. The desktop Journals editor
-uses a bounded scroll area with **Validate** / **Save** accessible outside it;
-on mobile, Journals remain in normal page flow.
+Settings → **Journals & Publishers** is one editor with one **Save** for the
+complete Monitor, Journals and Publishers draft. Journal name, ISSN-L and direct
+Publisher ID are read-only; edit Group, **Remove** a row, or **Add** a new Journal
+by ISSN-L. New rows are Pending until Save resolves canonical OpenAlex metadata.
+To change identity, Remove and Add. Create, rename, delete and order Groups in
+**Organize Groups**; deleting a Group moves its Journals to **Ungrouped**.
+Removing and reintroducing a saved ISSN-L through Add or Import restores its
+persisted canonical name and Publisher ID during offline Save, while retaining
+the draft's Group and Access URL edits.
 
-Bulk Journal import accepts UTF-8 CSV, TSV, pasted supported tables, and
-Literature Monitor `list.md`. Use **Preview** to inspect changes. **Merge** is
-the default; explicitly select **Replace** to replace the Journal list and
-preview removals. **Apply** changes only the unsaved Settings draft; use
-**Validate** and **Save** to validate and persist the complete configuration.
+Publisher name and OpenAlex ID are read-only. **Access URL** is an optional,
+visible, editable field: manually change it or clear it. **Open** is available
+for an accepted URL and uses a new tab with `noopener noreferrer`. Access is a
+manual institutional-login shortcut, not a login/status or entitlement check.
+The URL contract rejects non-HTTP(S), credentials, localhost and non-public IP
+literals after host Unicode/IDNA normalization, without DNS or reachability
+requests. Public IDN domains remain supported. Publisher IDs alone define identity; names, hostnames
+and corporate lineage do not merge Publishers.
 
-Workspace views show non-empty sections in saved Group order, followed by
-**Ungrouped** and **Unmapped journals**. Saving Group changes immediately
-updates this organization without rewriting existing Papers.
+Ordinary Save is offline, including Group, Access URL, keyword and date edits.
+Identity-changing Save resolves all required metadata before any persistence
+write. Resolution/identity failure writes neither settings file. Save compares
+both original content revisions; a concurrent disk edit conflicts. A journal
+write followed by a monitor-write failure is reported as a partial save.
+Provider metadata does not overwrite a manually entered or cleared Access URL.
+The old Web **Validate** button/route and separate Publisher projection are
+removed; CLI `validate` remains available.
+
+Desktop Journals and Publishers have separate bounded scroll areas, with Save,
+Bulk Import and Group controls outside them. At widths ≤760px, the lists stack
+in page flow. Automated HTMX checks cover preservation of draft values,
+revisions, disclosure state and list scroll. Real desktop Chrome and 550px
+responsive Chrome layout/interaction acceptance passed on 2026-10-08; physical
+mobile touch behavior remains untested.
+
+Bulk Import accepts UTF-8 CSV, TSV, pasted supported tables and Literature
+Monitor `list.md`. Prefer `Journal,ISSN-L,Group` (Group is optional). **Preview**
+shows changes; **Merge** keeps existing Journals and **Replace** previews
+removals. **Apply to draft** changes only the unsaved draft and retains its
+original revisions; Save is the sole persistence action. ISSN-L defines
+Merge/Replace identity. Rows with the same ISSN-L and compatible Groups merge
+despite different display hints; a genuine Group conflict blocks the whole
+Apply. Existing canonical metadata is retained, and new identities obtain
+canonical metadata from OpenAlex.
+
+Legacy `Journal,ISSN/EISSN[,Group]` input requires unique Source reconciliation
+and, where needed, independently confirmed ISSN-L, never name-based selection
+or automatic canonical selection by Crossref. Local Preview shows legacy
+identifiers, Groups and optional confirmed ISSN-L inputs. **Reconcile and Apply**
+uses OpenAlex evidence for all rows and changes the draft only if every row
+passes. Confirmation values are bound to the exact import source and rows;
+failed reconciliation retains correctable inputs and diagnostics. Existing
+legacy storage has separate confirmation inputs in its Settings migration flow: opening
+Settings writes nothing; Save verifies all rows, accepts optional confirmed
+ISSN-L targets, and preserves Groups. Migrate storage before adding/importing
+or organizing Journals; unresolved rows block the whole Save.
+
+`list.md` is the portable local-first source of truth for both tables:
+
+```markdown
+## Journals
+
+| Journal | ISSN-L | Publisher ID | Group |
+| --- | --- | --- | --- |
+| Biometrics | 0006-341X | https://openalex.org/P4310311648 | Statistics |
+
+## Publishers
+
+| Publisher | OpenAlex ID | Access URL |
+| --- | --- | --- |
+| Oxford University Press | https://openalex.org/P4310311648 | http://global.oup.com/?cc=gb |
+```
+
+Names and Journal Publisher associations are machine-managed; Group and Access
+URL are human-managed. No print/electronic alias columns or Publisher fields
+are added to `monitor.yaml`. Only Journals drive discovery. Conferences and
+unrelated Markdown sections retain their preservation boundary.
+
+Current Run attribution writes configured ISSN-L values into the existing
+plural `journal_issns` field, deduplicated when one DOI matches several Journal
+contexts. Historical Papers are not eagerly rewritten. Workspace maps a Paper
+only when its valid stored ISSNs identify exactly one configured Journal;
+zero/multiple matches appear under **Unmapped journals**. Non-empty sections
+follow saved Group order, then Ungrouped and Unmapped journals. Group changes
+update organization without rewriting Papers.
 
 During an active run, the GUI Run panel shows `Stage N of 5`, elapsed time,
 and per-source Activities. OpenAlex and Crossref Activities may coexist, each
@@ -137,10 +257,10 @@ workflow/execution database, persistent run history, SSE, WebSocket, batch
 queue, or another source of Paper decision state. Connector heartbeat and one
 active capture attempt are transient process-local state.
 
-### Current v0.6.1 Zotero workflow
+### Zotero workflow (unchanged v0.6.1 capture protocol)
 
 ```text
-Settings → Publisher access
+Settings → Journals & Publishers → Publisher Access URL → Open
 → optionally open relevant journal/publisher sites and authenticate manually
 
 Kept Paper → Save to Zotero
@@ -158,8 +278,9 @@ uncertain completion never automatically repeats a save.
 #### Prerequisites
 
 - **Zotero Desktop**, running with Local API access enabled.
-- For automatic capture, the **Literature Monitor Connector 0.6.1** in Chrome:
-  download and extract the Connector ZIP from the release, open
+- For automatic capture, the **Literature Monitor Connector** in Chrome:
+  extract the matching candidate ZIP (0.6.2, UNRELEASED) or the published
+  v0.6.1 ZIP, open
   `chrome://extensions/`, enable Developer Mode, choose **Load unpacked**, and
   select `chrome-mv3/`; see [Connector instructions](connector/README.md).
 - Run the local Web UI bridge at `http://127.0.0.1:8000`; Settings shows the
@@ -169,17 +290,16 @@ uncertain completion never automatically repeats a save.
 
 #### Publisher access
 
-Settings includes a normal **Publisher access** panel outside
-**Advanced & Diagnostics**. It is derived from the currently saved Journals and
-OpenAlex Source metadata and can present more than one real journal/platform
-link for the same publisher. Open the relevant sites early when useful and
-complete institutional login manually in the normal browser page.
+Use **Open** beside a Publisher Access URL in **Journals & Publishers**, then
+complete institutional login manually in the normal browser. Literature Monitor
+does not inspect cookies, identify your account or institution, determine
+entitlement, detect login success, or track session expiry. These fields belong
+to the shared Settings draft; opening a link does not save it or start a Run.
 
-Literature Monitor does not determine whether you are logged in, identify an
-account or institution, test entitlement, inspect login/session state, or track
-session expiry. Publisher projection is independent of Settings Validate/Save:
-an unavailable Publisher access panel does not make Settings, Workspace, or a
-Run fail.
+The separate read-only Publisher projection belonged to released v0.6.1.
+The development branch replaces it with the durable Publisher table above;
+`/settings/publisher-access` is removed. Zotero capture and exact-DOI
+reconciliation remain unchanged under §40.
 
 #### Open DOI and return behavior
 
@@ -228,7 +348,7 @@ unchanged.
 | No exact DOI match | Finish the manual Zotero Connector save, then use **Check Zotero**. |
 | Duplicate exact DOI parents | Resolve the duplicate bibliographic parents in My Library, then retry. |
 | Existing `zotero_key` conflicts | Repair the Paper/Zotero linkage deliberately; Literature Monitor does not silently replace it. |
-| Publisher access unavailable | Continue with **Open DOI** if needed; Publisher access failure is not a Run failure. |
+| Publisher Access URL empty | Enter a reviewed public URL in Settings, or continue with **Open DOI**. No login-status check is performed. |
 
 ### Historical v0.5.1 live verification
 
@@ -272,8 +392,10 @@ execution. One OpenAlex and one Crossref discovery branch may run concurrently;
 there is no async rewrite or journal/ISSN/DOI worker pool. Dependent Crossref DOI
 supplementation waits for both discovery branches.
 
-OpenAlex batches Source resolution with at most 100 ISSNs per batch, then uses
-multi-Source thin Works discovery. `primary_location`, its `is_published` flag,
+OpenAlex batches configured ISSN-L Source resolution with at most 100 identifiers
+per batch, then uses multi-Source thin Works discovery. The resolved valid aliases
+are transient evidence for bounded compatible Crossref queries, not new durable
+Journal identities. `primary_location`, its `is_published` flag,
 and Source/journal attribution remain discovery evidence. No retained-work
 location requests or OpenAlex revision state are used.
 
@@ -315,7 +437,8 @@ are never fabricated.
 
 Candidate Eligibility is evaluated after current Crossref supplementation and
 before evidence assembly and local matching. Exact Crossref `journal-article`
-with a target ISSN is strong eligible evidence; `journal-issue` is excluded
+with compatible identifier evidence for the configured ISSN-L context is strong
+eligible evidence; `journal-issue` is excluded
 before matching. An explicit non-journal type without a target ISSN is
 `INELIGIBLE`; conflicting type/venue evidence, `other`, missing type, or an
 article with explicit non-target ISSNs is `SCOPE_DISPUTED` under SPEC §32.
@@ -548,7 +671,7 @@ delta / “What's New” state, scheduler or daemon durable state, notifications
 run history, or a workflow/execution database. The last-run snapshot is
 observational metadata; Provider state is a reconstructible revision-validated
 optimization, and every Run still establishes live membership.
-In v0.6.1, Python Zotero integration remains read-only exact-DOI parent
+Under the unchanged v0.6.1 capture protocol, Python Zotero integration remains read-only exact-DOI parent
 reconciliation in My Library. The separate Literature Monitor Connector may
 save automatically only after authoritative preflight confirms the parent is
 absent. Custom PDF acquisition/staging, publisher-login automation and the
@@ -571,8 +694,10 @@ uv run literature-monitor validate --config config.example.yaml
 
 After local preflight succeeds, the command contacts OpenAlex only to resolve
 every configured journal Source through the same batched resolver as production,
-with up to 100 ISSNs per batch. Strict journal/title/ISSN consistency and
-conflicting-Source validation still apply. OpenAlex supports anonymous Source
+with up to 100 configured ISSN-L values per batch. Source kind, identity and
+identifier membership checks apply, including conflicting-Source rejection.
+Journal titles do not match or veto identity; each malformed alias is excluded
+and diagnosed independently. OpenAlex supports anonymous Source
 lookups; set `OPENALEX_API_KEY` in the environment to use an API key. Local
 configuration or runtime-preflight failures exit with status `2`; OpenAlex
 Source-resolution
@@ -617,7 +742,7 @@ search diagnostics, canonicalization diagnostics, and diagnostic materialization
 
 ## Diagnose OpenAlex discovery
 
-The OpenAlex discovery diagnostic resolves each configured ISSN independently,
+The OpenAlex discovery diagnostic resolves each configured ISSN-L,
 retrieves works from the resolved OpenAlex Source in an inclusive date window,
 and writes normalized records as NDJSON to stdout. Logs are written to stderr.
 The NDJSON shape is a validation surface for OpenAlex discovery, not a stable
@@ -626,7 +751,7 @@ export format.
 ```bash
 uv run literature-monitor openalex-discover \
   --config config.example.yaml \
-  --journal "Biometrics" \
+  --issn-l "0006-341X" \
   --from-date 2026-01-01 \
   --to-date 2026-09-18
 ```
@@ -647,7 +772,7 @@ or persistence.
 
 ## Diagnose Crossref discovery
 
-The Crossref discovery diagnostic queries every configured ISSN independently
+The Crossref-only discovery diagnostic queries each configured ISSN-L
 within the inclusive publication-date window and writes normalized provider
 records as NDJSON. It does not construct an OpenAlex client or apply local
 keyword filtering.
@@ -655,7 +780,7 @@ keyword filtering.
 ```bash
 uv run literature-monitor crossref-discover \
   --config config.example.yaml \
-  --journal "Biometrics" \
+  --issn-l "0006-341X" \
   --from-date 2026-01-20 \
   --to-date 2026-01-25
 ```
@@ -676,7 +801,7 @@ Use the configured expression:
 ```bash
 uv run literature-monitor openalex-filter \
   --config config.example.yaml \
-  --journal "Biometrics" \
+  --issn-l "0006-341X" \
   --from-date 2026-01-20 \
   --to-date 2026-01-25
 ```
@@ -687,7 +812,7 @@ configuration file:
 ```bash
 uv run literature-monitor openalex-filter \
   --config config.example.yaml \
-  --journal "Biometrics" \
+  --issn-l "0006-341X" \
   --from-date 2026-01-20 \
   --to-date 2026-01-25 \
   --keyword-expression '"multiview learning"'
@@ -698,7 +823,7 @@ Prefix and Proximity operands may be combined with the same Boolean grammar:
 ```bash
 uv run literature-monitor openalex-filter \
   --config config.example.yaml \
-  --journal "Biometrics" \
+  --issn-l "0006-341X" \
   --from-date 2026-01-20 \
   --to-date 2026-01-25 \
   --keyword-expression 'statist* AND "causal inference"~1'
@@ -794,7 +919,7 @@ for lacking searchable fields.
 ```bash
 uv run literature-monitor crossref-enrich \
   --config config.example.yaml \
-  --journal "Biometrics" \
+  --issn-l "0006-341X" \
   --from-date 2026-01-20 \
   --to-date 2026-01-25 \
   --keyword-expression '"multiview learning"'
@@ -806,7 +931,7 @@ the polite API pool without changing repository configuration:
 ```bash
 CROSSREF_MAILTO=you@example.com uv run literature-monitor crossref-enrich \
   --config config.example.yaml \
-  --journal "Biometrics" \
+  --issn-l "0006-341X" \
   --from-date 2026-01-20 \
   --to-date 2026-01-25 \
   --keyword-expression '"multiview learning"'
@@ -831,7 +956,7 @@ nor title/author similarity establish identity.
 ```bash
 uv run literature-monitor canonicalize \
   --config config.example.yaml \
-  --journal "Biometrics" \
+  --issn-l "0006-341X" \
   --from-date 2026-01-20 \
   --to-date 2026-01-25 \
   --keyword-expression '"multiview learning"'
@@ -850,14 +975,14 @@ export.
 `materialize` remains an explicit diagnostic entry point. It
 runs the same OpenAlex/Crossref consolidation-before-filter production pipeline
 as `run`, but it still requires an explicit CLI `--output-dir` and continues to
-support the existing diagnostic `--journal` and `--keyword-expression`
+support the existing diagnostic `--issn-l` and `--keyword-expression`
 overrides. The normal `run` command instead takes its output directory,
 journal whitelist, and keyword expression from the monitor definition:
 
 ```bash
 uv run literature-monitor materialize \
   --config config.example.yaml \
-  --journal "Biometrics" \
+  --issn-l "0006-341X" \
   --from-date 2026-01-20 \
   --to-date 2026-01-25 \
   --keyword-expression '"multiview learning"' \

@@ -3,6 +3,8 @@
   let lastRunAnnouncementKey = null;
   let workspaceScroll = null;
   let settingsJournalScroll = null;
+  let settingsPublisherScroll = null;
+  let settingsDisclosures = [];
   let pendingZoteroReturn = null;
   let zoteroReturnRequestInFlight = false;
 
@@ -198,6 +200,13 @@
       && !target.closest("[data-transient-import]");
   }
 
+  function syncPublisherLink(target) {
+    if (!target.matches('[name="publisher_access_url"]')) return;
+    const link = target.closest("[data-publisher-row]")?.querySelector("[data-publisher-open]");
+    // New links require the shared server URL validator; never keep a stale href.
+    if (link) link.hidden = target.value !== link.dataset.accessUrl;
+  }
+
   function setImportReady(editor, ready) {
     editor.querySelectorAll("[data-import-preview], [data-import-apply]").forEach((button) => {
       button.disabled = !ready;
@@ -301,6 +310,7 @@
       if (editor.dataset.importFileLoading !== "true") setImportReady(editor, true);
     }
     if (isSettingsField(event.target)) {
+      syncPublisherLink(event.target);
       setSettingsDirty(true);
     }
   });
@@ -316,6 +326,7 @@
       return;
     }
     if (isSettingsField(event.target)) {
+      syncPublisherLink(event.target);
       const editor = event.target.closest("#settings-editor");
       if (event.target.matches("[data-group-edit]")) {
         renameGroup(editor, event.target.closest("[data-group-row]"));
@@ -364,6 +375,10 @@
       const template = editor?.querySelector("template[data-journal-template]");
       if (rows && template instanceof HTMLTemplateElement) {
         rows.append(template.content.cloneNode(true));
+        const added = rows.lastElementChild;
+        added?.querySelector('[name="journal_issns"]')?.focus();
+        const count = editor.querySelector("[data-journal-count]");
+        if (count) count.textContent = journalRows(editor).length;
         syncGroupOptions(editor);
         setSettingsDirty(true);
       }
@@ -374,6 +389,8 @@
     if (removeButton) {
       const editor = removeButton.closest("#settings-editor");
       removeButton.closest(".journal-row")?.remove();
+      const count = editor.querySelector("[data-journal-count]");
+      if (count) count.textContent = journalRows(editor).length;
       alignJournalGroupOrder(editor);
       setSettingsDirty(true);
     }
@@ -401,6 +418,8 @@
     if (event.detail.target.id === "settings-editor") {
       const viewport = document.getElementById("settings-editor")?.querySelector("[data-journal-viewport]");
       settingsJournalScroll = viewport?.scrollTop ?? null;
+      settingsDisclosures = Array.from(document.getElementById("settings-editor").querySelectorAll("[data-settings-disclosure]")).filter(panel => panel.open).map(panel => panel.dataset.settingsDisclosure);
+      settingsPublisherScroll = document.getElementById("settings-editor")?.querySelector("[data-publisher-viewport]")?.scrollTop ?? null;
       return;
     }
     if (event.detail.target.id !== "workspace-root") {
@@ -424,7 +443,14 @@
     } else if (event.detail.target.id === "settings-editor") {
       const viewport = document.getElementById("settings-editor")?.querySelector("[data-journal-viewport]");
       if (viewport && settingsJournalScroll !== null) viewport.scrollTop = settingsJournalScroll;
+      const publishers = document.getElementById("settings-editor")?.querySelector("[data-publisher-viewport]");
+      if (publishers && settingsPublisherScroll !== null) publishers.scrollTop = settingsPublisherScroll;
+      document.getElementById("settings-editor").querySelectorAll("[data-settings-disclosure]").forEach(panel => {
+        if (settingsDisclosures.includes(panel.dataset.settingsDisclosure)) panel.open = true;
+      });
+      settingsDisclosures = [];
       settingsJournalScroll = null;
+      settingsPublisherScroll = null;
     }
   });
 

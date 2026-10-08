@@ -5,7 +5,6 @@ See SPEC.md §§32.2–32.3. Acquired Provider results remain untouched.
 
 from __future__ import annotations
 
-import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -13,7 +12,7 @@ from enum import Enum
 from literature_monitor.application.crossref_retrieval import CrossrefSupplementResult
 from literature_monitor.config import JournalConfig
 from literature_monitor.coverage import CoverageStatus
-from literature_monitor.crossref import CrossrefDiscoveryResult, CrossrefWorkRecord
+from literature_monitor.crossref import CrossrefDiscoveryResult, CrossrefWorkRecord, CrossrefJournalQuery, plan_crossref_queries
 from literature_monitor.diagnostics import RunDiagnostic, RunDiagnosticKind
 from literature_monitor.identifiers import normalize_doi
 from literature_monitor.models import ProviderRecordRef, ProviderWorkEvidence
@@ -34,24 +33,24 @@ class EligibilityDecision:
 
 @dataclass(frozen=True)
 class TargetVenue:
-    journal: str
-    issns: tuple[str, ...]
-    names: tuple[str, ...]
-    configured_issns: tuple[str, ...] = ()
+    configured_issn_l: str
+    query_aliases: tuple[str, ...]
+    source_id: str | None = None
+    name: str = ""  # Diagnostic presentation only.
+    excluded_aliases: tuple[str, ...] = ()
 
 
-def _journal_name(value: str) -> str:
-    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+def target_venue(plan: CrossrefJournalQuery, sources: Sequence[ResolvedSource]) -> TargetVenue:
+    journal = plan.journal
+    resolved = tuple(source for source in sources if source.configured_issn_l == journal.issn_l)
+    return TargetVenue(journal.issn_l, plan.query_aliases,
+                       resolved[0].openalex_id if len(resolved) == 1 else None, journal.name,
+                       plan.excluded_aliases)
 
 
-def target_venue(journal: JournalConfig, sources: Sequence[ResolvedSource]) -> TargetVenue:
-    resolved = tuple(source for source in sources if source.journal == journal.name)
-    return TargetVenue(
-        journal.name,
-        tuple(dict.fromkeys((*journal.issn, *(issn for source in resolved for issn in source.issn),
-                             *(source.issn_l for source in resolved if source.issn_l)))),
-        tuple(dict.fromkeys((journal.name, *(source.display_name for source in resolved)))),
-        journal.issn,
+def _conflicting_alias_only(record: CrossrefWorkRecord, target: TargetVenue) -> bool:
+    return bool(set(record.issns).intersection(target.excluded_aliases)) and not bool(
+        set(record.issns).intersection(target.query_aliases)
     )
 
 
@@ -59,7 +58,7 @@ def classify_crossref(record: CrossrefWorkRecord, target: TargetVenue) -> Eligib
     """Classify exact type/venue evidence without OpenAlex type or name vetoes."""
     state = CandidateEligibility
     kind = record.work_type
-    target_issn = bool(set(record.issns) & set(target.issns))
+    target_issn = bool(set(record.issns) & set(target.query_aliases))
     if kind == "journal-issue":
         return EligibilityDecision(state.INELIGIBLE)
     if kind is None or kind == "other":
@@ -69,10 +68,6 @@ def classify_crossref(record: CrossrefWorkRecord, target: TargetVenue) -> Eligib
             return EligibilityDecision(state.ELIGIBLE, strong=True)
         if record.issns:
             return EligibilityDecision(state.SCOPE_DISPUTED)
-        if record.journal is not None and _journal_name(record.journal) in {
-            _journal_name(name) for name in target.names
-        }:
-            return EligibilityDecision(state.ELIGIBLE)
         return EligibilityDecision(state.SCOPE_DISPUTED)
     return EligibilityDecision(state.SCOPE_DISPUTED if target_issn else state.INELIGIBLE)
 
@@ -134,13 +129,14 @@ def filter_candidate_evidence(
     supplements: CrossrefSupplementResult, journals: Sequence[JournalConfig],
 ) -> EligibleCandidates:
     """Filter candidates per current venue/anchor while preserving retrieval results."""
-    targets = {journal.name: target_venue(journal, openalex.sources) for journal in journals}
+    plans = plan_crossref_queries(journals, openalex.sources)
+    targets = {plan.journal.issn_l: target_venue(plan, openalex.sources) for plan in plans}
     source_targets: dict[str, list[TargetVenue]] = {}
     for source in openalex.sources:
-        if source.journal in targets:
+        if source.configured_issn_l in targets:
             venues = source_targets.setdefault(source.openalex_id, [])
-            if targets[source.journal] not in venues:
-                venues.append(targets[source.journal])
+            if targets[source.configured_issn_l] not in venues:
+                venues.append(targets[source.configured_issn_l])
     discovered = {record.doi: record for record in crossref.records}
     by_anchor = {(unit.requested_doi, ref): unit for unit in supplements.units for ref in unit.anchors}
     attribution: dict[ProviderRecordRef, list[EligibilityDecision]] = {}
@@ -150,7 +146,7 @@ def filter_candidate_evidence(
     def attribute_venue(ref: ProviderRecordRef, journal: str | None) -> None:
         identities = monitor_journal_issns.setdefault(ref, set())
         if journal is not None:
-            identities.update(targets[journal].configured_issns)
+            identities.add(targets[journal].configured_issn_l)
 
     def retain(
         ref: ProviderRecordRef, decision: EligibilityDecision, journal: str | None,
@@ -169,14 +165,18 @@ def filter_candidate_evidence(
     retained_crossref: dict[str, CrossrefWorkRecord] = {}
     seen_discovery: set[tuple[str, ProviderRecordRef]] = set()
     for unit in crossref.units:
-        target = targets[unit.journal.name]
+        target = targets[unit.journal.issn_l]
         for record in unit.records:
             ref = _ref(record)
-            key = (target.journal, ref)
+            key = (target.configured_issn_l, ref)
             if key in seen_discovery:
                 continue  # Multiple queried ISSNs are one logical venue decision.
             seen_discovery.add(key)
-            if retain(ref, classify_crossref(record, target), target.journal, doi=record.doi):
+            ambiguous = target.source_id is not None and len(source_targets.get(target.source_id, ())) > 1
+            decision = (EligibilityDecision(CandidateEligibility.SCOPE_DISPUTED) if ambiguous
+                        else classify_crossref(record, target))
+            identity = None if ambiguous or _conflicting_alias_only(record, target) else target.configured_issn_l
+            if retain(ref, decision, identity, doi=record.doi):
                 retained_crossref.setdefault(record.doi, record)
     # Missing current venue context cannot establish eligibility or exclusion.
     seen_refs = {ref for _journal, ref in seen_discovery}
@@ -193,6 +193,8 @@ def filter_candidate_evidence(
         unit = by_anchor.get((doi, ref))
         exact = discovered.get(doi) or (unit.record if unit is not None else None)
         venues = source_targets.get(record.source_id, ())
+        if len(venues) > 1:
+            venues = ()  # One Source shared by multiple configured targets cannot select identity.
         retained = False
         for target in venues:
             decision = (
@@ -202,7 +204,7 @@ def filter_candidate_evidence(
             )
             # Only the current requested-DOI/anchor relation authorizes prime grouping.
             if not retain(
-                ref, decision, target.journal,
+                ref, decision, target.configured_issn_l,
                 doi=exact.doi if exact is not None else doi,
                 related_record_ids=(exact.provenance.record_id,) if exact is not None else (),
             ):
@@ -214,7 +216,7 @@ def filter_candidate_evidence(
                 if ref not in anchors:
                     anchors.append(ref)
                 attribution.setdefault(_ref(exact), []).append(decision)
-                attribute_venue(_ref(exact), target.journal)
+                attribute_venue(_ref(exact), None if _conflicting_alias_only(exact, target) else target.configured_issn_l)
         if not venues:
             retained = retain(ref, EligibilityDecision(CandidateEligibility.SCOPE_DISPUTED), None)
         if retained:
@@ -227,7 +229,7 @@ def filter_candidate_evidence(
         {ref: tuple(decisions) for ref, decisions in attribution.items()},
         tuple(RunDiagnostic(
             RunDiagnosticKind.NON_CANDIDATE_EXCLUSION,
-            "evidence excluded from the candidate pipeline", tuple(sorted(record_ids)), journal,
+            "evidence excluded from the candidate pipeline", tuple(sorted(record_ids)), targets[journal].name if journal is not None else None,
         ) for (journal, _namespace, _identity), record_ids in exclusions.items()),
         {ref: tuple(sorted(issns)) for ref, issns in monitor_journal_issns.items()},
     )

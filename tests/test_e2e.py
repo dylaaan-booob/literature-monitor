@@ -191,11 +191,7 @@ def test_run_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
 ) -> None:
     whitelist_path = tmp_path / "list.md"
     whitelist_path.write_text(
-        "# E2E journals\n\n"
-        "## Journals\n\n"
-        "| Journal | ISSN/EISSN |\n"
-        "| --- | --- |\n"
-        "| Biometrics | 0006-341X |\n",
+        '# E2E journals\n\n## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  |  |\n',
         encoding="utf-8",
     )
     config_path = tmp_path / "monitor.yaml"
@@ -416,14 +412,7 @@ def test_representative_multi_journal_cycle_handles_overlapping_rerun(
 ) -> None:
     whitelist_path = tmp_path / "representative-list.md"
     whitelist_path.write_text(
-        "# Representative journals\n\n"
-        "## Journals\n\n"
-        "| Journal | ISSN/EISSN |\n"
-        "| --- | --- |\n"
-        "| BIOMETRICS | 0006-341X |\n"
-        "| IEEE Transactions on Pattern Analysis and Machine Intelligence "
-        "| 0162-8828 |\n"
-        "| Nature Methods | 1548-7091 / 1548-7105 |\n",
+        '# Representative journals\n\n## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| BIOMETRICS | 0006-341X |  |  |\n| IEEE Transactions on Pattern Analysis and Machine Intelligence | 0162-8828 |  |  |\n| Nature Methods | 1548-7091 |  |  |\n',
         encoding="utf-8",
     )
     config_path = tmp_path / "config.yaml"

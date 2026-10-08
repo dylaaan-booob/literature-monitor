@@ -196,7 +196,7 @@ def test_workflow_views_use_discovered_date_then_publication_date_then_title(
         discovered_at=datetime(2026, 9, 20, tzinfo=timezone.utc),
     )
 
-    journals = () if group == "unmapped" else (JournalConfig(name="Biometrics", issn=("0006-341X",), group=group),)
+    journals = () if group == "unmapped" else (JournalConfig(name="Biometrics", issn_l="0006-341X", group=group),)
     snapshot = load_workspace(tmp_path, journals)
 
     assert [paper.title for paper in snapshot.inbox] == [
@@ -343,10 +343,10 @@ def test_optional_attribution_does_not_remove_papers_from_any_workflow_view(tmp_
     assert all(p.read_bytes() == contents for p, contents in before.items())
 
 
-A = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"), group="Z Statistics")
-B = JournalConfig(name="Annals of Statistics", issn=("0090-5364",))
-C = JournalConfig(name="Psychometrika", issn=("0033-3123",), group="Z Statistics")
-D = JournalConfig(name="JASA", issn=("0162-1459",), group="A Methods")
+A = JournalConfig(name="Biometrics", issn_l="0006-341X", group="Z Statistics")
+B = JournalConfig(name="Annals of Statistics", issn_l="0090-5364")
+C = JournalConfig(name="Psychometrika", issn_l="0033-3123", group="Z Statistics")
+D = JournalConfig(name="JASA", issn_l="0162-1459", group="A Methods")
 
 
 @pytest.mark.parametrize("attribution,name,kind,label", [
@@ -358,6 +358,7 @@ D = JournalConfig(name="JASA", issn=("0162-1459",), group="A Methods")
     (["0006-341X", "0090-5364"], "Biometrics", "unmapped", "Unmapped journals"),
     (["0006-341X", "0033-3123"], "Biometrics", "unmapped", "Unmapped journals"),
     (["0092-5853"], "Biometrics", "unmapped", "Unmapped journals"),
+    (["1541-0420"], "Biometrics", "unmapped", "Unmapped journals"),
     ("missing", "  Ｂｉｏｍｅｔｒｉｃｓ  ", "group", "Z Statistics"),
     ("missing", " ANNALS   OF\nSTATISTICS ", "ungrouped", "Ungrouped"),
     ([], "BIOMETRICS", "group", "Z Statistics"),
@@ -399,7 +400,7 @@ def test_ambiguous_normalized_journal_names_never_pick_first_match(tmp_path, att
     path = write_paper(tmp_path, "paper.md", 1)
     if attribution != "missing":
         replace_frontmatter(path, journal_issns=attribution)
-    alias = JournalConfig(name="ＢＩＯＭＥＴＲＩＣＳ", issn=("0092-5853",), group=A.group)
+    alias = JournalConfig(name="ＢＩＯＭＥＴＲＩＣＳ", issn_l="0092-5853", group=A.group)
     snapshot = load_workspace(tmp_path, (A, alias))
     section, = snapshot.sections_for(WorkflowStatus.CANDIDATE)
     assert section.kind is WorkspaceSectionKind.UNMAPPED and not snapshot.issues
@@ -407,7 +408,7 @@ def test_ambiguous_normalized_journal_names_never_pick_first_match(tmp_path, att
 
 @pytest.mark.parametrize("status", list(WorkflowStatus))
 def test_sections_follow_first_configured_group_occurrence_and_flat_navigation_order(tmp_path, status):
-    journals = (A, B, D, C, JournalConfig(name="Empty journal", issn=("0092-5853",), group="Empty"))
+    journals = (A, B, D, C, JournalConfig(name="Empty journal", issn_l="0092-5853", group="Empty"))
     for ordinal, title, identities in (
         (1, "Z first group", ["0006-341X"]), (2, "Y same group", ["0033-3123"]),
         (3, "X second group", ["0162-1459"]), (4, "A ungrouped", ["0090-5364"]),
@@ -451,7 +452,7 @@ def test_current_config_changes_reproject_without_paper_writes_or_cache(tmp_path
     before = {p: p.read_bytes() for p in (tmp_path / "Papers").glob("*.md")}
     renamed = A.model_copy(update={"group": "Renamed"})
     assigned = A.model_copy(update={"group": D.group})
-    removed = JournalConfig(name="Biometrics", issn=("0092-5853",), group="Name fallback forbidden")
+    removed = JournalConfig(name="Biometrics", issn_l="0092-5853", group="Name fallback forbidden")
     for journals, expected in (
         ((A, D), ["Z Statistics", "A Methods"]),
         ((renamed, D), ["Renamed", "A Methods"]),

@@ -45,9 +45,10 @@ They are represented only by:
 
 The released v0.6.1 delta keeps the A1 Chrome/MV3 component-name
 and provenance changes and the A5 automatic-capture runtime. The tracked
-Literature Monitor build entry point supplies version `0.6.1` to the pinned
+Literature Monitor build entry point supplies candidate version `0.6.2` to the pinned
 upstream build through its supported `-v` option; the upstream revision,
-submodule pins and package metadata remain unchanged. The A5 source delta is
+submodule pins and upstream package metadata remain unchanged. v0.6.2 remains
+UNRELEASED. The A5 source delta is
 limited to:
 
 - wiring a Literature Monitor-owned background runtime into the MV3 worker;

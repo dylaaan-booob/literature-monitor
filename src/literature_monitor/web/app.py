@@ -31,7 +31,6 @@ from literature_monitor.application.journal_import import (
     apply_journal_import,
     preview_journal_import,
 )
-from literature_monitor.application.publisher_access import resolve_publisher_access
 from literature_monitor.application.settings import (
     SettingsIssue,
     SettingsLoadResult,
@@ -41,7 +40,6 @@ from literature_monitor.application.settings import (
     SettingsValidationResult,
     load_settings,
     save_settings,
-    validate_settings,
 )
 from literature_monitor.application.workspace import (
     WorkspacePaper,
@@ -51,7 +49,6 @@ from literature_monitor.application.workspace import (
 from literature_monitor.config import ConfigurationError, load_config
 from literature_monitor.identifiers import normalize_doi
 from literature_monitor.models import WorkflowStatus
-from literature_monitor.openalex import OpenAlexClient, OpenAlexError
 from literature_monitor.zotero_local import ZoteroLocalClient
 from literature_monitor.web.capture_coordinator import (
     CONNECTOR_VERSION_MAX_LENGTH,
@@ -477,24 +474,6 @@ def create_app(config_path: Path) -> FastAPI:
         }
         return templates.TemplateResponse(request, "fragments/zotero_integration.html", context)
 
-    @app.get("/settings/publisher-access", response_class=HTMLResponse)
-    def publisher_access_fragment(request: Request) -> HTMLResponse:
-        try:
-            saved_config = load_config(resolved_config_path)
-            with OpenAlexClient(api_key=os.environ.get("OPENALEX_API_KEY")) as client:
-                projection = resolve_publisher_access(client, saved_config.journals)
-        except (ConfigurationError, OpenAlexError):
-            projection = None
-
-        return templates.TemplateResponse(
-            request,
-            "fragments/publisher_access.html",
-            {
-                "publisher_access": projection,
-                "publisher_access_unavailable": projection is None,
-            },
-        )
-
     @app.get("/fragments/run", response_class=HTMLResponse)
     def run_fragment(request: Request) -> HTMLResponse:
         snapshot = app.state.run_coordinator.snapshot()
@@ -562,6 +541,9 @@ def create_app(config_path: Path) -> FastAPI:
         import_values = SettingsImportValues(
             contents=str(form.get("journal_import_text", "")),
             mode=str(form.get("journal_import_mode", JournalImportMode.MERGE.value)),
+            confirmation_source=str(form.get("import_confirmation_source", "")),
+            confirmation_rows=tuple(str(v) for v in form.getlist("import_confirmation_row")),
+            confirmation_targets=tuple(str(v) for v in form.getlist("import_confirmation_issn_l")),
         )
         try:
             mode = JournalImportMode(import_values.mode)
@@ -572,18 +554,26 @@ def create_app(config_path: Path) -> FastAPI:
         applied = False
         message = "Import could not be applied." if apply else "Import could not be previewed."
         if draft is not None and mode is not None:
+            plan = preview_journal_import(draft, import_values.contents, mode=mode)
+            stale_source = bool(import_values.confirmation_source and import_values.confirmation_source != import_values.source_revision)
             if apply:
-                result = apply_journal_import(draft, import_values.contents, mode=mode)
-                plan = result.plan
-                applied = result.applied
+                try:
+                    confirmations = import_values.confirmations(plan)
+                    result = apply_journal_import(draft, import_values.contents, mode=mode, confirmations=confirmations)
+                    plan = result.plan
+                    applied = result.applied
+                except ValueError as error:
+                    import_values = replace(import_values, error=str(error))
                 if applied:
                     values = settings_form_after_import(values, result.draft)
-                    message = "Import applied to the unsaved Settings draft. Validate and Save to persist it."
+                    message = "Import applied to the unsaved Settings draft. Save to persist it."
                 else:
                     message = "Import Apply blocked; the current draft is unchanged."
             else:
-                plan = preview_journal_import(draft, import_values.contents, mode=mode)
-                message = "Import preview ready." if plan.can_apply else "Import Apply blocked."
+                message = "Import preview ready." if plan.can_apply or plan.can_reconcile else "Import Apply blocked."
+            if stale_source:
+                import_values = replace(import_values, confirmation_rows=(), confirmation_targets=(),
+                                        error="Import source changed; confirm the current rows again.")
             import_values = replace(import_values, plan=plan)
 
         response = templates.TemplateResponse(
@@ -603,58 +593,6 @@ def create_app(config_path: Path) -> FastAPI:
     @app.post("/settings/import/apply", response_class=HTMLResponse)
     async def apply_settings_import(request: Request) -> HTMLResponse:
         return await import_settings_route(request, apply=True)
-
-    @app.post("/settings/validate", response_class=HTMLResponse)
-    async def validate_settings_route(request: Request) -> HTMLResponse:
-        form = await request.form()
-        submitted_csrf = form.get("csrf_token")
-        if not _csrf_valid(
-            str(submitted_csrf) if submitted_csrf is not None else None,
-            csrf_token,
-        ):
-            return HTMLResponse(
-                '<p class="notice error">Invalid or missing CSRF token.</p>',
-                status_code=403,
-            )
-
-        values = settings_form_from_submission(form)
-        draft, form_issues = settings_draft_from_form(values)
-        if draft is None:
-            return templates.TemplateResponse(
-                request,
-                "fragments/settings_editor.html",
-                _settings_context(
-                    request=request,
-                    csrf_token=csrf_token,
-                    form_values=values,
-                    issues=form_issues,
-                    message="Settings could not be validated.",
-                ),
-            )
-
-        validation = validate_settings(resolved_config_path, draft)
-        message = (
-            "Settings draft is valid."
-            if validation.outcome is SettingsValidationOutcome.VALID
-            else "Settings draft needs correction."
-        )
-        return templates.TemplateResponse(
-            request,
-            "fragments/settings_editor.html",
-            _settings_context(
-                request=request,
-                csrf_token=csrf_token,
-                form_values=values,
-                issues=validation.issues,
-                validation_result=validation,
-                message=message,
-                message_tone=(
-                    "success"
-                    if validation.outcome is SettingsValidationOutcome.VALID
-                    else "warning"
-                ),
-            ),
-        )
 
     @app.post("/settings/save", response_class=HTMLResponse)
     async def save_settings_route(request: Request) -> HTMLResponse:
@@ -684,7 +622,7 @@ def create_app(config_path: Path) -> FastAPI:
                 ),
             )
 
-        result = save_settings(resolved_config_path, draft)
+        result = save_settings(config_path, draft)
         if result.outcome is SettingsSaveOutcome.SAVED:
             response = templates.TemplateResponse(
                 request,

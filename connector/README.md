@@ -1,10 +1,10 @@
 # Literature Monitor Connector
 
-This directory defines the independent browser component released with
-v0.6.1 under SPEC §40. It is derived from the official
+This directory defines the independent browser component prepared for
+v0.6.2 (UNRELEASED), retaining the v0.6.1 protocol under SPEC §40. It is derived from the official
 Zotero Connector source and is separate from the MIT Python
 `literature_monitor` package. The tracked build entry point generates the
-Chrome/MV3 artifact with version `0.6.1`.
+Chrome/MV3 artifact with version `0.6.2`.
 
 A1 establishes source provenance, licensing, reconstruction and Chrome/MV3
 build boundaries. A5 adds the independent Literature Monitor automatic-capture
@@ -51,7 +51,7 @@ From the repository root:
 
 The script reconstructs the pinned upstream source into
 `connector/.work/`, verifies and applies the tracked Literature Monitor
-delta, runs the upstream debug build with release version `0.6.1`, verifies
+delta, runs the upstream debug build with release version `0.6.2`, verifies
 a Manifest V3 Chrome artifact, and copies the result to:
 
 ```text
@@ -81,6 +81,11 @@ See [SPEC §§40.14 and 40.15](../SPEC.md#4014-a7-implementation-and-validation-
 for live validation and preparation evidence, and
 [AGENTS.md](../AGENTS.md#release-execution-and-verification-reuse) for release
 execution and validation reuse.
+
+The v0.6.2 candidate uses the same upstream pins, patches and runtime overlay
+as v0.6.1; only its manifest release identity changes. Candidate construction
+and checks are recorded in [SPEC §41.15](../SPEC.md#4115-a7-release-preparation-2026-10-08).
+The v0.6.1 link above remains the latest published artifact.
 
 ## Runtime test
 

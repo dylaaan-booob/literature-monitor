@@ -2,7 +2,7 @@
   <div class="section-heading">
     <div>
       <h1>Settings</h1>
-      <p class="muted">Edits apply to the monitor definition and Journals configuration.</p>
+      <p class="muted">Configure discovery journals and manual publisher access in one local Settings draft.</p>
     </div>
     <span class="dirty-indicator" aria-live="polite">Unsaved changes</span>
   </div>
@@ -69,6 +69,7 @@
         <dt>Keyword expression</dt><dd>{{ settings_attempted.keyword_expression }}</dd>
         <dt>Output workspace</dt><dd>{{ settings_attempted.output_dir }}</dd>
         <dt>Journal rows</dt><dd>{{ settings_attempted.journals|length }}</dd>
+        {% for publisher in settings_attempted.publishers %}<dt>{{ publisher.name }} Access URL</dt><dd>{{ publisher.access_url or "Blank" }}</dd>{% endfor %}
       </dl>
     </details>
   {% endif %}
@@ -86,6 +87,11 @@
     <input type="hidden" name="journal_revision_exists" value="{{ settings_form.journal_revision_exists }}">
     <input type="hidden" name="journal_revision_digest" value="{{ settings_form.journal_revision_digest }}">
 
+    {% if settings_form.legacy_journals %}
+      <input type="hidden" name="legacy_journals" value="{{ settings_form.legacy_journals }}">
+    {% endif %}
+
+    <h2>Monitor configuration</h2>
     <div class="form-grid">
       <label>
         Name
@@ -134,15 +140,32 @@
       </div>
     </fieldset>
 
-    <fieldset>
-      <div class="section-heading">
-        <legend>Journals</legend>
-        <button type="button" class="secondary" data-add-journal>Add journal</button>
-      </div>
-      <p class="muted">Enter ISSN/EISSN values separated by commas. Conferences are not edited here.</p>
-      <div data-journal-viewport>
-        <section class="journal-import" data-transient-import aria-label="Bulk import Journals">
-          <h2>Bulk import Journals</h2>
+    <fieldset class="venue-settings">
+      <legend>Journals &amp; Publishers</legend>
+      <section aria-labelledby="settings-journals-heading">
+        <div class="section-heading">
+          <h2 id="settings-journals-heading">Journals <span class="muted" data-journal-count>{{ settings_form.legacy_rows|length if settings_form.legacy_rows else settings_form.journals|length }}</span></h2>
+          {% if not settings_form.legacy_journals %}<button type="button" class="secondary" data-add-journal>Add journal</button>{% endif %}
+        </div>
+        {% if settings_form.legacy_journals %}
+          <div class="notice warning" data-legacy-migration>
+            <strong>Migration required.</strong> This list uses legacy ISSN/EISSN storage. Opening Settings does not migrate it.
+            Save verifies all Journals together before writing. Leave the field blank to resolve existing identifiers,
+            or enter an ISSN-L you have independently confirmed. Unresolved rows block the whole Save.
+            Migrate with Save before adding, importing or organizing Journals. Current Groups are preserved.
+          </div>
+          <div data-journal-viewport>
+            {% for legacy in settings_form.legacy_rows %}
+              <div class="config-row legacy-journal-row">
+                <div class="config-metadata"><strong>{{ legacy.name }}</strong><div class="muted">Legacy identifiers: {{ legacy.issn|join(" / ") }}</div><div class="muted">Group: {{ legacy.group or "Ungrouped" }}</div></div>
+                <label>Confirmed ISSN-L <input name="migration_issn_l" value="{{ settings_form.migration_targets[loop.index0] if loop.index0 < settings_form.migration_targets|length else '' }}" placeholder="Optional confirmation" autocomplete="off"></label>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="muted">Canonical metadata is read-only. Add by ISSN-L; Save resolves new Journals. Replace an identity with Remove and Add.</p>
+        <details class="journal-import" data-settings-disclosure="import" {% if settings_import.plan or settings_import.error %}open{% endif %} data-transient-import aria-label="Bulk import Journals">
+          <summary>Bulk import Journals</summary>
           <label>Local UTF-8 file
             <input type="file" data-journal-import-file accept=".csv,.tsv,.md,text/csv,text/tab-separated-values,text/markdown,text/plain">
           </label>
@@ -166,7 +189,18 @@
           {% if settings_import.error %}<p class="notice error">{{ settings_import.error }}</p>{% endif %}
           {% if settings_import.plan %}
             <div class="import-preview" data-import-plan>
-              <h3>{{ "Ready to Apply" if settings_import.plan.can_apply else "Apply blocked" }}</h3>
+              <h3>{{ "Ready to Apply" if settings_import.plan.can_apply else "Ready to reconcile" if settings_import.plan.can_reconcile else "Apply blocked" }}</h3>
+              {% if settings_import.plan.legacy_rows %}
+                <p class="muted">Legacy import: Apply reconciles all identifiers. Enter an independently confirmed ISSN-L when automatic establishment is insufficient. Unresolved rows block the whole Apply.</p>
+                <input type="hidden" name="import_confirmation_source" value="{{ settings_import.source_revision }}">
+                {% for row in settings_import.plan.legacy_rows %}
+                  <div class="config-row">
+                    <div class="config-metadata"><strong>Source row {{ row.source_row }}: {{ row.name }}</strong><div>Legacy identifiers: {{ row.issn_cell }}</div><div>Group: {{ row.group or "Ungrouped" }}</div></div>
+                    <input type="hidden" name="import_confirmation_row" value="{{ row.source_row }}">
+                    <label>Confirmed ISSN-L <input name="import_confirmation_issn_l" value="{{ settings_import.target_for(row.source_row) }}" placeholder="Optional confirmation" autocomplete="off"></label>
+                  </div>
+                {% endfor %}
+              {% endif %}
               <p>{{ settings_import.plan.mode.value }}{% if settings_import.plan.source_format %} · {{ settings_import.plan.source_format.value }}{% endif %}</p>
               <ul class="import-entries">
                 {% set change_labels = {"ADD": "Add", "NO_OP_DUPLICATE": "No-op duplicate", "ISSN_MERGE": "ISSN merge", "ISSN_REMOVE": "ISSN remove", "GROUP_MOVE": "Group move", "ORDER_CHANGE": "Order change", "REMOVE": "Remove", "CONFLICT": "Conflict", "INVALID_ROW": "Invalid row", "FORMAT_ERROR": "Format error"} %}
@@ -186,15 +220,16 @@
                   </li>
                 {% endfor %}
               </ul>
-              {% if settings_import.plan.can_apply %}
+              {% if settings_import.plan.can_apply or settings_import.plan.can_reconcile %}
                 <button type="button" data-import-apply
                         hx-post="/settings/import/apply" hx-include="#settings-form"
-                        hx-target="#settings-editor" hx-swap="outerHTML">Apply to draft</button>
+                        hx-target="#settings-editor" hx-swap="outerHTML">{{ "Reconcile and Apply" if settings_import.plan.can_reconcile and not settings_import.plan.can_apply else "Apply to draft" }}</button>
               {% endif %}
             </div>
           {% endif %}
-        </section>
-        <section class="journal-organization" aria-label="Journal groups">
+        </details>
+        <details data-settings-disclosure="groups" class="journal-organization" aria-label="Journal groups">
+          <summary>Organize Groups</summary>
           <div class="group-create">
             <label>New Group name <input data-new-group autocomplete="off"></label>
             <button type="button" class="secondary" data-create-group>Create Group</button>
@@ -213,18 +248,23 @@
               </div>
             {% endfor %}
           </div>
-        </section>
+        </details>
+        <div data-journal-viewport>
         <div data-journal-rows>
           {% for row in settings_form.journals %}
-            <div class="journal-row">
-              <label>
-                Journal name
-                <input name="journal_name" value="{{ row.name }}" autocomplete="off">
-              </label>
-              <label>
-                ISSN/EISSN
-                <input name="journal_issns" value="{{ row.issns }}" autocomplete="off">
-              </label>
+            <div class="config-row journal-row" {{ 'data-pending-journal' if row.pending else '' }}>
+              <div class="config-metadata">
+                <strong>{{ "Pending resolution" if row.pending else row.name }}</strong>
+                <input type="hidden" name="journal_name" value="{{ row.name }}">
+                <input type="hidden" name="journal_publisher_id" value="{{ row.publisher_id }}">
+                <input type="hidden" name="journal_pending" value="{{ '1' if row.pending else '0' }}">
+                {% if row.publisher_id %}<div class="muted config-id">Publisher: {{ row.publisher_id }}</div>{% endif %}
+              </div>
+              {% if row.pending %}
+                <label>ISSN-L <input name="journal_issns" value="{{ row.issns }}" placeholder="NNNN-NNNN" autocomplete="off"></label>
+              {% else %}
+                <div class="config-identity"><span class="muted">ISSN-L</span><div>{{ row.issns }}</div><input type="hidden" name="journal_issns" value="{{ row.issns }}"></div>
+              {% endif %}
               <label>
                 Group
                 <select name="journal_group">
@@ -238,7 +278,9 @@
             </div>
           {% endfor %}
         </div>
-      </div>
+        </div>
+        {% endif %}
+      </section>
       <template data-group-template>
         <div class="group-row" data-group-row data-group-name="">
           <input type="hidden" name="settings_group" value="">
@@ -252,30 +294,45 @@
         </div>
       </template>
       <template data-journal-template>
-        <div class="journal-row">
-          <label>
-            Journal name
-            <input name="journal_name" value="" autocomplete="off">
-          </label>
-          <label>
-            ISSN/EISSN
-            <input name="journal_issns" value="" autocomplete="off">
-          </label>
+        <div class="config-row journal-row" data-pending-journal>
+          <div class="config-metadata">
+            <strong>Pending resolution</strong>
+            <input type="hidden" name="journal_name" value="Pending resolution">
+            <input type="hidden" name="journal_publisher_id" value="">
+            <input type="hidden" name="journal_pending" value="1">
+          </div>
+          <label>ISSN-L <input name="journal_issns" value="" placeholder="NNNN-NNNN" autocomplete="off"></label>
           <label>Group
             <select name="journal_group"><option value="" selected>Ungrouped</option></select>
           </label>
           <button type="button" class="secondary" data-remove-journal>Remove</button>
         </div>
       </template>
+      <section class="publisher-settings" aria-labelledby="settings-publishers-heading">
+        <h2 id="settings-publishers-heading">Publishers <span class="muted">{{ settings_form.publishers|length }}</span></h2>
+        <p class="muted">Publishers follow the Journals saved above. Access URLs are yours to edit or clear. Open links update after Save or Preview.</p>
+        <div data-publisher-viewport>
+          {% for publisher in settings_form.publishers %}
+            <div class="config-row publisher-row" data-publisher-row>
+              <div class="config-metadata">
+                <strong>{{ publisher.name }}</strong>
+                <div class="muted config-id">{{ publisher.publisher_id }}</div>
+                <input type="hidden" name="publisher_name" value="{{ publisher.name }}">
+                <input type="hidden" name="publisher_id" value="{{ publisher.publisher_id }}">
+              </div>
+              <label>Access URL <input name="publisher_access_url" value="{{ publisher.access_url }}" inputmode="url" autocomplete="off" placeholder="Optional public HTTP(S) URL"></label>
+              <div class="publisher-open">
+                {% if publisher.safe_access_url %}<a href="{{ publisher.safe_access_url }}" data-publisher-open data-access-url="{{ publisher.safe_access_url }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open</a>{% endif %}
+              </div>
+            </div>
+          {% else %}
+            <p class="muted">No configured Publisher. New Journal associations appear after Save.</p>
+          {% endfor %}
+        </div>
+      </section>
     </fieldset>
 
     <div class="form-actions">
-      <button type="button"
-              class="secondary"
-              hx-post="/settings/validate"
-              hx-include="#settings-form"
-              hx-target="#settings-editor"
-              hx-swap="outerHTML">Validate</button>
       <button type="submit">Save</button>
     </div>
   </form>

@@ -175,7 +175,7 @@ def test_client_uses_versioned_encoded_doi_endpoint_and_polite_headers() -> None
     assert parsed.path == "/v1/works/10.1002%2F%28abc%29%2Fx"
     assert parse_qs(parsed.query) == {"mailto": ["monitor@example.com"]}
     assert request.headers["Accept"] == "application/json"
-    assert request.headers["User-Agent"] == "literature-monitor/0.6.1"
+    assert request.headers["User-Agent"] == "literature-monitor/0.6.2"
     assert request.extensions["timeout"]["read"] == 17
 
 
@@ -941,10 +941,11 @@ def test_discovery_isolates_issn_failures_and_validates_venue_identity() -> None
 
     result = discover_crossref_journals(
         client,  # type: ignore[arg-type]
-        (JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420")),),
+        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 1, 31),
         retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
+        resolved_sources=(verified_source(),),
     )
 
     assert client.calls == ["0006-341X", "1541-0420"]
@@ -969,7 +970,7 @@ def test_discovery_isolates_issn_failures_and_validates_venue_identity() -> None
     ]
     assert all(
         unit.component is CoverageComponent.CROSSREF_DISCOVERY
-        and unit.journal == "Biometrics"
+        and unit.journal == "0006-341X"
         for unit in result.coverage
     )
 
@@ -989,7 +990,7 @@ def test_discovery_keeps_records_from_pages_before_later_request_failure() -> No
 
     result = discover_crossref_journals(
         PartialFailureClient(),  # type: ignore[arg-type]
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 1, 31),
         retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
@@ -1016,7 +1017,7 @@ def test_discovery_later_page_not_found_is_partial() -> None:
 
     result = discover_crossref_journals(
         PartialNotFoundClient(),  # type: ignore[arg-type]
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 1, 31),
         retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
@@ -1038,10 +1039,11 @@ def test_discovery_uses_alternate_issn_after_not_found() -> None:
 
     result = discover_crossref_journals(
         client,  # type: ignore[arg-type]
-        (JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420")),),
+        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 1, 31),
         retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
+        resolved_sources=(verified_source(),),
     )
 
     assert [record.doi for record in result.records] == ["10.5555/alternate"]
@@ -1058,7 +1060,7 @@ def test_discovery_zero_results_is_complete() -> None:
 
     result = discover_crossref_journals(
         client,  # type: ignore[arg-type]
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 1, 31),
         retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
@@ -1077,7 +1079,7 @@ def test_discovery_field_warning_keeps_complete_coverage() -> None:
 
     result = discover_crossref_journals(
         client,  # type: ignore[arg-type]
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 1, 31),
         retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
@@ -1097,7 +1099,7 @@ def test_discovery_progress_uses_total_results_without_extra_request() -> None:
 
     result = discover_crossref_journals(
         client,
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 1, 31),
         progress_callback=events.append,
@@ -1142,7 +1144,7 @@ def test_discovery_unusable_total_results_stays_indeterminate(
 
     result = discover_crossref_journals(
         client,
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 1, 31),
         progress_callback=events.append,
@@ -1168,7 +1170,7 @@ def test_discovery_skips_malformed_item_without_discarding_valid_peer() -> None:
 
     result = discover_crossref_journals(
         client,  # type: ignore[arg-type]
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date(2026, 1, 1),
         date(2026, 1, 31),
         retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
@@ -1183,7 +1185,7 @@ def test_discovery_skips_malformed_item_without_discarding_valid_peer() -> None:
     ("message", "accepted"),
     [
         (discovered_message("10.5555/issn", issns=["0006-341X"]), True),
-        (discovered_message("10.5555/alternate", issns=["1541-0420"]), True),
+        (discovered_message("10.5555/alternate", issns=["1541-0420"]), False),
         (
             discovered_message(
                 "10.5555/mismatch",
@@ -1192,7 +1194,7 @@ def test_discovery_skips_malformed_item_without_discarding_valid_peer() -> None:
             ),
             False,
         ),
-        (discovered_message("10.5555/name", journal=" BIOMETRICS "), True),
+        (discovered_message("10.5555/name", journal=" BIOMETRICS "), False),
         (discovered_message("10.5555/wrong-name", journal="Other"), False),
     ],
 )
@@ -1204,7 +1206,7 @@ def test_discovery_venue_validation_paths(
         message.pop("ISSN", None)
     from literature_monitor.crossref import crossref_record_matches_journal
 
-    journal = JournalConfig(name="Biometrics", issn=("0006-341X", "1541-0420"))
+    journal = JournalConfig(name="Biometrics", issn_l="0006-341X")
     normalized, _ = normalize_crossref_discovered_work(
         message, datetime(2026, 9, 19, tzinfo=timezone.utc),
     )
@@ -1870,7 +1872,7 @@ def test_a5_manifest_and_doi_batches_use_repeated_filters_and_same_pool() -> Non
         assert query["mailto"] == "a@example.com"
         assert "|" not in query["filter"]
         assert not {"query", "keyword_expression", "abstract"}.intersection(query)
-        assert request.headers["User-Agent"] == "literature-monitor/0.6.1"
+        assert request.headers["User-Agent"] == "literature-monitor/0.6.2"
 
 
 @pytest.mark.parametrize("code", [301, 308])
@@ -1943,3 +1945,8 @@ def test_a5_requests_preserve_retry_pacing_and_activity_before_sleep(clock: Fake
     assert len(transport.requests) == 3
     assert any(e.activity.operation == "manifest" for e in events)
     assert any(e.activity.operation == "full_hydration" for e in events)
+
+
+def verified_source():
+    from literature_monitor.openalex import ResolvedSource
+    return ResolvedSource('0006-341X', 'https://openalex.org/S1', 'Biometrics', ('0006-341X', '1541-0420'), '0006-341X')

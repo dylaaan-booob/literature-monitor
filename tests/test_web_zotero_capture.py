@@ -52,10 +52,7 @@ PAPER_TWO = UUID("22222222-2222-4222-8222-222222222222")
 
 def write_config(tmp_path: Path) -> tuple[Path, Path]:
     (tmp_path / "list.md").write_text(
-        "# Venues\n\n## Journals\n\n"
-        "| Journal | ISSN/EISSN |\n"
-        "|---|---|\n"
-        "| Biometrics | 0006-341X |\n",
+        '# Venues\n\n## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  |  |\n',
         encoding="utf-8",
     )
     config_path = tmp_path / "monitor.yaml"

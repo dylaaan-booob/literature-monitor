@@ -40,6 +40,7 @@ from literature_monitor.config import (
     LoadedConfig,
     LogLevel,
     load_config,
+    normalize_journal_issn,
     resolve_runtime_date,
     validate_runtime_keyword,
 )
@@ -82,7 +83,7 @@ from literature_monitor.openalex import (
     IssueSeverity,
     OpenAlexClient,
     ResolvedSource,
-    discover_journals_batched,
+    discover_resolved_sources,
     resolve_journal_sources_batched,
 )
 from literature_monitor.retrieval import assemble_live_provider_evidence
@@ -197,7 +198,7 @@ class RunResult:
 class ValidationResult:
     resolved_date_range: ResolvedDateRange | None
     configured_journal_count: int
-    configured_issn_count: int
+    configured_issn_l_count: int
     resolved_sources: tuple[ResolvedSource, ...]
     warnings: tuple[MonitorIssue, ...]
     errors: tuple[MonitorIssue, ...]
@@ -411,7 +412,7 @@ def _prepare_invocation(
     config_path: Path,
     *,
     date_override: DateRangeSpec | None,
-    journal_name: str | None,
+    issn_l: str | None,
     keyword_expression: str | None,
 ) -> tuple[_PreparedInvocation | None, LoadedConfig | None, MonitorIssue | None]:
     try:
@@ -438,23 +439,19 @@ def _prepare_invocation(
         )
 
     journals = config.journals
-    if journal_name is not None:
-        journals = tuple(
-            journal
-            for journal in journals
-            if journal.name.casefold() == journal_name.strip().casefold()
-        )
+    if issn_l is not None:
+        try:
+            identity = normalize_journal_issn(issn_l)
+        except ValueError as error:
+            return None, config, MonitorIssue(
+                MonitorIssueSeverity.ERROR, MonitorIssueComponent.CONFIGURATION,
+                "issn_l_override", str(error), config_path=config_path,
+            )
+        journals = tuple(journal for journal in journals if journal.issn_l == identity)
         if not journals:
-            return (
-                None,
-                config,
-                MonitorIssue(
-                    severity=MonitorIssueSeverity.ERROR,
-                    component=MonitorIssueComponent.CONFIGURATION,
-                    stage="journal_override",
-                    message=f"unknown configured journal {journal_name!r}",
-                    config_path=config_path,
-                ),
+            return None, config, MonitorIssue(
+                MonitorIssueSeverity.ERROR, MonitorIssueComponent.CONFIGURATION,
+                "issn_l_override", f"unknown configured ISSN-L {identity!r}", config_path=config_path,
             )
 
     try:
@@ -529,7 +526,7 @@ def _run_canonical_core(
     config_path: Path,
     *,
     date_override: DateRangeSpec | None = None,
-    journal_name: str | None = None,
+    issn_l: str | None = None,
     keyword_expression: str | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> _CanonicalCoreResult:
@@ -537,7 +534,7 @@ def _run_canonical_core(
     prepared, config, preflight_issue = _prepare_invocation(
         config_path,
         date_override=date_override,
-        journal_name=journal_name,
+        issn_l=issn_l,
         keyword_expression=keyword_expression,
     )
     if preflight_issue is not None:
@@ -564,11 +561,15 @@ def _execute_canonical_core(
             crossref_client, record_state=historical_state.crossref_records,
             progress_callback=progress_callback,
         )
+        resolutions = resolve_journal_sources_batched(
+            openalex_client, prepared.journals, progress_callback=progress_callback,
+        )
+        resolved_sources = tuple(unit.source for unit in resolutions if unit.source is not None)
         # Join inside client ownership so even a future exception drains workers first.
         with ThreadPoolExecutor(max_workers=2) as executor:
             openalex_future = executor.submit(
-                discover_journals_batched,
-                openalex_client, prepared.journals,
+                discover_resolved_sources,
+                openalex_client, resolutions,
                 prepared.resolved_date_range.from_date,
                 prepared.resolved_date_range.to_date,
                 progress_callback=progress_callback,
@@ -577,6 +578,7 @@ def _execute_canonical_core(
                 crossref_execution.discover,
                 prepared.journals, prepared.resolved_date_range.from_date,
                 prepared.resolved_date_range.to_date,
+                resolved_sources=resolved_sources,
             )
             openalex = openalex_future.result()
             discovery = crossref_future.result()
@@ -896,7 +898,7 @@ def run_monitor(
 ) -> RunResult:
     _emit_progress(progress_callback, ProgressStage.CHECKING_MONITOR)
     prepared, config, preflight_issue = _prepare_invocation(
-        config_path, date_override=date_override, journal_name=None, keyword_expression=None,
+        config_path, date_override=date_override, issn_l=None, keyword_expression=None,
     )
     if preflight_issue is not None:
         core = _invalid_core_result(config, preflight_issue)
@@ -983,15 +985,15 @@ def validate_monitor(
     prepared, config, preflight_issue = _prepare_invocation(
         config_path,
         date_override=None,
-        journal_name=None,
+        issn_l=None,
         keyword_expression=None,
     )
     if preflight_issue is not None:
         return ValidationResult(
             resolved_date_range=None,
             configured_journal_count=len(config.journals) if config is not None else 0,
-            configured_issn_count=(
-                sum(len(journal.issn) for journal in config.journals)
+            configured_issn_l_count=(
+                len(config.journals)
                 if config is not None
                 else 0
             ),
@@ -1038,9 +1040,7 @@ def validate_monitor(
     return ValidationResult(
         resolved_date_range=prepared.resolved_date_range,
         configured_journal_count=len(prepared.config.journals),
-        configured_issn_count=sum(
-            len(journal.issn) for journal in prepared.config.journals
-        ),
+        configured_issn_l_count=len(prepared.config.journals),
         resolved_sources=tuple(sources),
         warnings=warnings,
         errors=errors,

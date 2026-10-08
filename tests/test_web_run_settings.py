@@ -13,17 +13,19 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+
+@pytest.fixture(autouse=True)
+def unavailable_settings_metadata(monkeypatch):
+    from literature_monitor.openalex import OpenAlexClient, OpenAlexRequestError
+    def unavailable(*args, **kwargs):
+        raise OpenAlexRequestError("requires metadata resolution: test Provider unavailable")
+    monkeypatch.setattr(OpenAlexClient, "_request_json", unavailable)
+
 from fastapi.testclient import TestClient
 from starlette.datastructures import FormData
 
 import literature_monitor.web.app as web_app
 import literature_monitor.web.settings_form as settings_form
-from literature_monitor.application.publisher_access import (
-    PublisherAccessGroup,
-    PublisherAccessProjection,
-    PublisherAccessSite,
-    PublisherAccessUnavailableJournal,
-)
 from literature_monitor.application.monitor import (
     MonitorIssue,
     MonitorIssueComponent,
@@ -44,6 +46,7 @@ from literature_monitor.application.settings import (
     SettingsValidationOutcome,
     SettingsValidationResult,
     load_settings,
+    validate_settings,
 )
 from literature_monitor.config import JournalConfig, LogLevel, load_config, parse_monitor_definition
 from literature_monitor.coverage import CoverageComponent, CoverageStatus, CoverageUnit
@@ -91,7 +94,7 @@ def make_draft(
         name=name,
         keyword_expression=keyword_expression,
         journals=journals
-        or (JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        or (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         date_spec=DateRangeSpec(window_days=14),
         output_dir=output_dir,
         log_level=LogLevel.INFO,
@@ -242,8 +245,8 @@ def test_settings_form_output_path_matches_runtime_config_semantics(
 
 def test_settings_draft_form_round_trip_preserves_groups_and_revisions() -> None:
     draft = make_draft(journals=(
-        JournalConfig(name="Biometrics", issn=("0006-341X",), group="统计 & <Models> \"B\""),
-        JournalConfig(name="Annals of Applied Statistics", issn=("1932-6157", "1941-7330")),
+        JournalConfig(name="Biometrics", issn_l="0006-341X", group="统计 & <Models> \"B\""),
+        JournalConfig(name="Annals of Applied Statistics", issn_l="1932-6157"),
     ))
 
     values = settings_form.settings_form_from_draft(draft)
@@ -261,7 +264,7 @@ def test_settings_submission_preserves_per_row_groups_and_new_ungrouped_row(
     submission = list(valid_settings_form("unused").items()) + [
         ("journal_group", group_value),
         ("journal_name", "Annals of Applied Statistics"),
-        ("journal_issns", "1932-6157, 1941-7330"),
+        ("journal_issns", "1932-6157"),
         ("journal_group", ""),
     ]
 
@@ -271,8 +274,8 @@ def test_settings_submission_preserves_per_row_groups_and_new_ungrouped_row(
     assert issues == ()
     assert draft is not None
     assert draft.journals == (
-        JournalConfig(name="Biometrics", issn=("0006-341X",), group=group_value.strip() or None),
-        JournalConfig(name="Annals of Applied Statistics", issn=("1932-6157", "1941-7330")),
+        JournalConfig(name="Biometrics", issn_l="0006-341X", group=group_value.strip() or None),
+        JournalConfig(name="Annals of Applied Statistics", issn_l="1932-6157"),
     )
     assert draft.monitor_revision == revision(True, "monitor-old")
     assert draft.journal_revision == revision(True, "journal-old")
@@ -1447,11 +1450,8 @@ def test_settings_get_renders_structured_editor_and_exact_revisions(
 ) -> None:
     draft = make_draft(
         journals=(
-            JournalConfig(name="Biometrics", issn=("0006-341X",)),
-            JournalConfig(
-                name="Annals of Applied Statistics",
-                issn=("1932-6157", "1941-7330"),
-            ),
+            JournalConfig(name="Biometrics", issn_l="0006-341X"),
+            JournalConfig(name="Annals of Applied Statistics", issn_l="1932-6157"),
         )
     )
     state = make_settings_state(tmp_path, draft=draft)
@@ -1469,7 +1469,7 @@ def test_settings_get_renders_structured_editor_and_exact_revisions(
     assert "Biometrics" in response.text
     assert "0006-341X" in response.text
     assert "Annals of Applied Statistics" in response.text
-    assert "1932-6157, 1941-7330" in response.text
+    assert "1932-6157" in response.text
     assert 'name="monitor_revision_digest" value="monitor-old"' in response.text
     assert 'name="journal_revision_digest" value="journal-old"' in response.text
     assert "## Journals" not in response.text
@@ -1484,14 +1484,7 @@ def test_missing_or_malformed_monitor_remains_editable(
     if mode == "malformed":
         config_path.write_text("keyword_expression: [\n", encoding="utf-8")
     (tmp_path / "list.md").write_text(
-        """# List
-
-## Journals
-
-| Journal | ISSN/EISSN |
-|---|---|
-| Biometrics | 0006-341X |
-""",
+        '# List\n\n## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  |  |\n',
         encoding="utf-8",
     )
     app = create_app(config_path)
@@ -1534,107 +1527,38 @@ window_days: 14
     assert "Configuration needs attention" in response.text
 
 
-def test_settings_validate_requires_csrf_before_application_validation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = 0
-
-    def forbidden(*args: object, **kwargs: object) -> SettingsValidationResult:
-        nonlocal calls
-        calls += 1
-        raise AssertionError("validation should not be called")
-
-    monkeypatch.setattr(web_app, "validate_settings", forbidden)
-    app = create_app(tmp_path / "monitor.yaml")
-
-    with TestClient(app, base_url="http://localhost") as client:
-        response = client.post(
-            "/settings/validate",
-            data=valid_settings_form("wrong"),
-        )
-
-    assert response.status_code == 403
-    assert calls == 0
-
-
-def test_validate_converts_current_unsaved_form_to_monitor_draft_without_save(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: list[MonitorDraft] = []
-    save_calls = 0
-
-    def fake_validate(
-        config_path: Path,
-        draft: MonitorDraft,
-    ) -> SettingsValidationResult:
+def test_save_converts_current_unsaved_form_to_monitor_draft(tmp_path, monkeypatch):
+    captured=[]
+    def fake_save(config_path,draft):
         captured.append(draft)
-        return make_validation()
-
-    def forbidden_save(*args: object, **kwargs: object) -> SettingsSaveResult:
-        nonlocal save_calls
-        save_calls += 1
-        raise AssertionError("Validate must not save")
-
-    monkeypatch.setattr(web_app, "validate_settings", fake_validate)
-    monkeypatch.setattr(web_app, "save_settings", forbidden_save)
-    app = create_app(tmp_path / "monitor.yaml")
-
-    with TestClient(app, base_url="http://localhost") as client:
-        csrf = csrf_from_html(client.get("/settings").text)
-        response = client.post(
-            "/settings/validate",
-            data=valid_settings_form(csrf),
-        )
-
-    assert response.status_code == 200
-    assert len(captured) == 1
-    draft = captured[0]
-    assert draft.name == "Unsaved Monitor"
-    assert draft.keyword_expression == "causal AND inference"
-    assert draft.journals == (
-        JournalConfig(name="Biometrics", issn=("0006-341X",)),
-    )
-    assert draft.date_spec == DateRangeSpec(window_days=21)
-    assert draft.output_dir == Path("edited-workspace")
-    assert draft.log_level == "DEBUG"
-    assert draft.monitor_revision == revision(True, "monitor-old")
-    assert draft.journal_revision == revision(True, "journal-old")
-    assert save_calls == 0
-    assert "2026-09-09" in response.text
-    assert "2026-09-22" in response.text
-    assert "settingsSaved" not in response.headers.get("HX-Trigger", "")
+        return make_save_result(tmp_path,outcome=SettingsSaveOutcome.SAVED,state_draft=draft,
+                                journal_written=True,monitor_written=True)
+    monkeypatch.setattr(web_app,"save_settings",fake_save)
+    with TestClient(create_app(tmp_path/"monitor.yaml"),base_url="http://localhost") as client:
+        csrf=csrf_from_html(client.get("/settings").text)
+        response=client.post("/settings/save",data=valid_settings_form(csrf))
+    assert len(captured)==1
+    draft=captured[0]
+    assert draft.name=="Unsaved Monitor" and draft.keyword_expression=="causal AND inference"
+    assert draft.journals==(JournalConfig(name="Biometrics",issn_l="0006-341X"),)
+    assert draft.date_spec==DateRangeSpec(window_days=21) and draft.output_dir==Path("edited-workspace")
+    assert draft.log_level=="DEBUG"
+    assert draft.monitor_revision==revision(True,"monitor-old") and draft.journal_revision==revision(True,"journal-old")
+    assert "2026-09-09" in response.text and "2026-09-22" in response.text
+    assert response.headers["HX-Trigger"]=="settingsSaved"
 
 
 @pytest.mark.parametrize("raw_output_dir", ("", "   "))
-def test_validate_reaches_application_with_runtime_empty_path_semantics(
-    raw_output_dir: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: list[MonitorDraft] = []
-
-    def fake_validate(
-        config_path: Path,
-        draft: MonitorDraft,
-    ) -> SettingsValidationResult:
+def test_save_reaches_application_with_runtime_empty_path_semantics(raw_output_dir,tmp_path,monkeypatch):
+    captured=[]
+    def fake_save(config_path,draft):
         captured.append(draft)
-        return make_validation()
-
-    monkeypatch.setattr(web_app, "validate_settings", fake_validate)
-    app = create_app(tmp_path / "monitor.yaml")
-
-    with TestClient(app, base_url="http://localhost") as client:
-        csrf = csrf_from_html(client.get("/settings").text)
-        response = client.post(
-            "/settings/validate",
-            data=valid_settings_form(csrf, output_dir=raw_output_dir),
-        )
-
-    assert response.status_code == 200
-    assert len(captured) == 1
-    assert captured[0].output_dir == Path(".")
+        return make_save_result(tmp_path,outcome=SettingsSaveOutcome.WRITE_FAILED)
+    monkeypatch.setattr(web_app,"save_settings",fake_save)
+    with TestClient(create_app(tmp_path/"monitor.yaml"),base_url="http://localhost") as client:
+        csrf=csrf_from_html(client.get("/settings").text)
+        response=client.post("/settings/save",data=valid_settings_form(csrf,output_dir=raw_output_dir))
+    assert response.status_code==200 and captured[0].output_dir==Path(".")
     assert "Output workspace must not be empty." not in response.text
 
 
@@ -1644,42 +1568,16 @@ def test_settings_form_has_no_gui_specific_output_path_validation() -> None:
     assert "Output workspace must not be empty." not in source
 
 
-def test_validate_failure_preserves_submitted_unsaved_values_and_revisions(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    issue = SettingsIssue(
-        source=SettingsIssueSource.VALIDATION,
-        field="keyword_expression",
-        message="invalid keyword expression",
-    )
-    monkeypatch.setattr(
-        web_app,
-        "validate_settings",
-        lambda config_path, draft: make_validation(
-            outcome=SettingsValidationOutcome.INVALID,
-            issues=(issue,),
-        ),
-    )
-    app = create_app(tmp_path / "monitor.yaml")
-
-    with TestClient(app, base_url="http://localhost") as client:
-        csrf = csrf_from_html(client.get("/settings").text)
-        response = client.post(
-            "/settings/validate",
-            data=valid_settings_form(
-                csrf,
-                name="Still Unsaved",
-                keyword_expression="alpha AND",
-            ),
-        )
-
-    assert response.status_code == 200
-    assert "invalid keyword expression" in response.text
-    assert 'value="Still Unsaved"' in response.text
-    assert 'value="alpha AND"' in response.text
-    assert 'value="monitor-old"' in response.text
-    assert 'value="journal-old"' in response.text
+def test_save_validation_failure_preserves_submitted_values_and_revisions(tmp_path,monkeypatch):
+    issue=SettingsIssue(source=SettingsIssueSource.VALIDATION,field="keyword_expression",message="invalid keyword expression")
+    result=make_save_result(tmp_path,outcome=SettingsSaveOutcome.INVALID_DRAFT,issues=(issue,))
+    monkeypatch.setattr(web_app,"save_settings",lambda path,draft:result)
+    with TestClient(create_app(tmp_path/"monitor.yaml"),base_url="http://localhost") as client:
+        csrf=csrf_from_html(client.get("/settings").text)
+        response=client.post("/settings/save",data=valid_settings_form(csrf,name="Still Unsaved",keyword_expression="alpha AND"))
+    assert response.status_code==200 and "invalid keyword expression" in response.text
+    for value in ("Still Unsaved","alpha AND","monitor-old","journal-old"):
+        assert f'value="{value}"' in response.text
 
 
 def test_invalid_form_syntax_is_normal_settings_state_without_validation_call(
@@ -1693,13 +1591,13 @@ def test_invalid_form_syntax_is_normal_settings_state_without_validation_call(
         calls += 1
         raise AssertionError("unconstructable draft must not reach validation")
 
-    monkeypatch.setattr(web_app, "validate_settings", forbidden)
+    monkeypatch.setattr(web_app, "save_settings", forbidden)
     app = create_app(tmp_path / "monitor.yaml")
 
     with TestClient(app, base_url="http://localhost") as client:
         csrf = csrf_from_html(client.get("/settings").text)
         response = client.post(
-            "/settings/validate",
+            "/settings/save",
             data=valid_settings_form(
                 csrf,
                 from_date="not-a-date",
@@ -1907,7 +1805,7 @@ def test_partial_save_is_warning_and_uses_returned_disk_state_revisions(
     )
     disk_draft = make_draft(
         name="Old Monitor From Disk",
-        journals=(JournalConfig(name="Biometrics", issn=("0006-341X",)),),
+        journals=(JournalConfig(name="Biometrics", issn_l="0006-341X"),),
         monitor_digest="monitor-after-partial",
         journal_digest="journal-after-partial",
     )
@@ -1992,14 +1890,14 @@ def test_dirty_form_script_is_browser_only_and_save_event_driven(tmp_path: Path)
     assert "data-remove-journal" in script
     assert "localStorage" not in script
     assert "sessionStorage" not in script
-    assert 'hx-post="/settings/validate"' in settings.text
+    assert 'hx-post="/settings/import/preview"' in settings.text
     assert 'hx-post="/settings/save"' in settings.text
 
 
 @pytest.fixture
 def health_config(tmp_path: Path) -> Path:
     (tmp_path / "list.md").write_text(
-        "## Journals\n\n| Journal | ISSN/EISSN |\n|---|---|\n| Biometrics | 0006-341X |\n",
+        '## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  |  |\n',
         encoding="utf-8",
     )
     config_path = tmp_path / "monitor.yaml"
@@ -2011,53 +1909,6 @@ def health_config(tmp_path: Path) -> Path:
     return config_path
 
 
-def web_publisher_projection() -> PublisherAccessProjection:
-    first = JournalConfig(name='Journal <One>', issn=("1111-1111",))
-    second = JournalConfig(name="Journal Two", issn=("2222-2222",))
-    missing = JournalConfig(name="Missing Homepage", issn=("3333-3333",))
-    unavailable = JournalConfig(name='Unavailable <Journal>', issn=("4444-4444",))
-    return PublisherAccessProjection(
-        publishers=(
-            PublisherAccessGroup(
-                publisher_id="https://openalex.org/P1",
-                publisher_name='Publisher <One>',
-                sites=(
-                    PublisherAccessSite(
-                        source_ids=("https://openalex.org/S1",),
-                        source_names=('Source <One>',),
-                        homepage_url="https://journals.example.org/one?x=1&y=2",
-                        hostname="journals.example.org",
-                        journals=(first,),
-                    ),
-                    PublisherAccessSite(
-                        source_ids=("https://openalex.org/S2",),
-                        source_names=("Source Two",),
-                        homepage_url="https://journals.example.org/two",
-                        hostname="journals.example.org",
-                        journals=(second,),
-                    ),
-                ),
-            ),
-            PublisherAccessGroup(
-                publisher_id=None,
-                publisher_name=None,
-                sites=(
-                    PublisherAccessSite(
-                        source_ids=("https://openalex.org/S3",),
-                        source_names=("Source Missing",),
-                        homepage_url=None,
-                        hostname=None,
-                        journals=(missing,),
-                    ),
-                ),
-            ),
-        ),
-        unavailable_journals=(
-            PublisherAccessUnavailableJournal(journal=unavailable),
-        ),
-    )
-
-
 def broken_health_paper(config_path: Path, workspace: str) -> Path:
     papers = config_path.parent / workspace / "Papers"
     papers.mkdir(parents=True)
@@ -2066,12 +1917,11 @@ def broken_health_paper(config_path: Path, workspace: str) -> Path:
     return path
 
 
-def test_grouped_settings_web_validate_save_preserves_visible_assignment(health_config: Path) -> None:
+def test_grouped_settings_import_preview_save_preserves_visible_assignment(health_config: Path) -> None:
     group = "统计 & <Models> \"B\""
     journal_path = health_config.parent / "list.md"
     journal_path.write_text(
-        "## Journals\n\n| Journal | ISSN/EISSN | Group |\n|---|---|---|\n"
-        f"| Biometrics | 0006-341X | {group} |\n",
+        f"## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  | {group} |\n",
         encoding="utf-8",
     )
     state = load_settings(health_config)
@@ -2090,9 +1940,9 @@ def test_grouped_settings_web_validate_save_preserves_visible_assignment(health_
             monitor_revision_digest=state.draft.monitor_revision.digest,
             journal_revision_digest=state.draft.journal_revision.digest,
         )
-        validated = client.post("/settings/validate", data=submitted)
+        validated = client.post("/settings/import/preview", data=submitted)
         assert validated.status_code == 200
-        assert "Settings draft is valid" in validated.text
+        assert "id=\"settings-editor\"" in validated.text
         assert '<option value="统计 &amp; &lt;Models&gt; &#34;B&#34;" selected>' in validated.text
         assert (health_config.read_bytes(), journal_path.read_bytes()) == before
 
@@ -2103,7 +1953,7 @@ def test_grouped_settings_web_validate_save_preserves_visible_assignment(health_
         assert '<option value="统计 &amp; &lt;Models&gt; &#34;B&#34;" selected>' in saved.text
 
     assert load_config(health_config).journals == (
-        JournalConfig(name="Biometrics", issn=("0006-341X",), group=group),
+        JournalConfig(name="Biometrics", issn_l="0006-341X", group=group),
     )
 
 
@@ -2120,7 +1970,7 @@ def test_advanced_is_collapsed_sibling_with_zotero_health_and_run(
     assert advanced is not None
     assert "open" not in advanced.group(1)
     assert re.search(
-        r'</form>\s*</section>\s*<section id="publisher-access".*?</section>\s*'
+        r'</form>\s*</section>\s*'
         r'<details id="advanced-diagnostics"',
         text,
         re.S,
@@ -2132,375 +1982,7 @@ def test_advanced_is_collapsed_sibling_with_zotero_health_and_run(
     assert 'hx-trigger="settingsSaved from:body"' in advanced.group(2)
 
 
-def test_publisher_access_is_lazy_normal_settings_content_outside_advanced(
-    health_config: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def forbidden(*args: object, **kwargs: object) -> object:
-        raise AssertionError("GET /settings must not access OpenAlex Publisher projection")
-
-    monkeypatch.setattr(web_app, "OpenAlexClient", forbidden)
-    monkeypatch.setattr(web_app, "resolve_publisher_access", forbidden)
-    app = create_app(health_config)
-
-    with TestClient(app, base_url="http://localhost") as client:
-        page = client.get("/settings")
-
-    assert page.status_code == 200
-    assert (
-        page.text.index("</form>")
-        < page.text.index('id="publisher-access"')
-        < page.text.index('id="advanced-diagnostics"')
-    )
-    advanced = re.search(
-        r'<details id="advanced-diagnostics"([^>]*)>(.*?)</details>',
-        page.text,
-        re.S,
-    )
-    assert advanced is not None
-    assert "Publisher access" not in advanced.group(2)
-    placeholder = page.text[
-        page.text.index('id="publisher-access"'):
-        page.text.index('id="advanced-diagnostics"')
-    ]
-    assert 'hx-get="/settings/publisher-access"' in placeholder
-    assert 'hx-trigger="load"' in placeholder
-    assert 'hx-target="this"' in placeholder
-    assert 'hx-swap="outerHTML"' in placeholder
-
-
-def test_publisher_fragment_renders_projection_and_refreshes_only_after_saved_event(
-    health_config: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    projection = web_publisher_projection()
-    captured_journals: list[tuple[JournalConfig, ...]] = []
-    api_keys: list[str | None] = []
-    closed: list[bool] = []
-
-    class FakeClient:
-        def __init__(self, *, api_key: str | None = None) -> None:
-            api_keys.append(api_key)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            closed.append(True)
-
-    def resolve(client: object, journals: tuple[JournalConfig, ...]):
-        captured_journals.append(tuple(journals))
-        return projection
-
-    monkeypatch.setenv("OPENALEX_API_KEY", "publisher-test-key")
-    monkeypatch.setattr(web_app, "OpenAlexClient", FakeClient)
-    monkeypatch.setattr(web_app, "resolve_publisher_access", resolve)
-    app = create_app(health_config)
-
-    with TestClient(app, base_url="http://localhost") as client:
-        response = client.get(
-            "/settings/publisher-access",
-            params={
-                "homepage_url": "https://attacker.example/",
-                "journal": "Injected Journal",
-                "publisher_id": "P999",
-            },
-        )
-        post = client.post(
-            "/settings/publisher-access",
-            data={"journal": "Injected Journal"},
-        )
-
-    assert response.status_code == 200
-    assert post.status_code == 405
-    assert captured_journals == [
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),)
-    ]
-    assert api_keys == ["publisher-test-key"]
-    assert closed == [True]
-    assert 'hx-get="/settings/publisher-access"' in response.text
-    assert 'hx-trigger="settingsSaved from:body"' in response.text
-    assert 'hx-trigger="load"' not in response.text
-    assert "Publisher &lt;One&gt;" in response.text
-    assert "Journal &lt;One&gt;" in response.text
-    assert "Source &lt;One&gt;" in response.text
-    assert 'Publisher <One>' not in response.text
-    assert 'Journal <One>' not in response.text
-    assert 'Source <One>' not in response.text
-    assert response.text.count('>journals.example.org</a>') == 2
-    assert 'href="https://journals.example.org/one?x=1&amp;y=2"' in response.text
-    assert 'href="https://journals.example.org/two"' in response.text
-    assert response.text.count('target="_blank"') == 2
-    assert response.text.count('rel="noopener noreferrer"') == 2
-    assert response.text.count('referrerpolicy="no-referrer"') == 2
-    assert "Publisher name unavailable" in response.text
-    assert "Publisher identity unavailable" in response.text
-    assert "Site link unavailable" in response.text
-    assert "Publisher access unavailable for: Unavailable &lt;Journal&gt;" in response.text
-    assert "https://attacker.example/" not in response.text
-    for forbidden in (
-        str(health_config),
-        "csrf_token",
-        "zotero_key",
-        "Logged in",
-        "Logged out",
-        "Session valid",
-        "Access granted",
-        "Institutional access detected",
-        "Entitled",
-        "Last checked login",
-        "session expiry",
-    ):
-        assert forbidden not in response.text
-
-
-def test_unsaved_validate_does_not_drive_publisher_projection(
-    health_config: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    saved_state = load_settings(health_config)
-    draft_journal = JournalConfig(name="Draft Journal", issn=("0090-5364",))
-    unsaved_state = replace(
-        saved_state,
-        draft=replace(saved_state.draft, journals=(draft_journal,)),
-    )
-    captured_journals: list[tuple[JournalConfig, ...]] = []
-
-    class FakeClient:
-        def __init__(self, *, api_key: str | None = None) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            pass
-
-    def resolve(client: object, journals: tuple[JournalConfig, ...]):
-        captured_journals.append(tuple(journals))
-        return PublisherAccessProjection((), ())
-
-    monkeypatch.setattr(web_app, "load_settings", lambda path: unsaved_state)
-    monkeypatch.setattr(web_app, "validate_settings", lambda path, draft: make_validation())
-    monkeypatch.setattr(web_app, "OpenAlexClient", FakeClient)
-    monkeypatch.setattr(web_app, "resolve_publisher_access", resolve)
-    app = create_app(health_config)
-
-    with TestClient(app, base_url="http://localhost") as client:
-        page = client.get("/settings")
-        assert 'value="Draft Journal"' in page.text
-        validated = client.post(
-            "/settings/validate",
-            data=valid_settings_form(
-                csrf_from_html(page.text),
-                journal_name=draft_journal.name,
-                journal_issns=draft_journal.issn[0],
-            ),
-        )
-        assert captured_journals == []
-        fragment = client.get("/settings/publisher-access")
-
-    assert validated.status_code == 200
-    assert "settingsSaved" not in validated.headers.get("HX-Trigger", "")
-    assert fragment.status_code == 200
-    assert captured_journals == [
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),)
-    ]
-
-
-def test_successful_save_refresh_boundary_reads_new_saved_journals_only(
-    health_config: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured_journals: list[tuple[JournalConfig, ...]] = []
-
-    class FakeClient:
-        def __init__(self, *, api_key: str | None = None) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            pass
-
-    def resolve(client: object, journals: tuple[JournalConfig, ...]):
-        captured_journals.append(tuple(journals))
-        return PublisherAccessProjection((), ())
-
-    monkeypatch.setattr(web_app, "OpenAlexClient", FakeClient)
-    monkeypatch.setattr(web_app, "resolve_publisher_access", resolve)
-    app = create_app(health_config)
-
-    with TestClient(app, base_url="http://localhost") as client:
-        page = client.get("/settings")
-        data = browser_settings_submission(page.text)
-        data["journal_name"] = ["Annals of Statistics"]
-        data["journal_issns"] = ["0090-5364"]
-        saved = client.post("/settings/save", data=data)
-        assert captured_journals == []
-        fragment = client.get("/settings/publisher-access")
-
-    assert saved.status_code == 200
-    assert saved.headers["HX-Trigger"] == "settingsSaved"
-    assert fragment.status_code == 200
-    assert captured_journals == [
-        (JournalConfig(name="Annals of Statistics", issn=("0090-5364",)),)
-    ]
-    assert load_config(health_config).journals == captured_journals[0]
-
-
-@pytest.mark.parametrize(
-    "outcome",
-    (
-        SettingsSaveOutcome.REVISION_CONFLICT,
-        SettingsSaveOutcome.PARTIAL_SAVE,
-        SettingsSaveOutcome.WRITE_FAILED,
-    ),
-)
-def test_unsuccessful_save_never_feeds_attempted_journals_to_publisher_projection(
-    outcome: SettingsSaveOutcome,
-    health_config: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    attempted_journal = JournalConfig(name="Attempted Journal", issn=("0090-5364",))
-    result = make_save_result(
-        health_config.parent,
-        outcome=outcome,
-        state_draft=make_draft(journals=(attempted_journal,)),
-        journal_written=(outcome is SettingsSaveOutcome.PARTIAL_SAVE),
-    )
-    captured_journals: list[tuple[JournalConfig, ...]] = []
-
-    class FakeClient:
-        def __init__(self, *, api_key: str | None = None) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            pass
-
-    monkeypatch.setattr(web_app, "save_settings", lambda path, draft: result)
-    monkeypatch.setattr(web_app, "OpenAlexClient", FakeClient)
-    monkeypatch.setattr(
-        web_app,
-        "resolve_publisher_access",
-        lambda client, journals: (
-            captured_journals.append(tuple(journals))
-            or PublisherAccessProjection((), ())
-        ),
-    )
-    app = create_app(health_config)
-
-    with TestClient(app, base_url="http://localhost") as client:
-        page = client.get("/settings")
-        response = client.post(
-            "/settings/save",
-            data=valid_settings_form(
-                csrf_from_html(page.text),
-                journal_name=attempted_journal.name,
-                journal_issns=attempted_journal.issn[0],
-            ),
-        )
-        assert captured_journals == []
-        fragment = client.get("/settings/publisher-access")
-
-    assert response.status_code == 200
-    assert response.headers.get("HX-Trigger") != "settingsSaved"
-    assert fragment.status_code == 200
-    assert captured_journals == [
-        (JournalConfig(name="Biometrics", issn=("0006-341X",)),)
-    ]
-
-
-@pytest.mark.parametrize("mode", ("missing", "invalid", "unreadable"))
-def test_publisher_fragment_invalid_saved_config_never_uses_recovery_draft(
-    mode: str,
-    health_config: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = health_config.parent / "publisher-unavailable.yaml"
-    if mode == "invalid":
-        config_path.write_text("keyword_expression: [\n", encoding="utf-8")
-    elif mode == "unreadable":
-        config_path.mkdir()
-    recovery = replace(
-        load_settings(health_config),
-        draft=replace(
-            load_settings(health_config).draft,
-            journals=(JournalConfig(name="Recovery Journal", issn=("0090-5364",)),),
-        ),
-    )
-    monkeypatch.setattr(web_app, "load_settings", lambda path: recovery)
-
-    def forbidden(*args: object, **kwargs: object) -> object:
-        raise AssertionError("Invalid saved config must not reach OpenAlex")
-
-    monkeypatch.setattr(web_app, "OpenAlexClient", forbidden)
-    monkeypatch.setattr(web_app, "resolve_publisher_access", forbidden)
-    app = create_app(config_path)
-
-    with TestClient(app, base_url="http://localhost") as client:
-        response = client.get("/settings/publisher-access")
-
-    assert response.status_code == 200
-    assert "Publisher access unavailable right now." in response.text
-    assert "Recovery Journal" not in response.text
-
-
-def test_publisher_provider_failure_is_panel_local_and_read_only(
-    health_config: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    before = {
-        path.relative_to(health_config.parent): path.read_bytes()
-        for path in health_config.parent.rglob("*")
-        if path.is_file()
-    }
-    coordinator = StubCoordinator()
-
-    class FakeClient:
-        def __init__(self, *, api_key: str | None = None) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            pass
-
-    def fail(client: object, journals: tuple[JournalConfig, ...]) -> object:
-        raise web_app.OpenAlexError("private provider failure")
-
-    def forbidden_workspace(*args: object, **kwargs: object) -> object:
-        raise AssertionError("Publisher access must not scan Workspace diagnostics")
-
-    monkeypatch.setattr(web_app, "OpenAlexClient", FakeClient)
-    monkeypatch.setattr(web_app, "resolve_publisher_access", fail)
-    monkeypatch.setattr(web_app, "load_workspace", forbidden_workspace)
-    app = create_app(health_config)
-    app.state.run_coordinator = coordinator
-
-    with TestClient(app, base_url="http://localhost") as client:
-        response = client.get("/settings/publisher-access")
-
-    after = {
-        path.relative_to(health_config.parent): path.read_bytes()
-        for path in health_config.parent.rglob("*")
-        if path.is_file()
-    }
-    assert response.status_code == 200
-    assert "Publisher access unavailable right now." in response.text
-    assert "private provider failure" not in response.text
-    assert "Workspace health" not in response.text
-    assert "Current run" not in response.text
-    assert coordinator.snapshot_calls == 0
-    assert before == after
-
-
-def test_unsaved_output_and_validate_do_not_change_saved_workspace_health(
+def test_unsaved_output_and_import_preview_do_not_change_saved_workspace_health(
     health_config: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2517,7 +1999,7 @@ def test_unsaved_output_and_validate_do_not_change_saved_workspace_health(
         assert str(saved_issue) in page.text
         assert str(draft_issue) not in page.text
         validation = client.post(
-            "/settings/validate",
+            "/settings/import/preview",
             data=valid_settings_form(
                 csrf_from_html(page.text),
                 output_dir="draft-workspace",
@@ -2529,7 +2011,7 @@ def test_unsaved_output_and_validate_do_not_change_saved_workspace_health(
         refreshed = client.get("/settings")
 
     assert validation.status_code == 200
-    assert "Runtime date range" in validation.text
+    assert "id=\"settings-editor\"" in validation.text
     assert 'value="draft-workspace"' in validation.text
     assert 'id="advanced-diagnostics"' not in validation.text
     assert "settingsSaved" not in validation.headers.get("HX-Trigger", "")
@@ -2646,7 +2128,7 @@ def test_group_form_projection_exact_identity_and_noop_order():
     groups = ("Statistics", None, "statistics", "Statistics", "Ungrouped", "Unmapped journals", '统计 & <x> "y"')
     identifiers = ("0006-341X", "0090-5364", "0162-1459", "0033-3123", "0092-5853", "1932-6157", "1941-7330")
     draft = make_draft(journals=tuple(
-        JournalConfig(name=f"Journal {i}", issn=(issn,), group=group)
+        JournalConfig(name=f"Journal {i}", issn_l=issn, group=group)
         for i, (issn, group) in enumerate(zip(identifiers, groups))
     ))
     values = settings_form.settings_form_from_draft(draft)
@@ -2677,9 +2159,11 @@ def test_unsafe_assigned_group_uses_existing_validation(health_config, group):
     with TestClient(create_app(health_config), base_url="http://localhost") as client:
         page = client.get("/settings")
         data = organization_submission(health_config, csrf_from_html(page.text), (group,), [("A", "0006-341X", group)])
-        validated = client.post("/settings/validate", data=data)
+        validated = client.post("/settings/import/preview", data=data)
         saved = client.post("/settings/save", data=data)
-        assert "Settings draft needs correction" in validated.text
+        draft, issues = settings_form.settings_draft_from_form(browser_settings_values(validated.text))
+        assert not issues
+        assert validate_settings(health_config, draft).outcome is SettingsValidationOutcome.INVALID
         assert "Settings draft is invalid" in saved.text
         assert "HX-Trigger" not in saved.headers
     assert (health_config.read_bytes(), path.read_bytes()) == before
@@ -2722,32 +2206,32 @@ def organization_submission(config_path, csrf, groups, rows):
 
 
 @pytest.mark.parametrize("grouped", [False, True])
-def test_organization_validate_noop_order_and_empty_group_save(health_config, grouped):
+def test_organization_preview_noop_order_and_empty_group_save(health_config, grouped):
     path = health_config.parent / "list.md"
     rows = [("A", "0006-341X", "X" if grouped else ""), ("B", "0090-5364", ""),
             ("C", "0162-1459", "Y" if grouped else ""), ("D", "0033-3123", "X" if grouped else "")]
-    header = "| Journal | ISSN/EISSN" + (" | Group" if grouped else "") + " |\n"
-    path.write_text("## Journals\n" + header + ("|---|---|---|\n" if grouped else "|---|---|\n") + "".join(
-        f"| {name} | {issn}" + (f" | {group}" if grouped else "") + " |\n" for name, issn, group in rows
+    header = "| Journal | ISSN-L | Publisher ID | Group |\n"
+    path.write_text("## Journals\n" + header + ('|---|---|---|---|\n' if grouped else '|---|---|---|---|\n') + "".join(
+        f"| {name} | {issn} |  | {group} |\n" for name, issn, group in rows
     ))
     before = (health_config.read_bytes(), path.read_bytes())
     with TestClient(create_app(health_config), base_url="http://localhost") as client:
         page = client.get("/settings")
         assert (health_config.read_bytes(), path.read_bytes()) == before
         data = organization_submission(health_config, csrf_from_html(page.text), ("X", "Empty", "Y") if grouped else ("Empty",), rows)
-        validated = client.post("/settings/validate", data=data)
-        assert validated.status_code == 200 and "Settings draft is valid" in validated.text
+        validated = client.post("/settings/import/preview", data=data)
+        assert validated.status_code == 200 and "id=\"settings-editor\"" in validated.text
         assert (health_config.read_bytes(), path.read_bytes()) == before
         assert 'name="settings_group" value="Empty"' in validated.text
-        assert re.findall(r'name="journal_name" value="([^"]*)"', validated.text) == ["A", "B", "C", "D", ""]
+        assert re.findall(r'name="journal_name" value="([^"]*)"', validated.text) == ["A", "B", "C", "D", "Pending resolution"]
         for revision_field in ("monitor_revision_digest", "journal_revision_digest"):
             assert f'name="{revision_field}" value="{data[revision_field]}"' in validated.text
         data["name"] = "Unrelated monitor change"
         saved = client.post("/settings/save", data=data)
         assert saved.headers["HX-Trigger"] == "settingsSaved"
         assert 'name="settings_group" value="Empty"' not in saved.text
-    assert [(j.name, j.issn[0], j.group or "") for j in load_config(health_config).journals] == rows
-    assert ("| Group |" in path.read_text()) is grouped
+    assert [(j.name, j.issn_l, j.group or "") for j in load_config(health_config).journals] == rows
+    assert "| Group |" in path.read_text()
 
 
 @pytest.mark.parametrize("operation", ["assignment", "rename", "delete", "reorder"])
@@ -2756,9 +2240,9 @@ def test_organization_save_through_real_boundary(health_config, operation):
     grouped = operation != "assignment"
     rows = [("A", "0006-341X", "X" if grouped else ""), ("B", "0090-5364", ""),
             ("C", "0162-1459", "Y" if grouped else ""), ("D", "0033-3123", "X" if grouped else "")]
-    path.write_text("## Journals\n| Journal | ISSN/EISSN" + (" | Group" if grouped else "") + " |\n" +
-                    ("|---|---|---|\n" if grouped else "|---|---|\n") + "".join(
-                        f"| {n} | {i}" + (f" | {g}" if grouped else "") + " |\n" for n, i, g in rows))
+    path.write_text("## Journals\n| Journal | ISSN-L | Publisher ID | Group |\n" +
+                    ('|---|---|---|---|\n' if grouped else '|---|---|---|---|\n') + "".join(
+                        f"| {n} | {i} |  | {g} |\n" for n, i, g in rows))
     if operation == "assignment":
         rows[0] = (*rows[0][:2], "Ungrouped")
     elif operation == "rename":
@@ -2773,13 +2257,13 @@ def test_organization_save_through_real_boundary(health_config, operation):
         response = client.post("/settings/save", data=data)
         assert response.headers["HX-Trigger"] == "settingsSaved"
         assert 'name="settings_group" value="Empty"' not in response.text
-    assert [(j.name, j.issn[0], j.group or "") for j in load_config(health_config).journals] == rows
+    assert [(j.name, j.issn_l, j.group or "") for j in load_config(health_config).journals] == rows
     assert "| Group |" in path.read_text()
 
 
 def test_journal_organization_markup_and_responsive_scope(health_config):
     path = health_config.parent / "list.md"
-    path.write_text('## Journals\n| Journal | ISSN/EISSN | Group |\n|---|---|---|\n| A | 0006-341X | 统计 & <x> "y" |\n')
+    path.write_text('## Journals\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| A | 0006-341X |  | 统计 & <x> "y" |\n')
     with TestClient(create_app(health_config), base_url="http://localhost") as client:
         page = client.get("/settings").text
         css = client.get("/static/app.css").text
@@ -2788,7 +2272,7 @@ def test_journal_organization_markup_and_responsive_scope(health_config):
     def visit(node, ancestors=()):
         if isinstance(node, str): return
         attrs = node["attrs"]
-        if attrs.get("hx-post") == "/settings/validate" or (node["tag"] == "button" and attrs.get("type") == "submit"):
+        if attrs.get("hx-post") == "/settings/import/preview" or (node["tag"] == "button" and attrs.get("type") == "submit"):
             assert not any("data-journal-viewport" in a for a in ancestors)
         if attrs.get("id") == "advanced-diagnostics":
             assert "open" not in attrs and not any(a.get("id") == "settings-form" for a in ancestors)
@@ -2800,7 +2284,7 @@ def test_journal_organization_markup_and_responsive_scope(health_config):
     assert '<option value="统计 &amp; &lt;x&gt; &#34;y&#34;" selected>' in page
     assert 'type="hidden" name="journal_group"' not in page
     assert "draggable" not in page
-    desktop = css.split("[data-journal-viewport] {", 1)[1].split("}", 1)[0]
+    desktop = re.search(r"\[data-journal-viewport\],\s*\[data-publisher-viewport\] \{([^}]*)", css)[1]
     mobile = css.split("@media (max-width: 760px)", 1)[1]
     assert "max-height: 55vh" in desktop and "overflow-y: auto" in desktop
     assert "max-height: none" in mobile and "overflow: visible" in mobile
@@ -2905,7 +2389,7 @@ vm.runInNewContext(SOURCE, {
 '''
 
 
-def test_executable_group_operations_and_validate_scroll(health_config):
+def test_executable_group_operations_and_preview_scroll(health_config):
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node is unavailable for the executable Settings DOM test")
@@ -2919,8 +2403,8 @@ def test_executable_group_operations_and_validate_scroll(health_config):
         check = (11 - sum(int(d) * weight for d, weight in zip(digits, range(8, 1, -1))) % 11) % 11
         identifier = digits[:4] + "-" + digits[4:] + ("X" if check == 10 else str(check))
         initial.append((f"Extra {i}", identifier, "X"))
-    path.write_text("## Journals\n| Journal | ISSN/EISSN | Group |\n|---|---|---|\n" + "".join(
-        f"| {n} | {i} | {g} |\n" for n, i, g in initial))
+    path.write_text('## Journals\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n' + "".join(
+        f"| {n} | {i} |  | {g} |\n" for n, i, g in initial))
     before = (health_config.read_bytes(), path.read_bytes())
     app = create_app(health_config)
     with TestClient(app, base_url="http://localhost") as client:
@@ -2987,7 +2471,7 @@ assert.equal(group("Y"), undefined); assert.equal(assignment(row("A")).value, ""
 assert.deepEqual(content(), original);
 clean(); click(row("E").querySelector("[data-remove-journal]")); dirty(); assert.ok(group("x")); assert.equal(row("E"), undefined);
 clean(); click(editor().querySelector("[data-add-journal]")); dirty();
-const added = rows().at(-1); assert.equal(name(added), ""); assert.equal(added.querySelector('[name="journal_issns"]').value, "");
+const added = rows().at(-1); assert.equal(name(added), "Pending resolution"); assert.equal(added.querySelector('[name="journal_issns"]').value, "");
 assert.equal(assignment(added).value, ""); assert.ok(assignment(added).options.some(o => o.value === safe));
 click(added.querySelector("[data-remove-journal]")); assert.equal(rows().length, original.length - 1);
 assert.deepEqual(["monitor_revision_digest", "journal_revision_digest"].map(n => editor().querySelector(`[name="${n}"]`).value), revisions);
@@ -3026,8 +2510,8 @@ clean(); assert.equal(document.documentElement.dataset.settingsDirty, "false");
     data = json.loads(draft_result.stdout)
     # Submit precisely the browser DOM produced by the operations above.
     with TestClient(app, base_url="http://localhost") as client:
-        validated = client.post("/settings/validate", data=data)
-        assert "Settings draft is valid" in validated.text and "HX-Trigger" not in validated.headers
+        validated = client.post("/settings/import/preview", data=data)
+        assert "id=\"settings-editor\"" in validated.text and "HX-Trigger" not in validated.headers
         assert (health_config.read_bytes(), path.read_bytes()) == before
         assert 'name="settings_group" value="Empty"' in validated.text
         for field in ("monitor_revision_digest", "journal_revision_digest"):
@@ -3118,7 +2602,7 @@ def test_bulk_import_markup_defaults_and_security(health_config):
     assert '<option value="MERGE" selected>Merge</option>' in html
     assert '<option value="REPLACE" >Replace</option>' in html
     assert 'hx-post="/settings/import/preview"' in html and 'data-import-apply' not in html
-    assert 'hx-post="/settings/validate"' in html and 'hx-post="/settings/save"' in html
+    assert 'hx-post="/settings/import/preview"' in html and 'hx-post="/settings/save"' in html
     assert html.split('<form id="settings-form"', 1)[1].split("</form>", 1)[0].count('type="submit"') == 1
     assert app.openapi_url is None and app.docs_url is None
 
@@ -3131,7 +2615,7 @@ def test_import_csrf_precedes_core_and_has_no_side_effects(health_config, monkey
     monkeypatch.setattr(web_app, "apply_journal_import", forbidden)
     before = (health_config.read_bytes(), (health_config.parent / "list.md").read_bytes())
     with TestClient(create_app(health_config), base_url="http://localhost") as client:
-        data = valid_settings_form(csrf or "unused", journal_import_text="Journal,ISSN/EISSN\nA,0006-341X\n")
+        data = valid_settings_form(csrf or "unused", journal_import_text="Journal,ISSN-L\nA,0006-341X\n")
         if csrf is None: data.pop("csrf_token")
         response = client.post(f"/settings/import/{route}", data=data)
         assert response.status_code == 403 and "HX-Trigger" not in response.headers
@@ -3167,7 +2651,7 @@ def test_unconstructable_current_draft_is_not_substituted(health_config, monkeyp
     before = (health_config.read_bytes(), (health_config.parent / "list.md").read_bytes())
     with TestClient(app, base_url="http://localhost") as client:
         data = browser_settings_submission(client.get("/settings").text)
-        data.update(journal_import_text="Journal,ISSN/EISSN\nNew,0090-5364\n", settings_group=["Empty"], **{field: invalid})
+        data.update(journal_import_text="Journal,ISSN-L\nNew,0090-5364\n", settings_group=["Empty"], **{field: invalid})
         def forbidden(*args, **kwargs): pytest.fail("Invalid current form must not invoke import or reread disk")
         for function in ("preview_journal_import", "apply_journal_import", "load_settings", "load_config"):
             monkeypatch.setattr(web_app, function, forbidden)
@@ -3179,7 +2663,7 @@ def test_unconstructable_current_draft_is_not_substituted(health_config, monkeyp
     assert_import_does_not_write(health_config, before)
 
 
-def test_merge_preview_apply_validate_save_uses_current_unsaved_draft(health_config, monkeypatch):
+def test_merge_preview_apply_save_uses_current_unsaved_draft(health_config, monkeypatch):
     before = (health_config.read_bytes(), (health_config.parent / "list.md").read_bytes())
     app = create_app(health_config)
     with TestClient(app, base_url="http://localhost") as client:
@@ -3189,18 +2673,18 @@ def test_merge_preview_apply_validate_save_uses_current_unsaved_draft(health_con
         data.update(name="Current unsaved name", keyword_expression="causal AND inference", window_days="21",
                     journal_name=["Draft B", "Biometrics"], journal_issns=["0090-5364", "0006-341X"],
                     journal_group=["Other", "DraftGroup"], settings_group=["Other", "DraftGroup", "Empty"],
-                    journal_import_text="Journal,ISSN/EISSN,Group\nbiometrics,0006-341X,\nDraft B,0090-5364/0162-1459,Moved\nNew,0033-3123,NewGroup\n")
+                    journal_import_text="Journal,ISSN-L,Group\nbiometrics,0006-341X,\nDraft B,0090-5364,Moved\nNew,0033-3123,NewGroup\n")
         data.pop("journal_import_mode")  # Server default must remain Merge.
         # Import endpoints must not fetch disk state, validate/save, or run retrieval.
         with monkeypatch.context() as patch:
             def forbidden(*args, **kwargs): pytest.fail("Preview/Apply must use only the submitted draft and pure core")
-            for function in ("load_settings", "load_config", "validate_settings", "save_settings"):
+            for function in ("load_settings", "load_config", "save_settings"):
                 patch.setattr(web_app, function, forbidden)
             patch.setattr(app.state.run_coordinator, "start", forbidden)
             preview = client.post("/settings/import/preview", data=data)
             assert preview.status_code == 200 and "HX-Trigger" not in preview.headers
-            assert set(re.findall(r'data-import-change="([^"]+)"', preview.text)) == {"NO_OP_DUPLICATE", "ISSN_MERGE", "GROUP_MOVE", "ADD"}
-            assert "Source rows: 2" in preview.text and "Added ISSNs: 0162-1459" in preview.text
+            assert set(re.findall(r'data-import-change="([^"]+)"', preview.text)) == {"NO_OP_DUPLICATE", "GROUP_MOVE", "ADD"}
+            assert "Source rows: 2" in preview.text
             assert "Group: Other → Moved" in preview.text and 'data-import-apply' in preview.text
             assert browser_settings_values(preview.text).journals == (
                 settings_form.SettingsJournalRow("Draft B", "0090-5364", "Other"),
@@ -3213,62 +2697,56 @@ def test_merge_preview_apply_validate_save_uses_current_unsaved_draft(health_con
         values = browser_settings_values(applied.text)
         assert values.groups == ("Moved", "DraftGroup", "NewGroup", "Empty")
         assert values.journals == (
-            settings_form.SettingsJournalRow("Draft B", "0090-5364, 0162-1459", "Moved"),
+            settings_form.SettingsJournalRow("Draft B", "0090-5364", "Moved"),
             settings_form.SettingsJournalRow("Biometrics", "0006-341X", "DraftGroup"),
-            settings_form.SettingsJournalRow("New", "0033-3123", "NewGroup"),
+            settings_form.SettingsJournalRow("New", "0033-3123", "NewGroup", pending=True),
         )
         assert values.name == "Current unsaved name" and values.keyword_expression == "causal AND inference"
         assert values.window_days == "21"
         for f, revision_value in original_revisions.items(): assert current[f] == revision_value
         assert_import_does_not_write(health_config, before)
-        validated = client.post("/settings/validate", data=current)
-        assert "Settings draft is valid" in validated.text and "HX-Trigger" not in validated.headers
+        validated = client.post("/settings/import/preview", data=current)
+        assert "id=\"settings-editor\"" in validated.text and "HX-Trigger" not in validated.headers
         assert browser_settings_values(validated.text) == values
         assert_import_does_not_write(health_config, before)
         saved = client.post("/settings/save", data=browser_settings_submission(validated.text))
-        assert saved.headers["HX-Trigger"] == "settingsSaved" and "Settings saved." in saved.text
-        assert "Empty" not in browser_settings_values(saved.text).groups
-    assert load_config(health_config).journals == (
-        JournalConfig(name="Draft B", issn=("0090-5364", "0162-1459"), group="Moved"),
-        JournalConfig(name="Biometrics", issn=("0006-341X",), group="DraftGroup"),
-        JournalConfig(name="New", issn=("0033-3123",), group="NewGroup"),
-    )
+        assert "HX-Trigger" not in saved.headers and "requires metadata resolution" in saved.text
+        assert "Empty" in browser_settings_values(saved.text).groups
+    assert_import_does_not_write(health_config, before)
 
 
 def test_replace_preview_exposes_all_removals_and_order_changes(health_config):
     path = health_config.parent / "list.md"
-    path.write_text("## Journals\n| Journal | ISSN/EISSN | Group |\n|---|---|---|\n"
-                    "| A | 0006-341X / 0090-5364 | X |\n| B | 0162-1459 | Y |\n| C | 0033-3123 | RemovedGroup |\n")
+    path.write_text('## Journals\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| A | 0006-341X |  | X |\n| B | 0162-1459 |  | Y |\n| C | 0033-3123 |  | RemovedGroup |\n')
     before = (health_config.read_bytes(), path.read_bytes())
     with TestClient(create_app(health_config), base_url="http://localhost") as client:
         data = browser_settings_submission(client.get("/settings").text)
         data.update(settings_group=["X", "Y", "RemovedGroup", "Empty"], journal_import_mode="REPLACE",
-                    journal_import_text="Journal,ISSN/EISSN,Group\nB,0162-1459,\nA,0090-5364,Changed\n")
+                    journal_import_text="Journal,ISSN-L,Group\nB,0162-1459,\nA,0006-341X,Changed\n")
         preview = client.post("/settings/import/preview", data=data)
-        assert set(re.findall(r'data-import-change="([^"]+)"', preview.text)) == {"ORDER_CHANGE", "ISSN_REMOVE", "GROUP_MOVE", "REMOVE"}
-        assert "Removed ISSNs: 0006-341X" in preview.text and "Removed ISSNs: 0033-3123" in preview.text
+        assert set(re.findall(r'data-import-change="([^"]+)"', preview.text)) == {"ORDER_CHANGE", "GROUP_MOVE", "REMOVE"}
+        assert "Removed ISSNs: 0033-3123" in preview.text
         assert "Position: 2 → 1" in preview.text and "Position: 1 → 2" in preview.text
-        assert "ISSN order: 0006-341X, 0090-5364 → 0090-5364" in preview.text
         applied = client.post("/settings/import/apply", data=browser_settings_submission(preview.text))
         values = browser_settings_values(applied.text)
         assert applied.headers["HX-Trigger"] == "settingsDraftChanged"
         assert values.groups == ("Y", "Changed", "Empty")  # RemovedGroup is not resurrected as empty.
-        assert values.journals == (settings_form.SettingsJournalRow("B", "0162-1459", "Y"), settings_form.SettingsJournalRow("A", "0090-5364", "Changed"))
+        assert values.journals == (settings_form.SettingsJournalRow("B", "0162-1459", "Y"), settings_form.SettingsJournalRow("A", "0006-341X", "Changed"))
         assert_import_does_not_write(health_config, before)
         saved = client.post("/settings/save", data=browser_settings_submission(applied.text))
         assert saved.headers["HX-Trigger"] == "settingsSaved"
     assert load_config(health_config).journals == (
-        JournalConfig(name="B", issn=("0162-1459",), group="Y"), JournalConfig(name="A", issn=("0090-5364",), group="Changed"),
+        JournalConfig(name="B", issn_l="0162-1459", group="Y"), JournalConfig(name="A", issn_l="0006-341X", group="Changed"),
     )
 
 
 @pytest.mark.parametrize("contents,kind", [
     ("This is arbitrary prose, not a supported table.", "FORMAT_ERROR"),
-    ("Journal,ISSN/EISSN\nNew,not-an-issn\nPeer,0090-5364\n", "INVALID_ROW"),
-    ("Journal,ISSN/EISSN\nFirst,0090-5364\nOther,0090-5364\nPeer,0033-3123\n", "CONFLICT"),
-    ("Journal,ISSN/EISSN\nOther name,0006-341X\nPeer,0033-3123\n", "CONFLICT"),
-    ("Journal,ISSN/EISSN,Group\nNew,0090-5364,X\nNew,0162-1459,Y\nPeer,0033-3123,\n", "CONFLICT"),
-    ("Journal,ISSN/EISSN\nNew,0090-5364,unexpected\n", "INVALID_ROW"),
+    ("Journal,ISSN-L\nNew,not-an-issn\nPeer,0090-5364\n", "INVALID_ROW"),
+    ("Journal,ISSN-L,Group\nFirst,0090-5364,X\nOther,0090-5364,Y\nPeer,0033-3123,\n", "CONFLICT"),
+    ("Journal,ISSN/EISSN\nOther name,not-an-issn\nPeer,0033-3123\n", "INVALID_ROW"),
+    ("Journal,ISSN-L,Group\nNew,0090-5364,X\nNew,0090-5364,Y\nPeer,0033-3123,\n", "CONFLICT"),
+    ("Journal,ISSN-L\nNew,0090-5364,unexpected\n", "INVALID_ROW"),
 ])
 def test_import_blocking_is_whole_apply_and_preserves_exact_form(health_config, contents, kind):
     before = (health_config.read_bytes(), (health_config.parent / "list.md").read_bytes())
@@ -3296,11 +2774,11 @@ def test_import_blocking_is_whole_apply_and_preserves_exact_form(health_config, 
 def test_web_import_formats_and_safe_unicode_roundtrip(health_config, source):
     group = '统计 & <x> "y"'
     if source == "csv":
-        contents = '\ufeffJournal,ISSN/EISSN,Group\nBiometrics,0006-341X,"统计 & <x> ""y"""\n'
+        contents = '\ufeffJournal,ISSN-L,Group\nBiometrics,0006-341X,"统计 & <x> ""y"""\n'
     elif source == "tsv":
-        contents = f'Journal\tISSN/EISSN\tGroup\nBiometrics\t0006-341X\t"统计 & <x> ""y"""\n'
+        contents = f'Journal\tISSN-L\tGroup\nBiometrics\t0006-341X\t"统计 & <x> ""y"""\n'
     else:
-        contents = f"## Journals\n| Journal | ISSN/EISSN | Group |\n|---|---|---|\n| Biometrics | 0006-341X | {group} |\n\n## Conferences\nThis is ignored.\n"
+        contents = f"## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  | {group} |\n"
     before = (health_config.read_bytes(), (health_config.parent / "list.md").read_bytes())
     with TestClient(create_app(health_config), base_url="http://localhost") as client:
         data = browser_settings_submission(client.get("/settings").text)
@@ -3319,7 +2797,7 @@ def test_apply_replans_changed_draft_and_ignores_browser_plan(health_config):
     before = (health_config.read_bytes(), (health_config.parent / "list.md").read_bytes())
     with TestClient(create_app(health_config), base_url="http://localhost") as client:
         data = browser_settings_submission(client.get("/settings").text)
-        data["journal_import_text"] = "Journal,ISSN/EISSN\nNew,0090-5364\n"
+        data["journal_import_text"] = "Journal,ISSN-L\nNew,0090-5364\n"
         preview = client.post("/settings/import/preview", data=data)
         assert "Ready to Apply" in preview.text
         changed = browser_settings_submission(preview.text)
@@ -3327,9 +2805,9 @@ def test_apply_replans_changed_draft_and_ignores_browser_plan(health_config):
                        journal_group=["", "DraftGroup"], settings_group=["DraftGroup", "Empty"],
                        resulting_journals='[{"name":"Trusted?","issn":["0033-3123"]}]', plan_can_apply="true")
         applied = client.post("/settings/import/apply", data=changed)
-        assert "Apply blocked" in applied.text and 'data-import-change="CONFLICT"' in applied.text
+        assert "unsaved Settings draft" in applied.text and 'data-import-change="NO_OP_DUPLICATE"' in applied.text
         assert "Draft owner" in applied.text and "Trusted?" not in applied.text
-        assert "HX-Trigger" not in applied.headers
+        assert applied.headers["HX-Trigger"] == "settingsDraftChanged"
         assert browser_settings_values(applied.text).journals == (
             settings_form.SettingsJournalRow("Biometrics", "0006-341X", ""),
             settings_form.SettingsJournalRow("Draft owner", "0090-5364", "DraftGroup"),
@@ -3343,7 +2821,7 @@ def test_import_apply_preserves_open_revision_for_external_change_conflict(healt
     with TestClient(create_app(health_config), base_url="http://localhost") as client:
         data = browser_settings_submission(client.get("/settings").text)
         revision_before = data["journal_revision_digest"]
-        data["journal_import_text"] = "Journal,ISSN/EISSN,Group\nNew,0090-5364,Imported\n"
+        data["journal_import_text"] = "Journal,ISSN-L,Group\nNew,0090-5364,Imported\n"
         preview = client.post("/settings/import/preview", data=data)
         applied = client.post("/settings/import/apply", data=browser_settings_submission(preview.text))
         assert browser_settings_submission(applied.text)["journal_revision_digest"] == revision_before
@@ -3363,18 +2841,18 @@ def test_executable_import_file_dirty_events_and_fragment_scroll(health_config, 
     if node is None:
         pytest.skip("Node is unavailable for executable import file/DOM tests")
     if file_kind == "tsv":
-        text = "Journal\tISSN/EISSN\tGroup\nNew\t0090-5364\tImported\n"
+        text = "Journal\tISSN-L\tGroup\nNew\t0090-5364\tImported\n"
     elif file_kind == "md":
-        text = "## Journals\n| Journal | ISSN/EISSN | Group |\n|---|---|---|\n| New | 0090-5364 | Imported |\n"
+        text = '## Journals\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| New | 0090-5364 |  | Imported |\n'
     else:
-        text = "\ufeffJournal,ISSN/EISSN,Group\nNew,0090-5364,Imported\n"
+        text = "\ufeffJournal,ISSN-L,Group\nNew,0090-5364,Imported\n"
     journal_path = health_config.parent / "list.md"
     existing = [("Biometrics", "0006-341X")]
     for i in range(30):
         digits = f"777{i:04d}"
         check = (11 - sum(int(d) * weight for d, weight in zip(digits, range(8, 1, -1))) % 11) % 11
         existing.append((f"Existing {i}", digits[:4] + "-" + digits[4:] + ("X" if check == 10 else str(check))))
-    journal_path.write_text("## Journals\n| Journal | ISSN/EISSN |\n|---|---|\n" + "".join(f"| {n} | {i} |\n" for n, i in existing))
+    journal_path.write_text('## Journals\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n' + "".join(f"| {n} | {i} |  |  |\n" for n, i in existing))
     app = create_app(health_config)
     before = (health_config.read_bytes(), (health_config.parent / "list.md").read_bytes())
     with TestClient(app, base_url="http://localhost") as client:
@@ -3462,8 +2940,8 @@ const swap = (tree, top = 419, event = null) => {
   handlers.click({target: group.querySelector("[data-delete-group]")}); dirty();
   assert.equal(newRow.querySelector('[name="journal_group"]').value, "Renamed");
   swap(RESPONSES.validated, 431); dirty();
-  // Save clears dirty only through its existing event.
-  swap(RESPONSES.saved, 439, "settingsSaved"); clean();
+  // Unresolved metadata blocks Save and preserves the unsaved dirty editor.
+  swap(RESPONSES.saved, 439); dirty();
 })().catch(error => { console.error(error); process.exitCode = 1; });
 '''
     preamble = ("const SOURCE = " + json.dumps(javascript) + "; const PAGE = " + json.dumps(SettingsDOM(page).root) +
@@ -3481,11 +2959,12 @@ const swap = (tree, top = 419, event = null) => {
         assert "HX-Trigger" not in blocked.headers and "Apply blocked" in blocked.text
         applied = client.post("/settings/import/apply", data=browser_settings_submission(preview.text))
         assert applied.headers["HX-Trigger"] == "settingsDraftChanged"
-        validated = client.post("/settings/validate", data=browser_settings_submission(applied.text))
-        assert "HX-Trigger" not in validated.headers and "Settings draft is valid" in validated.text
+        validated = client.post("/settings/import/preview", data=browser_settings_submission(applied.text))
+        assert "HX-Trigger" not in validated.headers and "id=\"settings-editor\"" in validated.text
         assert_import_does_not_write(health_config, before)
         saved = client.post("/settings/save", data=browser_settings_submission(validated.text))
-        assert saved.headers["HX-Trigger"] == "settingsSaved"
+        assert "HX-Trigger" not in saved.headers and "requires metadata resolution" in saved.text
+        assert_import_does_not_write(health_config, before)
     responses = {key: SettingsDOM(response.text).root for key, response in (
         ("preview", preview), ("blocked", blocked), ("applied", applied), ("validated", validated), ("saved", saved),
     )}

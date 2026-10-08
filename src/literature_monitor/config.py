@@ -23,6 +23,7 @@ from literature_monitor.date_range import (
 )
 from literature_monitor.keywords import KeywordExpression, KeywordSyntaxError, parse_keyword_expression
 from literature_monitor.search import validate_search_expression
+from literature_monitor.url_safety import normalize_public_http_url
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 _ISSN_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{3}[0-9X]$")
@@ -55,16 +56,47 @@ class LogLevel(str, Enum):
 class JournalConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
+    issn_l: NonEmptyStr
+    name: NonEmptyStr
+    publisher_id: str | None = None
+    group: NonEmptyStr | None = None
+
+    @field_validator("issn_l")
+    @classmethod
+    def normalize_identity(cls, value: str) -> str:
+        return normalize_journal_issn(value)
+
+    @field_validator("publisher_id")
+    @classmethod
+    def normalize_publisher(cls, value: str | None) -> str | None:
+        return normalize_publisher_id(value) if value else None
+
+
+class PublisherConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    publisher_id: str
+    name: NonEmptyStr
+    access_url: str | None = None
+
+    @field_validator("publisher_id")
+    @classmethod
+    def normalize_identity(cls, value: str) -> str:
+        return normalize_publisher_id(value)
+
+    @field_validator("access_url")
+    @classmethod
+    def normalize_access_url(cls, value: str | None) -> str | None:
+        return normalize_public_http_url(value)
+
+
+class LegacyJournal(BaseModel):
+    """Migration input only; never supplied to LoadedConfig or production retrieval."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
     name: NonEmptyStr
     issn: tuple[NonEmptyStr, ...]
     group: NonEmptyStr | None = None
-
-    @field_validator("issn")
-    @classmethod
-    def require_issn(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if not value:
-            raise ValueError("at least one ISSN is required")
-        return value
 
 
 class _Settings(BaseModel):
@@ -140,15 +172,15 @@ def parse_journal_table_cells(
     line_number: int,
     columns: int | None = None,
 ) -> tuple[str, ...]:
-    """Read cells from a supported two/three-column Journal table row."""
+    """Read cells from an explicit Journal table schema."""
     stripped = line.strip()
     if not stripped.startswith("|") or not stripped.endswith("|"):
         raise ConfigurationError(
             f"{path}:{line_number}: expected a Markdown table row"
         )
     cells = tuple(cell.strip() for cell in stripped[1:-1].split("|"))
-    if len(cells) not in ((2, 3) if columns is None else (columns,)):
-        expected = "2 or 3" if columns is None else str(columns)
+    if len(cells) not in ((2, 3, 4) if columns is None else (columns,)):
+        expected = "2, 3 or 4" if columns is None else str(columns)
         raise ConfigurationError(
             f"{path}:{line_number}: expected {expected} table columns, found {len(cells)}"
         )
@@ -171,10 +203,13 @@ def normalize_journal_issn(raw: str) -> str:
     return issn
 
 
-def journal_name_identity(name: str) -> str:
-    """Return the deterministic name key shared by config and Journal import."""
-
-    return name.strip().casefold()
+def normalize_publisher_id(raw: str) -> str:
+    """Accept only a direct OpenAlex Publisher ID, stored as its canonical URL."""
+    value = raw.strip()
+    match = re.fullmatch(r"(?:https?://openalex\.org/)?(P[0-9]+)", value, re.IGNORECASE)
+    if match is None:
+        raise ValueError(f"invalid direct OpenAlex Publisher ID {raw!r}")
+    return "https://openalex.org/" + match[1].upper()
 
 
 def _journal_error(
@@ -205,73 +240,21 @@ def validate_journal_configs(
     if line_numbers is not None and len(line_numbers) != len(journals):
         raise ValueError("line_numbers must correspond to journals")
 
-    names: dict[str, int | None] = {}
-    issns: dict[str, int | None] = {}
+    identities: dict[str, int | None] = {}
     normalized: list[JournalConfig] = []
     for index, journal in enumerate(journals):
         line_number = line_numbers[index] if line_numbers is not None else None
-        name = journal.name.strip()
-        if not name:
-            raise _journal_error(
-                "Journal must not be empty",
-                path=path,
-                line_number=line_number,
-            )
-        normalized_name = journal_name_identity(name)
-        if normalized_name in names:
-            first_line = names[normalized_name]
-            suffix = (
-                f"; first seen at line {first_line}"
-                if first_line is not None
-                else ""
-            )
-            raise _journal_error(
-                f"duplicate Journal {name!r}{suffix}",
-                path=path,
-                line_number=line_number,
-            )
-
-        if not journal.issn:
-            raise _journal_error(
-                "ISSN/EISSN must not be empty",
-                path=path,
-                line_number=line_number,
-            )
-        journal_issns: list[str] = []
-        for raw_issn in journal.issn:
-            if not raw_issn.strip():
-                raise _journal_error(
-                    "ISSN/EISSN contains an empty value",
-                    path=path,
-                    line_number=line_number,
-                )
-            try:
-                issn = normalize_journal_issn(raw_issn)
-            except ValueError as error:
-                raise _journal_error(
-                    str(error),
-                    path=path,
-                    line_number=line_number,
-                ) from error
-            if issn in issns:
-                first_line = issns[issn]
-                suffix = (
-                    f"; first seen at line {first_line}"
-                    if first_line is not None
-                    else ""
-                )
-                raise _journal_error(
-                    f"duplicate ISSN/EISSN {issn!r}{suffix}",
-                    path=path,
-                    line_number=line_number,
-                )
-            issns[issn] = line_number
-            journal_issns.append(issn)
-
-        names[normalized_name] = line_number
-        normalized.append(
-            JournalConfig(name=name, issn=tuple(journal_issns), group=journal.group)
-        )
+        try:
+            item = JournalConfig.model_validate(journal.model_dump())
+        except ValueError as error:
+            raise _journal_error(str(error), path=path, line_number=line_number) from error
+        if item.issn_l in identities:
+            first = identities[item.issn_l]
+            suffix = f"; first seen at line {first}" if first is not None else ""
+            raise _journal_error(f"duplicate ISSN-L {item.issn_l!r}{suffix}",
+                                 path=path, line_number=line_number)
+        identities[item.issn_l] = line_number
+        normalized.append(item)
     return tuple(normalized)
 
 
@@ -308,10 +291,13 @@ def journal_whitelist_table(
     if header_cells not in (
         ("Journal", "ISSN/EISSN"),
         ("Journal", "ISSN/EISSN", "Group"),
+        ("Journal", "ISSN-L", "Publisher ID", "Group"),
+        ("Journal", "ISSN-L"),
+        ("Journal", "ISSN-L", "Group"),
     ):
         raise ConfigurationError(
             f"{path}:{header_line}: expected table header '| Journal | ISSN/EISSN |' "
-            "or '| Journal | ISSN/EISSN | Group |'"
+            "or target '| Journal | ISSN-L | Publisher ID | Group |'"
         )
     columns = len(header_cells)
 
@@ -325,42 +311,60 @@ def journal_whitelist_table(
     return columns, tuple(section[2:])
 
 
-def parse_journal_whitelist_text(
-    contents: str,
-    *,
-    path: Path,
-) -> tuple[JournalConfig, ...]:
-    """Parse the current Markdown Journals section into structured journals."""
+def _journal_header(contents: str) -> tuple[int, tuple[str, ...]]:
+    lines = contents.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip() == "## Journals")
+    header = next(line for line in lines[start + 1:] if line.strip())
+    cells = tuple(cell.strip() for cell in header.strip()[1:-1].split("|"))
+    return len(cells), cells
 
+
+def _journal_table_is_legacy(contents: str) -> bool:
+    try:
+        _, cells = _journal_header(contents)
+        return cells[1] == "ISSN/EISSN"
+    except (StopIteration, IndexError):
+        return False
+
+
+def parse_legacy_journal_whitelist_text(contents: str, *, path: Path) -> tuple[LegacyJournal, ...]:
+    """Read v0.6.1 storage explicitly for migration; no canonical identity guessing."""
     columns, rows = journal_whitelist_table(contents, path=path)
+    if not _journal_table_is_legacy(contents):
+        raise _journal_error("expected legacy Journal + ISSN/EISSN migration input", path=path)
+    journals = []
+    for number, row in rows:
+        cells = parse_journal_table_cells(row, path, number, columns)
+        try:
+            identifiers = tuple(normalize_journal_issn(value) for value in cells[1].split("/"))
+            journals.append(LegacyJournal(name=cells[0], issn=identifiers,
+                                           group=(cells[2] or None) if columns == 3 else None))
+        except ValueError as error:
+            raise _journal_error(str(error), path=path, line_number=number) from error
+    return tuple(journals)
 
-    journals: list[JournalConfig] = []
-    line_numbers: list[int] = []
-    for line_number, row in rows:
-        cells = parse_journal_table_cells(row, path, line_number, columns)
-        name, raw_issns = cells[:2]
-        group = (cells[2] or None) if columns == 3 else None
+
+def parse_journal_whitelist_text(contents: str, *, path: Path) -> tuple[JournalConfig, ...]:
+    """Load target storage only. Legacy tables require explicit migration."""
+    columns, rows = journal_whitelist_table(contents, path=path)
+    if _journal_table_is_legacy(contents):
+        raise _journal_error("legacy Journals storage: migration required to configured ISSN-L", path=path)
+    if columns != 4:
+        raise _journal_error("target storage requires Journal, ISSN-L, Publisher ID, Group", path=path)
+    journals, numbers = [], []
+    for number, row in rows:
+        name, issn_l, publisher, group = parse_journal_table_cells(row, path, number, columns)
         if not name:
-            raise ConfigurationError(f"{path}:{line_number}: Journal must not be empty")
-        if not raw_issns:
-            raise ConfigurationError(f"{path}:{line_number}: ISSN/EISSN must not be empty")
-
-        journal_issns: list[str] = []
-        for raw_issn in raw_issns.split("/"):
-            if not raw_issn.strip():
-                raise ConfigurationError(
-                    f"{path}:{line_number}: ISSN/EISSN contains an empty value"
-                )
-            journal_issns.append(raw_issn.strip())
-
-        journals.append(JournalConfig(name=name, issn=tuple(journal_issns), group=group))
-        line_numbers.append(line_number)
-
-    return validate_journal_configs(
-        journals,
-        path=path,
-        line_numbers=line_numbers,
-    )
+            raise _journal_error("Journal must not be empty", path=path, line_number=number)
+        if not issn_l:
+            raise _journal_error("ISSN-L must not be empty", path=path, line_number=number)
+        try:
+            journals.append(JournalConfig(name=name, issn_l=issn_l,
+                                           publisher_id=publisher or None, group=group or None))
+        except ValueError as error:
+            raise _journal_error(str(error), path=path, line_number=number) from error
+        numbers.append(number)
+    return validate_journal_configs(journals, path=path, line_numbers=numbers)
 
 
 def parse_journal_whitelist(path: Path) -> tuple[JournalConfig, ...]:
@@ -418,29 +422,9 @@ def render_journal_whitelist_text(
             end = index
             break
 
-    grouped = any(journal.group is not None for journal in normalized)
-    if headings:
-        header = next(
-            (line.strip() for line in lines[start + 1:end] if line.strip()), ""
-        )
-        if header.startswith("|") and header.endswith("|"):
-            grouped = grouped or tuple(cell.strip() for cell in header[1:-1].split("|")) == (
-                "Journal",
-                "ISSN/EISSN",
-                "Group",
-            )
-
-    rows = [
-        "## Journals",
-        "",
-        "| Journal | ISSN/EISSN | Group |" if grouped else "| Journal | ISSN/EISSN |",
-        "|---|---|---|" if grouped else "|---|---|",
-    ]
+    rows = ["## Journals", "", "| Journal | ISSN-L | Publisher ID | Group |", "| --- | --- | --- | --- |"]
     for journal in normalized:
-        row = f"| {journal.name} | {' / '.join(journal.issn)} |"
-        if grouped:
-            row += f" {journal.group or ''} |"
-        rows.append(row)
+        rows.append(f"| {journal.name} | {journal.issn_l} | {journal.publisher_id or ''} | {journal.group or ''} |")
     section = "\n".join(rows) + "\n\n"
     if existing_contents is None:
         return "# List\n\n" + section
@@ -616,3 +600,76 @@ def load_config(path: Path) -> LoadedConfig:
             path=path,
         ) from error
     return build_loaded_config(path, definition, journals)
+
+
+def validate_publisher_configs(publishers: Sequence[PublisherConfig]) -> tuple[PublisherConfig, ...]:
+    normalized = []
+    seen = set()
+    for publisher in publishers:
+        try:
+            item = PublisherConfig.model_validate(publisher.model_dump())
+        except ValueError as error:
+            raise ConfigurationError(str(error), field="publishers") from error
+        if item.publisher_id in seen:
+            raise ConfigurationError(f"duplicate Publisher ID {item.publisher_id}", field="publishers")
+        for value in (item.name, item.access_url):
+            if value is not None and any(c == "|" or ord(c) < 32 or ord(c) == 127 for c in value):
+                raise ConfigurationError("Publisher content cannot be represented in Markdown table", field="publishers")
+        seen.add(item.publisher_id)
+        normalized.append(item)
+    return tuple(normalized)
+
+
+def parse_publisher_whitelist_text(contents: str, *, path: Path) -> tuple[PublisherConfig, ...]:
+    lines = contents.splitlines()
+    headings = [i for i, line in enumerate(lines) if line.strip() == "## Publishers"]
+    if not headings:
+        return ()  # Pre-A4 documents are read without rewriting them.
+    if len(headings) != 1:
+        raise ConfigurationError("expected exactly one Publishers section", field="publishers", path=path)
+    section = []
+    for i in range(headings[0] + 1, len(lines)):
+        if _HEADING_PATTERN.match(lines[i].strip()):
+            break
+        if lines[i].strip():
+            section.append((i + 1, lines[i]))
+    if len(section) < 2:
+        raise ConfigurationError("Publishers table is missing", field="publishers", path=path)
+    header = parse_journal_table_cells(section[0][1], path, section[0][0], 3)
+    separator = parse_journal_table_cells(section[1][1], path, section[1][0], 3)
+    if header != ("Publisher", "OpenAlex ID", "Access URL") or not all(_SEPARATOR_PATTERN.fullmatch(c) for c in separator):
+        raise ConfigurationError("invalid Publishers table header/separator", field="publishers", path=path)
+    result = []
+    for number, line in section[2:]:
+        name, identity, url = parse_journal_table_cells(line, path, number, 3)
+        try:
+            result.append(PublisherConfig(name=name, publisher_id=identity, access_url=url or None))
+        except ValueError as error:
+            raise ConfigurationError(f"{path}:{number}: {error}", field="publishers", path=path) from error
+    return validate_publisher_configs(result)
+
+
+def validate_publisher_membership(journals: Sequence[JournalConfig], publishers: Sequence[PublisherConfig]) -> None:
+    if {p.publisher_id for p in publishers} != {j.publisher_id for j in journals if j.publisher_id is not None}:
+        raise ConfigurationError("Publisher rows must exactly match active direct Journal Publisher IDs", field="publishers")
+
+
+def render_settings_list_text(existing_contents: str | None, journals: Sequence[JournalConfig],
+                              publishers: Sequence[PublisherConfig], *, path: Path) -> str:
+    """Prepare one coherent list target; neither section has an independent write path."""
+    publishers = validate_publisher_configs(publishers)
+    validate_publisher_membership(journals, publishers)
+    target = render_journal_whitelist_text(existing_contents, journals, path=path)
+    lines = target.splitlines(keepends=True)
+    headings = [i for i, line in enumerate(lines) if line.strip() == "## Publishers"]
+    if len(headings) > 1:
+        raise ConfigurationError("duplicate Publishers section", field="publishers", path=path)
+    start = headings[0] if headings else next((i for i, line in enumerate(lines) if line.strip() == "## Conferences"), len(lines))
+    end = start if not headings else next((i for i in range(start + 1, len(lines)) if _HEADING_PATTERN.match(lines[i].strip())), len(lines))
+    rows = ["## Publishers", "", "| Publisher | OpenAlex ID | Access URL |", "| --- | --- | --- |"]
+    rows.extend(f"| {p.name} | {p.publisher_id} | {p.access_url or ''} |" for p in publishers)
+    section = "\n".join(rows) + "\n\n"
+    prefix = "".join(lines[:start])
+    if prefix and not prefix.endswith("\n\n"):
+        prefix += "\n" if prefix.endswith("\n") else "\n\n"
+    return prefix + section + "".join(lines[end:])

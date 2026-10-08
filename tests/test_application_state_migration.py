@@ -69,7 +69,7 @@ class Transport(httpx.MockTransport):
 class Execution:
     def __init__(self, tmp_path, monkeypatch):
         self.config = tmp_path / "monitor.yaml"
-        (tmp_path / "list.md").write_text("## Journals\n\n| Journal | ISSN/EISSN |\n|---|---|\n| Biometrics | 0006-341X |\n")
+        (tmp_path / "list.md").write_text('## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  |  |\n')
         self.config.write_text("venue_whitelist: list.md\nkeyword_expression: statistics\noutput_dir: workspace\nfrom_date: 2026-01-01\nto_date: 2026-01-31\n")
         self.output = tmp_path / "workspace"
         self.path = self.output / ".literature-monitor" / ps.STATE_FILENAME
@@ -512,7 +512,7 @@ def run_parallel_discovery_case(e, first, unexpected=None):
     calls, completions, workers, events, papers, results, errors = [], [], [], [], [], [], []
     owner = []
     with pytest.MonkeyPatch.context() as patch:
-        original_oa = monitor.discover_journals_batched
+        original_oa = monitor.discover_resolved_sources
         original_cr = monitor.CrossrefRetrieval.discover
         original_supplement = monitor.CrossrefRetrieval.supplement
         original_sqlite = sqlite3.connect
@@ -576,7 +576,7 @@ def run_parallel_discovery_case(e, first, unexpected=None):
         import literature_monitor.naming as naming
         patch.setattr(naming, "uuid4", lambda: UUID(int=100))
         patch.setattr(sqlite3, "connect", connect)
-        patch.setattr(monitor, "discover_journals_batched", oa)
+        patch.setattr(monitor, "discover_resolved_sources", oa)
         patch.setattr(monitor.CrossrefRetrieval, "discover", cr)
         patch.setattr(monitor.CrossrefRetrieval, "supplement", supplement)
         patch.setattr(monitor, "read_provider_state", track("read", monitor.read_provider_state))
@@ -1160,13 +1160,13 @@ def test_reused_provider_state_gets_current_configuration_attribution_without_sc
     before = durable_state(e.path)
     state_before = ps.read_provider_state(e.output).state
     (e.config.parent / "list.md").write_text(
-        "## Journals\n\n| Journal | ISSN/EISSN |\n|---|---|\n| Biometrics | 0006-341X / 1541-0420 |\n",
+        '## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  |  |\n',
     )
     second = e.run()
     assert second.state_usage.crossref_reused == 1 and not e.full_requests
-    assert papers[-1].journal_issns == (ISSN, "1541-0420")
+    assert papers[-1].journal_issns == (ISSN,)
     assert second.warnings == first.warnings and second.diagnostics == first.diagnostics
     assert ps.SCHEMA_VERSION == 3 and durable_state(e.path) == before
     assert ps.read_provider_state(e.output).state == state_before
     persisted, = (e.output / "Papers").glob("*.md")
-    assert yaml.safe_load(persisted.read_text().split("---", 2)[1])["journal_issns"] == [ISSN, "1541-0420"]
+    assert yaml.safe_load(persisted.read_text().split("---", 2)[1])["journal_issns"] == [ISSN]

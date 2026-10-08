@@ -315,7 +315,7 @@ button:disabled {
 }
 
 .form-grid label,
-.journal-row label {
+.config-row label {
   display: grid;
   gap: .3rem;
   font-weight: 600;
@@ -332,19 +332,59 @@ select {
   padding: .45rem .55rem;
 }
 
-.journal-row {
+.config-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, .8fr) auto;
-  gap: .65rem;
-  align-items: end;
-  padding: .6rem 0;
+  gap: .8rem;
+  align-items: center;
+  padding: .85rem .2rem;
+  min-width: 0;
 }
 
-[data-journal-viewport] {
+.journal-row {
+  grid-template-columns: minmax(0, 1.5fr) minmax(8rem, .6fr) minmax(8rem, .7fr) auto;
+}
+
+.publisher-row {
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1.3fr) 3rem;
+}
+
+.legacy-journal-row {
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+}
+
+.config-row > * { min-width: 0; }
+.config-metadata { overflow-wrap: anywhere; }
+.config-id { font-size: .8rem; }
+.config-identity { font-variant-numeric: tabular-nums; }
+.config-identity > .muted { font-size: .8rem; }
+.settings-editor h2 { font-size: 1.05rem; }
+.settings-editor legend { font-weight: 700; }
+.settings-editor .notice { overflow-wrap: anywhere; }
+.config-row + .config-row { border-top: 1px solid #eceef1; }
+
+[data-journal-viewport],
+[data-publisher-viewport] {
   max-height: 55vh;
   overflow-y: auto;
   padding-right: .4rem;
 }
+
+.publisher-settings {
+  border-top: 1px solid #d9dde3;
+  margin-top: 1.25rem;
+  padding-top: .75rem;
+}
+
+.publisher-open a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+}
+
+.publisher-open a[hidden] { display: none; }
+
+.settings-editor button:active { transform: scale(.98); }
+.settings-editor :focus-visible { outline: 2px solid #1859a9; outline-offset: 2px; }
 
 .group-create,
 .group-row {
@@ -372,9 +412,11 @@ select {
   margin-bottom: .6rem;
 }
 
-.journal-import h2 {
+.journal-import summary,
+.journal-organization summary {
   font-size: 1rem;
-  margin-top: 0;
+  cursor: pointer;
+  margin-bottom: .65rem;
 }
 
 .import-entries {
@@ -390,10 +432,6 @@ select {
   display: flex;
   flex-wrap: wrap;
   gap: .35rem;
-}
-
-.journal-row + .journal-row {
-  border-top: 1px solid #eceef1;
 }
 
 .form-actions {
@@ -479,12 +517,15 @@ textarea {
 
   .form-grid,
   .journal-row,
+  .publisher-row,
+  .legacy-journal-row,
   .group-create,
   .group-row {
     grid-template-columns: 1fr;
   }
 
-  [data-journal-viewport] {
+  [data-journal-viewport],
+  [data-publisher-viewport] {
     max-height: none;
     overflow: visible;
     padding-right: 0;

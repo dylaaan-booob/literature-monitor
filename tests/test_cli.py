@@ -129,12 +129,7 @@ def test_logging_configuration_is_idempotent() -> None:
 def validate_config(tmp_path: Path) -> tuple[Path, object]:
     whitelist = tmp_path / "journals.md"
     whitelist.write_text(
-        "# List\n\n"
-        "## Journals\n\n"
-        "| Journal | ISSN/EISSN |\n"
-        "|---|---|\n"
-        "| Biometrics | 0006-341X / 1541-0420 |\n"
-        "| Annals of Statistics | 0090-5364 |\n",
+        '# List\n\n## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  |  |\n| Annals of Statistics | 0090-5364 |  |  |\n',
         encoding="utf-8",
     )
     config_path = tmp_path / "config.yaml"
@@ -175,16 +170,7 @@ def config_with_keyword_expression(tmp_path: Path, expression: str) -> Path:
 
 
 def resolved_source(journal: JournalConfig) -> ResolvedSource:
-    return ResolvedSource(
-        journal=journal.name,
-        configured_issns=journal.issn,
-        resolved_issns=journal.issn,
-        unresolved_issns=(),
-        openalex_id=f"https://openalex.org/S-{journal.name.replace(' ', '-')}",
-        display_name=journal.name,
-        issn_l=journal.issn[0],
-        issn=journal.issn,
-    )
+    return ResolvedSource(journal=journal.name, configured_issn_l=journal.issn_l, openalex_id=f"https://openalex.org/S-{journal.name.replace(' ', '-')}", display_name=journal.name, provider_issn_l=journal.issn_l, aliases=(journal.issn_l,))
 
 
 def test_validate_cli_calls_application_boundary_and_logs_result(
@@ -193,7 +179,7 @@ def test_validate_cli_calls_application_boundary_and_logs_result(
     capsys: object,
 ) -> None:
     config_path = tmp_path / "monitor.yaml"
-    journal = JournalConfig(name="Biometrics", issn=("0006-341X",))
+    journal = JournalConfig(name="Biometrics", issn_l="0006-341X")
     source = resolved_source(journal)
     warning = MonitorIssue(
         severity=MonitorIssueSeverity.WARNING,
@@ -201,7 +187,7 @@ def test_validate_cli_calls_application_boundary_and_logs_result(
         stage="source_resolution",
         message="ISSN is unresolved; using the consistent Source",
         journal=journal.name,
-        issn=journal.issn[0],
+        issn=journal.issn_l,
     )
     calls: list[Path] = []
     callbacks: list[ProgressCallback | None] = []
@@ -219,7 +205,7 @@ def test_validate_cli_calls_application_boundary_and_logs_result(
                 to_date=date(2026, 1, 31),
             ),
             configured_journal_count=1,
-            configured_issn_count=1,
+            configured_issn_l_count=1,
             resolved_sources=(source,),
             warnings=(warning,),
             errors=(),
@@ -241,7 +227,7 @@ def test_validate_cli_calls_application_boundary_and_logs_result(
     assert captured.out == ""
     assert "resolved Biometrics to Biometrics" in captured.err
     assert "ISSN 0006-341X" in captured.err
-    assert "1 configured journals, 1 configured ISSNs, 1 resolved sources" in captured.err
+    assert "1 configured journals, 1 configured ISSN-L identities, 1 resolved sources" in captured.err
     assert "1 warnings, 0 errors" in captured.err
 
 
@@ -275,7 +261,7 @@ def test_validate_cli_maps_application_outcome_to_exit_code(
     result_value = ValidationResult(
         resolved_date_range=None,
         configured_journal_count=0,
-        configured_issn_count=0,
+        configured_issn_l_count=0,
         resolved_sources=(),
         warnings=(),
         errors=(issue,) if expected_exit else (),
@@ -348,7 +334,7 @@ def test_validate_cli_non_tty_progress_is_plain_stderr(
                 to_date=date(2026, 1, 31),
             ),
             configured_journal_count=2,
-            configured_issn_count=3,
+            configured_issn_l_count=3,
             resolved_sources=(),
             warnings=(),
             errors=(),
@@ -386,16 +372,7 @@ def diagnostic_result(*, with_error: bool = False) -> DiscoveryResult:
     ) if with_error else ()
     return DiscoveryResult(
         sources=(
-            ResolvedSource(
-                journal="Biometrics",
-                configured_issns=("0006-341X",),
-                resolved_issns=("0006-341X",),
-                unresolved_issns=(),
-                openalex_id="https://openalex.org/S8265502",
-                display_name="Biometrics",
-                issn_l="0006-341X",
-                issn=("0006-341X", "1541-0420"),
-            ),
+            ResolvedSource(journal="Biometrics", configured_issn_l="0006-341X", openalex_id="https://openalex.org/S8265502", display_name="Biometrics", provider_issn_l="0006-341X", aliases=("0006-341X", "1541-0420")),
         ),
         records=(
             OpenAlexWorkRecord(
@@ -642,7 +619,7 @@ def test_run_parser_accepts_shared_date_override_forms(
 @pytest.mark.parametrize(
     "forbidden_arguments",
     (
-        ("--journal", "Biometrics"),
+        ("--issn-l", "0006-341X"),
         ("--keyword-expression", "causal"),
         ("--output-dir", "other-workspace"),
     ),
@@ -1466,7 +1443,7 @@ def test_validate_cli_tty_progress_has_no_run_stage_model(
                 to_date=date(2026, 1, 31),
             ),
             configured_journal_count=2,
-            configured_issn_count=3,
+            configured_issn_l_count=3,
             resolved_sources=(),
             warnings=(),
             errors=(),
@@ -1718,8 +1695,8 @@ def test_openalex_discover_cli_writes_diagnostic_ndjson_and_logs_to_stderr(
             "openalex-discover",
             "--config",
             str(repository_root / "config.example.yaml"),
-            "--journal",
-            "biometrics",
+            "--issn-l",
+            "0006-341x",
             "--from-date",
             "2026-01-01",
             "--to-date",
@@ -1732,7 +1709,7 @@ def test_openalex_discover_cli_writes_diagnostic_ndjson_and_logs_to_stderr(
     assert result == 0
     assert payload["external_ids"]["openalex"] == "https://openalex.org/W1"
     assert "OpenAlex diagnostic completed" in captured.err
-    assert captured_journals == [("BIOMETRICS",)]
+    assert captured_journals == [("Biometrics",)]
 
 
 def test_openalex_discover_cli_returns_one_for_partial_errors(
@@ -1749,8 +1726,8 @@ def test_openalex_discover_cli_returns_one_for_partial_errors(
             "openalex-discover",
             "--config",
             str(repository_root / "config.example.yaml"),
-            "--journal",
-            "Biometrics",
+            "--issn-l",
+            "0006-341X",
             "--from-date",
             "2026-01-01",
             "--to-date",
@@ -1784,8 +1761,8 @@ def test_openalex_discover_cli_rejects_unknown_journal_without_network(
             "openalex-discover",
             "--config",
             str(repository_root / "config.example.yaml"),
-            "--journal",
-            "Not Configured",
+            "--issn-l",
+            "1541-0420",
             "--from-date",
             "2026-01-01",
             "--to-date",
@@ -1795,7 +1772,7 @@ def test_openalex_discover_cli_rejects_unknown_journal_without_network(
 
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert result == 2
-    assert "unknown configured journal" in captured.err
+    assert "unknown configured ISSN-L" in captured.err
     assert not called
 
 
@@ -1846,8 +1823,8 @@ def test_openalex_filter_uses_config_expression_and_reports_counts(
             "openalex-filter",
             "--config",
             str(repository_root / "config.example.yaml"),
-            "--journal",
-            "Biometrics",
+            "--issn-l",
+            "0006-341X",
             "--from-date",
             "2026-01-01",
             "--to-date",
@@ -2619,8 +2596,8 @@ def test_crossref_enrich_uses_config_filter_before_enrichment(
             "crossref-enrich",
             "--config",
             str(repository_root / "config.example.yaml"),
-            "--journal",
-            "Biometrics",
+            "--issn-l",
+            "0006-341X",
             "--from-date",
             "2026-01-01",
             "--to-date",
@@ -3050,8 +3027,8 @@ def test_crossref_discover_is_crossref_only_and_emits_provider_ndjson(
             "crossref-discover",
             "--config",
             str(repository_root / "config.example.yaml"),
-            "--journal",
-            "Biometrics",
+            "--issn-l",
+            "0006-341X",
             "--from-date",
             "2026-01-01",
             "--to-date",
@@ -3062,7 +3039,7 @@ def test_crossref_discover_is_crossref_only_and_emits_provider_ndjson(
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     assert result == 0
     assert calls[0][0] is client
-    assert calls[0][1] == ("BIOMETRICS",)
+    assert calls[0][1] == ("Biometrics",)
     assert json.loads(captured.out)["doi"] == "10.5555/one"
     assert "1 records, 0 issues" in captured.err
 
@@ -3245,11 +3222,11 @@ def test_canonicalize_cli_calls_shared_application_core_and_emits_ndjson(
         path: Path,
         *,
         date_override: DateRangeSpec | None = None,
-        journal_name: str | None = None,
+        issn_l: str | None = None,
         keyword_expression: str | None = None,
         progress_callback: object = None,
     ) -> _CanonicalCoreResult:
-        calls.append((path, date_override, journal_name, keyword_expression))
+        calls.append((path, date_override, issn_l, keyword_expression))
         return core
 
     def unexpected_materialization(*args: object, **kwargs: object) -> object:
@@ -3269,8 +3246,8 @@ def test_canonicalize_cli_calls_shared_application_core_and_emits_ndjson(
             "canonicalize",
             "--config",
             str(config_path),
-            "--journal",
-            "Biometrics",
+            "--issn-l",
+            "0006-341X",
             "--from-date",
             "2026-01-01",
             "--to-date",
@@ -3289,7 +3266,7 @@ def test_canonicalize_cli_calls_shared_application_core_and_emits_ndjson(
                 from_date=date(2026, 1, 1),
                 to_date=date(2026, 1, 31),
             ),
-            "Biometrics",
+            "0006-341X",
             "statistics",
         )
     ]
@@ -3379,11 +3356,11 @@ def test_materialize_cli_uses_shared_core_then_formal_materialization_path(
         path: Path,
         *,
         date_override: DateRangeSpec | None = None,
-        journal_name: str | None = None,
+        issn_l: str | None = None,
         keyword_expression: str | None = None,
         progress_callback: object = None,
     ) -> _CanonicalCoreResult:
-        core_calls.append((path, date_override, journal_name, keyword_expression))
+        core_calls.append((path, date_override, issn_l, keyword_expression))
         return core
 
     def fake_materialize(
@@ -3409,8 +3386,8 @@ def test_materialize_cli_uses_shared_core_then_formal_materialization_path(
             "materialize",
             "--config",
             str(config_path),
-            "--journal",
-            "Biometrics",
+            "--issn-l",
+            "0006-341X",
             "--window-days",
             "14",
             "--keyword-expression",
@@ -3426,7 +3403,7 @@ def test_materialize_cli_uses_shared_core_then_formal_materialization_path(
         (
             config_path,
             DateRangeSpec(window_days=14),
-            "Biometrics",
+            "0006-341X",
             "statistics",
         )
     ]
@@ -3587,3 +3564,35 @@ def test_provider_diagnostics_close_http_clients(
 
     assert len(sessions) == (2 if command == "crossref-enrich" else 1)
     assert all(session.is_closed for session in sessions)
+
+
+@pytest.mark.parametrize("command", ["openalex-discover", "openalex-filter", "crossref-discover", "crossref-enrich"])
+def test_retired_journal_selector_is_rejected(command):
+    with pytest.raises(SystemExit) as error:
+        _build_parser().parse_args((command, "--config", "monitor.yaml", "--journal", "Biometrics"))
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("identity", ["0006-3410", "1541-0420"])
+@pytest.mark.parametrize("command", ["openalex-discover", "openalex-filter", "crossref-discover", "crossref-enrich"])
+def test_issn_l_invalid_or_unconfigured_selector_stops_before_network(tmp_path, monkeypatch, capsys, command, identity):
+    config_path, _ = validate_config(tmp_path)
+    def unexpected_client(**kwargs):
+        raise AssertionError("invalid/unknown selector must fail before a Provider client")
+    monkeypatch.setattr("literature_monitor.cli.OpenAlexClient", unexpected_client)
+    monkeypatch.setattr("literature_monitor.cli.CrossrefClient", unexpected_client)
+    assert main((command, "--config", str(config_path), "--issn-l", identity)) == 2
+    captured = capsys.readouterr()
+    assert ("--issn-l" if identity == "0006-3410" else "unknown configured ISSN-L") in captured.err
+
+
+def test_issn_l_selector_normalizes_and_selects_exact_identity(tmp_path, monkeypatch, capsys):
+    config_path, _ = validate_config(tmp_path)
+    selected = []
+    def discover(client, journals, *args):
+        selected.extend(journals)
+        return DiscoveryResult((), (), ())
+    monkeypatch.setattr("literature_monitor.cli.discover_journals", discover)
+    assert main(("openalex-discover", "--config", str(config_path), "--issn-l", "0006-341x")) == 0
+    assert [j.issn_l for j in selected] == ["0006-341X"]
+    capsys.readouterr()

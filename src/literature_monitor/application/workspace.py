@@ -116,7 +116,7 @@ def _section_key(
 ) -> tuple[WorkspaceSectionKind, str]:
     if paper.journal_attribution_state is PaperJournalAttributionState.VALID:
         identities = set(paper.journal_issns)
-        matches = [journal for journal in journals if identities.intersection(journal.issn)]
+        matches = [journal for journal in journals if journal.issn_l in identities]
     elif paper.journal_attribution_state is PaperJournalAttributionState.MISSING_OR_EMPTY:
         matches = [journal for journal in journals if _journal_name(journal.name) == _journal_name(paper.journal)]
     else:

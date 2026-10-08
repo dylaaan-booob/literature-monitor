@@ -1,11 +1,11 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.6.1 is RELEASED and is the latest released/completed baseline. Python package, Provider User-Agent and Connector identities are `0.6.1`. Permanent RELEASE_HEAD and annotated tag target are `22bd1efb6c3534110850dfaae5a6239f74b16731`. Current release evidence is in §40.16; earlier records retain their original version and scope.
+**Status:** Active; v0.6.1 is RELEASED and remains the latest published release. Published v0.6.1 Python package, Provider User-Agent and Connector identities are `0.6.1`; the current UNRELEASED v0.6.2 candidate Python package, Provider User-Agent and Connector identities are `0.6.2`. The v0.6.1 permanent RELEASE_HEAD and annotated tag target remain `22bd1efb6c3534110850dfaae5a6239f74b16731`. Its publication evidence is in §40.16; earlier records retain their original version and scope.
 
-**Stage:** v0.6.1 implementation, necessary preparation, artifact validation, annotated tag, remote-main/tag pushes, GitHub Release and authoritative asset-digest verification are complete (§40.16). This documentation closeout is a separate subsequent change outside the permanent tag target. Release execution and evidence reuse follow [AGENTS.md](AGENTS.md#release-execution-and-verification-reuse).
+**Stage:** v0.6.2 A1 through A6 implementation and tracked Journal/Publisher migrations are present on the development branch (§§41.13–41.14), uncommitted and UNRELEASED. A6_FIX_1 closed all five code findings; isolated real macOS Chrome desktop (1470px content width) and responsive 550px window acceptance passed on 2026-10-08 (§41.14). Physical mobile touch remains NOT_TESTED. CODE_FINDINGS: CLOSED; A6_BROWSER_GATE: CLOSED; A6_FINAL_REVIEW: PASSED; A7_RELEASE_PREPARATION: PREPARED; A7_FINAL_RELEASE_CANDIDATE_REVIEW: PASSED; V0_6_2_RELEASED: NO. The v0.6.2 candidate artifacts and validation are recorded in §41.15; v0.6.2 has not been committed, tagged, pushed or published. v0.6.1 implementation, necessary preparation, artifact validation, annotated tag, remote-main/tag pushes, GitHub Release and authoritative asset-digest verification are complete (§40.16). Its documentation closeout is a separate subsequent change outside the permanent tag target. Release execution and evidence reuse follow [AGENTS.md](AGENTS.md#release-execution-and-verification-reuse).
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
-**Current contract:** §40 is the current released v0.6.1 contract for Automatic Zotero Connector Capture. §39 remains the historical/released v0.6.0 authority. §40 supersedes §39 only where §39 excludes automatic Zotero Connector triggering and the narrowly related bridge/orchestration needed for v0.6.1. §37 remains authoritative for unaffected DOI-first identity, Provider behavior, current Paper schema, single-manifestation and Zotero parent identity. Historical §§35 through 39 retain their release, live-verification, maintenance, and version-specific behavior records.
+**Current contract:** §41 is the v0.6.2 development authority for its explicit venue identity, retrieval adaptation and Journal/Publisher Settings changes. §40 remains the current released v0.6.1 contract for Automatic Zotero Connector Capture. §39 remains the historical/released v0.6.0 authority; unaffected §39/§40 behavior continues to apply. §37 remains authoritative for unaffected DOI-first identity, Provider behavior, current Paper schema, single-manifestation and Zotero parent identity. Historical §§35 through 40 retain their release, live-verification, maintenance, and version-specific behavior records.
 
 ---
 
@@ -5323,3 +5323,449 @@ preserved, unstaged and excluded from published artifacts. The subsequent
 necessary documentation closeout uses affected content/diff checks only and
 keeps the release tag and assets fixed; it requires no new functional suite
 or package rebuild.
+
+---
+
+## 41. v0.6.2 ISSN-L Venue Identity & Journals/Publishers Settings - Development Contract
+
+### 41.1 Authority, baseline and delivery boundary
+
+§41 is the v0.6.2 development authority for the configured venue identity, Journal/Publisher configuration, retrieval adaptation and Settings behavior it explicitly changes. It supersedes conflicting earlier ISSN/EISSN and Journal-name identity, import, Settings storage and Publisher access projection requirements, including the affected parts of §§25, 32, 34 and 39.7. Unaffected requirements continue to apply.
+
+§40 remains authoritative for automatic Zotero Connector capture, its bridge, orchestration, completion observation and reconciliation. Other §39/§40 Zotero/Connector behavior is unchanged. §37 retains authority for DOI-first Paper identity and unaffected Provider/Paper semantics. §§35 through 40 remain historical version contracts and evidence; their text must not be rewritten to imply v0.6.2 behavior.
+
+Development began from verified `main@8ab0630237753e0d56d26a06953576894a7d1106` on the normal `v0.6.2-development` branch. v0.6.1 remains the latest released/completed baseline. A1 established only this contract and aligned project rules, without product implementation, data migration or publication. A1 through A6 implementation and accepted migrations are now present; §41.13 records implementation evidence, §41.14 preserves the original A6 blockers and their closure, and §41.15 records the prepared A7 candidate. README distinguishes current unreleased development behavior from released v0.6.1. v0.6.2 adds no institutional-login automation.
+
+### 41.2 Configured identity, Provider evidence and Source reconciliation
+
+Venue identity has three separate layers:
+
+| Layer | Ownership and permitted use |
+| --- | --- |
+| Durable configured identity | `JournalConfig.issn_l` is exactly one normalized, syntax/checksum-valid ISSN-L, owned by the user/configuration once established. It is the sole duplicate key, Candidate Eligibility configured venue key and value used in new/current Paper `journal_issns`. No Provider may silently replace it. |
+| Provider identifier evidence | Individually normalized OpenAlex/Crossref ISSNs are transient evidence for Source membership, retrieval expansion, venue corroboration, legacy migration analysis and diagnostics. A Provider's canonical field label does not confer durable identity authority. |
+| Reconciliation | Compare independently obtained evidence with configured identity or a migration candidate. Outcomes are verified/compatible, insufficient/unproven or conflicting/ambiguous. Preserve disagreements and do not guess across conflict; no persistent reconciliation database, alias registry or second source of truth is authorized. |
+
+The target `JournalConfig` semantics are:
+
+| Field | Ownership and meaning |
+| --- | --- |
+| `issn_l` | Sole durable configured Journal identity, supplied or explicitly established under the migration proof rules. |
+| `name` | Machine-managed canonical OpenAlex display metadata; not user-editable. |
+| `publisher_id` | Direct OpenAlex Publisher ID or null. |
+| `group` | Human-managed optional Group. |
+
+Exact Python field names may follow project style; these semantics are normative. Duplicate detection uses ISSN-L only. Different ISSN-L values with the same display name are valid distinct Journals. Journal names, alternate titles, abbreviations, Publisher names and hostnames cannot substitute for identifiers or act as fallback identity, merge authority or Source-resolution veto. Names cannot participate in duplicate validation, Provider matching, Candidate Eligibility identity or migration merging.
+
+For an already configured v0.6.2 Journal, verify the OpenAlex relationship by direct identifier membership:
+
+```text
+configured ISSN-L
+→ local syntax/checksum normalization
+→ OpenAlex Source lookup by identifier
+→ usable individually validated Source ISSN evidence
+→ unique journal Source membership
+→ verified configured Source
+```
+
+Success requires a locally valid configured ISSN-L, exactly one supporting Source of type `journal`, that identifier in the Source's usable normalized `issn` membership evidence, a valid OpenAlex Source ID and usable canonical `display_name`. Direct unambiguous membership is sufficient for the configured Source relationship. A configured-name/Source-name mismatch must never veto it. One queried identifier supported by multiple distinct active Sources is an explicit identity conflict.
+
+OpenAlex `Source.issn_l` is Provider evidence only. It can corroborate the relationship, disagree with it or supply a legacy migration candidate (§41.10). A different, missing or malformed value may generate diagnostics, but cannot by itself invalidate otherwise unambiguous direct membership or replace configured `issn_l`. A canonical external-ID label in OpenAlex documentation does not change local ownership.
+
+Validate every Source alias independently: normalize and retain each valid ISSN, exclude and diagnose each malformed/checksum-invalid value, then deduplicate normalized values. One bad additional alias must not poison valid aliases or the useful Source entity. For M&SOM, retain `1523-4614` and `1526-5498`, exclude/diagnose `1526-5489` and permit membership through the valid identifiers. Never invent a typo correction.
+
+Fail closed when the configured/queried identifier itself is invalid or absent from usable membership, the Source is not a journal, its ID or required display metadata is unusable, multiple Sources support the identifier, or response structure prevents determining which Source owns it. Per-identifier tolerance does not excuse indeterminate ownership. From a verified Source, canonical display metadata and direct `host_organization` supply Journal metadata and Publisher association; usable aliases remain transient, never multiple configured identities.
+
+Design benchmarks are the public [OpenAlex sources registry](https://github.com/ourresearch/openalex-sources#readme), which separates feed evidence, normalized membership, direct identifier reconciliation, conflicts and ISSN→ISSN-L mapping, and [OpenCitations Meta identifier cleaning](https://github.com/opencitations/oc_meta/blob/master/oc_meta/core/curator.py#L704-L737), which retains individually valid identifiers. These are architectural references, not code to copy or runtime dependencies. Literature Monitor does not adopt OpenAlex's guarded name matching, first-alias fallback or persistent registry machinery. The existing Crossref `_normalize_issns()` is the local precedent for independent identifier validation.
+
+### 41.3 Provider retrieval and venue evidence
+
+OpenAlex remains the primary discovery Provider; Crossref remains the secondary discovery and bibliographic-evidence Provider. Configured identity remains ISSN-L throughout retrieval. Resolve the OpenAlex Source once and share its verified membership/alias evidence; do not add a redundant Source lookup solely for Crossref. Retrieve OpenAlex Works by that Source, and seed Crossref journal/date requests with configured ISSN-L plus its usable Source aliases. Deduplicate all alias results by normalized DOI.
+
+Crossref records/manifests may contain additional ISSNs. Apply existing `_normalize_issns()` policy individually: retain normalized valid identifiers, warn/ignore malformed ones and preserve other valid evidence. Valid Crossref identifiers tied to the already verified configured venue may supplement/corroborate the current transient retrieval evidence. They are not persisted into Journal configuration. Contradictory identifiers are retained/reported as disagreement, not automatically promoted into the usable query set.
+
+```text
+durable identity:
+  configured ISSN-L
+transient evidence:
+  valid OpenAlex Source aliases
+  + compatible valid Crossref ISSNs tied to current venue evidence
+retrieval:
+  bounded union of usable evidence
+  → Crossref journal/date requests
+  → normalized-DOI deduplication
+never:
+  transient alias → silent Journal identity mutation
+```
+
+Do not introduce an unbounded recursive alias crawl. If a later implementation demonstrates a recall need, it may use a deterministic, bounded second query expansion within the same verified configured-venue context, with DOI deduplication and no promotion of Crossref-only ISSNs to durable identity.
+
+Crossref can independently corroborate that current works/journal metadata carry identifiers compatible with configured ISSN-L and OpenAlex membership. Agreement strengthens venue evidence. Crossref does not provide authoritative `arbitrary Crossref ISSN → canonical ISSN-L` mapping and cannot select or rewrite configured `issn_l`. Both Providers can contain incorrect metadata; neither a canonical label nor a single erroneous field changes long-lived identity.
+
+Crossref availability is not a mandatory gate for every configured Journal Source lookup or identity-changing Settings Save. Preserve valid, uniquely supported OpenAlex membership when Crossref corroboration is unavailable. Available contradictory evidence must be preserved/reported without identity mutation or automatic query expansion; migration or identity-changing persistence remains conservative until the conflict is resolved.
+
+When Source resolution is unavailable during normal retrieval, Crossref may conservatively query only configured ISSN-L; Journal-name fallback must not expand scope. This retrieval fallback does not authorize identity-changing Settings persistence without verified metadata (§41.8). Crossref records lacking usable ISSN evidence cannot obtain strong configured-venue authority from matching `container-title` alone. Preserve conservative disputed/fail-closed eligibility for insufficient evidence, Provider-local failure isolation, consolidation before local keyword filtering and unaffected §37 DOI/Provider behavior. Implementation may choose the clearest internal API preserving these requirements.
+
+### 41.4 Candidate attribution, Papers and Workspace mapping
+
+Candidate Eligibility uses canonical configured ISSN-L as its authoritative venue key. Existing plural fields retain their names and responsibilities:
+
+```text
+ProviderWorkEvidence.monitor_journal_issns: transient configured attribution
+CanonicalPaper.journal_issns: current configured attribution
+Paper journal_issns: durable configured attribution
+```
+
+Current/new attribution contains configured canonical ISSN-L values, not raw Provider aliases or Group names. Preserve §34's current-context union, materialization update/preservation and human-content ownership rules where unaffected. Attribution remains separate from DOI identity, Paper UUID, duplicate matching and workflow status.
+
+For Workspace Group mapping, valid non-empty `journal_issns` matches configured ISSN-L: one matching Journal maps to its Group or Ungrouped; zero or multiple matching Journals are Unmapped, with no name fallback. Existing bounded compatibility for legacy missing/empty attribution may remain, but cannot become current identity authority. Malformed attribution retains its conservative Unmapped behavior. Different Journals sharing a display name cannot gain identity from that compatibility path.
+
+Do not eagerly rewrite historical Paper Markdown when venue identity changes. Before any proposed migration, establish canonical ISSN-L under §41.10 and compare current durable Paper attribution under legacy configuration with proposed canonical configuration. Detect changes to unique Journal, Group, mapped/unmapped status and ambiguity status. Block migration before configuration writes if a currently uniquely mapped Paper becomes unmapped, ambiguous or mapped to another Journal or Group. Journal-name fallback cannot conceal an incompatibility.
+
+A canonical ISSN-L absent from the old configured identifier set triggers explicit independent identity confirmation and Paper/Group compatibility proof; it is not a permanent migration failure. If canonical identity is independently established and durable Paper/Group mapping remains unchanged, absence alone does not block migration. This proof does not authorize eager Paper rewriting or a persistent alias registry.
+
+### 41.5 CLI and Bulk Import
+
+Retire exact Journal-name diagnostic selection `--journal <name>` and replace it with `--issn-l <ISSN-L>`. CLI `validate` remains. Change the flag spelling only if repository conventions demonstrate a materially better equivalent with the same identity semantics.
+
+Preferred Bulk Import identity is explicit ISSN-L. Merge/Replace compares ISSN-L only, never normalized Journal name. Legacy `Journal + ISSN/EISSN` input is migration input only; its Journal name is a display hint. Normalize each legacy identifier and reconcile membership against one unambiguous current Journal under §41.10. OpenAlex can establish Source membership and supply an ISSN-L candidate; available Crossref current identifier evidence can corroborate it. Neither Provider alone supplies authoritative canonical selection. Different or ambiguous Source relationships conflict; do not merge by name.
+
+If reliable ISSN-L cannot be established under the migration proof rules, require explicit confirmation/correction before Apply/Save accepts the identity. Persist no invented identity and select no ISSN-L automatically from Crossref.
+
+Import Preview may remain local syntax/plan preview. Provider membership reconciliation and required independent identity confirmation belong to Apply/Save before persistence. Any invalid row or unresolved identity conflict blocks the whole Apply; no partial draft application is allowed. Preserve explicit Replace/removal preview, applicable Group semantics and the draft's original monitor/list revisions. Apply changes only the unsaved Settings draft, and Save remains the sole persistence boundary; Apply must not create a second write path or refresh revisions to bypass conflicts.
+
+### 41.6 Shared portable list.md storage
+
+`list.md` is the portable local-first source of truth for configured Journals and Publishers. The target tables are:
+
+```markdown
+## Journals
+
+| Journal | ISSN-L | Publisher ID | Group |
+| --- | --- | --- | --- |
+
+## Publishers
+
+| Publisher | OpenAlex ID | Access URL |
+| --- | --- | --- |
+```
+
+Journal display name and direct Publisher association are machine-managed; ISSN-L is Journal identity; Group is human-managed. Publisher display name is machine-managed; OpenAlex ID is direct Publisher identity; optional Access URL is human-managed. Persist no additional configured print/electronic aliases.
+
+Only Journals drive literature discovery. Preserve `## Conferences` and all unrelated sections exactly under existing storage semantics; they must not become discovery input. Opening Settings or upgrading the application does not by itself rewrite legacy Journal storage. `monitor.yaml` gains no Publisher field, and no third persistence file is added.
+
+### 41.7 Direct Publishers and safe manual Access URLs
+
+Publisher identity comes from each verified Journal Source's direct `host_organization`. Merge by direct OpenAlex Publisher ID only, never by Publisher name, hostname or parent/imprint lineage. Do not collapse an imprint into its corporate parent. Several Journals with the same direct Publisher ID produce one Publisher row. Removing the last associated configured Journal may remove that Publisher from active configuration.
+
+For a new Publisher, resolve canonical `display_name` and `homepage_url` from OpenAlex Publisher metadata, batching metadata lookup where practical. A safe valid homepage may seed its initial Access URL; missing homepage yields blank, and an unsafe homepage must not become an initial clickable URL.
+
+After Access URL is saved, it is user-managed, including an intentionally blank value. The user may enter, replace or clear it. Later metadata resolution must not silently overwrite or clear that saved value.
+
+Blank Access URL is valid. A nonblank value must be a safe public HTTP/HTTPS URL. Reject credentials/userinfo, localhost, loopback/private IP targets, control characters and malformed URLs. Render an Open link only for a valid safe URL, using established external-link safety including `noopener`, `noreferrer` and no-referrer behavior where applicable.
+
+Access URL is only a manual institutional-login shortcut. Its presence or use establishes no login/session status, entitlement or successful authentication. Add no cookie inspection, credentials, checked timestamps, login history or URL polling.
+
+### 41.8 Settings validation, resolution and persistence
+
+Journals and Publishers share one Settings form, one Save action, one `list.md` content revision and the existing monitor/list persistence boundary (§25.6). Preserve local complete-draft validation, both original revision/CAS checks, safe writes, established two-file write order and truthful partial-save reporting.
+
+The Save sequence is:
+
+```text
+edit Settings
+→ local validation
+→ determine whether Journal identity requires metadata resolution
+→ resolve all required OpenAlex Journal/Publisher metadata before first disk write
+→ reread both current files and check original content revisions
+→ prepare complete list.md and monitor.yaml targets
+→ preserve compare-before-replace/CAS checks at the write boundary
+→ write list.md, then monitor.yaml, through existing persistence
+→ reread actual disk state and report the result
+```
+
+For a new or changed v0.6.2 Journal, the user/configuration supplies the intended ISSN-L. Save verifies that value through local syntax/checksum validation, one unambiguous OpenAlex journal Source supporting it, usable membership containing it, valid Source ID and canonical display metadata (§41.2). OpenAlex `issn_l` never replaces the submitted value. Legacy identities follow §41.10 confirmation/proof before persistence. Available Crossref corroboration may strengthen diagnostics; do not add a mandatory Crossref Save dependency without a later implementation task demonstrating that need. Unresolved contradictory evidence remains a persistence conflict.
+
+Metadata resolution is required only for identity-changing cases: legacy ISSN/EISSN-to-ISSN-L migration, a new Journal, a changed ISSN-L or legacy import canonicalization. Ordinary saves remain network-independent, including Group-only, Publisher Access URL-only, keyword-expression, date-policy, output-directory and other changes that leave Journal identity unchanged. Those saves perform no OpenAlex request and must not become a metadata refresh.
+
+If OpenAlex fails or identity cannot be established during identity-changing Save/Apply, fail before any settings-file write; neither `list.md` nor `monitor.yaml` may be partially mutated. Once complete targets have been prepared and writes begin, preserve existing two-file partial-save semantics: a list write failure prevents the monitor write; a successful list write followed by monitor failure reports partial save and real disk state, never success. Do not add a third file, cross-file transaction framework or rollback subsystem.
+
+### 41.9 Settings presentation and removed Web actions
+
+The shared form presents `Journals & Publishers`. Journals rows expose read-only canonical Journal name, ISSN-L, Group and Remove. Publishers rows expose read-only canonical Publisher name, editable Access URL and Open link only for a valid safe URL. Bulk Import and Group organization remain within the Journals subsection.
+
+Use consistent row/grid presentation for both lists. Desktop lists use bounded scrolling consistent with existing Journals behavior; mobile retains readable single-column rows and avoids inappropriate nested scrolling.
+
+Remove the separate Publisher access panel and Web `/settings/publisher-access` projection route. Remove the Settings Validate button and Web `/settings/validate` route. Retain application `validate_settings()`, internal `save_settings()` validation and CLI `validate`. Preserve unaffected Settings/Web security and §40 Connector readiness/capture behavior.
+
+### 41.10 Real tracked migration, reconciliation and evidence boundary
+
+The pre-migration tracked `list.md` contained 74 legacy `Journal + ISSN/EISSN` rows whose identifiers were legacy evidence rather than explicit durable ISSN-L. A2_FIX_1 subsequently proved all 74 target identities SAFE; A3 persisted the Journal migration and A4 persisted 20 direct Publishers. The current tables and unchanged Paper/Group mappings were read-only rechecked in A6 (§41.13). Reviewed deterministic proof must use real verified metadata, not synthetic-only fixtures. The earlier supplied OpenAlex HTTP 429 planning evidence established neither resolved identities nor successful migration.
+
+```text
+legacy ISSN/EISSN set
+→ normalize each identifier
+→ OpenAlex Source membership + available Crossref valid current journal/work ISSNs
+→ reconcile whether identifiers describe one current Journal
+→ ISSN-L candidate/evidence
+→ establish durable ISSN-L only under an authorized proof rule
+```
+
+OpenAlex `Source.issn_l` may supply a candidate and Crossref may corroborate membership. Neither alone supplies authoritative ISSN→ISSN-L mapping. All relevant valid legacy identifiers must be compatible with one unambiguous journal Source/current venue; indeterminate or contradictory evidence remains unproven/conflicting. Retain valid evidence while diagnosing invalid identifiers; never invent corrections or silently drop unresolved identity-bearing input to force success.
+
+A narrow automatic migration may accept the OpenAlex candidate only when all of these hold:
+
+- All relevant valid legacy identifiers resolve compatibly to one unambiguous journal Source.
+- Candidate ISSN-L passes syntax/checksum validation, belongs to the Source's usable identifier set and is already in the legacy configured identifier set.
+- No available Crossref evidence contradicts the venue relationship; unavailable corroboration is not fabricated as agreement.
+- No other legacy row resolves to the same target identity.
+- Historical Paper/Group compatibility is proven safe under §41.4.
+
+This accepts a strongly corroborated existing identifier; it grants no global authority to OpenAlex `issn_l`. A known unresolved disagreement cannot enter this automatic safe case, even when the candidate is an old identifier.
+
+A proposed ISSN-L absent from the old set must not be persisted solely because OpenAlex returns it. Require explicit independent confirmation: reviewed one-time authoritative ISSN Registry evidence may establish the tracked repository's canonical identity; generic user migration requires explicit confirmation/correction rather than guessing. Available Crossref current-work ISSNs can corroborate one venue but cannot choose canonical ISSN-L. Do not select canonical identity by Crossref frequency, print/electronic labels, Journal title, Provider ordering, first alias or OpenAlex `issn_l` alone. Independently established identities still require unique Source membership, no target collision, resolution of contradictory evidence and the Paper/Group compatibility gate. Absence alone is not a permanent failure after those proofs pass.
+
+#### Historical A2 exceptional identity evidence (Revision 2)
+
+The original A2 real-data probe exposed these four cases. At the Revision 2 documentation-only correction, the supplied Registry conclusions below had not been independently re-verified and required review before configuration writes. A2_FIX_1 later re-verified the exceptional decisions and produced the accepted proof recorded in §41.13. The historical table retains the original A2 evidence; title-history conflicts must be resolved by reviewed identifiers, never runtime name matching.
+
+| Journal (presentation label) | Legacy identifiers | A2 OpenAlex evidence | Supplied independent Registry conclusion and implication |
+| --- | --- | --- | --- |
+| Optimization Methods & Software | `1055-6788` | Candidate `1026-7670` | ISSN-L `1026-7670`; a legitimate canonical identity can be absent from the old set and requires confirmation/proof. |
+| INFORMS Journal on Computing | `1091-9856` | Candidate `0899-1499` | Current-title ISSN-L `1091-9856`; `0899-1499` belongs to predecessor ORSA Journal on Computing. Source aggregation across title history cannot choose the current configured identity. |
+| Genome Biology | `1474-760X` | Candidate `1465-6906` | Current-title ISSN-L `1474-7596`; `1465-6906` is associated with earlier GenomeBiology.com. Apply the same title-history constraint and independent confirmation. |
+| Manufacturing & Service Operations Management | `1523-4614`, `1526-5498` | Source also contains invalid `1526-5489` | ISSN-L `1523-4614`; diagnose/exclude the invalid alias while retaining valid membership evidence. |
+
+#### Historical A2 Paper evidence and completion limit
+
+Supplied A2 workspace evidence reports 30 Paper Markdown files, 30 valid `journal_issns` attribution states and 11 Papers with multiple ISSNs. The supplied read-only simulation excluded the malformed M&SOM alias while retaining valid Source evidence and produced 30 unique current mappings, 30 unique proposed mappings, 30 unchanged Journal/Group mappings and zero demonstrated mapping changes. This is simulation evidence, not final migration acceptance; it does not settle exceptional canonical ISSN-L choices. That Revision 2 documentation task ran neither the simulation nor a live Provider probe.
+
+The preserved A2 implementation/probe's strict resolution rules remain distinct from that supplied simulation: its report classified 70 rows safe, three requiring compatibility treatment and one invalid Source, and left all 30 proposed Paper mappings unproven. Revision 2 changes the contract, not that implementation or report. Corrected parsing/reconciliation belongs to `V0_6_2_A2_ISSN_L_RESOLUTION_MIGRATION_PROOF_FIX_1` after independent review of this correction.
+
+Before configuration writes, independently re-verify exceptional canonical decisions, reconcile every row, prove safe historical mapping and inspect the reviewed migration diff. Any unresolved identity conflict, target collision or unsafe Paper/Group mapping blocks the tracked migration. At A1/Revision 2 the 74-row migration was not complete, and read-only A2 evidence did not constitute accepted rewritten data. Subsequent A2_FIX_1, A3 and A4 completed proof and tracked migration; current evidence is in §41.13. These later results do not retroactively change the original blocked A2 report.
+
+### 41.11 Explicit non-goals
+
+v0.6.2 does not add:
+
+- automatic institutional login, credential storage, cookie/session inspection, login/session status detection or entitlement checks;
+- CARSI, Smart Gateway, WebVPN or XMU login automation; publisher-specific login DOM adapters or login-expiry diagnostics;
+- Publisher URL reachability polling, Publisher login history or automatic Publisher merging by name/hostname/lineage;
+- a persistent OpenAlex metadata database/cache, Journal identity SQLite database, reconciliation database, alias registry or global metadata refresh scheduler;
+- ISSN Portal API, ISSN.org scraping, Registry credentials/subscriptions, a local 2.6M-row ISSN→ISSN-L mirror, periodic mapping refresh or any new persistent identifier registry;
+- conference monitoring, PDF attachment-readiness changes, Zotero collection routing, changes to the v0.6.1 Connector capture protocol or new Paper workflow states;
+- unrelated Provider/canonicalization refactoring or restoration of retired v0.5.x acquisition/session machinery.
+
+Reviewed one-time authoritative Registry evidence for the tracked 74-row migration is release/migration verification data, not a new production Provider or mandatory runtime dependency. Production remains OpenAlex + Crossref.
+
+### 41.12 Required implementation acceptance and release boundary
+
+The implementation must demonstrate all of the following. These remain acceptance requirements, not A1 test results; §41.13 records implementation evidence and §41.14 identifies remaining gaps. Passing existing tests does not waive these requirements:
+
+- Exactly one user/configuration-owned durable ISSN-L per Journal, ISSN-L-only duplicate detection, distinct Journals with duplicate display names allowed and read-only canonical names. Providers cannot silently replace configured identity. Regressions cover name mismatch with valid identity and duplicate display names with different ISSN-L values.
+- One unambiguous journal Source directly supporting configured ISSN-L through usable membership, valid Source ID and display metadata. Independently validate/deduplicate aliases; unrelated malformed aliases and different/missing/malformed OpenAlex `issn_l` do not alone invalidate valid membership. Cover invalid queried IDs, absent membership, non-journal Sources, invalid Source IDs, structural ownership uncertainty and multiple-Source conflicts.
+- Shared Source resolution, bounded transient OpenAlex/Crossref retrieval evidence, normalized-DOI deduplication and explicit compatible/unproven/conflicting reconciliation. Crossref corroborates membership but cannot select ISSN-L; contradictory identifiers are reported, not automatically queried. No unbounded alias crawl, durable alias registry or strong name-only Crossref venue authority. Resolution failure preserves the bounded configured-ISSN-L fallback, Provider failure isolation and conservative eligibility.
+- ISSN-L Candidate Eligibility and new/current Paper attribution through the existing plural fields, conservative Workspace mapping and no eager historical Paper rewrite. Human notes, unknown frontmatter, status and Zotero linkage remain preserved.
+- Reviewed real-metadata migration of all 74 tracked rows, with the narrow existing-identifier automatic rule, independent confirmation/correction for absent-set identities, re-verification of all four exceptional cases, no target collisions and historical Paper/Group compatibility. Canonical absence alone does not permanently block a proven safe migration; unresolved identity conflicts or unsafe mapping prevent writes. No eager Paper rewrite or external Registry runtime dependency.
+- Publishers persisted in shared `list.md`, one row per direct Publisher ID, no name/hostname/lineage merging, safe homepage seeding and preservation of manually entered or cleared URLs. Regressions cover one Publisher shared by several Journals and missing homepage followed by manual URL entry.
+- Safe URL acceptance/rejection and external-link behavior; Conferences and unrelated content preserved; monitor YAML schema unchanged.
+- One shared Settings Save/revision/CAS boundary. Ordinary saves remain network-independent; identity-changing Save verifies submitted ISSN-L and resolves required metadata before the first persistence write, without silently substituting OpenAlex `issn_l` or imposing mandatory Crossref availability. Failed identity establishment or unresolved conflict causes zero settings mutation. Regressions cover network independence, fail-before-write, concurrent edits and existing two-file partial-save reporting.
+- Explicit ISSN-L import and ISSN-L-only Merge/Replace; legacy import uses reconciled evidence and confirmation rules, with no name merging or Crossref-derived automatic ISSN-L selection. Whole-Apply conflict handling, original draft revisions and Group organization remain preserved.
+- Unified desktop/mobile Settings lists; separate Publisher projection and Web Validate action/routes removed while application/internal validation and CLI `validate` remain.
+- v0.6.1 Connector protocol, automatic capture, exact-DOI reconciliation and manual-session boundaries remain unchanged.
+- Relevant tests cover migration, OpenAlex, Crossref, Candidate Eligibility, Workspace, Import, Settings and Web. Before release, run full pytest, applicable Node Settings/UI harnesses, `uv lock --check`, `git diff --check` and normal package/build verification. Preserve applicable §40 Connector acceptance and report actual verification scope.
+- Package and Provider version identities change to `0.6.2` only during normal release preparation. A1 changes no package/Provider/Connector version, production code, tests, configuration data or protected local state, and runs no live Provider migration probe.
+
+### 41.13 A1 through A5 implementation and migration evidence (2026-10-08)
+
+Current development HEAD is `8ab0630237753e0d56d26a06953576894a7d1106` on `v0.6.2-development`; A1 through A5 changes remain uncommitted. This record separates real external evidence, deterministic replay, automated checks and current read-only data verification. It does not assert v0.6.2 publication or complete acceptance.
+
+| Phase | Implemented or verified scope | Evidence boundary |
+| --- | --- | --- |
+| A1 | §41 identity, storage, migration and Settings contract; stable project rules. | Contract only at that phase, not implementation or migration. |
+| Original A2 | Real Source probe under the original strict rules: 70 safe rows, three requiring compatibility treatment and one invalid Source; all 30 proposed Paper mappings unproven. | BLOCKED historical report. Revision 2 supplied simulation did not close it. |
+| A2_FIX_1 | Real OpenAlex Source response and independently reviewed exceptional canonical decisions; 74 SAFE targets: 71 automatic existing-identifier cases and three independently confirmed cases. No collisions, conflicts or unresolved targets. All 30 Papers retain the same unique Journal/Group mapping; 11 have multiple stored ISSNs. | Accepted read-only proof (`report.json`). Crossref was NOT_QUERIED; no positive Crossref corroboration is claimed. Recorded-response replay (`final-code-replay.json`) reproduced the 74/30 result without new network calls. |
+| A3 and A3_FIX_1 | Persisted 74 canonical Journal names, one durable ISSN-L each, direct Publisher associations and original Groups. Adapted Source membership, shared retrieval evidence, CLI selection, Candidate Eligibility, current Paper attribution and conservative Workspace mapping. | Migration/preservation evidence and network-independent regression coverage. Historical Papers were not proactively rewritten. |
+| A4 | Persisted 20 direct Publisher IDs/names from a real OpenAlex Publisher batch, matching 73 Journal associations. Seeded 19 accepted initial homepage URLs; one Publisher has a blank URL. Shared local-first Settings resolution, offline ordinary saves, URL ownership and revision checks implemented. | Real Publisher probe (`publisher-probe.json`) and preservation checks. No hostname/name/lineage merge, login check or credential/session inspection. No new Crossref migration probe. |
+| A5 | Unified Journals & Publishers editor, read-only canonical metadata, Pending new Journals, editable/clearable Access URLs, Group controls and one Save. Separate Publisher projection and Web Validate actions/routes removed; application/internal validation and CLI validate retained. | Python Web tests and Node Settings/UI harnesses passed. Real desktop/mobile browser layout and interactions were not verified. A6 found gaps below. |
+
+A6 read-only comparison used the accepted A2_FIX_1 row tuples (canonical display name, durable ISSN-L, direct Publisher ID and Group) and A4 Publisher tuples (display name, direct ID and initial Access URL). All 74 Journal rows and 20 Publisher rows match. There are 74 unique Journal identities and 20 unique Publisher identities, 73 associations, 19 populated initial URLs and one blank. The Conferences/unrelated tail matches the pre-migration tracked content exactly. Workspace loads 30 Papers without issues; every Paper retains the accepted unique Journal/Group classification, including Ungrouped where appropriate. Paper bytes and protected state remain unchanged.
+
+Retrieval review found no additional substantive defect in shared once-per-run Source resolution, independently validated aliases, bounded Crossref reconciliation/fallback, normalized-DOI consolidation, configured-ISSN-L Candidate Eligibility/current attribution or conservative historical mapping. This is code review plus existing automated coverage, not a new live multi-Provider Run. §40 Connector implementation/protocol and Connector source/artifacts are unchanged; relevant capture/reconciliation regressions remain covered by the reused suite. Existing §40 live evidence keeps its original scope and is not a fresh Chrome/Zotero acceptance run.
+
+Validation reused from A5 (macOS, Python 3.12.14, Node v24.21.0): `uv run pytest` completed with **2665 passed**, including applicable Node Settings/UI harnesses, and two existing dependency deprecation warnings. A6 changed only README/SPEC; production source, test behavior, dependencies and Connector inputs are unchanged, so this result remains applicable under AGENTS evidence-reuse rules. A6 additionally ran offline adversarial probes against isolated temporary configurations; they exposed the five defects in §41.14 despite the passing existing suite. No real user configuration was written and no external Publisher URL was opened by these probes.
+
+A6 ran `uv lock --check` successfully (`Resolved 27 packages`) and checked README commands against the actual root/subcommand CLI help, including `--issn-l` on the six Journal-selecting diagnostics and absence of `--journal`. `git diff --check` passed after documentation edits. Package and OpenAlex/Crossref User-Agent identities remain `0.6.1`; no version bump, build, tag, push or Release was performed. A7 must perform its own authorized release preparation and distribution verification after A6 blockers close.
+
+### 41.14 A6 integration audit and product acceptance (2026-10-08)
+
+**Original A6 result: STATE: BLOCKED. RELEASE_READY: no. NEXT: A6_FIX.** A6 inspected the full task-relevant A1 through A5 changes, current callers/tests and tracked migration evidence using AGENTS and the parent Desktop `REVIEW_WORKFLOW.md`. That audit changed documentation only and observed the following unfixed findings at its source snapshot. The table and probe evidence remain the historical audit record; subsequent A6_FIX_1 closure is recorded below. The acceptance/identity contract above is unchanged.
+
+| Finding | Directly observed behavior and impact | Bounded correction and required regression |
+| --- | --- | --- |
+| F1 / P1: Unicode Access URL host bypass | `src/literature_monitor/url_safety.py:25–39` checks localhost/private IP before IDNA normalization. `http://127。0。0。1`, `http://192。168。1。1` and `http://１０。０。０。１` pass shared validation/PublisherConfig, while Node's WHATWG URL parser resolves them to loopback/private IPs. An isolated ordinary Save also persists a bypass URL and exposes Open. This violates §41.7's local/non-public target rejection. | Normalize the host before the existing localhost/IP/numeric-host rejection, retaining offline validation and legitimate public IDN support. Cover validator, PublisherConfig and Web Save/Open; add no DNS, reachability or login probe. |
+| F4 / P1: damaged Journal storage cannot be repaired | `src/literature_monitor/application/settings.py:768` strictly parses persisted Journals before accepting a corrected draft. A recoverable Settings page for malformed/missing Journal table still rejects a valid replacement with “Journals table is missing or empty”; no Provider calls or writes occur. This regresses unaffected §25.8 recovery. | Permit explicit damaged-storage repair while preserving readable metadata authority, unrelated sections and original revisions/CAS. Test missing/malformed storage, successful repair and zero-write failure; do not ignore parser errors globally. |
+| F2 / P2: display hint vetoes same-ISSN-L import | `src/literature_monitor/application/journal_import.py:230` treats differing imported names as conflicting row metadata. Two rows with `0006-341X`, the same Group and different display hints block the whole Apply. This violates ISSN-L-only duplicate handling (§§41.2, 41.5). | Remove the display-name veto while retaining genuine Group-conflict handling and authoritative existing metadata. Test same identity/different hints, distinct identities/same name and conflicting Groups. |
+| F3 / P2: legacy Web Import has no completion path | `application/journal_import.py:253–256` returns legacy previews with `MIGRATION_REQUIRED` and `can_apply=false`; `web/templates/fragments/settings_editor.html:212` hides Apply, and `web/app.py:555` supplies no migration confirmations (all beneath `src/literature_monitor/`). Valid legacy import therefore cannot reach the backend migration resolver or confirmed identity Apply. | Connect legacy Preview/reconciliation/confirmation to whole-draft Apply using the existing migration rules. Keep ambiguous/conflicting input blocked, preserve original revisions and unsaved values, and retain Save as the only disk-write action. Cover automatic-safe and explicitly confirmed legacy input through Web endpoints. |
+| F5 / P2: remove/reintroduce saved identity fails Save | Removing a saved Journal from the draft, then importing that same ISSN-L, produces a Pending row with a hint and empty Publisher ID. Apply succeeds, but Save rejects machine-managed metadata against the still-persisted row. Code inspection shows Add constructs the same Pending metadata shape; the persisted-metadata rejection is at `src/literature_monitor/application/settings.py:778–780`. | Restore persisted canonical metadata for a reintroduced saved identity while retaining metadata-tampering rejection and offline ordinary Save. Cover Remove → Import/Add → Save, retained Group/URL edits, revisions and zero-write failure. |
+
+Primary offline probes used application import and isolated FastAPI TestClient requests with Provider calls disabled where ordinary Save must be offline. All four failure-path reproductions retained settings bytes; URL normalization was compared with Node's actual URL parser without requesting any target. These probes establish observable defects; they are not browser visual acceptance and do not amend the passing A5 test record.
+
+Real desktop/mobile smoke is **UNVERIFIED**. The browser-control inventory call timed out after 10 seconds; prior A5 attempts were also unavailable. No write-based smoke was run on the user's real configuration. Automated CSS/template/DOM assertions cannot prove actual large-list independent scrolling, narrow-screen stacking, focus/interaction, HTMX visual restoration or rendered success/failure feedback. The requested isolated 74-Journal/20-Publisher desktop/mobile smoke remains a release gate.
+
+The original A6 next step was a separately authorized bounded fix of all five findings, followed by real desktop/mobile acceptance. A6_FIX_1 below closes the code findings; browser acceptance remains required before recommending A7. v0.6.1 remains the latest RELEASED baseline; v0.6.2 preparation, publication and new live Connector verification have not been performed.
+
+#### A6_FIX_1 closure and verification (2026-10-08)
+
+**CODE_FINDINGS: CLOSED. BROWSER_ACCEPTANCE: UNVERIFIED. RELEASE_READY: NO. NEXT: BROWSER_ACCEPTANCE.** Authorized fixes retain the original A1 through A6 changes and the §41 identity/persistence contract. HEAD remains `8ab0630237753e0d56d26a06953576894a7d1106` on `v0.6.2-development`; all changes remain uncommitted and the index is empty.
+
+| Finding | Closure and observable regression coverage |
+| --- | --- |
+| F1 / P1 | Shared server validation performs IDNA/Unicode host normalization before localhost, literal-IP and numeric-host checks. Unicode dots, fullwidth digits and other normalized non-public targets are rejected by the validator, PublisherConfig and Web Save/Open; legitimate public IDNs remain accepted. Python results are compared with Node's actual WHATWG URL parser. No DNS, reachability or login probe was added. |
+| F4 / P1 | Settings distinguishes canonical, legacy, recoverable damaged and unsafe storage. An explicit valid repair draft can replace missing/malformed Journals while preserving readable Publishers and unrelated sections. Individually verifiable canonical rows retain metadata authority; untrusted rows require existing OpenAlex resolution. Unassociated persisted Publishers cannot be silently lost during repair. Provider/metadata failure, ambiguous duplicate sections, unsafe paths, symlinks, unreadable input and revision conflicts block writes. List-first CAS and partial-save semantics remain intact. |
+| F2 / P2 | Duplicate import identity uses ISSN-L alone. Compatible Groups merge despite different display hints; the first hint is deterministic for a new identity, whose final metadata still comes from OpenAlex. Existing canonical metadata is retained. Genuine Group conflicts block the whole Apply, and different ISSN-L values with the same name coexist. MERGE/REPLACE and source-row diagnostics are covered. |
+| F3 / P2 | Local legacy Preview exposes identifiers, Groups and confirmation inputs, with a Reconcile and Apply path into the existing migration engine. All rows must resolve automatically or pass independent explicit confirmation; Provider failures, conflicting/ambiguous evidence, invalid confirmations and target collisions block the whole Apply without writes. Import confirmation fields are separate from persisted-storage migration fields and bound to the exact source text and source-row sequence. Edited sources invalidate stale confirmations. HTMX retains unsaved fields, URL edits/clears, revisions and valid confirmation inputs after a failed attempt. Save remains the sole persistence action. |
+| F5 / P2 | Save matches Pending reintroductions against persisted canonical ISSN-L rows and restores their canonical name and Publisher ID without Provider requests. Remove/Add and Remove/Import retain draft Group and Publisher URL edits/clears. Ordinary forged metadata and fake Publisher associations remain rejected; unfamiliar identities still require resolution, and revision conflicts remain blocked. |
+
+`tests/test_a6_fix1.py` adds **56 finding-specific regression cases**, including actual Node URL parsing and the existing Settings DOM harness for edited import confirmations and HTMX restoration. Each finding's independent regression first reproduced the failure and then passed after its fix. Existing Import/Web regressions now test genuine Group conflicts rather than treating display-name differences as identity conflicts; invalid legacy inputs remain whole-Apply blocked.
+
+Associated URL/Settings/Import/migration/A3/A4/A5/Workspace/Candidate/OpenAlex/Crossref coverage passed **1187 tests** before the final additional Node regression; that Node case also passed independently. Final `uv run pytest` passed **2720 tests**, with two existing dependency deprecation warnings, in 9.00 seconds on macOS/Python 3.12.14/Node v24.21.0. Applicable Node Settings/UI harnesses ran within pytest; these are automated assertions, not real browser acceptance. `uv lock --check` passed (`Resolved 27 packages`), and `git diff --check` passed after the final documentation edits. The complete FIX diff was inspected.
+
+Read-only preservation checks matched all **74 Journal** tuples to accepted A2_FIX_1 evidence and all **20 Publisher** tuples to accepted A4 evidence. All **30 Papers** retained their unique Journal/Group mapping and exact bytes. The **177 protected files** under `monitor.yaml`, `src/.obsidian/` and `workspace/` matched the pre-fix snapshot. Tracked `list.md`, AGENTS stable rules, dependencies, §40 Connector source/artifacts and package/Provider User-Agent version `0.6.1` are unchanged. SPEC §§1 through 40, including §40.16, match the pre-fix text exactly. No real settings or workspace writes, commit, build, tag, push, Release or A7 operation occurred.
+
+The FIX_1 real-browser inventory attempt, `cua.getState()`, timed out after 10 seconds. **Desktop and mobile acceptance remain UNVERIFIED**: no isolated 74-Journal/20-Publisher rendered smoke could be performed. Independent scrolling, mobile page flow, focus/interactions and rendered success/failure/conflict feedback still require real browser acceptance. This environment blocker does not reopen F1 through F5, but it prevents a release-ready claim.
+
+Audit/rollback boundary: the original findings above, isolated before/after regressions and final verification record identify the changes. Rollback would remove only the FIX_1 named-file hunks while retaining prior A1 through A6 work; no real configuration/Paper rollback or data migration is needed because the fixes were exercised only on isolated fixtures. No unrelated refactor, new Provider, persistent alias registry, runtime ISSN Portal dependency or frontend framework was introduced.
+
+#### A6 browser acceptance closeout (2026-10-08)
+
+A subsequent acceptance session succeeded using the AgentDock desktop skill and real macOS Google Chrome, after the earlier A6_FIX_1 browser-control timeout. The original A6 **BLOCKED** findings and the FIX_1 **UNVERIFIED** record above remain accurate descriptions of their respective earlier checkpoints; this closeout supersedes only the current browser-gate status. F1–F5 code findings were already closed by A6_FIX_1. This session did not change the §41 identity or persistence contract.
+
+```yaml
+CODE_FINDINGS: CLOSED
+BROWSER_DESKTOP: PASS
+BROWSER_RESPONSIVE_550PX: PASS
+PHYSICAL_MOBILE: NOT_TESTED
+A6_BROWSER_GATE: CLOSED
+A6_FINAL_REVIEW: PENDING
+A7: NOT_STARTED
+V0_6_2_RELEASED: NO
+```
+
+**Isolated configuration and real rendering.** Chrome visited `http://127.0.0.1:8767/settings` against the isolated test service. The service used `/private/tmp/literature-monitor-browser-repair-20261008/smoke/monitor.yaml` and `/private/tmp/literature-monitor-browser-repair-20261008/smoke/list.md`, never the user's active configuration. At **1470px content width**, the real page rendered **74 Journals**, **20 Publishers** and **19 Open links**. Journal name, ISSN-L, Group and Remove, plus Publisher name, Access URL and Open, were displayed and usable. The two lists had separate bounded scrolling and could scroll independently; the page had no horizontal overflow. **Desktop Chrome: PASS.**
+
+At **550px macOS Chrome window width**, both Journal and Publisher rows stacked in a single column. Internal list scrolling was disabled in favor of normal page scrolling; long-list entries, Group, Remove, Access URL and Open remained readable and there was no horizontal overflow. **Responsive Chrome: PASS.** This was a resized desktop-browser window, **not** physical phone/touch acceptance.
+
+**Real-browser interaction results (all PASS; all writes confined to the isolated files):**
+
+1. **Unicode URL safety:** Entering `http://127。0。0。1` hid the Open link. Save rejected the value while preserving the draft input and showing an error; both isolated files remained byte-identical.
+2. **Import Preview → Apply:** A Group change for the same ISSN-L `0090-5364` applied correctly to the unsaved draft. The Publisher Access URL draft and original revision survived Apply; no file write occurred before Save.
+3. **Successful Save:** The Group became `Statistics · T0.5` and the Publisher Access URL became `https://a6-isolated.example/access`. Chrome showed success; both values persisted to the isolated `list.md`, and the dirty indicator cleared.
+4. **Invalid new Journal:** Adding Pending Journal `NOT-ISSN` caused Save to reject the draft and retain the input/error feedback, with no file mutation.
+5. **Revision conflict:** Two Chrome tabs simulated concurrent Settings edits. Save with the stale original revision was rejected, preserving the attempted draft and the newer disk content.
+6. **HTMX Preview restoration:** The Journal list's `scrollTop=1630`, Publisher list's `scrollTop=680`, and the expanded Import and Groups sections survived the partial replacement.
+7. **Remove → Add → Save:** Removing a persisted Journal and adding back ISSN-L `0090-5364` succeeded. Unique identity, canonical Journal name, Publisher ID and Group were restored correctly on Save, with no residual Pending state.
+
+**Verification provenance and limits.** `tests/test_a6_fix1.py` was independently rerun with **56 passed**. The **2720 passed** full `uv run pytest` suite, including Node Settings/UI harnesses and two existing dependency deprecation warnings, is **prior Codex evidence** from A6_FIX_1, not a suite run repeated during this real-browser session or the documentation closeout. No new live OpenAlex/Crossref end-to-end Provider Run or physical mobile/touch test was performed. The §40 Connector live evidence retains its historical scope; this session does not claim new Connector acceptance.
+
+The user's `monitor.yaml`, `src/.obsidian/`, `workspace/` and Paper Markdown were not used for browser writes; their protection checks remained unchanged. `list.md` retains 74 Journal and 20 Publisher rows. The document-only closeout preserves SPEC §§1–40 (including §40.16), the original A6 audit and FIX_1 timeout evidence, and package/Provider User-Agent version `0.6.1`. The Git index remains empty, and no commit, build, tag, push, GitHub Release or A7 preparation was performed. **A6_BROWSER_GATE is CLOSED; A6 is ready for final independent documentation/Git review, which is still PENDING.** v0.6.2 remains **UNRELEASED**; no v0.6.2 distribution artifact has been verified.
+
+
+### 41.15 A7 release preparation (2026-10-08)
+
+**A6_FINAL_REVIEW: PASSED. A7_RELEASE_PREPARATION: PREPARED. v0.6.2: UNRELEASED.**
+The authorized A7 baseline confirms that the final independent A1–A6 review
+passed. This current status supersedes the pending checkpoint in §41.14, while
+preserving its original BLOCKED audit, FIX_1 browser timeout and subsequent
+real-Chrome acceptance records. v0.6.1 remains the latest published release
+until publication verification.
+
+Preparation operates on accepted uncommitted A1–A6 inputs at
+`8ab0630237753e0d56d26a06953576894a7d1106` on `v0.6.2-development`.
+Python metadata, OpenAlex/Crossref User-Agent strings and the independent
+Connector manifest target `0.6.2`. Upstream revision, all five submodule pins,
+Connector patches/overlay and §40 protocol are unchanged. The Git index remains
+empty; commit, tag, push and GitHub Release are outside this task.
+
+Preflight verified local `main`, `origin/main` and development HEAD at that same
+baseline; live `origin/main` also matched. The index was empty, no local/remote
+`v0.6.2` tag existed, GitHub authentication was active, and the tag Release API
+returned HTTP 404. The latest public stable Release was `v0.6.1`. There is no
+branch/history/publication conflict. These were read-only remote checks.
+
+**Direct A7 validation (macOS, Python 3.12.14, Node v24.21.0, uv 0.12.19).**
+The isolated current-working-tree candidate includes the two accepted untracked
+modules (`application/journal_migration.py`, `url_safety.py`) and all six accepted
+untracked test files, rather than exporting the old HEAD alone. Version/header
+and boundary tests passed across these focused commands:
+
+- `uv run --locked pytest tests/test_crossref.py::test_client_uses_versioned_encoded_doi_endpoint_and_polite_headers tests/test_crossref.py -k 'versioned_encoded or redirect' tests/test_openalex.py::test_canonical_singleton_checks_only_configured_identity_with_bearer_key tests/test_connector_boundary.py`: **20 passed, 190 deselected**. The global `-k` selection excludes the OpenAlex and boundary cases, which the next command exercises.
+- `uv run --locked pytest tests/test_openalex.py::test_canonical_singleton_checks_only_configured_identity_with_bearer_key tests/test_connector_boundary.py`: **13 passed**.
+- `uv run --locked pytest tests/test_crossref.py::test_a5_manifest_and_doi_batches_use_repeated_filters_and_same_pool`: **1 passed**.
+- `./connector/test.sh`: **36/36 passed**; `uv lock --check`: **Resolved 27 packages**; `git diff --check`: passed. Package metadata, lock project version and Provider/build/assertion references are consistently `0.6.2`.
+
+A7 changes only release identities, their direct assertions and release documents.
+Dependency membership/versions, packaging logic and A1–A6 runtime behavior remain
+unchanged. §41.14's A6_FIX_1 full `uv run pytest` **2720 passed**, including Node
+Settings/UI harnesses and two existing warnings, its independent **56 passed**
+regression rerun, and real desktop/550px Chrome acceptance are **reused evidence**,
+not new A7 runs. The accepted A6 source/test inputs were frozen at A7 preflight
+and only the stated A7 changes followed. §40.14 Connector live acceptance retains
+its original scope. Physical mobile, a new live multi-Provider Run, the optional
+pre-existing-parent live case and the 17 upstream ItemSaver tests remain
+unverified under their recorded boundaries. The unavailable Puppeteer Chrome
+environment was unchanged; blocked upstream setup was not repeated.
+
+**Python candidate.** `uv build --no-sources --out-dir <external>/artifacts`
+built the wheel from the sdist using accepted current working-tree inputs.
+Both artifacts report `0.6.2` and MIT, include current README/license metadata,
+and contain all **61/61** application payload files byte-identically, including
+new modules and Web templates/static. Complete file lists were inspected
+(**75 wheel entries**, **66 sdist files**). Protected local paths, Connector/AGPL
+payload, caches, temporary reports and secret markers are absent. A fresh
+external Python 3.12.14 venv installed the wheel offline with frozen exported
+runtime requirements; site-packages metadata, 11 imports, all installed payload
+bytes, CLI help and `uv pip check` (**21 packages compatible**) passed. Installed
+FastAPI HTTP/template/static smoke returned 200 for `/settings`, `/static/app.js`
+and `/static/app.css`; it used a missing external config and wrote no settings.
+
+**Connector candidate.** The external build reconstructed exact upstream
+`876e41ad15139077f2e07b2f71a0fa94742e0b4a` and all five locked top-level submodules,
+ran `npm ci --ignore-scripts --no-audit --no-fund` and upstream debug build
+`./build.sh -d -v 0.6.2`. MV3 manifest version is `0.6.2`, name is
+`Literature Monitor Connector`, and service worker is `background-worker.js`.
+Runtime/provenance overlay and AGPL COPYING match tracked sources; source delta
+matches all four declared patched paths. Against the digest-verified published
+v0.6.1 ZIP, the Chrome payload path set is identical and **only manifest.version
+changes**. The separate ZIP retains `chrome-mv3/`, `INSTALL.txt` and **2006**
+corresponding-source files under `source/upstream/` and
+`source/literature-monitor/connector/`. Its source path set matches the accepted
+v0.6.1 format; unused Zotero Desktop dependency symlinks remain excluded as in
+that archive. ZIP CRC, complete byte readback, executable build/reconstruction
+modes, required licenses/locks/patches/overlays and absence of Python/personal
+payload passed. A provenance wording correction required only ZIP repackaging
+and readback, not a new upstream build.
+
+All three candidate files are retained in:
+`/private/tmp/literature-monitor-v0.6.2-a7-4hq2flbd/artifacts/`.
+
+| Candidate | SHA-256 |
+| --- | --- |
+| `literature_monitor-0.6.2-py3-none-any.whl` | `1343c6d1af9fe9113640fb03eac1719522d5cce45466a980ea5650023a5d9d35` |
+| `literature_monitor-0.6.2.tar.gz` | `2674ac7072099cbc891039e1d805177c876eca28b570013231ddc8fd58198555` |
+| `literature-monitor-connector-0.6.2-chrome-mv3.zip` | `816c5e00ed391808e38110aff43a208709a3ac99ba1fba519175ba1da0afecea` |
+
+**Scope and preservation.** A7 adds exactly 12 version/document/assertion file
+changes; no unrelated refactor or runtime/dependency/build-logic change was
+introduced. The complete A1–A7 candidate inventory and diffs are recorded beside
+artifacts, including accepted untracked modules/tests and intended deletions.
+The 74 Journal and 20 Publisher tuples match accepted A2_FIX_1/A4 evidence;
+all 30 durable Papers retain their accepted unique Journal/Group mapping.
+`list.md` is unchanged by A7, Conferences/unrelated tail matches HEAD, and all
+177 protected files match A7 preflight bytes/modes/mtimes and the A6 byte hashes.
+SPEC §§1–40, including §40.16 artifact digests, remain byte-identical. README,
+current identities and final artifacts agree. The final index is empty and HEAD
+is unchanged. No commit, tag, push or GitHub Release was performed.
+
+**NEXT: V0_6_2_A7_FINAL_RELEASE_CANDIDATE_REVIEW.** PREPARED records local
+candidate construction and verification; v0.6.2 remains UNRELEASED.

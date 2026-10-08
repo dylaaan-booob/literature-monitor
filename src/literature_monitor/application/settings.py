@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+import os
+from contextlib import nullcontext
+from dataclasses import dataclass, replace
 from datetime import date
 from enum import Enum
 from pathlib import Path
@@ -14,30 +16,39 @@ import yaml
 from literature_monitor.config import (
     ConfigurationError,
     JournalConfig,
+    PublisherConfig,
+    LegacyJournal,
+    parse_legacy_journal_whitelist_text,
+    parse_publisher_whitelist_text,
+    validate_publisher_configs,
+    render_settings_list_text,
     LoadedConfig,
     LogLevel,
     build_loaded_config,
+    _journal_table_is_legacy,
+    journal_whitelist_table,
     parse_journal_whitelist_text,
     parse_monitor_definition,
-    render_journal_whitelist_text,
-    resolve_config_path,
     validate_journal_storage,
     validate_runtime_config,
 )
+from literature_monitor.application.journal_migration import MigrationConfirmation, resolve_legacy_journals
+from literature_monitor.openalex import OpenAlexClient, OpenAlexError, resolve_source_identities, resolve_publisher_metadata
 from literature_monitor.date_range import (
     DEFAULT_WINDOW_DAYS,
     DateRangeError,
     DateRangeSpec,
     ResolvedDateRange,
+    resolve_date_range,
 )
 from literature_monitor.safe_write import (
     CompareReadError,
     ContentChangedError,
     create_text_exclusive,
     read_text_exact,
-    replace_text_if_unchanged,
+    replace_regular_text_if_unchanged as replace_text_if_unchanged,
 )
-from literature_monitor.search import SearchBackendError, SearchExpressionError
+from literature_monitor.search import SearchBackendError, SearchExpressionError, validate_search_expression
 
 __all__ = [
     "ContentRevision",
@@ -71,6 +82,10 @@ class MonitorDraft:
     log_level: LogLevel | str
     monitor_revision: ContentRevision
     journal_revision: ContentRevision
+    publishers: tuple[PublisherConfig, ...] = ()
+    legacy_journals: tuple[LegacyJournal, ...] = ()
+    migration_confirmations: tuple[MigrationConfirmation, ...] = ()
+    pending_journal_ids: tuple[str, ...] = ()  # Transient Add/Import placeholders.
 
 
 class SettingsIssueSource(str, Enum):
@@ -157,6 +172,10 @@ def _read_snapshot(
     source: SettingsIssueSource,
 ) -> _FileSnapshot:
     try:
+        if any(candidate.is_symlink() for candidate in (path, *path.parents)):
+            raise OSError("Settings storage path must not contain a symlink")
+        if path.exists() and not path.is_file():
+            raise OSError("Settings storage must be a regular file")
         contents = read_text_exact(path)
     except FileNotFoundError:
         return _FileSnapshot(
@@ -315,6 +334,42 @@ def _monitor_fields(
     )
 
 
+def _journal_storage(contents: str, path: Path) -> tuple[tuple[JournalConfig, ...], tuple[LegacyJournal, ...], ConfigurationError | None]:
+    """Distinguish valid storage from repairable content; retain trustworthy rows.
+
+    Duplicate sections have no unambiguous replacement boundary. Damaged rows
+    cannot confer canonical metadata authority and require normal resolution.
+    """
+    try:
+        if _journal_table_is_legacy(contents):
+            return (), parse_legacy_journal_whitelist_text(contents, path=path), None
+        return parse_journal_whitelist_text(contents, path=path), (), None
+    except ConfigurationError as error:
+        if sum(line.strip() == "## Journals" for line in contents.splitlines()) > 1:
+            raise
+        recovered = []
+        try:
+            columns, rows = journal_whitelist_table(contents, path=path)
+        except ConfigurationError:
+            rows, columns = (), 0
+        if columns == 4 and not _journal_table_is_legacy(contents):
+            header = "## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n| --- | --- | --- | --- |\n"
+            for _, row in rows:
+                try:
+                    recovered.extend(parse_journal_whitelist_text(header + row + "\n", path=path))
+                except ConfigurationError:
+                    continue
+        # A duplicate target is ambiguous, even when either individual row parses.
+        unique = tuple(j for j in recovered if sum(r.issn_l == j.issn_l for r in recovered) == 1)
+        return unique, (), error
+
+
+def _journal_path(config_path: Path, fields: _DraftFields) -> Path:
+    # Retain the lexical path so snapshot checks can reject symlink substitution.
+    value = fields.venue_whitelist
+    return value.absolute() if value.is_absolute() else (config_path.parent / value).absolute()
+
+
 def load_settings(config_path: Path) -> SettingsLoadResult:
     """Load an editable Settings state without requiring valid runtime config."""
 
@@ -324,11 +379,7 @@ def load_settings(config_path: Path) -> SettingsLoadResult:
         source=SettingsIssueSource.MONITOR_CONFIG,
     )
     fields, monitor_issues = _monitor_fields(config_path, monitor_snapshot)
-    journal_path = resolve_config_path(
-        config_path,
-        fields.venue_whitelist,
-        "list.md",
-    )
+    journal_path = _journal_path(config_path, fields)
     journal_snapshot = _read_snapshot(
         journal_path,
         source=SettingsIssueSource.JOURNAL_DATA,
@@ -336,6 +387,8 @@ def load_settings(config_path: Path) -> SettingsLoadResult:
 
     journal_issues: list[SettingsIssue] = []
     journals: tuple[JournalConfig, ...] = ()
+    publishers: tuple[PublisherConfig, ...] = ()
+    legacy_journals: tuple[LegacyJournal, ...] = ()
     if not journal_snapshot.revision.exists:
         journal_issues.append(
             SettingsIssue(
@@ -349,10 +402,10 @@ def load_settings(config_path: Path) -> SettingsLoadResult:
         journal_issues.append(journal_snapshot.issue)
     else:
         try:
-            journals = parse_journal_whitelist_text(
-                journal_snapshot.contents,
-                path=journal_path,
-            )
+            publishers = parse_publisher_whitelist_text(journal_snapshot.contents, path=journal_path)
+            journals, legacy_journals, damage = _journal_storage(journal_snapshot.contents, journal_path)
+            if damage is not None:
+                journal_issues.append(SettingsIssue(SettingsIssueSource.JOURNAL_DATA, str(damage), field="journals", path=journal_path))
         except ConfigurationError as error:
             journal_issues.append(
                 SettingsIssue(
@@ -367,6 +420,8 @@ def load_settings(config_path: Path) -> SettingsLoadResult:
         name=fields.name,
         keyword_expression=fields.keyword_expression,
         journals=journals,
+        publishers=publishers,
+        legacy_journals=legacy_journals,
         date_spec=fields.date_spec,
         output_dir=fields.output_dir,
         log_level=fields.log_level,
@@ -423,9 +478,15 @@ def validate_settings(
                 venue_whitelist=storage_fields.venue_whitelist,
             ),
         )
-        config = build_loaded_config(config_path, definition, draft.journals)
-        validate_journal_storage(config.journals)
-        resolved = validate_runtime_config(config, today=date.today())
+        validate_publisher_configs(draft.publishers)
+        if draft.legacy_journals and not draft.journals:
+            validate_search_expression(definition.keyword_ast)
+            resolved = resolve_date_range(definition.date_spec, today=date.today())
+            config = None
+        else:
+            config = build_loaded_config(config_path, definition, draft.journals)
+            validate_journal_storage(config.journals)
+            resolved = validate_runtime_config(config, today=date.today())
     except ConfigurationError as error:
         return SettingsValidationResult(
             outcome=SettingsValidationOutcome.INVALID,
@@ -557,10 +618,11 @@ def _result_from_state(
 def save_settings(
     config_path: Path,
     draft: MonitorDraft,
+    *, client: OpenAlexClient | None = None,
 ) -> SettingsSaveResult:
     """Validate and persist Settings with explicit two-file failure semantics."""
 
-    config_path = config_path.resolve()
+    config_path = config_path.absolute()
     validation = validate_settings(config_path, draft)
     if validation.outcome is SettingsValidationOutcome.INVALID:
         state = load_settings(config_path)
@@ -573,8 +635,7 @@ def save_settings(
             monitor_written=False,
         )
 
-    assert validation.config is not None
-    journal_path = validation.config.venue_whitelist
+    journal_path = load_settings(config_path).journal_path
 
     monitor_snapshot = _read_snapshot(
         config_path,
@@ -621,32 +682,38 @@ def save_settings(
 
     storage_fields, _ = _monitor_fields(config_path, monitor_snapshot)
 
-    # Both complete target documents are prepared before the first write starts.
     try:
-        journal_target = render_journal_whitelist_text(
-            journal_snapshot.contents,
-            validation.config.journals,
-            path=journal_path,
-        )
-        monitor_target = _render_monitor_yaml(
-            draft,
-            venue_whitelist=storage_fields.venue_whitelist,
-        )
-    except ConfigurationError as error:
-        state = load_settings(config_path)
-        issue = SettingsIssue(
-            source=SettingsIssueSource.JOURNAL_DATA,
-            message=str(error),
-            field=error.field,
-            path=error.path,
-        )
+        draft = _resolve_settings_targets(config_path, draft, journal_snapshot, storage_fields, client)
+        validation = validate_settings(config_path, draft)
+        if validation.outcome is SettingsValidationOutcome.INVALID:
+            raise ConfigurationError("; ".join(i.message for i in validation.issues))
+    except (ConfigurationError, OpenAlexError, ValueError) as error:
         return _result_from_state(
-            outcome=SettingsSaveOutcome.INVALID_DRAFT,
-            validation=validation,
-            state=state,
-            issues=(issue,),
-            journal_written=False,
-            monitor_written=False,
+            outcome=SettingsSaveOutcome.INVALID_DRAFT, validation=validation,
+            state=load_settings(config_path),
+            issues=(SettingsIssue(SettingsIssueSource.VALIDATION, str(error)),),
+            journal_written=False, monitor_written=False,
+        )
+
+    # Provider work is transient. Recheck BOTH original revisions before any write.
+    monitor_snapshot = _read_snapshot(config_path, source=SettingsIssueSource.MONITOR_CONFIG)
+    journal_snapshot = _read_snapshot(journal_path, source=SettingsIssueSource.JOURNAL_DATA)
+    if monitor_snapshot.revision != draft.monitor_revision or journal_snapshot.revision != draft.journal_revision:
+        return _result_from_state(
+            outcome=SettingsSaveOutcome.REVISION_CONFLICT, validation=validation,
+            state=load_settings(config_path),
+            issues=(SettingsIssue(SettingsIssueSource.STORAGE, "Settings files changed during metadata resolution"),),
+            journal_written=False, monitor_written=False,
+        )
+    try:
+        # Both complete targets exist before the first CAS write starts.
+        journal_target = render_settings_list_text(journal_snapshot.contents, draft.journals, draft.publishers, path=journal_path)
+        monitor_target = _render_monitor_yaml(draft, venue_whitelist=storage_fields.venue_whitelist)
+    except ConfigurationError as error:
+        return _result_from_state(
+            outcome=SettingsSaveOutcome.INVALID_DRAFT, validation=validation,
+            state=load_settings(config_path), issues=(SettingsIssue(SettingsIssueSource.JOURNAL_DATA, str(error)),),
+            journal_written=False, monitor_written=False,
         )
 
     try:
@@ -728,3 +795,72 @@ def save_settings(
         journal_written=True,
         monitor_written=True,
     )
+
+
+def _resolve_settings_targets(config_path: Path, draft: MonitorDraft, snapshot: _FileSnapshot,
+                              fields: _DraftFields, client: OpenAlexClient | None) -> MonitorDraft:
+    contents = snapshot.contents
+    persisted, legacy, damage = _journal_storage(contents, config_path) if contents else ((), (), None)
+    saved_publishers = parse_publisher_whitelist_text(contents, path=config_path) if contents else ()
+    by_identity = {j.issn_l: j for j in persisted}
+    by_publisher = {p.publisher_id: p for p in saved_publishers}
+    submitted_publishers = {p.publisher_id: p for p in validate_publisher_configs(draft.publishers)}
+    for publisher in submitted_publishers.values():
+        saved = by_publisher.get(publisher.publisher_id)
+        if saved is None or publisher.name != saved.name:
+            raise ConfigurationError("Publisher ID/name are machine-managed metadata", field="publishers")
+    journals = []
+    for journal in draft.journals:
+        saved = by_identity.get(journal.issn_l)
+        if saved and journal.issn_l in draft.pending_journal_ids and journal.publisher_id is None:
+            journal = saved.model_copy(update={"group": journal.group})
+        elif saved and (journal.name != saved.name or journal.publisher_id != saved.publisher_id):
+            raise ConfigurationError(f"Journal {journal.issn_l}: canonical name and Publisher ID are machine-managed metadata", field="journals")
+        journals.append(journal)
+    draft = replace(draft, journals=tuple(journals))
+    if draft.legacy_journals and draft.legacy_journals != legacy:
+        raise ConfigurationError("legacy migration input differs from persisted rows", field="journals")
+    retained = {j.publisher_id for j in draft.journals if j.issn_l in by_identity and j.publisher_id is not None}
+    if any(p not in submitted_publishers for p in retained if p in by_publisher):
+        raise ConfigurationError("retained Publisher ID/name must match persisted state", field="publishers")
+    new = [j for j in draft.journals if j.issn_l not in by_identity]
+    journals = draft.journals
+    needs_network = bool(legacy or new)
+    with (nullcontext(client) if client is not None or not needs_network else OpenAlexClient(api_key=os.environ.get("OPENALEX_API_KEY"))) as provider:
+        if legacy:
+            confirmations = draft.migration_confirmations
+            if draft.journals:
+                if len(draft.journals) != len(legacy):
+                    raise ConfigurationError("legacy migration cannot remove or partially migrate rows", field="journals")
+                if not confirmations:
+                    confirmations = tuple(MigrationConfirmation(i, j.issn_l, "explicit user-submitted target ISSN-L")
+                                          for i, j in enumerate(draft.journals, 1))
+            journals = resolve_legacy_journals(provider, legacy, confirmations=confirmations,
+                workspace=fields.output_dir if fields.output_dir.is_absolute() else config_path.parent / fields.output_dir)
+            if draft.journals:
+                if any(j.group != old.group for j, old in zip(draft.journals, legacy)):
+                    raise ConfigurationError("legacy migration must preserve Group for historical compatibility", field="journals")
+        elif new:
+            results = resolve_source_identities(provider, [j.issn_l for j in new])
+            resolved = {r.requested_issn: r for r in results}
+            canonical = {}
+            for journal in new:
+                result = resolved[journal.issn_l]
+                if result.evidence is None:
+                    raise ConfigurationError(f"Journal {journal.issn_l} requires metadata resolution: {result.status.value}: {result.diagnostic}", field="journals")
+                evidence = result.evidence
+                if any("inconsistent optional Publisher" in d for d in evidence.diagnostics):
+                    raise ConfigurationError("unresolved contradictory Source metadata", field="journals")
+                canonical[journal.issn_l] = JournalConfig(issn_l=journal.issn_l, name=evidence.display_name,
+                                                         publisher_id=evidence.publisher_id, group=journal.group)
+            journals = tuple(canonical.get(j.issn_l, j) for j in journals)
+        active = tuple(dict.fromkeys(j.publisher_id for j in journals if j.publisher_id is not None))
+        if damage is not None and any(p not in active for p in by_publisher):
+            raise ConfigurationError("Journal repair would discard saved Publisher metadata/Access URLs; restore their Journal associations", field="publishers")
+        missing = [p for p in active if p not in by_publisher]
+        if missing and not needs_network:
+            raise ConfigurationError("active Publisher durable metadata missing; explicit migration required", field="publishers")
+        metadata = resolve_publisher_metadata(provider, missing) if missing else ()
+    initialized = {m.publisher_id: PublisherConfig(publisher_id=m.publisher_id, name=m.display_name, access_url=m.homepage_url) for m in metadata}
+    publishers = tuple(submitted_publishers.get(p, by_publisher.get(p)) or initialized[p] for p in active)
+    return replace(draft, journals=journals, publishers=publishers, legacy_journals=(), migration_confirmations=(), pending_journal_ids=())
