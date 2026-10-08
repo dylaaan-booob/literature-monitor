@@ -1,7 +1,7 @@
 # Literature Monitor Connector
 
-This directory defines the independent browser component prepared for
-v0.6.2 (UNRELEASED), retaining the v0.6.1 protocol under SPEC §40. It is derived from the official
+This directory defines the independent browser component released with
+v0.6.2, retaining the v0.6.1 protocol under SPEC §40. It is derived from the official
 Zotero Connector source and is separate from the MIT Python
 `literature_monitor` package. The tracked build entry point generates the
 Chrome/MV3 artifact with version `0.6.2`.
@@ -70,22 +70,23 @@ directories from being treated as disposable Connector build state.
 For local installation or verification, open `chrome://extensions/`, enable
 Developer Mode, choose **Load unpacked**, and select the generated `chrome-mv3`
 directory. Alternatively, extract the published
-[Connector ZIP](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.1)
+[Connector ZIP](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.2)
 and select its `chrome-mv3/` directory; it includes corresponding source and
 license/build instructions. This is a local install path, not a Chrome Web Store release.
 A7 recorded a successful toolbar-free automatic save in normal Chrome with
 Zotero Desktop and an existing institutional session; that scoped live acceptance
-does not constitute a Chrome Web Store release. Publication and asset
+does not constitute a Chrome Web Store release. Historical v0.6.1 publication and asset
 verification are recorded in [SPEC §40.16](../SPEC.md#4016-v061-release-and-documentation-closeout-2026-10-07).
 See [SPEC §§40.14 and 40.15](../SPEC.md#4014-a7-implementation-and-validation-evidence-2026-10-07)
 for live validation and preparation evidence, and
 [AGENTS.md](../AGENTS.md#release-execution-and-verification-reuse) for release
 execution and validation reuse.
 
-The v0.6.2 candidate uses the same upstream pins, patches and runtime overlay
+The v0.6.2 release uses the same upstream pins, patches and runtime overlay
 as v0.6.1; only its manifest release identity changes. Candidate construction
-and checks are recorded in [SPEC §41.15](../SPEC.md#4115-a7-release-preparation-2026-10-08).
-The v0.6.1 link above remains the latest published artifact.
+and checks remain in [SPEC §41.15](../SPEC.md#4115-a7-release-preparation-2026-10-08).
+Publication, final ZIP digest and the permanent release source are recorded in
+[SPEC §41.16](../SPEC.md#4116-v062-release-and-documentation-closeout-2026-10-08).
 
 ## Runtime test
 

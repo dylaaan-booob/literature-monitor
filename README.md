@@ -8,14 +8,19 @@ safely updates durable Paper and Author Markdown, and exports kept papers.
 
 ## Release and development status
 
-**v0.6.1 is RELEASED and is the latest completed baseline.**
-[GitHub Release v0.6.1](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.1)
-contains the Python wheel, sdist and separate Chrome/MV3 Connector ZIP.
-Published v0.6.1 Python package, Provider User-Agent and Connector identities are `0.6.1`.
-[SPEC §40](SPEC.md#40-v061-automatic-zotero-connector-capture-current-contract)
-defines the released capture contract; [SPEC §40.16](SPEC.md#4016-v061-release-and-documentation-closeout-2026-10-07)
-records the immutable release target and asset verification. §§40.14 and 40.15
-retain implementation/live acceptance and preparation evidence.
+**v0.6.2 is RELEASED and is the latest published release.**
+[GitHub Release v0.6.2](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.2)
+contains the verified Python wheel, sdist and separate Chrome/MV3 Connector ZIP.
+Python package, Provider User-Agent and Connector release identities are `0.6.2`.
+[SPEC §41](SPEC.md#41-v062-issn-l-venue-identity--journalspublishers-settings---development-contract)
+defines the venue identity and Settings contract;
+[SPEC §41.16](SPEC.md#4116-v062-release-and-documentation-closeout-2026-10-08)
+records the permanent release target and asset verification.
+The unchanged automatic capture contract remains in
+[SPEC §40](SPEC.md#40-v061-automatic-zotero-connector-capture-current-contract).
+[SPEC §40.16](SPEC.md#4016-v061-release-and-documentation-closeout-2026-10-07)
+preserves v0.6.1 publication history; §§40.14 and 40.15 retain its live acceptance
+and preparation evidence.
 
 A7 recorded a successful toolbar-free automatic save in normal Chrome with
 Zotero Desktop and an existing institutional session. Final authoritative
@@ -44,15 +49,13 @@ release execution and validation reuse. Detailed historical release and live
 evidence remain in SPEC; historical validation does not establish success for
 the current release beyond its recorded scope.
 
-**v0.6.2 is implemented on the development branch and remains UNRELEASED.**
-The usage instructions below describe that branch under
+The usage instructions below describe released v0.6.2 under
 [SPEC §41](SPEC.md#41-v062-issn-l-venue-identity--journalspublishers-settings---development-contract).
-For the released configuration and Settings interface, use the
-[v0.6.1 README](https://github.com/dylaaan-booob/literature-monitor/blob/v0.6.1/README.md).
-Current Python package, Provider User-Agent and Connector release identities are
-`0.6.2`. **A6_FINAL_REVIEW: PASSED.** A7 prepares repository-external Python
-and Chrome/MV3 candidates for final review; v0.6.1 remains the latest published
-release until v0.6.2 publication is verified.
+The [v0.6.1 README](https://github.com/dylaaan-booob/literature-monitor/blob/v0.6.1/README.md)
+retains the previous configuration and Settings interface.
+**A6_FINAL_REVIEW: PASSED; A7_RELEASE_PREPARATION: PREPARED;
+A7_FINAL_RELEASE_CANDIDATE_REVIEW: PASSED.** The final review's sole top-status
+finding was corrected and rechecked before publication.
 
 A6_FIX_1 closed all five code findings (F1–F5): URL host normalization,
 import identity, legacy Web import, damaged Journal-storage recovery and
@@ -75,10 +78,10 @@ full suite. Physical mobile testing and a new live OpenAlex/Crossref
 end-to-end Run remain unverified. See
 [SPEC §41.14](SPEC.md#4114-a6-integration-audit-and-product-acceptance-2026-10-08)
 for the historical BLOCKED findings and subsequent acceptance record.
-v0.6.2 remains **UNRELEASED**. A7 release preparation and its current status,
-validation, artifact paths and SHA-256 values are recorded in
+A7 candidate validation and original SHA-256 values remain in
 [SPEC §41.15](SPEC.md#4115-a7-release-preparation-2026-10-08).
-Final candidate review follows preparation.
+[SPEC §41.16](SPEC.md#4116-v062-release-and-documentation-closeout-2026-10-08)
+records the published artifacts and reused validation evidence.
 
 ## Current retrieval architecture
 
@@ -279,8 +282,7 @@ uncertain completion never automatically repeats a save.
 
 - **Zotero Desktop**, running with Local API access enabled.
 - For automatic capture, the **Literature Monitor Connector** in Chrome:
-  extract the matching candidate ZIP (0.6.2, UNRELEASED) or the published
-  v0.6.1 ZIP, open
+  download and extract the published v0.6.2 ZIP, open
   `chrome://extensions/`, enable Developer Mode, choose **Load unpacked**, and
   select `chrome-mv3/`; see [Connector instructions](connector/README.md).
 - Run the local Web UI bridge at `http://127.0.0.1:8000`; Settings shows the

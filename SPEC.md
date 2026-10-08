@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.6.1 is RELEASED and remains the latest published release. Published v0.6.1 Python package, Provider User-Agent and Connector identities are `0.6.1`; the current UNRELEASED v0.6.2 candidate Python package, Provider User-Agent and Connector identities are `0.6.2`. The v0.6.1 permanent RELEASE_HEAD and annotated tag target remain `22bd1efb6c3534110850dfaae5a6239f74b16731`. Its publication evidence is in §40.16; earlier records retain their original version and scope.
+**Status:** Active; v0.6.2 is RELEASED and is the latest published release. Python package, Provider User-Agent and Connector release identities are `0.6.2`. Permanent v0.6.2 RELEASE_HEAD and annotated tag target are `f6cf5a0a24248f321ac88410043610339d348ade` (§41.16). The v0.6.1 permanent RELEASE_HEAD and tag target remain `22bd1efb6c3534110850dfaae5a6239f74b16731`; §40.16 and earlier records retain their original version and scope.
 
-**Stage:** v0.6.2 A1 through A6 implementation and tracked Journal/Publisher migrations are present on the development branch (§§41.13–41.14), uncommitted and UNRELEASED. A6_FIX_1 closed all five code findings; isolated real macOS Chrome desktop (1470px content width) and responsive 550px window acceptance passed on 2026-10-08 (§41.14). Physical mobile touch remains NOT_TESTED. CODE_FINDINGS: CLOSED; A6_BROWSER_GATE: CLOSED; A6_FINAL_REVIEW: PASSED; A7_RELEASE_PREPARATION: PREPARED; A7_FINAL_RELEASE_CANDIDATE_REVIEW: PASSED; V0_6_2_RELEASED: NO. The v0.6.2 candidate artifacts and validation are recorded in §41.15; v0.6.2 has not been committed, tagged, pushed or published. v0.6.1 implementation, necessary preparation, artifact validation, annotated tag, remote-main/tag pushes, GitHub Release and authoritative asset-digest verification are complete (§40.16). Its documentation closeout is a separate subsequent change outside the permanent tag target. Release execution and evidence reuse follow [AGENTS.md](AGENTS.md#release-execution-and-verification-reuse).
+**Stage:** v0.6.2 A1 through A7 implementation, migration, acceptance and release preparation are complete. A6_FINAL_REVIEW: PASSED; A7_RELEASE_PREPARATION: PREPARED; A7_FINAL_RELEASE_CANDIDATE_REVIEW: PASSED; V0_6_2_RELEASED: YES. FIX_1 corrected only the two stale top-status lines and its recheck passed before the authorized release. Normal main/tag pushes, GitHub Release and all three authoritative asset digests are verified (§41.16). The post-publication documentation closeout is a subsequent change outside the permanent tag target. A6 original BLOCKED/fix/browser records and §41.15 candidate evidence remain historical; physical mobile and other recorded verification limits retain their scope. Release execution and evidence reuse follow [AGENTS.md](AGENTS.md#release-execution-and-verification-reuse).
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 **Current contract:** §41 is the v0.6.2 development authority for its explicit venue identity, retrieval adaptation and Journal/Publisher Settings changes. §40 remains the current released v0.6.1 contract for Automatic Zotero Connector Capture. §39 remains the historical/released v0.6.0 authority; unaffected §39/§40 behavior continues to apply. §37 remains authoritative for unaffected DOI-first identity, Provider behavior, current Paper schema, single-manifestation and Zotero parent identity. Historical §§35 through 40 retain their release, live-verification, maintenance, and version-specific behavior records.
@@ -5334,7 +5334,7 @@ or package rebuild.
 
 §40 remains authoritative for automatic Zotero Connector capture, its bridge, orchestration, completion observation and reconciliation. Other §39/§40 Zotero/Connector behavior is unchanged. §37 retains authority for DOI-first Paper identity and unaffected Provider/Paper semantics. §§35 through 40 remain historical version contracts and evidence; their text must not be rewritten to imply v0.6.2 behavior.
 
-Development began from verified `main@8ab0630237753e0d56d26a06953576894a7d1106` on the normal `v0.6.2-development` branch. v0.6.1 remains the latest released/completed baseline. A1 established only this contract and aligned project rules, without product implementation, data migration or publication. A1 through A6 implementation and accepted migrations are now present; §41.13 records implementation evidence, §41.14 preserves the original A6 blockers and their closure, and §41.15 records the prepared A7 candidate. README distinguishes current unreleased development behavior from released v0.6.1. v0.6.2 adds no institutional-login automation.
+Development began from verified `main@8ab0630237753e0d56d26a06953576894a7d1106` on the normal `v0.6.2-development` branch. v0.6.1 was the released baseline at development start; v0.6.2 publication is now verified in §41.16. A1 established only this contract and aligned project rules, without product implementation, data migration or publication. A1 through A6 implementation and accepted migrations are now present; §41.13 records implementation evidence, §41.14 preserves the original A6 blockers and their closure, and §41.15 records the prepared A7 candidate. README describes released v0.6.2 and links the historical v0.6.1 interface. v0.6.2 adds no institutional-login automation.
 
 ### 41.2 Configured identity, Provider evidence and Source reconciliation
 
@@ -5769,3 +5769,72 @@ is unchanged. No commit, tag, push or GitHub Release was performed.
 
 **NEXT: V0_6_2_A7_FINAL_RELEASE_CANDIDATE_REVIEW.** PREPARED records local
 candidate construction and verification; v0.6.2 remains UNRELEASED.
+
+
+### 41.16 v0.6.2 release and documentation closeout (2026-10-08)
+
+FIX_1 repaired the final candidate review's sole finding: stale Status/Stage
+lines at the top of SPEC. Its bounded recheck confirmed only lines 3 and 5
+changed, all section bodies (including §§1-40 and §41.15) were unchanged, README
+was consistent, the external SPEC input hash was synchronized, the index was
+empty, all 177 protected files were unchanged, and SPEC was absent from all
+three candidate archives. Candidate hashes remained exactly those in §41.15.
+No tests or artifact rebuilds were repeated for that document-only repair.
+The final candidate review recheck passed. The user's subsequent explicit
+release confirmation authorized the continuous commit/tag/push/publication
+and necessary documentation closeout.
+
+The scoped implementation/preparation commit and permanent **RELEASE_HEAD**
+are `f6cf5a0a24248f321ac88410043610339d348ade`. It includes all **52** accepted A1-A7 paths, including two new
+Python modules and six new test files, plus the FIX_1 top-status correction.
+The annotated `v0.6.2` tag object is `6eec6fd6003e217eb3f04457ddd51ee694510486` and its peeled target is RELEASE_HEAD.
+Normal remote-main and tag pushes were read back against these exact objects;
+local `main` was fast-forwarded by compare-and-swap without switching the
+`v0.6.2-development` checkout, rewriting history or touching protected data.
+
+[GitHub Release v0.6.2](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.2)
+was published at `2026-10-08T04:22:30Z` (2026-10-08 12:22:30 Asia/Shanghai).
+GitHub API readback confirms latest stable, non-draft, non-prerelease status,
+exact title/notes/target, exactly three uploaded assets, and all authoritative
+SHA-256 digests matching the verified local files:
+
+| Published asset | SHA-256 |
+| --- | --- |
+| `literature_monitor-0.6.2-py3-none-any.whl` | `1343c6d1af9fe9113640fb03eac1719522d5cce45466a980ea5650023a5d9d35` |
+| `literature_monitor-0.6.2.tar.gz` | `2674ac7072099cbc891039e1d805177c876eca28b570013231ddc8fd58198555` |
+| `literature-monitor-connector-0.6.2-chrome-mv3.zip` | `b779e3303efaef21187572191c1f1af25a3edaedcce565bc5873b30a69e87219` |
+
+Final artifacts are retained in
+`/private/tmp/literature-monitor-v0.6.2-publish-ssmdeu_6/dist/`.
+The Python wheel/sdist reuse the unchanged §41.15 candidate bytes. Their
+61/61 application payload files and embedded README were directly compared
+against permanent RELEASE_HEAD. SPEC is outside their payload, so FIX_1 and
+review-status changes do not invalidate the tested Python build/install inputs.
+The final Connector ZIP reuses the verified Chrome build and all 2006
+corresponding-source files. Only `INSTALL.txt` was repackaged to identify the
+formal release source and exact RELEASE_HEAD instead of an uncommitted,
+UNRELEASED candidate. Complete byte readback, ZIP CRC, source comparison against
+RELEASE_HEAD and version checks passed. This explains its final ZIP digest's
+difference from §41.15; the original three candidate files and digests are
+retained unchanged. No upstream reconstruction or runtime rebuild was needed.
+
+Validation reuse follows §41.15: A6 full pytest **2720 passed**, independent
+**56 passed** regressions, applicable Node Settings/UI harnesses, real desktop
+and responsive 550px Chrome acceptance; A7 affected version/boundary runs and
+Connector Node **36/36**, Python metadata/payload/isolation smoke and Connector
+pin/license/source/build verification. Only document status and ZIP installation
+instructions changed afterward. Physical mobile, a new live multi-Provider Run,
+optional pre-existing-parent live case and the 17 upstream ItemSaver tests retain
+their recorded unverified scope. Functional tests/live browser acceptance were
+not repeated for Git or publication phases. There are no repository CI workflows;
+GitHub returns zero check runs and zero status contexts, not a CI success.
+
+Publication checks additionally ran `git diff --check`, scoped staged-content
+checks and artifact-source/digest verification. `monitor.yaml`, `src/.obsidian/`,
+`workspace/`, all 30 Paper bytes/mappings and 74 Journal/20 Publisher rows remain
+preserved. Protected paths were never staged or packaged. Historical §40.16
+and §41.15 records remain unchanged. Current README/SPEC/Connector documents
+now describe the verified v0.6.2 release. The necessary documentation closeout
+is outside the permanent release tag and does not alter uploaded assets; it
+uses affected document/diff checks only. No PyPI or Chrome Web Store publication
+is claimed, and no tag, Release, asset or reviewed commit was overwritten.
