@@ -656,7 +656,7 @@ class CrossrefClient:
             url = f"{url}?{urlencode(query)}"
         headers = {
             "Accept": "application/json",
-            "User-Agent": "literature-monitor/0.6.2",
+            "User-Agent": "literature-monitor/0.6.3",
         }
 
         # Classify HTTP shape, independently of the caller's Activity operation.

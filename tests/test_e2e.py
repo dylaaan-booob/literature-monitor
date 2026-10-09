@@ -396,7 +396,7 @@ def test_run_full_cli_cycle_preserves_human_state_and_exports_kept_paper(
     assert snapshot_files(output_dir) == before_export
     assert inbox_path.read_bytes() == custom_inbox
 
-    replace_once(doi_path, "status: kept\n", "status: in_zotero\n")
+    replace_once(doi_path, "status: kept\n", "status: exported\n")
     after_manual_import = snapshot_files(output_dir)
     assert main(("export-kept", "--output-dir", str(output_dir))) == 0
     second_export = capsys.readouterr()

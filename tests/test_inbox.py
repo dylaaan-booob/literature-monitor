@@ -12,7 +12,7 @@ VIEW_STATUSES = {
     "Inbox": "candidate",
     "Kept": "kept",
     "Rejected": "rejected",
-    "In Zotero": "in_zotero",
+    "Exported": "exported",
 }
 
 EXPECTED_ORDER = [

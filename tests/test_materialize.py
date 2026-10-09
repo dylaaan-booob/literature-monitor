@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+import os
 from pathlib import Path
 from uuid import UUID
 
@@ -36,6 +37,149 @@ from literature_monitor.models import (
 )
 from literature_monitor.naming import paper_filename
 from literature_monitor.progress import ProgressEvent
+
+
+@pytest.mark.parametrize("replacement", ["directory", "symlink", "lock", "papers"])
+@pytest.mark.parametrize("phase", ["initial", "write", "after_first_write"])
+def test_materialization_rejects_identity_substitution(tmp_path, replacement, phase):
+    root = tmp_path / "output"
+    root.mkdir()
+    root.joinpath("Papers").mkdir()
+    sources = tuple(
+        paper(str(UUID(int=index + 1)), title=f"Paper {index}").model_copy(
+            update={"external_ids": ExternalIds(doi=f"10.5555/race-{index}")}
+        ) for index in range(2)
+    )
+    moved = tmp_path / "preserved"
+    injected = False
+
+    def substitute(event):
+        nonlocal injected
+        activity = event.activity
+        if injected or activity is None:
+            return
+        trigger = (
+            phase == "initial" and activity.operation == "materialize_read"
+            and activity.label == "Reading workspace"
+        ) or (
+            phase == "write" and activity.operation == "materialize_write" and activity.current == 0
+        ) or (
+            phase == "after_first_write" and activity.operation == "materialize_write" and activity.current == 1
+        )
+        if not trigger:
+            return
+        injected = True
+        if replacement in {"directory", "symlink"}:
+            root.rename(moved)
+            if replacement == "directory":
+                root.mkdir()
+            else:
+                root.symlink_to(moved, target_is_directory=True)
+        elif replacement == "papers":
+            root.joinpath("Papers").rename(moved)
+            root.joinpath("Papers").mkdir()
+        else:
+            lock = root / ".literature-monitor-operation.lock"
+            lock.rename(tmp_path / "old-lock")
+            lock.touch()
+
+    result = materialize_papers(sources, root, progress_callback=substitute)
+    assert injected
+    assert result.has_errors
+    expected = 1 if phase == "after_first_write" else 0
+    assert len(result.created_papers) == expected
+    original_papers = moved / "Papers" if replacement in {"directory", "symlink"} else (
+        moved if replacement == "papers" else root / "Papers"
+    )
+    assert len(list(original_papers.glob("*.md"))) == expected
+    if replacement == "directory":
+        assert not list(root.rglob("*.md"))
+    elif replacement == "papers":
+        assert not list(root.joinpath("Papers").glob("*.md"))
+
+
+@pytest.mark.parametrize("replacement", ["directory", "symlink", "lock", "papers_symlink", "authors"])
+def test_materialization_rechecks_identity_during_temporary_write(tmp_path, monkeypatch, replacement):
+    root = tmp_path / "output"
+    root.mkdir()
+    source = paper("12345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    moved = tmp_path / "preserved"
+    real_fsync = os.fsync
+    injected = False
+
+    def substitute(descriptor):
+        nonlocal injected
+        directory = root / ("Authors" if replacement == "authors" else "Papers")
+        if not injected and any(directory.glob("*.tmp")):
+            injected = True
+            if replacement in {"directory", "symlink"}:
+                root.rename(moved)
+                if replacement == "directory":
+                    root.mkdir()
+                else:
+                    root.symlink_to(moved, target_is_directory=True)
+            elif replacement == "lock":
+                lock = root / ".literature-monitor-operation.lock"
+                lock.rename(tmp_path / "old-lock")
+                lock.touch()
+            else:
+                directory.rename(moved)
+                if replacement == "papers_symlink":
+                    directory.symlink_to(moved, target_is_directory=True)
+                else:
+                    directory.mkdir()
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("literature_monitor.safe_write.os.fsync", substitute)
+    result = materialize_papers((source,), root)
+    assert injected and result.has_errors
+    assert not result.created_papers
+    assert not list((root / "Papers").glob("*.md"))
+    assert not list(moved.glob("*.md"))
+    assert not list(root.rglob("*.tmp"))
+
+
+def test_materialization_reports_replacement_committed_before_sync_failure(tmp_path, monkeypatch):
+    source = paper("12345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    first = materialize_papers((source,), tmp_path)
+    target = first.created_papers[0]
+    updated = source.model_copy(update={"metadata": source.metadata.model_copy(update={"title": "Updated"})})
+    real_fsync = os.fsync
+    papers_identity = (target.parent.stat().st_dev, target.parent.stat().st_ino)
+
+    def fail_directory_sync(descriptor):
+        current = os.fstat(descriptor)
+        if (current.st_dev, current.st_ino) == papers_identity:
+            raise OSError("simulated directory sync failure after replacement")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("literature_monitor.safe_write.os.fsync", fail_directory_sync)
+    result = materialize_papers((updated,), tmp_path)
+    assert result.has_errors
+    assert result.updated_papers == (target,)
+    assert "title: Updated" in target.read_text()
+
+
+def test_materialization_reports_creation_committed_before_sync_failure(tmp_path, monkeypatch):
+    root = tmp_path / "output"
+    root.mkdir()
+    (root / "Papers").mkdir()
+    source = paper("12345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    real_fsync = os.fsync
+    identity = ((root / "Papers").stat().st_dev, (root / "Papers").stat().st_ino)
+
+    def fail_directory_sync(descriptor):
+        current = os.fstat(descriptor)
+        if (current.st_dev, current.st_ino) == identity:
+            raise OSError("simulated directory sync failure after creation")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("literature_monitor.safe_write.os.fsync", fail_directory_sync)
+    result = materialize_papers((source,), root)
+    assert result.has_errors
+    assert len(result.created_papers) == 1
+    assert result.created_papers[0].is_file()
+    assert not list(root.rglob("*.tmp"))
 
 
 NOW = datetime(2026, 9, 18, 8, 30, tzinfo=timezone.utc)
@@ -157,7 +301,6 @@ def test_materializes_complete_paper_and_minimal_author_notes(tmp_path: Path) ->
         "author_keywords",
         "status",
         "discovered_at",
-        "zotero_key",
         "external_ids",
         "sources",
     ]
@@ -174,7 +317,7 @@ def test_materializes_complete_paper_and_minimal_author_notes(tmp_path: Path) ->
     assert values["author_keywords"] == ["statistics", "multiview"]
     assert values["status"] == "candidate"
     assert values["discovered_at"] == "2026-09-18T08:30:00Z"
-    assert values["zotero_key"] is None
+    assert "zotero_key" not in values
     assert values["external_ids"]["pmid"] == "12345678"  # type: ignore[index]
     assert "versions" not in values and "preferred_version" not in values
     assert values["sources"] == [source.sources[0].model_dump(mode="json")]
@@ -276,10 +419,10 @@ def test_inbox_creation_failure_preserves_created_paper_and_author(
     inbox_path = tmp_path / "Inbox.base"
     create_file = materialize_module._create_file
 
-    def fail_inbox_creation(path: Path, contents: str) -> tuple[str | None, str | None]:
+    def fail_inbox_creation(path: Path, contents: str, directory) -> tuple[str | None, str | None]:
         if path == inbox_path:
             return None, "simulated Inbox write failure"
-        return create_file(path, contents)
+        return create_file(path, contents, directory)
 
     monkeypatch.setattr(materialize_module, "_create_file", fail_inbox_creation)
 
@@ -932,7 +1075,7 @@ def test_atomic_replace_failure_preserves_original_paper(
         }
     )
 
-    def fail_replace(source: object, destination: object) -> None:
+    def fail_replace(source: object, destination: object, **kwargs) -> None:
         raise OSError("replace failed")
 
     monkeypatch.setattr("literature_monitor.safe_write.os.replace", fail_replace)
@@ -1071,7 +1214,7 @@ def test_update_preserves_workflow_unknown_frontmatter_and_unmanaged_body(
             "status: candidate",
             "status: kept\ncustom_field:\n  nested: retained",
         )
-        .replace("zotero_key: null", "zotero_key: ZOT123")
+
         .replace(
             f"# {initial.metadata.title}\n\n",
             f"# {initial.metadata.title}\n\nIntro prose.\n\n"
@@ -1098,7 +1241,7 @@ def test_update_preserves_workflow_unknown_frontmatter_and_unmanaged_body(
     values = frontmatter(contents)
     assert result.updated_papers == (path,)
     assert values["status"] == "kept"
-    assert values["zotero_key"] == "ZOT123"
+    assert "zotero_key" not in values
     assert values["custom_field"] == {"nested": "retained"}
     for retained in (
         "Intro prose.",
@@ -1318,7 +1461,6 @@ def test_existing_attribution_replacement_repair_or_raw_preservation(tmp_path, y
     path, = first.created_papers
     contents = with_journal_attribution(path.read_text(), yaml_value)
     contents = contents.replace("status: candidate", "status: kept\ncustom_field:\n  nested: retained")
-    contents = contents.replace("zotero_key: null", "zotero_key: ZOT123")
     contents = contents.replace("## Notes\n", "## Notes\n\nHuman note.\n\n## Custom\n\nKeep this.\n")
     path.write_text(contents)
     original_values = frontmatter(contents)
@@ -1346,7 +1488,7 @@ def test_existing_attribution_replacement_repair_or_raw_preservation(tmp_path, y
     else:
         assert ("journal_issns" in values) == ("journal_issns" in original_values)
         assert values.get("journal_issns") == original_values.get("journal_issns")
-    assert values["status"] == "kept" and values["zotero_key"] == "ZOT123"
+    assert values["status"] == "kept" and "zotero_key" not in values
     assert values["custom_field"] == {"nested": "retained"}
     assert "Human note.\n\n## Custom\n\nKeep this.\n" in updated
     for author_path, (author_bytes, mtime) in author_before.items():
@@ -1498,3 +1640,22 @@ def test_body_rewrite_preserves_human_versions_heading_without_managing_it():
     rewritten = rewrite_managed_body(body, title="Title", abstract="New.", sources_summary="New sources.")
     assert "## Versions\n\nHuman discussion." in rewritten and "Human notes." in rewritten
     assert rewritten.count("## Versions") == 1
+
+
+@pytest.mark.parametrize('status', [WorkflowStatus.REJECTED, WorkflowStatus.EXPORTED])
+def test_terminal_history_survives_rerun_with_same_doi_and_uuid(tmp_path, status):
+    source = paper('12345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
+    first = materialize_papers((source,), tmp_path)
+    path = first.created_papers[0]
+    values = frontmatter(path.read_text())
+    _, _, body = path.read_text().split('---', 2)
+    values['status'] = status.value
+    values['custom'] = {'human': 'retained'}
+    path.write_text('---\n' + yaml.safe_dump(values, sort_keys=False) + '---' + body + '\n## Notes\nHuman history.\n')
+    second = materialize_papers((source.model_copy(update={'id': UUID('abcdefab-aaaa-4aaa-8aaa-aaaaaaaaaaaa')}),), tmp_path)
+    assert not second.has_errors and second.created_papers == ()
+    after = frontmatter(path.read_text())
+    assert after['status'] == status.value and after['id'] == str(source.id)
+    assert after['custom'] == values['custom'] and after['discovered_at'] == values['discovered_at']
+    assert after['doi'] == values['doi'] and 'Human history.' in path.read_text()
+    assert 'zotero_key' not in after

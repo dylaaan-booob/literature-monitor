@@ -1,8 +1,8 @@
 diff --git a/src/browserExt/background-worker.js b/src/browserExt/background-worker.js
-index 8af4320..05761f5 100644
+index 8af4320..24c5af4 100644
 --- a/src/browserExt/background-worker.js
 +++ b/src/browserExt/background-worker.js
-@@ -22,21 +22,22 @@
+@@ -22,21 +22,23 @@
  	
  	***** END LICENSE BLOCK *****
  */
@@ -17,6 +17,7 @@ index 8af4320..05761f5 100644
  		"keep-mv3-alive.js",
 -		"background.js"
 +		"background.js",
++		"literature-monitor-access.js",
 +		"literature-monitor-runtime.js"
  	];
  
@@ -26,11 +27,75 @@ index 8af4320..05761f5 100644
  } catch (e) {
  	console.error(e);
  }
+diff --git a/src/browserExt/background.js b/src/browserExt/background.js
+index 915767a..95e10e5 100644
+--- a/src/browserExt/background.js
++++ b/src/browserExt/background.js
+@@ -1179,24 +1179,32 @@ Zotero.Connector_Browser = new function() {
+ 		}
+ 	}
+ 
+ 	/**
+ 	 * @param tab <Tab>
+ 	 * @param i <Integer> the index of translator to save with
+ 	 * @param options <Object>
+ 	 * 		- fallbackOnFailure <Boolean> if translation fails, attempt to save with lower priority translators
+ 	 * 		- note <String> add string as a note to the saved item
+ 	 * @returns {Promise<*>}
+ 	 */
+ 	this.saveWithTranslator = function(tab, i, options={}) {
++		if (options.literatureMonitorAutomatic) {
++			const context = options.literatureMonitorContext;
++			// The runtime selects a top-frame translator from this exact document,
++			// independently of the tab cache (which may contain an iframe/late report).
++			return browser.tabs.sendMessage(tab.id,
++				["translate", [0, context.translatorID, options]],
++				{documentId: context.documentID});
++		}
+ 		let tabInfo = this.getTabInfo(tab.id);
+ 		var translator = tabInfo.translators[i];
+ 		
+ 		// Set frameId to null - send message to all frames
+ 		// There is code to figure out which frame should translate with instanceID.
+ 		return Zotero.Messaging.sendMessage(
+ 			"translate",
+ 			[
+ 				tabInfo.instanceID,
+ 				translator.translatorID,
+ 				options
+ 			],
 diff --git a/src/common/inject/pageSaving.js b/src/common/inject/pageSaving.js
-index 9e7105a..a023024 100644
+index 9e7105a..ba5d41a 100644
 --- a/src/common/inject/pageSaving.js
 +++ b/src/common/inject/pageSaving.js
-@@ -284,25 +284,34 @@ let PageSaving = {
+@@ -181,25 +181,25 @@ let PageSaving = {
+ 				parentItem: attachment.parentItem,
+ 				progress,
+ 				itemType: determineAttachmentType(attachment)
+ 			}
+ 		);
+ 	},
+ 
+ 	/**
+ 	 * Runs translation and attempts to save items to Zotero or Zotero account
+ 	 * @param translators {Array}
+ 	 * @returns {Promise<*>}
+ 	 */
+-	async translateAndSave(translators, fallbackOnFailure = false) {
++	async translateAndSave(translators, fallbackOnFailure = false, literatureMonitorAttempt = null) {
+ 		const sessionID = this.sessionDetails.id;
+ 		let itemsTotal = 0;
+ 		let itemsSaved = 0;
+ 		
+ 		// Translate handlers
+ 		const onSelect = (obj, items, callback) => {
+ 			// Close the progress window before displaying Select Items
+ 			Zotero.Messaging.sendMessage("progressWindow.close", null);
+ 
+ 			// If the handler returns a non-undefined value then it is passed
+ 			// back to the callback due to backwards compat code in translate.js
+ 			(async () => {
+@@ -284,25 +284,32 @@ let PageSaving = {
  				Zotero.debug(`Saving with ${translators[0].label} failed. Falling back to saving as webpage`);
  				return this.saveAsWebpage({ snapshot: true });
  			}
@@ -49,10 +114,8 @@ index 9e7105a..a023024 100644
 +			itemType,
 +			baseURI: document.location.href,
 +			proxy,
-+			literatureMonitorAutomatic: !!(
-+				this.sessionDetails.saveOptions
-+				&& this.sessionDetails.saveOptions.literatureMonitorAutomatic
-+			)
++			literatureMonitorAutomatic: !!literatureMonitorAttempt,
++			literatureMonitorAttempt
 +		});
  		this.sessionDetails.itemSaver = itemSaver;
  		return itemSaver.saveItems(items, PageSaving._onAttachmentProgress, onItemsSaved)
@@ -66,7 +129,8 @@ index 9e7105a..a023024 100644
  	 * @param saveSnapshot
  	 * @returns {Promise<*>}
  	 */
-@@ -516,25 +525,32 @@ let PageSaving = {
+@@ -515,26 +522,41 @@ let PageSaving = {
+ 				Zotero.Messaging.sendMessage("progressWindow.done", [false, 'unexpectedError']);
  			}
  			throw e;
  		}
@@ -78,12 +142,20 @@ index 9e7105a..a023024 100644
  	 * with selection as a note.
  	 */
  	async onTranslate(translatorID, options={}) {
++		// Freeze invocation identity before any asynchronous work or session mutation.
++		const literatureMonitorAttempt = options.literatureMonitorAutomatic ? {
++			context: Object.freeze({...options.literatureMonitorContext}),
++			dispatchRequested: false,
++			deadline: performance.now() + Math.max(0, Math.min(75000,
++				options.literatureMonitorContext.expiresAt - Date.now()))
++		} : null;
  		let result = await Zotero.Inject.checkActionToServer();
 -		if (!result) return;
 +		if (!result) {
-+			if (options.literatureMonitorAutomatic) {
++			if (literatureMonitorAttempt) {
 +				void browser.runtime.sendMessage({
-+					type: "literature-monitor-save-failed"
++					type: "literature-monitor-save-failed",
++					context: literatureMonitorAttempt.context
 +				}).catch(() => {});
 +			}
 +			return;
@@ -100,7 +172,12 @@ index 9e7105a..a023024 100644
  		// In some cases, we just reopen the popup instead of saving again
  		if (this._shouldReopenProgressWindow(translatorID, options, translator.itemType)) {
  			Zotero.debug(`PageSaving.onTranslate: Reopening popup`);
-@@ -574,24 +590,31 @@ let PageSaving = {
+@@ -569,29 +591,43 @@ let PageSaving = {
+ 			setTimeout(sendShowMessage, delay)
+ 		}
+ 		else {
+ 			sendShowMessage();
+ 		}
  		
  		try {
  			let translators = this.translators.slice(translatorIndex);
@@ -108,16 +185,24 @@ index 9e7105a..a023024 100644
  			if (!options.fallbackOnFailure) {
  				translators = translators.slice(0, 1)
  			}
- 			let items = await this.translateAndSave(translators, options.fallbackOnFailure);
+-			let items = await this.translateAndSave(translators, options.fallbackOnFailure);
++			let items = await this.translateAndSave(translators, options.fallbackOnFailure, literatureMonitorAttempt);
++			if (literatureMonitorAttempt) {
++				void browser.runtime.sendMessage({
++					type: "literature-monitor-pipeline-complete",
++					context: literatureMonitorAttempt.context,
++					sessionID
++				}).catch(() => {});
++			}
  			Zotero.Messaging.sendMessage("progressWindow.done", [true]);
  			return items;
  		} catch (e) {
  			Zotero.logError(e);
-+			if (options.literatureMonitorAutomatic
-+					&& !(this.sessionDetails.itemSaver
-+						&& this.sessionDetails.itemSaver._literatureMonitorParentSaveStarted)) {
++			if (literatureMonitorAttempt) {
 +				void browser.runtime.sendMessage({
-+					type: "literature-monitor-save-failed"
++					type: "literature-monitor-save-failed",
++					context: literatureMonitorAttempt.context,
++					stage: literatureMonitorAttempt.dispatchRequested ? "native_save" : "translator"
 +				}).catch(() => {});
 +			}
  			// Clear session details on failure, so another save click tries again
@@ -133,10 +218,10 @@ index 9e7105a..a023024 100644
  			let statusCode = '';
  			try {
 diff --git a/src/common/itemSaver.js b/src/common/itemSaver.js
-index eea69ce..9cee25a 100644
+index eea69ce..d1f4b2d 100644
 --- a/src/common/itemSaver.js
 +++ b/src/common/itemSaver.js
-@@ -36,24 +36,27 @@ const PRIMARY_ATTACHMENT_TYPES = new Set([
+@@ -36,24 +36,26 @@ const PRIMARY_ATTACHMENT_TYPES = new Set([
   *         <li>proxy - A proxy to deproxify item URLs</li>
   *         <li>baseURI - URI to which attachment paths should be relative</li>
   *         <li>sessionID - A sessionID for the save session to allow changes later</li>
@@ -150,8 +235,7 @@ index eea69ce..9cee25a 100644
  	this._items = [];
  	this._singleFile = false;
 +	this._literatureMonitorAutomatic = !!options.literatureMonitorAutomatic;
-+	this._literatureMonitorParentSaveStarted = false;
-+	this._literatureMonitorParentAccepted = false;
++	this._literatureMonitorAttempt = options.literatureMonitorAttempt;
  	
  	// Add listener for callbacks, but only for Safari or the bookmarklet. In Chrome, we
  	// (have to) save attachments from the inject page.
@@ -164,7 +248,7 @@ index eea69ce..9cee25a 100644
  			if(callback) {
  				if(status === false || status === 100) {
  					delete ItemSaver._attachmentCallbacks[id];
-@@ -88,24 +91,27 @@ ItemSaver.prototype = {
+@@ -88,24 +90,27 @@ ItemSaver.prototype = {
  	 * @param {Function} [attachmentCallback] A callback that receives information about attachment
  	 *     save progress. The callback will be called as attachmentCallback(attachment, false, error)
  	 *     on failure or attachmentCallback(attachment, progressPercent) periodically during saving.
@@ -192,7 +276,7 @@ index eea69ce..9cee25a 100644
  			sessionID: this._sessionID,
  			uri: this._baseURI,
  		};
-@@ -170,25 +176,32 @@ ItemSaver.prototype = {
+@@ -170,25 +175,81 @@ ItemSaver.prototype = {
  			});
  		}
  		
@@ -205,13 +289,63 @@ index eea69ce..9cee25a 100644
  			});
  		}
  		
-+		this._literatureMonitorParentSaveStarted = true;
- 		await Zotero.Connector.callMethod("saveItems", payload)
-+		this._literatureMonitorParentAccepted = true;
+-		await Zotero.Connector.callMethod("saveItems", payload)
 +		if (this._literatureMonitorAutomatic) {
-+			void browser.runtime.sendMessage({
-+				type: "literature-monitor-parent-saved"
-+			}).catch(() => {});
++			const attempt = this._literatureMonitorAttempt;
++			if (!(performance.now() < attempt.deadline && Date.now() < attempt.context.expiresAt)) throw new Error("Automatic parent permission expired");
++			const target = decodeURIComponent(new URL(attempt.context.doiURL).pathname.slice(1));
++			const doi = items.length === 1 && typeof items[0].DOI === "string"
++				? items[0].DOI.trim().replace(/^https:\/\/doi\.org\//i, "").trim().toLowerCase() : null;
++			if (doi !== target || items[0].itemType === "attachment") {
++				throw new Error("Automatic parent DOI does not match the reserved target");
++			}
++			// Mark before requesting permission: a lost reply must not become no-effect.
++			if (attempt.dispatchRequested) throw new Error("Automatic parent already dispatched");
++			attempt.dispatchRequested = true;
++			const permitted = await browser.runtime.sendMessage({
++				type: "literature-monitor-before-parent-save",
++				context: attempt.context,
++				sessionID: this._sessionID
++			});
++			if (permitted !== true || !(performance.now() < attempt.deadline && Date.now() < attempt.context.expiresAt)) throw new Error("Automatic parent dispatch is no longer authorized");
++		}
++		// Native saveItems echoes the client's string/numeric ID, not a library key.
++		const parentIdentity = item => {
++			if (!item || typeof item !== "object" || Array.isArray(item)
++					|| !Object.prototype.hasOwnProperty.call(item, "id")) return undefined;
++			const id = item.id;
++			return ((typeof id === "string" && id.trim().length > 0)
++				|| (typeof id === "number" && Number.isFinite(id) && id !== 0)) ? id : undefined;
++		};
++		// Freeze the actual request identity before crossing the native save boundary.
++		const requestedParentID = this._literatureMonitorAutomatic
++			&& Array.isArray(payload.items) && payload.items.length === 1
++			? parentIdentity(payload.items[0]) : undefined;
++		const accepted = await Zotero.Connector.callMethod(
++			this._literatureMonitorAutomatic
++				? {method: "saveItems", literatureMonitorResponse: true} : "saveItems", payload);
++		if (this._literatureMonitorAutomatic) {
++			// The native endpoint can return 201 with an empty body. If it echoes
++			// items, the one echoed client ID must still match the frozen request.
++			const body = accepted?.body;
++			const acceptedParentID = body && typeof body === "object"
++				&& !Array.isArray(body) && Object.prototype.hasOwnProperty.call(body, "items")
++				&& Array.isArray(body.items) && body.items.length === 1
++				? parentIdentity(body.items[0]) : undefined;
++			if (requestedParentID === undefined || payload.items[0].id !== requestedParentID
++					|| accepted?.status !== 201 || !(body === "" || body === null
++						|| acceptedParentID === requestedParentID)) {
++				throw new Error("Automatic parent acceptance response is unverified");
++			}
++			try {
++				await browser.runtime.sendMessage({
++					type: "literature-monitor-parent-saved",
++					context: this._literatureMonitorAttempt.context,
++					sessionID: this._sessionID
++				});
++			} catch (_) {
++				// Lost LM feedback must not abort the original Zotero attachment work.
++			}
 +		}
  		// Update UI for top-level items
  		itemsDoneCallback(items);
@@ -225,3 +359,26 @@ index eea69ce..9cee25a 100644
  		}
  
  		return items;
+diff --git a/src/common/connector.js b/src/common/connector.js
+index 84f1ddb..84f1ddb 100644
+--- a/src/common/connector.js
++++ b/src/common/connector.js
+@@ -160,8 +160,9 @@
+ 	this.callMethod = async function(options, data = null, tab = null) {
+ 		if (typeof options == 'string') {
+ 			options = {method: options};
+ 		}
+ 		var method = options.method;
++		const literatureMonitorResponse = method === "saveItems" && options.literatureMonitorResponse === true;
+ 		let localhostPermissionMissing = false;
+ 		if (Zotero.isSafari) {
+ 			const hasLocalhostPermission = await browser.permissions.contains({
+@@ -256,7 +257,8 @@
+ 				Zotero.debug("Connector: Method "+method+" failed with status "+xhr.status);
+ 				throw new Zotero.Connector.CommunicationError(`Method ${method} failed`, xhr.status, val);
+ 			} else {
+ 				Zotero.debug("Connector: Method "+method+" succeeded");
++				if (literatureMonitorResponse) return {status: xhr.status, body: val};
+ 				return val;
+ 			}
+ 		} catch (e) {

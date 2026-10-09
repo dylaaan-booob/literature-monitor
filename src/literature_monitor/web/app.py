@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import secrets
+import threading
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
@@ -16,16 +19,17 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from literature_monitor.application.decisions import (
     DecisionOutcome,
     DecisionResult,
     keep_paper,
-    reconcile_paper_with_zotero,
     reject_paper,
 )
+from literature_monitor.application.export_attempts import ExportCompletionOutcome
+from literature_monitor.application.workspace_reset import ResetPlan, ResetRefused, preview_reset, execute_reset
 from literature_monitor.application.journal_import import (
     JournalImportMode,
     apply_journal_import,
@@ -46,17 +50,21 @@ from literature_monitor.application.workspace import (
     WorkspaceSnapshot,
     load_workspace,
 )
-from literature_monitor.config import ConfigurationError, load_config
+from literature_monitor.config import ConfigurationError, LoadedConfig, load_config
 from literature_monitor.identifiers import normalize_doi
+from literature_monitor.safe_write import ContentChangedError, WorkspaceOperationLock
 from literature_monitor.models import WorkflowStatus
 from literature_monitor.zotero_local import ZoteroLocalClient
 from literature_monitor.web.capture_coordinator import (
     CONNECTOR_VERSION_MAX_LENGTH,
     REQUEST_ID_MAX_LENGTH,
     CaptureCoordinator,
+    CaptureFailureStage,
     CaptureOutcome,
     CaptureStage,
     CaptureSnapshot,
+    PdfOutcome,
+    SaveInvocation,
 )
 from literature_monitor.web.run_coordinator import (
     CoordinatorSnapshot,
@@ -74,12 +82,10 @@ from literature_monitor.web.settings_form import (
     settings_form_from_draft,
     settings_form_from_submission,
 )
-from literature_monitor.web.zotero_capture import (
-    CompletionProcessOutcome,
-    SaveToZoteroOutcome,
-    process_capture_completion,
-    start_save_to_zotero,
-)
+from literature_monitor.web.zotero_capture import process_capture_completion
+from literature_monitor.application.batch_import import BatchImportService, BatchPhase
+from literature_monitor.application.access import AccessObservation
+from literature_monitor.web.batch_presentation import build_batch_presentation
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _PACKAGE_DIR / "templates"
@@ -89,10 +95,56 @@ _VIEW_STATUSES = {
     "inbox": WorkflowStatus.CANDIDATE,
     "kept": WorkflowStatus.KEPT,
     "rejected": WorkflowStatus.REJECTED,
-    "in-zotero": WorkflowStatus.IN_ZOTERO,
+    "exported": WorkflowStatus.EXPORTED,
 }
 
 templates = Jinja2Templates(directory=_TEMPLATES_DIR)
+
+
+@dataclass(frozen=True)
+class _ImportTarget:
+    config_path: Path
+    config_digest: str
+    config_identity: tuple[int, int]
+    workspace: Path
+    workspace_identity: tuple[int, int, int] | None
+    papers_identity: tuple[int, int, int] | None
+    lock_identity: tuple[int, int, int] | None
+
+    @classmethod
+    def read(cls, config_path: Path) -> tuple[_ImportTarget, LoadedConfig]:
+        def identity(path: Path) -> tuple[int, int, int] | None:
+            try:
+                value = path.lstat()
+                return value.st_dev, value.st_ino, value.st_mode
+            except FileNotFoundError:
+                return None
+
+        contents = config_path.read_bytes()
+        config_identity = identity(config_path)
+        if config_identity is None:
+            raise ContentChangedError("Configuration disappeared while reading the Workspace target")
+        config = load_config(config_path)
+        target = cls(config_path, hashlib.sha256(contents).hexdigest(), config_identity[:2],
+                     config.output_dir, identity(config.output_dir),
+                     identity(config.output_dir / 'Papers'),
+                     identity(config.output_dir / '.literature-monitor-operation.lock'))
+        if config_path.read_bytes() != contents or identity(config_path) != config_identity:
+            raise ContentChangedError("Configuration changed while reading the Workspace target")
+        return target, config
+
+    def form_token(self, nonce: str) -> str:
+        # 浏览器只持有签名，不能选择路径；同一 nonce 下不同目标的表单也不通用。
+        return hmac.new(nonce.encode('ascii'), repr(self).encode('utf-8'), hashlib.sha256).hexdigest()
+
+    def verify(self, lock: WorkspaceOperationLock) -> None:
+        current, _ = self.read(self.config_path)
+        if self.lock_identity is None:
+            # 首次导入可创建空操作锁；已有锁的替换仍必须拒绝。
+            current = replace(current, lock_identity=None)
+        if current != self or self.workspace_identity is None or lock.identity != self.workspace_identity[:2]:
+            raise ContentChangedError("Workspace changed since this import form was shown; no import started")
+        lock.verify()
 
 
 class _ConnectorHeartbeatBody(BaseModel):
@@ -102,15 +154,48 @@ class _ConnectorHeartbeatBody(BaseModel):
     zotero_reachable: StrictBool
 
 
+class _ImportStartForm(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    csrf_token: str | None = None
+    import_token: str | None = None
+
+
+class _ImportPollForm(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    csrf_token: str | None = None
+    view: str = "kept"
+    paper: UUID | None = None
+
+
 class _ConnectorClaimBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class _ConnectorResultBody(BaseModel):
+class _ConnectorInvocationBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str = Field(min_length=1, max_length=REQUEST_ID_MAX_LENGTH)
+    invocation_id: str = Field(min_length=1, max_length=REQUEST_ID_MAX_LENGTH)
+    doi_url: str = Field(min_length=1, max_length=8192)
+    tab_id: StrictInt = Field(ge=0)
+    session_id: str = Field(min_length=1, max_length=REQUEST_ID_MAX_LENGTH)
+
+
+class _ConnectorResultBody(_ConnectorInvocationBody):
+    tab_id: StrictInt | None = Field(ge=0)
+    session_id: str | None = Field(min_length=1, max_length=REQUEST_ID_MAX_LENGTH)
     outcome: CaptureOutcome
+    pdf_outcome: PdfOutcome
+    failure_stage: CaptureFailureStage | None = None
+
+
+class _ConnectorAccessBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str = Field(min_length=1, max_length=REQUEST_ID_MAX_LENGTH)
+    invocation_id: str = Field(min_length=1, max_length=REQUEST_ID_MAX_LENGTH)
+    doi_url: str = Field(min_length=1, max_length=8192)
+    tab_id: StrictInt = Field(ge=0)
+    observation: AccessObservation
 
 
 def _utc_now() -> datetime:
@@ -181,7 +266,22 @@ def _workspace_context(
     navigation_position: str | None = None,
     capture_snapshot: CaptureSnapshot | None = None,
 ) -> dict[str, object]:
-    workspace, config_error = _workspace_state(config_path)
+    # Capture progress first: a terminal snapshot's commits must precede the
+    # Markdown read, so its final poll cannot retain a stale Kept list.
+    batch_snapshot = request.app.state.batch_import.snapshot()
+    import_token = ""
+    try:
+        target, config = _ImportTarget.read(config_path)
+        workspace = load_workspace(target.workspace, journals=config.journals)
+        # 页面必须展示签名所绑定的同一次配置读取结果；读取中途改变则不签发授权。
+        current, _ = _ImportTarget.read(config_path)
+        if current != target:
+            raise ContentChangedError("Workspace changed while rendering; refresh before importing")
+        with request.app.state.import_submission_lock:
+            import_token = target.form_token(request.app.state.import_token)
+        config_error = None
+    except (ConfigurationError, ContentChangedError, OSError) as error:
+        workspace, config_error = None, str(error)
     selected_view, view_papers = _view_papers(workspace, view)
     selected_paper = _find_paper(view_papers, selected_paper_id)
     selection_stepped = False
@@ -216,6 +316,8 @@ def _workspace_context(
         "open_doi_url": open_doi_url,
         "selected_position": selected_position,
         "selection_stepped": selection_stepped,
+        "batch": build_batch_presentation(batch_snapshot, workspace),
+        "import_token": import_token,
         "decision_result": decision_result,
         "decision_message": decision_message,
         "decision_message_tone": decision_message_tone,
@@ -235,7 +337,7 @@ def _capture_presentation(
     attempt = snapshot.attempt
     if snapshot.completion_pending:
         return {
-            "message": "Finishing Zotero reconciliation…",
+            "message": "Committing export outcome…",
             "poll": True,
             "tone": "warning",
         }
@@ -258,8 +360,8 @@ def _capture_presentation(
     ):
         return {
             "message": (
-                "Automatic Zotero save failed. "
-                "Use Open DOI or Check Zotero to recover."
+                "Connector reported no parent dispatch. "
+                "Export controls remain unavailable during the workflow transition."
             ),
             "poll": False,
             "tone": "warning",
@@ -271,7 +373,7 @@ def _capture_presentation(
         return {
             "message": (
                 "The Literature Monitor Connector did not claim the automatic "
-                "save. Use Open DOI or Check Zotero to recover."
+                "save. Automatic retry is blocked; inspect the unresolved export attempt."
             ),
             "poll": False,
             "tone": "warning",
@@ -372,6 +474,12 @@ def create_app(config_path: Path) -> FastAPI:
     app.state.csrf_token = csrf_token
     app.state.run_coordinator = RunCoordinator(resolved_config_path)
     app.state.capture_coordinator = CaptureCoordinator()
+    app.state.batch_import = BatchImportService(app.state.capture_coordinator)
+    app.state.import_token = secrets.token_urlsafe(32)
+    app.state.reset_confirmation = None
+    app.state.reset_lock = threading.Lock()
+    import_submission_lock = threading.RLock()
+    app.state.import_submission_lock = import_submission_lock
 
     app.add_middleware(
         TrustedHostMiddleware,
@@ -401,17 +509,36 @@ def create_app(config_path: Path) -> FastAPI:
                     else {
                         "request_id": command.request_id,
                         "doi_url": command.doi_url,
+                        "invocation_id": command.invocation_id,
+                        **({"access_context": command.access_context} if command.access_context else {}),
                     }
                 )
             }
         )
 
+    @app.post("/api/connector/dispatch")
+    def connector_dispatch(body: _ConnectorInvocationBody) -> JSONResponse:
+        accepted = app.state.capture_coordinator.authorize_parent_dispatch(
+            SaveInvocation(**body.model_dump()),
+        )
+        return JSONResponse({"accepted": accepted}, status_code=200 if accepted else 409)
+
+    @app.post("/api/connector/native-save-settled")
+    def connector_native_save_settled(body: _ConnectorInvocationBody) -> JSONResponse:
+        accepted = app.state.capture_coordinator.report_native_save_settled(
+            SaveInvocation(**body.model_dump()),
+        )
+        return JSONResponse({"accepted": accepted}, status_code=200 if accepted else 409)
+
+    @app.post("/api/connector/access")
+    def connector_access(body: _ConnectorAccessBody) -> JSONResponse:
+        accepted = app.state.capture_coordinator.record_access(**body.model_dump(exclude={'observation'}),
+                                                              observation=body.observation)
+        return JSONResponse({"accepted": accepted}, status_code=200 if accepted else 409)
+
     @app.post("/api/connector/result")
     def connector_result(body: _ConnectorResultBody) -> JSONResponse:
-        accepted = app.state.capture_coordinator.submit_result(
-            body.request_id,
-            body.outcome,
-        )
+        accepted = app.state.capture_coordinator.submit_connector_result(**body.model_dump())
         return JSONResponse(
             {"accepted": accepted},
             status_code=200 if accepted else 409,
@@ -438,6 +565,18 @@ def create_app(config_path: Path) -> FastAPI:
         )
         return templates.TemplateResponse(request, "workspace.html", context)
 
+    def reset_preview_context() -> dict[str, object]:
+        with app.state.reset_lock:
+            # Each display supersedes its predecessor; POST cannot choose a path.
+            app.state.reset_confirmation = None
+            try:
+                plan = preview_reset(resolved_config_path)
+                token = secrets.token_urlsafe(32)
+                app.state.reset_confirmation = (token, plan)
+                return {"reset_plan": plan, "reset_token": token, "reset_error": None}
+            except (ResetRefused, OSError, ValueError) as error:
+                return {"reset_plan": None, "reset_token": None, "reset_error": str(error)}
+
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request) -> HTMLResponse:
         settings_state = load_settings(resolved_config_path)
@@ -454,6 +593,7 @@ def create_app(config_path: Path) -> FastAPI:
             ),
         )
         context.update(_workspace_health_context(resolved_config_path))
+        context.update(reset_preview_context())
         context["run_snapshot"] = app.state.run_coordinator.snapshot()
         context["connector_readiness"] = (
             app.state.capture_coordinator.snapshot().readiness.value
@@ -462,6 +602,46 @@ def create_app(config_path: Path) -> FastAPI:
             request,
             "settings.html",
             context,
+        )
+
+    @app.post("/settings/workspace-reset", response_class=HTMLResponse)
+    async def reset_workspace_route(request: Request) -> HTMLResponse:
+        form = await request.form()
+        csrf = form.get("csrf_token")
+        if not _csrf_valid(str(csrf) if csrf is not None else None, csrf_token):
+            return HTMLResponse("Invalid or missing CSRF token.", status_code=403)
+        reset_result = None
+        with app.state.reset_lock:
+            saved = app.state.reset_confirmation
+            token = form.get("reset_token")
+            if (saved is None or not isinstance(token, str)
+                    or not secrets.compare_digest(token, saved[0])):
+                result_message, status = "Reset confirmation is stale or already used. Reload Settings.", 409
+            elif form.get("reset_word") != "RESET":
+                app.state.reset_confirmation = None
+                result_message, status = "Type the complete RESET confirmation. Reload Settings to retry.", 400
+            elif app.state.run_coordinator.snapshot().status is CoordinatorStatus.RUNNING:
+                app.state.reset_confirmation = None
+                result_message, status = "A Run is active; Reset refused.", 409
+            elif app.state.batch_import.running:
+                app.state.reset_confirmation = None
+                result_message, status = "A batch Import is active; Reset refused.", 409
+            elif blocker := app.state.capture_coordinator.reset_blocker:
+                app.state.reset_confirmation = None
+                result_message, status = blocker, 409
+            else:
+                app.state.reset_confirmation = None
+                result = execute_reset(resolved_config_path, saved[1])
+                reset_result = result
+                result_message = result.message
+                status = 200 if result.success else 409
+        return templates.TemplateResponse(
+            request, "fragments/workspace_reset.html",
+            {"request": request, "csrf_token": csrf_token,
+             "reset_plan": None, "reset_token": None,
+             "reset_error": result_message, "reset_success": status == 200,
+             "reset_result": reset_result},
+            status_code=status,
         )
 
     @app.get("/settings/zotero", response_class=HTMLResponse)
@@ -678,6 +858,39 @@ def create_app(config_path: Path) -> FastAPI:
             ),
         )
 
+    def render_import_workspace(request: Request, *, view: str = "kept",
+                                paper: UUID | None = None, message: str | None = None,
+                                status_code: int = 200) -> HTMLResponse:
+        context = _workspace_context(request=request, config_path=resolved_config_path,
+            csrf_token=csrf_token, view=view, selected_paper_id=paper, decision_message=message)
+        return templates.TemplateResponse(request, "fragments/workspace.html", context,
+                                          status_code=status_code)
+
+    @app.post("/imports/start", response_class=HTMLResponse)
+    def import_start(request: Request, body: Annotated[_ImportStartForm, Form()]) -> HTMLResponse:
+        if not _csrf_valid(body.csrf_token, csrf_token):
+            return HTMLResponse("Invalid or missing CSRF token.", status_code=403)
+        with import_submission_lock:
+            try:
+                target, _ = _ImportTarget.read(resolved_config_path)
+            except (ConfigurationError, ContentChangedError, OSError):
+                return render_import_workspace(request, message="Configuration needs attention before import.", status_code=400)
+            if not _csrf_valid(body.import_token, target.form_token(app.state.import_token)):
+                return render_import_workspace(request, message="Workspace changed or import request already submitted/expired. Review the current Workspace before importing.", status_code=409)
+            # 消耗授权和启动保持串行；worker 持锁后再次复核，绝不按后来的配置改投其他 Workspace。
+            app.state.import_token = secrets.token_urlsafe(32)
+            snapshot = app.state.batch_import.start(target.workspace, validate_target=target.verify)
+            if snapshot.plan is None and snapshot.phase is BatchPhase.BLOCKED:
+                return render_import_workspace(request, message=snapshot.message, status_code=409)
+        return render_import_workspace(request)
+
+    @app.post("/imports/poll", response_class=HTMLResponse)
+    def import_poll(request: Request, body: Annotated[_ImportPollForm, Form()]) -> HTMLResponse:
+        if not _csrf_valid(body.csrf_token, csrf_token):
+            return HTMLResponse("Invalid or missing CSRF token.", status_code=403)
+        # Only snapshot() is read by presentation; A4 owns completion delivery.
+        return render_import_workspace(request, view=body.view, paper=body.paper)
+
     @app.get("/fragments/workspace", response_class=HTMLResponse)
     def workspace_fragment(
         request: Request,
@@ -889,7 +1102,7 @@ def create_app(config_path: Path) -> FastAPI:
             )
 
         snapshot = app.state.capture_coordinator.snapshot()
-        if not snapshot.completion_pending:
+        if app.state.batch_import.running or not snapshot.completion_pending:
             return render_capture_status(
                 request,
                 snapshot=snapshot,
@@ -901,51 +1114,15 @@ def create_app(config_path: Path) -> FastAPI:
         completion_result = process_capture_completion(
             app.state.capture_coordinator,
         )
-        if completion_result.outcome is CompletionProcessOutcome.NO_COMPLETION:
-            return render_capture_status(
-                request,
-                snapshot=app.state.capture_coordinator.snapshot(),
-                view=view,
-                selected_paper_id=paper,
-                navigation_position=position,
-            )
-
-        completion = completion_result.completion
-        reconciliation = completion_result.reconciliation
-        assert completion is not None
-        assert reconciliation is not None
-
+        if completion_result.result is None:
+            return render_capture_status(request, snapshot=app.state.capture_coordinator.snapshot(),
+                                         view=view, selected_paper_id=paper, navigation_position=position)
+        result = completion_result.result
         selected_paper_id = paper
-        decision_result: DecisionResult | None = reconciliation
-        decision_message: str | None = None
-        decision_message_tone = "warning"
-        navigation_position = None
-        if completion_result.outcome is CompletionProcessOutcome.RECONCILED:
-            current_output_dir, config_error = _resolve_output_dir(
-                resolved_config_path,
-            )
-            current_workspace_is_origin = (
-                config_error is None
-                and current_output_dir is not None
-                and Path(
-                    os.path.abspath(os.fspath(current_output_dir)),
-                )
-                == completion.capture_guard.output_dir
-            )
-            if (
-                current_workspace_is_origin
-                and view == "kept"
-                and paper == completion.paper_id
-            ):
-                selected_paper_id = completion.paper_id
-                navigation_position = position
-            else:
-                # A completion can finish while the user is viewing another
-                # Paper/workspace; browser hints stay presentation-only.
-                decision_result = None
-                decision_message = reconciliation.message
-                decision_message_tone = "success"
-
+        decision_result = None
+        decision_message = result.message
+        decision_message_tone = "success" if result.outcome is ExportCompletionOutcome.EXPORTED else "warning"
+        navigation_position = position
         context = _workspace_context(
             request=request,
             config_path=resolved_config_path,
@@ -976,70 +1153,9 @@ def create_app(config_path: Path) -> FastAPI:
         view: Annotated[str, Form()] = "kept",
         position: Annotated[str | None, Form()] = None,
     ) -> HTMLResponse:
-        output_dir, parsed_status, failure = prepare_paper_mutation(
-            request,
-            paper_id=paper_id,
-            expected_status_value=expected_status,
-            submitted_csrf=csrf_token_value,
-            view=view,
-        )
-        if failure is not None:
-            return failure
-        assert output_dir is not None
-        assert parsed_status is not None
-
-        result = start_save_to_zotero(
-            output_dir,
-            paper_id,
-            parsed_status,
-            app.state.capture_coordinator,
-        )
-        decision_result: DecisionResult | None = None
-        decision_message: str | None = None
-        decision_message_tone = "warning"
-        if result.outcome is SaveToZoteroOutcome.RECONCILED:
-            decision_result = result.preflight
-        elif result.outcome is SaveToZoteroOutcome.CONNECTOR_UNAVAILABLE:
-            decision_message = (
-                "Automatic Zotero capture is unavailable because the "
-                "Literature Monitor Connector is not connected. "
-                "Use Open DOI or Check Zotero to recover."
-            )
-        elif result.outcome is SaveToZoteroOutcome.CAPTURE_BUSY:
-            decision_message = (
-                "Another automatic Zotero save is in progress. "
-                "No second capture was started."
-            )
-        elif result.outcome is SaveToZoteroOutcome.COMPLETION_PENDING:
-            decision_message = (
-                "A previous automatic Zotero save is ready to finish. "
-                "No second capture was started."
-            )
-        elif result.outcome is SaveToZoteroOutcome.PRECHECK_FAILED:
-            decision_result = result.preflight
-        elif result.outcome is SaveToZoteroOutcome.CAPTURE_INVALID_DOI:
-            decision_message = (
-                "Automatic Zotero capture could not start because the "
-                "authoritative DOI was invalid."
-            )
-
-        context = _workspace_context(
-            request=request,
-            config_path=resolved_config_path,
-            csrf_token=csrf_token,
-            view=view,
-            selected_paper_id=paper_id,
-            decision_result=decision_result,
-            decision_message=decision_message,
-            decision_message_tone=decision_message_tone,
-            navigation_position=position,
-            capture_snapshot=app.state.capture_coordinator.snapshot(),
-        )
-        return templates.TemplateResponse(
-            request,
-            "fragments/workspace.html",
-            context,
-        )
+        if not _csrf_valid(csrf_token_value, csrf_token):
+            return HTMLResponse("Invalid or missing CSRF token.", status_code=403)
+        return HTMLResponse("Legacy per-Paper Zotero saving is retired. Use Import to Zotero on Kept.", status_code=410)
 
     @app.post("/papers/{paper_id}/keep", response_class=HTMLResponse)
     def keep_route(
@@ -1088,14 +1204,8 @@ def create_app(config_path: Path) -> FastAPI:
         view: Annotated[str, Form()] = "kept",
         position: Annotated[str | None, Form()] = None,
     ) -> HTMLResponse:
-        return apply_decision(
-            request,
-            paper_id=paper_id,
-            expected_status_value=expected_status,
-            submitted_csrf=csrf_token_value,
-            view=view,
-            navigation_position=position,
-            action=reconcile_paper_with_zotero,
-        )
+        if not _csrf_valid(csrf_token_value, csrf_token):
+            return HTMLResponse("Invalid or missing CSRF token.", status_code=403)
+        return HTMLResponse("Zotero reconciliation is retired. Exported records are historical parent-save outcomes.", status_code=410)
 
     return app

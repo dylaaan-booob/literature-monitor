@@ -65,7 +65,7 @@ def test_connector_delta_does_not_live_in_python_package():
 
 def test_connector_build_pins_release_version():
     script = BUILD_SCRIPT.read_text()
-    assert 'CONNECTOR_VERSION="0.6.2"' in script
+    assert 'CONNECTOR_VERSION="0.6.3"' in script
     assert './build.sh -d -v "$CONNECTOR_VERSION"' in script
 
 

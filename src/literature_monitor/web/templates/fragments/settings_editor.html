@@ -140,6 +140,22 @@
       </div>
     </fieldset>
 
+    <fieldset aria-describedby="institution-help">
+      <legend>Institution / Federated Access</legend>
+      <p class="muted" data-institution-state>{{ "Public identifiers entered; Save to apply changes." if settings_form.institution_name or settings_form.institution_idp_entity_id else "Not configured. Manual institutional access remains available." }}</p>
+      <div class="form-grid">
+        <label>Institution name or identifier (optional)
+          <input name="institution_name" value="{{ settings_form.institution_name }}" maxlength="120" autocomplete="off" aria-describedby="institution-help">
+        </label>
+        <label>Public IdP entity ID (optional)
+          <input name="institution_idp_entity_id" value="{{ settings_form.institution_idp_entity_id }}" maxlength="512" autocomplete="off" spellcheck="false" aria-describedby="institution-help" placeholder="Public HTTPS entity ID or URN">
+        </label>
+      </div>
+      <p class="muted" id="institution-help">Leave these blank if unknown. Use public identifiers only, never account details, passwords, tokens or session data. An IdP entity ID identifies your institution's identity provider; it is not a login link.</p>
+      <p class="muted">Configured institution ≠ authenticated session ≠ full-text entitlement. These settings do not prove IdP or service login, access to a Paper, or a saved Zotero PDF.</p>
+      <p class="muted">Automatic federated access is unavailable until a service route is verified. Use the Paper's service page or your manual Publisher Access URL; existing OpenAthens host associations remain independent.</p>
+    </fieldset>
+
     <fieldset class="venue-settings">
       <legend>Journals &amp; Publishers</legend>
       <section aria-labelledby="settings-journals-heading">

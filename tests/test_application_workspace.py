@@ -31,7 +31,6 @@ def write_paper(
     title: str = "A Paper",
     publication_date: date | None = date(2026, 9, 20),
     discovered_at: datetime = datetime(2026, 9, 21, tzinfo=timezone.utc),
-    zotero_key: str | None = None,
 ) -> Path:
     paper = CanonicalPaper(
         id=UUID(int=ordinal),
@@ -57,7 +56,6 @@ def write_paper(
         workflow=Workflow(
             status=status,
             discovered_at=discovered_at,
-            zotero_key=zotero_key,
         ),
     )
     path = output_dir / "Papers" / filename
@@ -91,7 +89,7 @@ def test_missing_papers_returns_empty_snapshot_without_creating_anything(
     assert snapshot.inbox == ()
     assert snapshot.kept == ()
     assert snapshot.rejected == ()
-    assert snapshot.in_zotero == ()
+    assert snapshot.exported == ()
     assert not output_dir.exists()
 
 
@@ -105,7 +103,7 @@ def test_all_workflow_statuses_appear_only_in_their_derived_view(
             ordinal,
             status=status,
             title=status.value,
-            zotero_key="ZOT-1" if status is WorkflowStatus.IN_ZOTERO else None,
+
         )
 
     snapshot = load_workspace(tmp_path)
@@ -114,8 +112,8 @@ def test_all_workflow_statuses_appear_only_in_their_derived_view(
     assert [paper.status for paper in snapshot.inbox] == [WorkflowStatus.CANDIDATE]
     assert [paper.status for paper in snapshot.kept] == [WorkflowStatus.KEPT]
     assert [paper.status for paper in snapshot.rejected] == [WorkflowStatus.REJECTED]
-    assert [paper.status for paper in snapshot.in_zotero] == [
-        WorkflowStatus.IN_ZOTERO
+    assert [paper.status for paper in snapshot.exported] == [
+        WorkflowStatus.EXPORTED
     ]
 
     candidate = snapshot.inbox[0]
@@ -330,15 +328,14 @@ def test_papers_path_that_is_not_a_directory_returns_issue(tmp_path: Path) -> No
 @pytest.mark.parametrize("attribution", ["missing", [], ["0006-341X"], "damaged", None, {"issn": "0006-341X"}, ["0006-341X", "invalid"]])
 def test_optional_attribution_does_not_remove_papers_from_any_workflow_view(tmp_path, attribution):
     for ordinal, status in enumerate(WorkflowStatus, start=1):
-        path = write_paper(tmp_path, f"{status.value}.md", ordinal, status=status,
-                           zotero_key="ZOT123" if status is WorkflowStatus.IN_ZOTERO else None)
+        path = write_paper(tmp_path, f"{status.value}.md", ordinal, status=status)
         if attribution != "missing":
             replace_frontmatter(path, journal_issns=attribution)
     before = {p: p.read_bytes() for p in (tmp_path / "Papers").glob("*.md")}
     snapshot = load_workspace(tmp_path)
     assert len(snapshot.papers) == 4 and snapshot.issues == ()
     for view, status in ((snapshot.inbox, WorkflowStatus.CANDIDATE), (snapshot.kept, WorkflowStatus.KEPT),
-                         (snapshot.rejected, WorkflowStatus.REJECTED), (snapshot.in_zotero, WorkflowStatus.IN_ZOTERO)):
+                         (snapshot.rejected, WorkflowStatus.REJECTED), (snapshot.exported, WorkflowStatus.EXPORTED)):
         assert len(view) == 1 and view[0].status is status
     assert all(p.read_bytes() == contents for p, contents in before.items())
 
@@ -414,8 +411,7 @@ def test_sections_follow_first_configured_group_occurrence_and_flat_navigation_o
         (3, "X second group", ["0162-1459"]), (4, "A ungrouped", ["0090-5364"]),
         (5, "B unmapped", ["0036-1992"]),
     ):
-        path = write_paper(tmp_path, f"{ordinal}.md", ordinal, title=title, status=status,
-                           zotero_key="ZOT123" if status is WorkflowStatus.IN_ZOTERO else None)
+        path = write_paper(tmp_path, f"{ordinal}.md", ordinal, title=title, status=status)
         replace_frontmatter(path, journal_issns=identities)
     snapshot = load_workspace(tmp_path, journals)
     sections = snapshot.sections_for(status)

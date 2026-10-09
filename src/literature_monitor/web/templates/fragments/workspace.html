@@ -13,8 +13,9 @@
     <div class="notice {{ decision_message_tone }}">{{ decision_message }}</div>
   {% endif %}
 
-  {% set selected_paper_id = selected_paper.paper_id if selected_paper else none %}
-  {% include "fragments/capture_status.html" %}
+  {% if active_view == 'kept' or batch.snapshot.phase.value != 'idle' %}
+    {% include "fragments/batch_import.html" %}
+  {% endif %}
 
   {% if config_error %}
     <div class="notice warning">
@@ -23,16 +24,6 @@
       <p><a href="/settings">Open Settings</a></p>
     </div>
   {% else %}
-    <nav class="view-tabs" aria-label="Workspace views">
-      {% for key, label in (("inbox", "Inbox"), ("kept", "Kept"), ("rejected", "Rejected"), ("in-zotero", "In Zotero")) %}
-        <a href="/?view={{ key }}"
-           class="{{ 'active' if active_view == key else '' }}"
-           hx-get="/fragments/workspace?view={{ key }}"
-           hx-target="#workspace-root"
-           hx-swap="outerHTML">{{ label }}</a>
-      {% endfor %}
-    </nav>
-
     <div class="workspace-grid">
       {% include "fragments/paper_list.html" %}
       {% include "fragments/paper_detail.html" %}

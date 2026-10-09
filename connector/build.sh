@@ -3,7 +3,7 @@ set -euo pipefail
 
 CONNECTOR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPOSITORY_ROOT="$(cd "$CONNECTOR_ROOT/.." && pwd -P)"
-CONNECTOR_VERSION="0.6.2"
+CONNECTOR_VERSION="0.6.3"
 DEFAULT_WORK_ROOT="$CONNECTOR_ROOT/.work"
 DEFAULT_OUTPUT_DIR="$CONNECTOR_ROOT/build/chrome-mv3"
 WORK_ROOT_IS_EXTERNAL=0
@@ -207,6 +207,14 @@ grep -Fq "$(awk '$1 == "upstream" { print $3 }' "$CONNECTOR_ROOT/upstream.lock")
 
 test -f "$OUTPUT_DIR/literature-monitor-runtime.js" \
     || fail "artifact is missing the Literature Monitor runtime overlay"
+test -f "$OUTPUT_DIR/literature-monitor-access.js" \
+    || fail "artifact is missing the Literature Monitor access overlay"
+node - "$OUTPUT_DIR/background-worker.js" <<'NODE'
+const source = require('fs').readFileSync(process.argv[2], 'utf8');
+const access = source.indexOf('"literature-monitor-access.js"');
+const runtime = source.indexOf('"literature-monitor-runtime.js"');
+if (access < 0 || runtime < access) throw new Error('access overlay must load before runtime');
+NODE
 grep -Fq '"literature-monitor-runtime.js"' "$OUTPUT_DIR/background-worker.js" \
     || fail "MV3 service worker is not wired to the Literature Monitor runtime"
 grep -Fq 'const BRIDGE_BASE = "http://127.0.0.1:8000";' \

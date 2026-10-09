@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, replace
 from datetime import date
 from enum import Enum
@@ -15,12 +16,14 @@ import yaml
 
 from literature_monitor.config import (
     ConfigurationError,
+    InstitutionConfig,
     JournalConfig,
     PublisherConfig,
     LegacyJournal,
     parse_legacy_journal_whitelist_text,
     parse_publisher_whitelist_text,
     validate_publisher_configs,
+    validate_publisher_membership,
     render_settings_list_text,
     LoadedConfig,
     LogLevel,
@@ -46,6 +49,8 @@ from literature_monitor.safe_write import (
     ContentChangedError,
     create_text_exclusive,
     read_text_exact,
+    workspace_operation_lock,
+    workspace_path_lock,
     replace_regular_text_if_unchanged as replace_text_if_unchanged,
 )
 from literature_monitor.search import SearchBackendError, SearchExpressionError, validate_search_expression
@@ -86,6 +91,7 @@ class MonitorDraft:
     legacy_journals: tuple[LegacyJournal, ...] = ()
     migration_confirmations: tuple[MigrationConfirmation, ...] = ()
     pending_journal_ids: tuple[str, ...] = ()  # Transient Add/Import placeholders.
+    institution: InstitutionConfig | None = None
 
 
 class SettingsIssueSource(str, Enum):
@@ -160,6 +166,7 @@ class _DraftFields:
     output_dir: Path
     date_spec: DateRangeSpec
     log_level: LogLevel | str
+    institution: InstitutionConfig | None = None
 
 
 def _digest(contents: str) -> str:
@@ -235,6 +242,10 @@ def _recovery_fields(config_path: Path, raw: Any) -> _DraftFields:
     venue = raw.get("venue_whitelist")
     output = raw.get("output_dir")
     log_level = raw.get("log_level")
+    try:
+        institution = InstitutionConfig.model_validate(raw["institution"]) if raw.get("institution") is not None else None
+    except ValueError:
+        institution = None  # Never project invalid or sensitive institution data.
 
     recovered_name = name.strip() if isinstance(name, str) else defaults.name
     recovered_keyword = (
@@ -279,6 +290,7 @@ def _recovery_fields(config_path: Path, raw: Any) -> _DraftFields:
         output_dir=recovered_output,
         date_spec=recovered_date,
         log_level=recovered_log,
+        institution=institution,
     )
 
 
@@ -329,6 +341,7 @@ def _monitor_fields(
             output_dir=definition.output_dir,
             date_spec=definition.date_spec,
             log_level=definition.log_level,
+            institution=definition.institution,
         ),
         (),
     )
@@ -427,6 +440,7 @@ def load_settings(config_path: Path) -> SettingsLoadResult:
         log_level=fields.log_level,
         monitor_revision=monitor_snapshot.revision,
         journal_revision=journal_snapshot.revision,
+        institution=fields.institution,
     )
     return SettingsLoadResult(
         config_path=config_path,
@@ -455,6 +469,7 @@ def _draft_monitor_mapping(
         raw["to_date"] = draft.date_spec.to_date
     if draft.date_spec.window_days is not None:
         raw["window_days"] = draft.date_spec.window_days
+    raw["institution"] = draft.institution
     return raw
 
 
@@ -574,6 +589,8 @@ def _render_monitor_yaml(
         if isinstance(draft.log_level, LogLevel)
         else str(draft.log_level)
     )
+    if draft.institution is not None and (draft.institution.name or draft.institution.idp_entity_id):
+        values["institution"] = draft.institution.model_dump(exclude_none=True)
     return yaml.safe_dump(values, sort_keys=False, allow_unicode=True)
 
 
@@ -616,9 +633,38 @@ def _result_from_state(
 
 
 def save_settings(
+    config_path: Path, draft: MonitorDraft, *, client: OpenAlexClient | None = None,
+) -> SettingsSaveResult:
+    """Workspace-path changes share exclusion with batch/Run/decisions (§42.4)."""
+    state = load_settings(config_path)
+    def workspace_path(value):
+        return Path(os.path.abspath(value if value.is_absolute() else config_path.absolute().parent / value))
+    old, new = workspace_path(state.draft.output_dir), workspace_path(draft.output_dir)
+    try:
+        with ExitStack() as stack:
+            locks = []
+            for path in sorted({old, new}):
+                if path.exists() or path.is_symlink():
+                    locks.append(stack.enter_context(workspace_operation_lock(path)))
+                else:
+                    # Reset owns absent targets too; existence cannot bypass exclusion.
+                    stack.enter_context(workspace_path_lock(path))
+            return _save_settings(config_path, draft, client=client, operation_locks=tuple(locks))
+    except (CompareReadError, ContentChangedError, OSError) as error:
+        invalid_path = isinstance(error, OSError) and error.errno in (errno.ELOOP, errno.ENOTDIR)
+        return _result_from_state(
+            outcome=SettingsSaveOutcome.INVALID_DRAFT if invalid_path else SettingsSaveOutcome.WRITE_FAILED,
+            validation=validate_settings(config_path, draft),
+            state=load_settings(config_path),
+            issues=(SettingsIssue(SettingsIssueSource.STORAGE, f"Workspace path change refused: {error}"),),
+            journal_written=False, monitor_written=False,
+        )
+
+
+def _save_settings(
     config_path: Path,
     draft: MonitorDraft,
-    *, client: OpenAlexClient | None = None,
+    *, client: OpenAlexClient | None = None, operation_locks: tuple = (),
 ) -> SettingsSaveResult:
     """Validate and persist Settings with explicit two-file failure semantics."""
 
@@ -635,7 +681,8 @@ def save_settings(
             monitor_written=False,
         )
 
-    journal_path = load_settings(config_path).journal_path
+    stored_state = load_settings(config_path)
+    journal_path = stored_state.journal_path
 
     monitor_snapshot = _read_snapshot(
         config_path,
@@ -681,12 +728,22 @@ def save_settings(
         )
 
     storage_fields, _ = _monitor_fields(config_path, monitor_snapshot)
+    institution_only = (
+        not stored_state.issues and not draft.legacy_journals
+        and draft.institution != stored_state.draft.institution
+        and replace(draft, institution=stored_state.draft.institution) == stored_state.draft
+    )
 
     try:
-        draft = _resolve_settings_targets(config_path, draft, journal_snapshot, storage_fields, client)
+        if institution_only:
+            validate_publisher_membership(draft.journals, draft.publishers)
+        else:
+            draft = _resolve_settings_targets(config_path, draft, journal_snapshot, storage_fields, client)
         validation = validate_settings(config_path, draft)
         if validation.outcome is SettingsValidationOutcome.INVALID:
             raise ConfigurationError("; ".join(i.message for i in validation.issues))
+        if validation.config is not None:
+            draft = replace(draft, institution=validation.config.institution)
     except (ConfigurationError, OpenAlexError, ValueError) as error:
         return _result_from_state(
             outcome=SettingsSaveOutcome.INVALID_DRAFT, validation=validation,
@@ -707,7 +764,8 @@ def save_settings(
         )
     try:
         # Both complete targets exist before the first CAS write starts.
-        journal_target = render_settings_list_text(journal_snapshot.contents, draft.journals, draft.publishers, path=journal_path)
+        journal_target = (journal_snapshot.contents if institution_only else
+                          render_settings_list_text(journal_snapshot.contents, draft.journals, draft.publishers, path=journal_path))
         monitor_target = _render_monitor_yaml(draft, venue_whitelist=storage_fields.venue_whitelist)
     except ConfigurationError as error:
         return _result_from_state(
@@ -717,7 +775,10 @@ def save_settings(
         )
 
     try:
-        _write_snapshot_target(journal_path, journal_target, journal_snapshot)
+        for lock in operation_locks:
+            lock.verify()
+        if not institution_only:
+            _write_snapshot_target(journal_path, journal_target, journal_snapshot)
     except (ContentChangedError, FileExistsError):
         state = load_settings(config_path)
         return _result_from_state(
@@ -752,11 +813,15 @@ def save_settings(
         )
 
     try:
+        for lock in operation_locks:
+            lock.verify()
+        if institution_only and _read_snapshot(journal_path, source=SettingsIssueSource.JOURNAL_DATA).revision != draft.journal_revision:
+            raise ContentChangedError("journal data changed before monitor configuration write")
         _write_snapshot_target(config_path, monitor_target, monitor_snapshot)
     except (ContentChangedError, FileExistsError) as error:
         state = load_settings(config_path)
         return _result_from_state(
-            outcome=SettingsSaveOutcome.PARTIAL_SAVE,
+            outcome=SettingsSaveOutcome.REVISION_CONFLICT if institution_only else SettingsSaveOutcome.PARTIAL_SAVE,
             validation=validation,
             state=state,
             issues=(
@@ -766,13 +831,13 @@ def save_settings(
                     path=config_path,
                 ),
             ),
-            journal_written=True,
+            journal_written=not institution_only,
             monitor_written=False,
         )
     except (CompareReadError, OSError) as error:
         state = load_settings(config_path)
         return _result_from_state(
-            outcome=SettingsSaveOutcome.PARTIAL_SAVE,
+            outcome=SettingsSaveOutcome.WRITE_FAILED if institution_only else SettingsSaveOutcome.PARTIAL_SAVE,
             validation=validation,
             state=state,
             issues=(
@@ -782,7 +847,7 @@ def save_settings(
                     path=config_path,
                 ),
             ),
-            journal_written=True,
+            journal_written=not institution_only,
             monitor_written=False,
         )
 
@@ -792,7 +857,7 @@ def save_settings(
         validation=validation,
         state=state,
         issues=state.issues,
-        journal_written=True,
+        journal_written=not institution_only,
         monitor_written=True,
     )
 

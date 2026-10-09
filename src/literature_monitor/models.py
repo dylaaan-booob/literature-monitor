@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import date as Date
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated, Any
+from pathlib import Path
+import re
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import (
@@ -137,13 +139,58 @@ class WorkflowStatus(str, Enum):
     CANDIDATE = "candidate"
     REJECTED = "rejected"
     KEPT = "kept"
-    IN_ZOTERO = "in_zotero"
+    EXPORTED = "exported"
+
+
+class ExportAttemptState(str, Enum):
+    PENDING = "pending"
+    UNCERTAIN = "uncertain"
+
+
+class ExportAttempt(DomainModel):
+    """Minimal durable reservation binding under SPEC §42.3, not capture history."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=False)
+
+    state: ExportAttemptState
+    attempt_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    paper_id: UUID
+    doi: str
+    expected_status: Literal["kept"]
+    workspace_path: str
+    paper_path: str
+    workspace_identity: tuple[
+        Annotated[int, Field(strict=True, ge=0)], Annotated[int, Field(strict=True, ge=0)],
+    ]
+    papers_identity: tuple[
+        Annotated[int, Field(strict=True, ge=0)], Annotated[int, Field(strict=True, ge=0)],
+    ]
+
+    @field_validator("doi")
+    @classmethod
+    def require_normalized_doi(cls, value: str) -> str:
+        from literature_monitor.identifiers import normalize_doi
+
+        if normalize_doi(value) != value or not re.fullmatch(r"10\.\d{4,9}/[^\s]+", value):
+            raise ValueError("export attempt DOI must be valid and normalized")
+        return value
+
+    @model_validator(mode="after")
+    def require_bound_paths(self) -> ExportAttempt:
+        workspace = Path(self.workspace_path)
+        paper = Path(self.paper_path)
+        if not workspace.is_absolute() or str(workspace) != self.workspace_path or ".." in workspace.parts:
+            raise ValueError("export attempt workspace path must be absolute and normalized")
+        if (paper.parts[:1] != ("Papers",) or len(paper.parts) != 2
+                or paper.name in {".", ".."} or paper.suffix != ".md"
+                or str(paper) != self.paper_path):
+            raise ValueError("export attempt paper path must be a direct Papers Markdown path")
+        return self
 
 
 class Workflow(DomainModel):
     status: WorkflowStatus = WorkflowStatus.CANDIDATE
     discovered_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    zotero_key: NonEmptyStr | None = None
 
     @field_validator("discovered_at")
     @classmethod

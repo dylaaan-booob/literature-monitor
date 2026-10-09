@@ -11,7 +11,6 @@
       <dt>Authors</dt><dd>{{ paper.authors | map(attribute='name') | join(', ') }}</dd>
       <dt>Author keywords</dt><dd>{{ paper.author_keywords | join(', ') if paper.author_keywords else "None supplied" }}</dd>
       <dt>Abstract</dt><dd>{{ paper.abstract if paper.abstract else "Abstract unavailable" }}</dd>
-      <dt>Zotero key</dt><dd>{{ paper.zotero_key if paper.zotero_key else "Not marked in Zotero" }}</dd>
     </dl>
 
     <h3>External IDs</h3>
@@ -62,36 +61,15 @@
           <button type="submit" class="secondary">Reject</button>
         </form>
       {% elif paper.status.value == "kept" and open_doi_url %}
-        <form method="post"
-              action="/papers/{{ paper.paper_id }}/save-to-zotero"
-              hx-post="/papers/{{ paper.paper_id }}/save-to-zotero"
-              hx-target="#workspace-root"
-              hx-swap="outerHTML"
-              data-save-zotero-form>
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="expected_status" value="{{ paper.status.value }}">
-          <input type="hidden" name="view" value="{{ active_view }}">
-          <input type="hidden" name="position" value="{{ selected_position }}">
-          <button type="submit">Save to Zotero</button>
-        </form>
+        {% if paper.export_attempt_present %}
+          <p class="muted">Historical export-attempt metadata is preserved. It does not block a new explicit Import; inspect Zotero for a possible existing parent.</p>
+        {% endif %}
         <a class="button secondary"
            href="{{ open_doi_url }}"
            target="_blank"
            rel="noopener noreferrer"
            referrerpolicy="no-referrer"
            data-open-doi>Open DOI</a>
-        <form method="post"
-              action="/papers/{{ paper.paper_id }}/check-zotero"
-              hx-post="/papers/{{ paper.paper_id }}/check-zotero"
-              hx-target="#workspace-root"
-              hx-swap="outerHTML"
-              data-check-zotero-form>
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="expected_status" value="{{ paper.status.value }}">
-          <input type="hidden" name="view" value="{{ active_view }}">
-          <input type="hidden" name="position" value="{{ selected_position }}">
-          <button type="submit" class="secondary">Check Zotero</button>
-        </form>
       {% endif %}
     </div>
   {% else %}

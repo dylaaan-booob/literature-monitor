@@ -8,7 +8,7 @@ safely updates durable Paper and Author Markdown, and exports kept papers.
 
 ## Release and development status
 
-**v0.6.2 is RELEASED and is the latest published release.**
+**v0.6.3 is in release preparation and is NOT YET PUBLISHED.** The last verified published release is v0.6.2.
 [GitHub Release v0.6.2](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.2)
 contains the verified Python wheel, sdist and separate Chrome/MV3 Connector ZIP.
 Python package, Provider User-Agent and Connector release identities are `0.6.2`.
@@ -28,7 +28,7 @@ exact-DOI reconciliation confirmed the bibliographic parent and changed the
 validation Paper to `in_zotero`; a PDF was observed without gating parent success.
 The optional pre-existing-parent live case and 17 upstream ItemSaver tests remain
 unverified, the latter because the required Puppeteer Chrome was unavailable.
-These recorded §40.14 acceptance boundaries continue to apply to this release.
+These recorded §40.14 acceptance boundaries describe the historical v0.6.2 release.
 
 The released v0.6.0 workflow uses the official Zotero Connector manually and
 read-only exact-DOI reconciliation. The released v0.6.1 workflow adds automatic
@@ -82,6 +82,46 @@ A7 candidate validation and original SHA-256 values remain in
 [SPEC §41.15](SPEC.md#4115-a7-release-preparation-2026-10-08).
 [SPEC §41.16](SPEC.md#4116-v062-release-and-documentation-closeout-2026-10-08)
 records the published artifacts and reused validation evidence.
+
+## v0.6.3 release candidate
+
+A0–A9 and the Reset Guard Lifecycle Fix implement [SPEC §42](SPEC.md#42-v063-keep-driven-batch-zotero-import--federated-access-preparation--development-contract).
+The candidate is **not yet published**. Existing Python and Connector automated
+checks are recorded in §§42.15–42.17; the user additionally reports completed
+real Chrome/Zotero parent and PDF saves, serial import across two Access Services,
+dedicated Workspace Reset → explicit Run, and all 17 upstream ItemSaver tests.
+These user-reported live results remain distinct from recorded automated checks;
+actual PDF completion is still `unverified` in the application without an
+attributable upstream attachment receipt. Final versioned artifacts and remote
+publication require separate verification.
+
+The development UI has exactly **Inbox / Kept / Settings**. Run creates
+`candidate` Papers; Keep/Reject persists immediately. Kept aggregates eligible
+Papers across Runs. Its single Import action processes the set serially through
+the separate Connector. Attributable parent acceptance marks `exported`; PDF
+remains independently `unverified` without reliable attachment evidence.
+New imports create no persistent `export_attempt` marker. Failed, interrupted
+or unconfirmed parents remain `kept`; a later explicit Import creates a fresh
+plan and can retry them. Historical `export_attempt` frontmatter is preserved
+without becoming a blocking authority. An active batch and concurrent Connector
+save still exclude overlapping dispatches. Native parent acceptance alone can
+mark `exported`; translator failure, native errors, absent confirmation and
+local Paper-write errors remain distinct transient batch results. Normal import
+does not enumerate Zotero My Library; inspect uncertain saves before another
+invocation to avoid duplicate parents. A0–A9 pre-simplification tests are
+preserved in `tests/history/` alongside replacement regressions.
+
+Settings accepts optional public institution/IdP identifiers, which establish
+neither a session nor full-text access. There are currently **zero enabled
+federation routes**; use Open DOI and manual institutional access. Workspace
+Reset in Settings is explicit **permanent deletion of the entire configured
+Workspace, with no undo/recovery**. This includes `.obsidian`, custom files and
+old/damaged Papers. Configuration outside the Workspace remains; deletion
+failures may leave partial results. Reset does not undo Zotero saves or make
+import retry safe. A later explicit Run recreates the Workspace.
+See [SPEC §42.10](SPEC.md#4210-verification-and-release-gates) for required manual
+acceptance and [SPEC §42.15](SPEC.md#4215-a9-final-functional-closeout-2026-10-08)
+for current evidence. The remaining usage sections describe released v0.6.2.
 
 ## Current retrieval architecture
 

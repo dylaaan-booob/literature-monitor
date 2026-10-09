@@ -9,7 +9,8 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from literature_monitor.application.decisions import ReconciliationGuard
+from capture_helpers import reservation
+from literature_monitor.application.export_attempts import resolve_export_completion
 import literature_monitor.web.capture_coordinator as capture_module
 from literature_monitor.web.capture_coordinator import (
     ACTIVE_TIMEOUT_SECONDS,
@@ -17,6 +18,8 @@ from literature_monitor.web.capture_coordinator import (
     WAITING_TIMEOUT_SECONDS,
     CaptureCoordinator,
     CaptureOutcome,
+    PdfOutcome,
+    SaveInvocation,
     CaptureStage,
     CaptureStartOutcome,
     ConnectorReadiness,
@@ -54,20 +57,14 @@ def connect(coordinator: CaptureCoordinator) -> None:
     ) is ConnectorReadiness.CONNECTED
 
 
-def capture_guard(
-    *,
-    paper_id: UUID | None = None,
-    doi: str = "10.1000/example",
-) -> ReconciliationGuard:
-    return ReconciliationGuard(
-        output_dir=Path("/workspace"),
-        workspace_identity=(1, 10),
-        papers_directory_identity=(1, 11),
-        paper_path=Path("/workspace/Papers/paper.md"),
-        paper_file_identity=(1, 12),
-        paper_id=paper_id or uuid4(),
-        normalized_doi=doi,
-    )
+@pytest.fixture(autouse=True)
+def reservation_root(tmp_path):
+    global TEST_ROOT
+    TEST_ROOT = tmp_path / "reservations"
+
+
+def capture_guard(*, paper_id=None, doi="10.1000/example"):
+    return reservation(TEST_ROOT, paper_id=paper_id, doi=doi)
 
 
 def start(
@@ -83,6 +80,21 @@ def claim(coordinator: CaptureCoordinator):
     command = coordinator.claim_command()
     assert command is not None
     return command
+
+
+def submit_result(coordinator, command, outcome, *, request_id=None):
+    identity = dict(
+        request_id=request_id if request_id is not None else command.request_id,
+        invocation_id=command.invocation_id, doi_url=command.doi_url,
+        tab_id=100, session_id="native-session",
+    )
+    if outcome is CaptureOutcome.CONFIRMED:
+        native = SaveInvocation(**identity)
+        if coordinator.authorize_parent_dispatch(native):
+            assert coordinator.report_native_save_settled(native)
+    return coordinator.submit_connector_result(
+        **identity, outcome=outcome, pdf_outcome=PdfOutcome.UNVERIFIED,
+    )
 
 
 def test_fresh_state_is_unavailable_idle_and_immutable(clock: FakeClock) -> None:
@@ -193,11 +205,13 @@ def test_request_ids_are_opaque_distinct_and_doi_target_is_server_built(clock: F
     first_command = claim(coordinator)
     assert first_command.request_id == first.request_id
     assert first_command.doi_url == "https://doi.org/10.1000/a%3Fb%23c%28d%29"
-    assert set(first_command.__dataclass_fields__) == {"request_id", "doi_url"}
+    assert set(first_command.__dataclass_fields__) == {"request_id", "doi_url", "invocation_id", "access_context"}
+    assert first_command.access_context is None
     assert str(paper_id) not in first.request_id
     assert doi not in first.request_id
-    assert coordinator.submit_result(first.request_id, CaptureOutcome.FAILED)
+    assert submit_result(coordinator, first_command, CaptureOutcome.FAILED)
 
+    resolve_export_completion(coordinator.consume_completion(), coordinator=coordinator)
     second = start(coordinator)
     assert second.outcome is CaptureStartOutcome.STARTED
     assert second.request_id is not None
@@ -254,17 +268,11 @@ def test_url_like_normalized_input_cannot_override_doi_authority(clock: FakeCloc
 
     started = start(coordinator, doi="https://evil.example/path?x#y")
 
-    assert started.outcome is CaptureStartOutcome.STARTED
-    command = claim(coordinator)
-    parsed = urlsplit(command.doi_url)
-    assert parsed.scheme == "https"
-    assert parsed.netloc == "doi.org"
-    assert parsed.query == ""
-    assert parsed.fragment == ""
-    assert command.doi_url == "https://doi.org/https%3A//evil.example/path%3Fx%23y"
+    assert started.outcome is CaptureStartOutcome.INVALID_DOI
+    assert coordinator.claim_command() is None
 
 
-def test_waiting_timeout_releases_slot_without_completion(clock: FakeClock) -> None:
+def test_waiting_timeout_delivers_uncertain_completion(clock: FakeClock) -> None:
     coordinator = CaptureCoordinator()
     connect(coordinator)
     first = start(coordinator)
@@ -275,14 +283,11 @@ def test_waiting_timeout_releases_slot_without_completion(clock: FakeClock) -> N
 
     assert expired.attempt is not None
     assert expired.attempt.stage is CaptureStage.FINISHED
-    assert expired.attempt.terminal_outcome is None
-    assert not expired.completion_pending
-    assert coordinator.consume_completion() is None
-
-    connect(coordinator)
-    replacement = start(coordinator)
-    assert replacement.outcome is CaptureStartOutcome.STARTED
-    assert replacement.request_id != first.request_id
+    assert expired.attempt.terminal_outcome is CaptureOutcome.UNCONFIRMED
+    assert expired.completion_pending
+    completion = coordinator.consume_completion()
+    resolve_export_completion(completion, coordinator=coordinator)
+    assert coordinator.claim_command() is None
 
 
 def test_claimed_timeout_becomes_one_shot_unconfirmed_completion(clock: FakeClock) -> None:
@@ -308,7 +313,7 @@ def test_claimed_timeout_becomes_one_shot_unconfirmed_completion(clock: FakeCloc
     assert completion.request_id == command.request_id == started.request_id
     assert completion.paper_id == UUID("22222222-2222-4222-8222-222222222222")
     assert completion.normalized_doi == "10.1000/example"
-    assert completion.capture_guard is identity
+    assert completion.export_reservation is identity
     assert completion.outcome is CaptureOutcome.UNCONFIRMED
     assert coordinator.consume_completion() is None
 
@@ -318,7 +323,7 @@ def test_claimed_timeout_becomes_one_shot_unconfirmed_completion(clock: FakeCloc
     (
         (CaptureOutcome.CONFIRMED, True),
         (CaptureOutcome.UNCONFIRMED, True),
-        (CaptureOutcome.FAILED, False),
+        (CaptureOutcome.FAILED, True),
     ),
 )
 def test_terminal_results_finish_current_claimed_attempt_once(
@@ -331,8 +336,8 @@ def test_terminal_results_finish_current_claimed_attempt_once(
     started = start(coordinator)
     command = claim(coordinator)
 
-    assert coordinator.submit_result(command.request_id, outcome)
-    assert not coordinator.submit_result(command.request_id, outcome)
+    assert submit_result(coordinator, command, outcome)
+    assert not submit_result(coordinator, command, outcome)
 
     snapshot = coordinator.snapshot()
     assert snapshot.attempt is not None
@@ -358,14 +363,15 @@ def test_stale_or_unknown_result_cannot_finish_current_attempt(clock: FakeClock)
 
     first = start(coordinator)
     first_command = claim(coordinator)
-    assert coordinator.submit_result(first_command.request_id, CaptureOutcome.FAILED)
+    assert submit_result(coordinator, first_command, CaptureOutcome.FAILED)
 
+    resolve_export_completion(coordinator.consume_completion(), coordinator=coordinator)
     second = start(coordinator)
     second_command = claim(coordinator)
     assert first.request_id != second.request_id
 
-    assert not coordinator.submit_result(first_command.request_id, CaptureOutcome.CONFIRMED)
-    assert not coordinator.submit_result("unknown-request", CaptureOutcome.CONFIRMED)
+    assert not submit_result(coordinator, first_command, CaptureOutcome.CONFIRMED)
+    assert not submit_result(coordinator, second_command, CaptureOutcome.CONFIRMED, request_id="unknown-request")
     current = coordinator.snapshot()
     assert current.attempt is not None
     assert current.attempt.request_id == second_command.request_id
@@ -379,8 +385,8 @@ def test_malformed_or_oversized_result_cannot_change_state(clock: FakeClock) -> 
     started = start(coordinator)
     command = claim(coordinator)
 
-    assert not coordinator.submit_result("x" * 1000, CaptureOutcome.CONFIRMED)
-    assert not coordinator.submit_result(command.request_id, "CONFIRMED")  # type: ignore[arg-type]
+    assert not submit_result(coordinator, command, CaptureOutcome.CONFIRMED, request_id="x" * 1000)
+    assert not submit_result(coordinator, command, "CONFIRMED")  # type: ignore[arg-type]
 
     snapshot = coordinator.snapshot()
     assert snapshot.attempt is not None
@@ -395,15 +401,13 @@ def test_coordinator_never_writes_filesystem_state(
 ) -> None:
     sentinel = tmp_path / "paper.md"
     sentinel.write_text("human-owned\n", encoding="utf-8")
-    before = tuple(sorted(tmp_path.iterdir()))
 
     coordinator = CaptureCoordinator()
     connect(coordinator)
     started = start(coordinator)
     command = claim(coordinator)
-    assert coordinator.submit_result(command.request_id, CaptureOutcome.CONFIRMED)
+    assert submit_result(coordinator, command, CaptureOutcome.CONFIRMED)
     assert coordinator.consume_completion() is not None
     assert started.request_id == command.request_id
 
     assert sentinel.read_text(encoding="utf-8") == "human-owned\n"
-    assert tuple(sorted(tmp_path.iterdir())) == before

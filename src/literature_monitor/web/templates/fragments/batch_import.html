@@ -1,0 +1,83 @@
+<section id="batch-import" class="panel batch-import" aria-label="Zotero import"
+         data-batch-phase="{{ batch.snapshot.phase.value }}">
+  <div class="section-heading">
+    <h2>{{ batch.heading }}</h2>
+    {% if active_view == 'kept' %}
+      <form method="post" action="/imports/start" hx-post="/imports/start"
+            hx-target="#workspace-root" hx-swap="outerHTML" hx-sync="this:drop"
+            hx-disabled-elt="find button" data-import-form>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="import_token" value="{{ import_token }}">
+        <button type="submit" {% if batch.poll or config_error %}disabled{% endif %}>Import to Zotero</button>
+      </form>
+    {% endif %}
+  </div>
+  <p class="notice error" role="alert" data-import-error hidden></p>
+  {% if active_view == 'kept' %}
+    <p class="muted">Imports all eligible Kept Papers across the whole Workspace, including earlier Runs.
+      This does not check Zotero My Library for matching DOIs. Prior manual saves, failed or interrupted imports may already
+      have created parents; another explicit Import can create duplicates. Failed and unconfirmed Papers remain Kept.</p>
+  {% endif %}
+  <div class="{{ 'notice ' + batch.tone if batch.tone else '' }}" role="status" aria-live="polite">
+    <p>{{ batch.snapshot.message }}</p>
+    {% if batch.current_title %}<p><strong>Current Paper:</strong> {{ batch.current_title }}</p>{% endif %}
+    {% if batch.current_access %}<p>{{ batch.current_access }}</p>{% endif %}
+    {% if batch.snapshot.plan %}
+      <p>{{ batch.snapshot.results|length }} of {{ batch.snapshot.plan.papers|length }} planned Papers processed.</p>
+    {% endif %}
+  </div>
+  <h3>Parent results</h3>
+  <dl class="batch-statistics">
+    <div><dt>Exported parents</dt><dd data-stat="exported-parent">{{ batch.statistics.exported_parent }}</dd></div>
+    <div><dt>No-effect</dt><dd data-stat="no-effect">{{ batch.statistics.no_effect }}</dd></div>
+    <div><dt>Uncertain</dt><dd data-stat="uncertain">{{ batch.statistics.uncertain }}</dd></div>
+    <div><dt>Skipped / blocked</dt><dd data-stat="skipped-blocked">{{ batch.statistics.skipped_blocked }}</dd></div>
+    <div><dt>Normally excluded</dt><dd data-stat="normal-excluded">{{ batch.statistics.normal_excluded }}</dd></div>
+  </dl>
+  <h3>PDF results</h3>
+  <dl class="batch-statistics">
+    <div><dt>Verified success</dt><dd data-stat="pdf-success">{{ batch.statistics.pdf_verified_success }}</dd></div>
+    <div><dt>Verified failure</dt><dd data-stat="pdf-failure">{{ batch.statistics.pdf_verified_failure }}</dd></div>
+    <div><dt>Unverified</dt><dd data-stat="pdf-unverified">{{ batch.statistics.pdf_unverified }}</dd></div>
+  </dl>
+  <p class="muted">Parent export does not confirm that a PDF was saved. Unverified PDFs require manual inspection in Zotero.</p>
+  {% if batch.statistics.uncertain or batch.snapshot.phase.value in ('blocked', 'paused') %}
+    <p class="notice warning">An unconfirmed save may already have reached Zotero.
+      Check Zotero before invoking Import again to avoid possible duplicate parents.
+      A restarted app rejects old callbacks and does not resume an interrupted batch.</p>
+  {% endif %}
+  {% if batch.results %}
+    <details open><summary>Paper results</summary>
+      <ul class="batch-reasons">
+        {% for entry in batch.results %}
+          <li><strong>{{ entry.title }}</strong>: {{ {'exported':'Parent exported', 'no_effect':'Pre-dispatch failure', 'uncertain':'Parent unconfirmed', 'skipped':'Skipped', 'blocked':'Local write/ownership failure'}[entry.result.outcome] }}.
+            {{ entry.result.reason }}
+            {% if entry.access %}<span>{{ entry.access }}</span>{% endif %}
+            {% if entry.result.pdf_outcome %}
+              <span>PDF: {{ {'verified_success':'verified success', 'verified_failure':'verified failure', 'unverified':'unverified'}[entry.result.pdf_outcome.value] }}.</span>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    </details>
+  {% endif %}
+  {% if batch.snapshot.plan %}
+    {% if batch.snapshot.plan.exclusions %}
+      <details {% if batch.statistics.skipped_blocked %}open{% endif %}><summary>Excluded Papers and documents</summary>
+        <ul class="batch-reasons">
+          {% for issue in batch.snapshot.plan.exclusions %}<li>{{ issue.path.name }} ({{ issue.kind }}): {{ issue.reason }}</li>{% endfor %}
+        </ul>
+      </details>
+    {% endif %}
+  {% endif %}
+  {% if batch.poll %}
+    <form method="post" action="/imports/poll" hx-post="/imports/poll"
+          hx-trigger="load delay:1s" hx-target="#workspace-root" hx-swap="outerHTML" hx-sync="this:drop"
+          data-import-poll>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="view" value="{{ active_view }}">
+      {% if selected_paper %}<input type="hidden" name="paper" value="{{ selected_paper.paper_id }}">{% endif %}
+      <button type="submit" class="secondary">Refresh progress</button>
+    </form>
+  {% endif %}
+</section>

@@ -83,10 +83,10 @@ views:
       - property: title
         direction: ASC
   - type: table
-    name: In Zotero
+    name: Exported
     filters:
       and:
-        - status == "in_zotero"
+        - status == "exported"
     order:
       - formula.Paper
       - journal

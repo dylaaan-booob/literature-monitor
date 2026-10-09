@@ -1,0 +1,27 @@
+<section id="danger-zone" class="danger-zone" aria-labelledby="danger-zone-heading">
+  <h3 id="danger-zone-heading">Danger Zone — Workspace Reset</h3>
+  <p>Permanent deletion. There is no undo or recovery. This deletes the entire configured Workspace,
+    including <code>.obsidian/</code>, old or damaged Papers, custom files and all nested folders.</p>
+  <p>Configuration outside this Workspace, Zotero and Chrome data are not changed.
+    Old browser operations may already have saved items in Zotero. Reset does not undo those saves
+    or make another import safe, and does not start a Run.</p>
+  {% if reset_success %}
+    <p class="notice success" role="status">{{ reset_error }}</p>
+  {% elif reset_error %}
+    <p class="notice error" role="alert">{{ reset_error }}</p>
+  {% endif %}
+  {% if reset_plan %}
+    <p>Resolved Workspace: <code>{{ reset_plan.workspace }}</code></p>
+    <form method="post" action="/settings/workspace-reset"
+          hx-post="/settings/workspace-reset" hx-target="#danger-zone" hx-swap="outerHTML">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="reset_token" value="{{ reset_token }}">
+      <label>Enter RESET to permanently delete this entire Workspace:
+        <input name="reset_word" autocomplete="off" spellcheck="false" required>
+      </label>
+      <button type="submit" class="secondary">Permanently delete Workspace</button>
+    </form>
+  {% else %}
+    <p>Reload Settings for a fresh confirmation of the configured Workspace path.</p>
+  {% endif %}
+</section>

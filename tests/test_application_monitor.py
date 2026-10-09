@@ -119,6 +119,47 @@ def canonical_paper() -> CanonicalPaper:
     )
 
 
+@pytest.mark.parametrize("entrypoint", ["cli", "web"])
+def test_run_config_switch_at_preflight_never_writes_unlocked_workspace(tmp_path, monkeypatch, entrypoint):
+    from literature_monitor.web.run_coordinator import RunCoordinator, CoordinatorStatus
+    config_path = write_monitor(tmp_path)
+    locked = tmp_path / "workspace"
+    other = tmp_path / "workspace-b"
+    other.mkdir()
+    (other / "personal.txt").write_text("untouched")
+    install_core_mocks(monkeypatch)
+    switched = []
+
+    def switch(event):
+        if event.stage is ProgressStage.CHECKING_MONITOR and not switched:
+            switched.append(True)
+            config_path.write_text(config_path.read_text().replace("output_dir: workspace", "output_dir: workspace-b"))
+
+    if entrypoint == "cli":
+        result = run_monitor(config_path, progress_callback=switch)
+    else:
+        coordinator = RunCoordinator(config_path)
+        original = coordinator._update_progress
+        def progress(event):
+            switch(event)
+            original(event)
+        monkeypatch.setattr(coordinator, "_update_progress", progress)
+        coordinator.start()
+        coordinator._worker.join(5)
+        assert coordinator.snapshot().status is CoordinatorStatus.FINISHED
+        assert coordinator.snapshot().unexpected_error is None
+        result = coordinator.snapshot().result
+    assert switched == [True]
+    assert set(p.name for p in other.iterdir()) == {"personal.txt"}
+    assert (other / "personal.txt").read_text() == "untouched"
+    assert result.outcome is RunOutcome.COMPLETED
+    assert (locked / "Inbox.base").exists()
+    assert list((locked / "Papers").glob("*.md"))
+    assert list((locked / "Authors").glob("*.md"))
+    assert (locked / ".literature-monitor" / "provider-state.sqlite3").exists()
+    assert read_last_run_snapshot(locked).status is LastRunReadStatus.AVAILABLE
+
+
 def resolved_source(journal: JournalConfig) -> ResolvedSource:
     return ResolvedSource(journal=journal.name, configured_issn_l=journal.issn_l, openalex_id=f"https://openalex.org/S-{journal.name.replace(' ', '-')}", display_name=journal.name, provider_issn_l=journal.issn_l, aliases=(journal.issn_l,))
 
@@ -503,6 +544,7 @@ def test_materialize_consumes_the_same_canonical_result(
         destination: Path,
         *,
         progress_callback: ProgressCallback | None = None,
+        operation_lock: object | None = None,
     ) -> MaterializationResult:
         received.append((papers, destination))
         received_callbacks.append(progress_callback)
@@ -550,6 +592,7 @@ def test_run_monitor_uses_core_materialization_and_progress_contract(
         destination: Path,
         *,
         progress_callback: ProgressCallback | None = None,
+        operation_lock: object | None = None,
     ) -> MaterializationResult:
         events.append("materialize")
         assert destination == (tmp_path / "run-workspace").resolve()
@@ -816,6 +859,7 @@ def test_snapshot_write_failure_is_warning_after_materialization(
         destination: Path,
         *,
         progress_callback: ProgressCallback | None = None,
+        operation_lock: object | None = None,
     ) -> MaterializationResult:
         materialized.extend(papers)
         return materialization_result(destination)
@@ -938,6 +982,7 @@ def test_provider_error_still_materializes_successful_papers(
         destination: Path,
         *,
         progress_callback: ProgressCallback | None = None,
+        operation_lock: object | None = None,
     ) -> MaterializationResult:
         materialized.extend(papers)
         return materialization_result(destination)
@@ -1011,6 +1056,7 @@ def test_materialization_issue_controls_structured_run_outcome(
         destination: Path,
         *,
         progress_callback: ProgressCallback | None = None,
+        operation_lock: object | None = None,
     ) -> MaterializationResult:
         return materialization_result(
             destination,

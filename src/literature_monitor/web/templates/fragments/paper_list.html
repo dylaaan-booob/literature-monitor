@@ -1,6 +1,6 @@
 <section class="panel paper-list" id="paper-list">
   <div class="section-heading">
-    <h1>{{ {"inbox": "Inbox", "kept": "Kept", "rejected": "Rejected", "in-zotero": "In Zotero"}[active_view] }}</h1>
+    <h1>{{ {"inbox": "Inbox", "kept": "Kept", "rejected": "Rejected", "exported": "Exported"}[active_view] }}</h1>
     <span class="count">{{ papers|length }}</span>
   </div>
   {% if papers %}
@@ -25,6 +25,9 @@
                   <span>{{ paper.publication_date.isoformat() if paper.publication_date else "Publication date unavailable" }}</span>
                   <span>{{ paper.authors | map(attribute='name') | join(', ') }}</span>
                   <span>Status: {{ paper.status.value }}</span>
+                  {% if paper.export_attempt_present %}
+                    <span>Legacy export-attempt metadata retained; it does not prevent a new explicit import.</span>
+                  {% endif %}
                   <span>Discovered: {{ paper.discovered_at.date().isoformat() }}</span>
                 </a>
               </li>

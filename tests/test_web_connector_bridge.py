@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import literature_monitor.web.app as web_app
-from literature_monitor.application.decisions import ReconciliationGuard
+from capture_helpers import reservation
 from literature_monitor.web.app import create_app
 from literature_monitor.web.capture_coordinator import (
     CaptureOutcome,
@@ -28,15 +28,7 @@ def connect(app) -> None:
 def start_capture(app):
     paper_id = UUID("11111111-1111-4111-8111-111111111111")
     result = app.state.capture_coordinator.start_capture(
-        ReconciliationGuard(
-            output_dir=Path("/workspace"),
-            workspace_identity=(1, 10),
-            papers_directory_identity=(1, 11),
-            paper_path=Path("/workspace/Papers/paper.md"),
-            paper_file_identity=(1, 12),
-            paper_id=paper_id,
-            normalized_doi="10.1000/example",
-        ),
+        reservation(app.state.config_path.parent, paper_id=paper_id),
     )
     assert result.outcome is CaptureStartOutcome.STARTED
     assert result.request_id is not None
@@ -78,7 +70,7 @@ def test_bridge_claim_is_atomic_minimal_and_does_not_leak_previous_command(
 
     assert claimed.status_code == 200
     command = claimed.json()["command"]
-    assert set(command) == {"request_id", "doi_url"}
+    assert set(command) == {"request_id", "doi_url", "invocation_id"}
     assert command["request_id"] == started.request_id
     assert command["doi_url"] == "https://doi.org/10.1000/example"
     assert repeated.status_code == 200
@@ -157,7 +149,7 @@ def test_simple_cross_origin_claim_cannot_consume_pending_command(tmp_path: Path
 
     assert valid.status_code == 200
     command = valid.json()["command"]
-    assert set(command) == {"request_id", "doi_url"}
+    assert set(command) == {"request_id", "doi_url", "invocation_id"}
     assert command["request_id"] == started.request_id
     assert command["doi_url"] == "https://doi.org/10.1000/example"
     assert repeated.status_code == 200
@@ -174,7 +166,7 @@ def test_result_route_only_updates_process_local_capture_state(
     def forbidden(*args: object, **kwargs: object) -> object:
         raise AssertionError("Connector bridge must not enter Paper/Zotero authority")
 
-    monkeypatch.setattr(web_app, "reconcile_paper_with_zotero", forbidden)
+    assert not hasattr(web_app, "reconcile_paper_with_zotero")
     monkeypatch.setattr(web_app, "load_config", forbidden)
     monkeypatch.setattr(web_app, "load_workspace", forbidden)
 
@@ -184,11 +176,12 @@ def test_result_route_only_updates_process_local_capture_state(
 
     with TestClient(app, base_url="http://localhost") as client:
         claimed = client.post("/api/connector/claim", json={})
+        invocation = {**claimed.json()["command"], "tab_id": 100, "session_id": "native-session"}
+        assert client.post("/api/connector/dispatch", json=invocation).status_code == 200
         response = client.post(
             "/api/connector/result",
             json={
-                "request_id": claimed.json()["command"]["request_id"],
-                "outcome": "CONFIRMED",
+                **invocation, "outcome": "CONFIRMED", "pdf_outcome": "unverified",
             },
         )
 
@@ -214,7 +207,7 @@ def test_stale_malformed_and_oversized_results_do_not_change_active_attempt(
         claimed = client.post("/api/connector/claim", json={}).json()["command"]
         unknown = client.post(
             "/api/connector/result",
-            json={"request_id": "unknown-request", "outcome": "CONFIRMED"},
+            json={**claimed, "request_id": "unknown-request", "tab_id": 100, "session_id": "native-session", "outcome": "CONFIRMED", "pdf_outcome": "unverified"},
         )
         invalid_outcome = client.post(
             "/api/connector/result",

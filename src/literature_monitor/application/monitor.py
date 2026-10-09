@@ -65,6 +65,7 @@ from literature_monitor.keywords import (
     KeywordSyntaxError,
     parse_keyword_expression,
 )
+from literature_monitor.safe_write import workspace_operation_lock, ContentChangedError, WorkspaceOperationLock
 from literature_monitor.materialize import (
     MaterializationIssue,
     MaterializationIssueSeverity,
@@ -414,9 +415,10 @@ def _prepare_invocation(
     date_override: DateRangeSpec | None,
     issn_l: str | None,
     keyword_expression: str | None,
+    loaded_config: LoadedConfig | None = None,
 ) -> tuple[_PreparedInvocation | None, LoadedConfig | None, MonitorIssue | None]:
     try:
-        config = load_config(config_path)
+        config = loaded_config if loaded_config is not None else load_config(config_path)
     except ConfigurationError as error:
         return None, None, _configuration_issue(error, config_path)
 
@@ -833,6 +835,7 @@ def _materialize_canonical_result(
     output_dir: Path | None,
     *,
     progress_callback: ProgressCallback | None = None,
+    operation_lock: WorkspaceOperationLock | None = None,
 ) -> RunResult:
     if core.outcome is RunOutcome.INVALID_CONFIGURATION:
         return RunResult(
@@ -856,11 +859,14 @@ def _materialize_canonical_result(
 
     assert output_dir is not None
     _emit_progress(progress_callback, ProgressStage.UPDATING_WORKSPACE)
-    materialization = materialize_papers(
-        core.papers,
-        output_dir,
-        progress_callback=progress_callback,
-    )
+    # Direct materialization callers still acquire their own lock; Run reuses its
+    # whole-operation ownership instead of recursively acquiring a second flock.
+    if operation_lock is None:
+        materialization = materialize_papers(core.papers, output_dir, progress_callback=progress_callback)
+    else:
+        materialization = materialize_papers(
+            core.papers, output_dir, progress_callback=progress_callback, operation_lock=operation_lock,
+        )
     materialization_issues = tuple(
         _materialization_issue(issue) for issue in materialization.issues
     )
@@ -895,15 +901,50 @@ def run_monitor(
     *,
     date_override: DateRangeSpec | None = None,
     progress_callback: ProgressCallback | None = None,
+    operation_lock: WorkspaceOperationLock | None = None,
+) -> RunResult:
+    # Web 请求启动时已经取得排他锁；CLI 在此自行取得整段 Run 的锁。
+    try:
+        configured = load_config(config_path)
+    except ConfigurationError as error:
+        _emit_progress(progress_callback, ProgressStage.CHECKING_MONITOR)
+        return _materialize_canonical_result(
+            _invalid_core_result(None, _configuration_issue(error, config_path)), None,
+        )
+    if operation_lock is not None:
+        operation_lock.verify()
+        if configured.output_dir != operation_lock.path:
+            raise ContentChangedError("Run configuration differs from reserved Workspace")
+        return _run_monitor_owned(config_path, date_override=date_override,
+                                  progress_callback=progress_callback, operation_lock=operation_lock,
+                                  loaded_config=configured)
+    # Run 从网络发现开始排他，不能让 Reset 趁物化之前删除工作区。
+    with workspace_operation_lock(configured.output_dir, create=True) as lock:
+        return _run_monitor_owned(config_path, date_override=date_override,
+                                  progress_callback=progress_callback, operation_lock=lock,
+                                  loaded_config=configured)
+
+
+def _run_monitor_owned(
+    config_path: Path,
+    *,
+    loaded_config: LoadedConfig,
+    date_override: DateRangeSpec | None = None,
+    progress_callback: ProgressCallback | None = None,
+    operation_lock: WorkspaceOperationLock,
 ) -> RunResult:
     _emit_progress(progress_callback, ProgressStage.CHECKING_MONITOR)
     prepared, config, preflight_issue = _prepare_invocation(
         config_path, date_override=date_override, issn_l=None, keyword_expression=None,
+        loaded_config=loaded_config,
     )
     if preflight_issue is not None:
         core = _invalid_core_result(config, preflight_issue)
         return _materialize_canonical_result(core, None)
     assert prepared is not None
+    operation_lock.verify()
+    if prepared.config.output_dir != operation_lock.path:
+        raise ContentChangedError("Run configuration differs from owned Workspace")
     state_read = read_provider_state(prepared.config.output_dir)
     state_path = prepared.config.output_dir / METADATA_DIRECTORY_NAME / STATE_FILENAME
     state_issues = ()
@@ -916,17 +957,19 @@ def run_monitor(
         prepared, config_path, historical_state=state_read.state or ProviderState(),
         state_issues=state_issues, progress_callback=progress_callback,
     )
-    output_dir = core.config.output_dir if core.config is not None else None
+    output_dir = prepared.config.output_dir
     result = _materialize_canonical_result(
         core,
         output_dir,
         progress_callback=progress_callback,
+        operation_lock=operation_lock,
     )
     if result.outcome is RunOutcome.INVALID_CONFIGURATION:
         return result
 
     assert output_dir is not None
     assert result.resolved_date_range is not None
+    operation_lock.verify()
     try:
         if state_read.status is ProviderStateStatus.INVALID:
             if not state_read.replaceable:
@@ -956,6 +999,7 @@ def run_monitor(
         reused_units=(),
     )
     try:
+        operation_lock.verify()
         write_last_run_snapshot(output_dir, snapshot)
     except LastRunSnapshotWriteError as error:
         warning = _coverage_snapshot_issue(error)

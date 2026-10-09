@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import logging
 import threading
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
 from literature_monitor.application.monitor import RunResult, run_monitor
+from literature_monitor.config import ConfigurationError, load_config
+from literature_monitor.safe_write import WorkspaceOperationLock, workspace_operation_lock, ContentChangedError
 from literature_monitor.progress import (
     PROGRESS_STAGES,
     ActivitySnapshot,
@@ -87,6 +90,8 @@ class RunCoordinator:
         self._result: RunResult | None = None
         self._unexpected_error: UnexpectedRunError | None = None
         self._worker: threading.Thread | None = None
+        self._ownership: AbstractContextManager[WorkspaceOperationLock] | None = None
+        self._operation_lock: WorkspaceOperationLock | None = None
 
     def start(self) -> StartResult:
         """Start a production run on a dedicated worker if none is active."""
@@ -101,6 +106,35 @@ class RunCoordinator:
             self._finished_at = None
             self._result = None
             self._unexpected_error = None
+            # 在发布 RUNNING/启动 worker 之前完成跨进程独占；旧工作线程
+            # 即使尚未进入 materialize，也不得让 Reset 看到空闲 flock。
+            ownership = None
+            acquired = False
+            try:
+                try:
+                    config = load_config(self._config_path)
+                except ConfigurationError:
+                    config = None
+                if config is not None:
+                    ownership = workspace_operation_lock(config.output_dir, create=True)
+                    operation_lock = ownership.__enter__()
+                    acquired = True
+                    if load_config(self._config_path).output_dir != operation_lock.path:
+                        raise ContentChangedError("Run configuration changed before start")
+                    self._operation_lock = operation_lock
+                    self._ownership = ownership
+            except (ContentChangedError, OSError, ConfigurationError) as error:
+                if acquired and ownership is not None:
+                    ownership.__exit__(None, None, None)
+                self._operation_lock = None
+                self._ownership = None
+                self._status = CoordinatorStatus.FINISHED
+                self._finished_at = datetime.now(timezone.utc)
+                self._unexpected_error = UnexpectedRunError(
+                    category=type(error).__name__,
+                    message="Run could not acquire exclusive Workspace ownership.",
+                )
+                return StartResult(StartOutcome.START_FAILED)
             worker = threading.Thread(
                 target=self._run_worker,
                 name="literature-monitor-run",
@@ -110,6 +144,10 @@ class RunCoordinator:
                 # 在线程启动成功前保持锁，避免暴露 RUNNING + 尚未启动 worker 的瞬时状态。
                 worker.start()
             except Exception as error:
+                if self._ownership is not None:
+                    self._ownership.__exit__(None, None, None)
+                self._ownership = None
+                self._operation_lock = None
                 self._status = CoordinatorStatus.FINISHED
                 self._finished_at = datetime.now(timezone.utc)
                 self._result = None
@@ -176,10 +214,14 @@ class RunCoordinator:
         result: RunResult | None = None
         unexpected_error: UnexpectedRunError | None = None
         try:
-            result = run_monitor(
-                self._config_path,
-                progress_callback=self._update_progress,
-            )
+            if self._operation_lock is None:
+                result = run_monitor(self._config_path, progress_callback=self._update_progress)
+            else:
+                result = run_monitor(
+                    self._config_path,
+                    progress_callback=self._update_progress,
+                    operation_lock=self._operation_lock,
+                )
         except BaseException as error:
             LOGGER.exception("Unexpected exception during monitor run")
             unexpected_error = UnexpectedRunError(
@@ -187,7 +229,18 @@ class RunCoordinator:
                 message="The monitor run stopped because of an unexpected internal error.",
             )
         finally:
-            # 所有 worker 退出路径都在执行边界收敛，不能依赖 HTTP polling 修复状态。
+            # 先结束所有工作及操作锁，再对外报告 FINISHED。
+            if self._ownership is not None:
+                try:
+                    self._ownership.__exit__(None, None, None)
+                except Exception:
+                    LOGGER.exception("Failed to release Run Workspace ownership")
+                    unexpected_error = UnexpectedRunError(
+                        category="WorkspaceOwnershipError",
+                        message="Run operation ownership failed during release.",
+                    )
+                self._ownership = None
+                self._operation_lock = None
             with self._lock:
                 self._result = result if unexpected_error is None else None
                 self._unexpected_error = unexpected_error

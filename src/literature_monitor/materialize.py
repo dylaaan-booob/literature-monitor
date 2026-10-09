@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from collections.abc import Sequence
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -45,9 +46,12 @@ from literature_monitor.progress import (
 from literature_monitor.safe_write import (
     CompareReadError,
     ContentChangedError,
-    atomic_replace_text,
+    TextWriteCommittedError,
+    WorkspaceOperationLock,
+    WorkspaceTextDirectory,
+    workspace_text_directory,
     read_text_exact,
-    replace_text_if_unchanged,
+    workspace_operation_lock,
 )
 
 
@@ -151,7 +155,6 @@ def render_paper_markdown(
         "author_keywords": list(paper.metadata.author_keywords),
         "status": workflow["status"],
         "discovered_at": workflow["discovered_at"],
-        "zotero_key": workflow["zotero_key"],
         "external_ids": external_ids.model_dump(
             mode="json", exclude_none=False
         ),
@@ -191,36 +194,18 @@ def _author_stem(author: Author, paper_id: UUID, ordinal: int) -> str:
     return f"unidentified-{paper_id.hex}-{ordinal:02d}"
 
 
-def _ensure_directory(path: Path) -> MaterializationIssue | None:
+def _create_file(path: Path, contents: str, directory: WorkspaceTextDirectory) -> tuple[str | None, str | None]:
     try:
-        path.mkdir(parents=True, exist_ok=True)
-    except OSError as error:
-        return MaterializationIssue(path=path, message=str(error))
-    if not path.is_dir():
-        return MaterializationIssue(path=path, message="target is not a directory")
-    return None
-
-
-def _create_file(path: Path, contents: str) -> tuple[str | None, str | None]:
-    created = False
-    try:
-        with path.open("x", encoding="utf-8", newline="") as handle:
-            created = True
-            handle.write(contents)
+        directory.create(path.name, contents)
+    except TextWriteCommittedError as error:
+        return "created", str(error)
     except FileExistsError:
-        if path.is_file():
+        target = directory.path / path.name
+        if target.is_file() and not target.is_symlink():
             return "existing", None
         return None, "target exists but is not a regular file"
-    except OSError as error:
-        message = str(error)
-        if created:
-            try:
-                path.unlink()
-            except OSError as cleanup_error:
-                message = (
-                    f"{message}; failed to remove incomplete file: {cleanup_error}"
-                )
-        return None, message
+    except (OSError, ContentChangedError, CompareReadError) as error:
+        return None, str(error)
     return "created", None
 
 
@@ -454,6 +439,7 @@ def _enrich_author_state(
     state: AuthorMarkdownState,
     author: Author,
     issues: list[MaterializationIssue],
+    directory: WorkspaceTextDirectory,
 ) -> AuthorMarkdownState | None:
     frontmatter = dict(state.frontmatter)
     changed = False
@@ -481,8 +467,10 @@ def _enrich_author_state(
         return state
     contents = serialize_document(frontmatter, state.body)
     try:
-        atomic_replace_text(state.path, contents)
-    except OSError as error:
+        directory.replace(state.path.name, contents, expected_contents=state.original)
+    except TextWriteCommittedError as error:
+        issues.append(MaterializationIssue(state.path, str(error)))
+    except (OSError, ContentChangedError, CompareReadError) as error:
         issues.append(MaterializationIssue(state.path, str(error)))
         return None
     return parse_author_state(state.path, contents)
@@ -499,6 +487,7 @@ def _resolve_author_links(
     created_authors: list[Path],
     existing_authors: list[Path],
     issues: list[MaterializationIssue],
+    directory: WorkspaceTextDirectory,
 ) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
     links: list[str] = []
     stems: list[str] = []
@@ -583,7 +572,7 @@ def _resolve_author_links(
                     )
                 )
                 return None
-            enriched = _enrich_author_state(state, author, issues)
+            enriched = _enrich_author_state(state, author, issues, directory)
             if enriched is None:
                 return None
             if enriched is not state:
@@ -611,7 +600,9 @@ def _resolve_author_links(
             except Exception as error:
                 issues.append(MaterializationIssue(target, str(error)))
                 return None
-            outcome, error = _create_file(target, contents)
+            outcome, error = _create_file(target, contents, directory)
+            if error is not None and outcome == "created":
+                issues.append(MaterializationIssue(target, error))
             if outcome == "created":
                 created_authors.append(target)
             elif outcome == "existing":
@@ -669,7 +660,6 @@ def _render_updated_paper(
             "discovered_at": state.discovered_at.isoformat().replace(
                 "+00:00", "Z"
             ),
-            "zotero_key": state.zotero_key,
             "external_ids": external_values,
             "sources": [source.model_dump(mode="json") for source in merged.sources],
         }
@@ -690,9 +680,39 @@ def materialize_papers(
     output_dir: Path,
     *,
     progress_callback: ProgressCallback | None = None,
+    operation_lock: WorkspaceOperationLock | None = None,
+) -> MaterializationResult:
+    """Serialize workspace materialization with durable Paper attempt writes."""
+    try:
+        ownership = (nullcontext(operation_lock) if operation_lock is not None
+                     else workspace_operation_lock(output_dir, create=True))
+        with ownership as lock, ExitStack() as stack:
+            lock.verify()
+            if lock.path != output_dir.absolute():
+                raise ContentChangedError("Materialization lock targets another Workspace")
+            directories = {}
+            issues = []
+            for name in ("Authors", "Papers"):
+                try:
+                    directories[name] = stack.enter_context(workspace_text_directory(lock, name))
+                except (OSError, ContentChangedError, CompareReadError) as error:
+                    issues.append(MaterializationIssue(lock.path / name, str(error)))
+            return _materialize_papers(papers, lock, directories, issues, progress_callback=progress_callback)
+    except (ContentChangedError, CompareReadError, OSError) as error:
+        return MaterializationResult((), (), (), (), (), (MaterializationIssue(output_dir, str(error)),))
+
+
+def _materialize_papers(
+    papers: Sequence[CanonicalPaper],
+    lock: WorkspaceOperationLock,
+    directories: dict[str, WorkspaceTextDirectory],
+    issues: list[MaterializationIssue],
+    *,
+    progress_callback: ProgressCallback | None = None,
 ) -> MaterializationResult:
     """Create or incrementally update Paper and Author notes."""
 
+    output_dir = lock.path
     read_activity = ActivityUpdate(
         kind=ActivityKind.WORKING,
         source="workspace",
@@ -702,22 +722,23 @@ def materialize_papers(
     _report_activity(progress_callback, read_activity)
     authors_dir = output_dir / "Authors"
     papers_dir = output_dir / "Papers"
-    issues: list[MaterializationIssue] = []
-    authors_directory_issue = _ensure_directory(authors_dir)
-    papers_directory_issue = _ensure_directory(papers_dir)
-    if authors_directory_issue is not None:
-        issues.append(authors_directory_issue)
-    if papers_directory_issue is not None:
-        issues.append(papers_directory_issue)
+    try:
+        lock.verify()
+        for directory in directories.values():
+            directory.verify()
+    except (OSError, ContentChangedError, CompareReadError) as error:
+        return MaterializationResult((), (), (), (), (), tuple(issues) + (MaterializationIssue(output_dir, str(error)),))
+    authors_directory_issue = "Authors" not in directories
+    papers_directory_issue = "Papers" not in directories
 
     states = (
         _scan_papers(papers_dir, authors_dir, issues)
-        if papers_directory_issue is None
+        if not papers_directory_issue
         else []
     )
     author_states, openalex_index, orcid_index = (
         _scan_authors(authors_dir)
-        if authors_directory_issue is None
+        if not authors_directory_issue
         else ({}, defaultdict(set), defaultdict(set))
     )
     matches = _match_papers(
@@ -766,7 +787,7 @@ def materialize_papers(
             state = match.state
             if state is not None and state.path not in existing_papers:
                 existing_papers.append(state.path)
-            if match.blocked:
+            if match.blocked or authors_directory_issue:
                 continue
             if state is not None:
                 if not state.updateable:
@@ -791,6 +812,7 @@ def materialize_papers(
                     created_authors,
                     existing_authors,
                     issues,
+                    directories["Authors"],
                 )
                 if resolved is None:
                     continue
@@ -815,7 +837,7 @@ def materialize_papers(
                 )
                 continue
 
-            if papers_directory_issue is not None or authors_directory_issue is not None:
+            if papers_directory_issue or authors_directory_issue:
                 continue
             target = papers_dir / paper_filename(
                 paper.metadata.title,
@@ -842,6 +864,7 @@ def materialize_papers(
                 created_authors,
                 existing_authors,
                 issues,
+                directories["Authors"],
             )
             if resolved is None:
                 continue
@@ -901,10 +924,8 @@ def materialize_papers(
         try:
             if pending.original is not None:
                 try:
-                    replace_text_if_unchanged(
-                        pending.path,
-                        pending.contents,
-                        expected_contents=pending.original,
+                    directories["Papers"].replace(
+                        pending.path.name, pending.contents, expected_contents=pending.original,
                     )
                 except CompareReadError as error:
                     issues.append(
@@ -920,12 +941,17 @@ def materialize_papers(
                             "Paper changed on disk after it was scanned; update safely aborted",
                         )
                     )
+                except TextWriteCommittedError as error:
+                    updated_papers.append(pending.path)
+                    issues.append(MaterializationIssue(pending.path, str(error)))
                 except OSError as error:
                     issues.append(MaterializationIssue(pending.path, str(error)))
                 else:
                     updated_papers.append(pending.path)
                 continue
-            outcome, error = _create_file(pending.path, pending.contents)
+            outcome, error = _create_file(pending.path, pending.contents, directories["Papers"])
+            if error is not None and outcome == "created":
+                issues.append(MaterializationIssue(pending.path, error))
             if outcome == "created":
                 created_papers.append(pending.path)
             elif outcome == "existing":
@@ -955,15 +981,22 @@ def materialize_papers(
                     ),
                 )
 
-    if authors_directory_issue is None and papers_directory_issue is None:
+    if not authors_directory_issue and not papers_directory_issue:
         inbox_path = output_dir / "Inbox.base"
         _outcome, error = _create_file(
             inbox_path,
             render_default_inbox_base(),
+            WorkspaceTextDirectory(lock, lock.directory, lock.identity),
         )
         if error is not None:
             issues.append(MaterializationIssue(inbox_path, error))
 
+    try:
+        lock.verify()
+        for directory in directories.values():
+            directory.verify()
+    except (OSError, ContentChangedError, CompareReadError) as error:
+        issues.append(MaterializationIssue(output_dir, str(error)))
     return MaterializationResult(
         created_papers=tuple(created_papers),
         existing_papers=tuple(existing_papers),

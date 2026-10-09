@@ -25,7 +25,7 @@ def nodes(html, *, tag=None, attribute=None):
             result.append(node)
         for child in node['children']:
             walk(child)
-    walk(SettingsDOM(html).root)
+    walk(html if isinstance(html, dict) else SettingsDOM(html).root)
     return result
 
 
@@ -75,7 +75,7 @@ def test_unified_74_journals_20_publishers_offline_get_and_routes(tmp_path, offl
         assert all(i.get('type') != 'hidden' for i in inputs if i.get('name') == 'publisher_access_url')
         forms = [n for n in nodes(page, tag='form') if n['attrs'].get('id') == 'settings-form']
         assert len(forms) == 1
-        assert len([n for n in nodes(page, tag='button') if n['attrs'].get('type') == 'submit']) == 1
+        assert len([n for n in nodes(forms[0], tag='button') if n['attrs'].get('type') == 'submit']) == 1
         for link in nodes(page, attribute='data-publisher-open'):
             assert link['attrs']['target'] == '_blank'
             assert link['attrs']['rel'] == 'noopener noreferrer'

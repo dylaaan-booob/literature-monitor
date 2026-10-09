@@ -1417,6 +1417,7 @@ def test_unexpected_run_error_renders_only_safe_coordinator_text(tmp_path: Path)
 
 def test_workspace_listens_for_run_completion_and_refreshes_through_workspace_route(
     tmp_path: Path,
+    health_config: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     load_calls: list[Path] = []
@@ -1864,10 +1865,12 @@ def test_settings_route_delegates_save_once_and_contains_no_persistence_code(
         csrf = csrf_from_html(client.get("/settings").text)
         response = client.post("/settings/save", data=valid_settings_form(csrf))
 
+    settings_endpoint = next(route.endpoint for route in app.routes if getattr(route, 'path', None) == '/settings/save')
     source = inspect.getsource(web_app)
     assert response.status_code == 200
     assert calls == 1
-    assert "safe_write" not in source
+    # Import 的只读身份校验可引用锁类型；Settings 仍只能委托应用层写入。
+    assert "safe_write" not in inspect.getsource(settings_endpoint)
     assert "write_text" not in source
     assert "write_bytes" not in source
     assert "yaml.safe" not in source
@@ -2576,7 +2579,13 @@ def browser_settings_submission(html):
                 value = selected["attrs"]["value"]
             result.setdefault(attrs["name"], []).append(value)
         for child in node["children"]: walk(child)
-    walk(SettingsDOM(html).root)
+    def find_form(node):
+        if isinstance(node, str): return
+        if node["tag"] == "form":
+            if node["attrs"].get("id") == "settings-form": walk(node)
+            return
+        for child in node["children"]: find_form(child)
+    find_form(SettingsDOM(html).root)
     return result
 
 

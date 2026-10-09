@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError, field_validator
@@ -99,6 +101,50 @@ class LegacyJournal(BaseModel):
     group: NonEmptyStr | None = None
 
 
+class InstitutionConfig(BaseModel):
+    """Public preparation context only; never a route or access proof (§42.7)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, revalidate_instances="always")
+    name: str | None = None
+    idp_entity_id: str | None = None
+
+    @field_validator("name", "idp_entity_id", mode="before")
+    @classmethod
+    def optional_public_text(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("must be public text")
+        if any(unicodedata.category(c).startswith("C") for c in value):
+            raise ValueError("control and invisible characters are forbidden")
+        return value.strip() or None
+
+    @field_validator("name")
+    @classmethod
+    def public_name(cls, value: str | None) -> str | None:
+        if value is not None and (len(value) > 120 or not all(
+            unicodedata.category(c)[0] in "LNM" or c in " .,'()-_" for c in value
+        )):
+            raise ValueError("use at most 120 letters, numbers, spaces or name punctuation")
+        return value
+
+    @field_validator("idp_entity_id")
+    @classmethod
+    def public_entity_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if len(value) > 512 or not value.isascii():
+            raise ValueError("use a public HTTPS entity ID or URN, at most 512 ASCII characters")
+        if re.fullmatch(r"urn:[A-Za-z0-9][A-Za-z0-9._-]*:[A-Za-z0-9._:-]+", value):
+            return value
+        normalize_public_http_url(value)
+        parsed = urlsplit(value)
+        if (parsed.scheme != "https" or parsed.query or parsed.fragment
+                or any(c in value for c in "?%#<>'\"")):
+            raise ValueError("entity ID must use HTTPS without query, fragment or encoded payload")
+        return value
+
+
 class _Settings(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -110,6 +156,12 @@ class _Settings(BaseModel):
     to_date: date | None = None
     window_days: int | None = None
     log_level: LogLevel = LogLevel.INFO
+    institution: InstitutionConfig | None = None
+
+    @field_validator("institution")
+    @classmethod
+    def empty_institution(cls, value: InstitutionConfig | None) -> InstitutionConfig | None:
+        return value if value is not None and (value.name or value.idp_entity_id) else None
 
     @field_validator(
         "name",
@@ -144,6 +196,7 @@ class LoadedConfig:
     date_spec: DateRangeSpec
     log_level: LogLevel
     journals: tuple[JournalConfig, ...]
+    institution: InstitutionConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -157,6 +210,7 @@ class MonitorDefinition:
     output_dir: Path
     date_spec: DateRangeSpec
     log_level: LogLevel
+    institution: InstitutionConfig | None = None
 
 
 def _read_text(path: Path) -> str:
@@ -517,6 +571,7 @@ def parse_monitor_definition(path: Path, raw: Any) -> MonitorDefinition:
         ),
         date_spec=date_spec,
         log_level=settings.log_level,
+        institution=settings.institution,
     )
 
 
@@ -542,6 +597,7 @@ def build_loaded_config(
         date_spec=definition.date_spec,
         log_level=definition.log_level,
         journals=normalized_journals,
+        institution=definition.institution,
     )
 
 

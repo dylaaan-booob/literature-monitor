@@ -9,6 +9,7 @@ from datetime import date
 from itertools import zip_longest
 from pathlib import Path
 
+from pydantic import ValidationError
 from starlette.datastructures import FormData
 
 from literature_monitor.application.journal_import import JournalImportMode, JournalImportPlan
@@ -19,7 +20,7 @@ from literature_monitor.application.settings import (
     SettingsIssue,
     SettingsIssueSource,
 )
-from literature_monitor.config import JournalConfig, LegacyJournal, LogLevel, PublisherConfig
+from literature_monitor.config import InstitutionConfig, JournalConfig, LegacyJournal, LogLevel, PublisherConfig
 from literature_monitor.date_range import DateRangeSpec
 from literature_monitor.url_safety import normalize_public_http_url
 
@@ -65,6 +66,9 @@ class SettingsFormValues:
     legacy_journals: str = ""
     migration_targets: tuple[str, ...] = ()
     groups: tuple[str, ...] = ()  # Presentation only; empty Groups are not durable.
+    institution_name: str = ""
+    institution_idp_entity_id: str = ""
+    institution_issues: tuple[SettingsIssue, ...] = ()
 
     @property
     def legacy_rows(self) -> tuple[LegacyJournal, ...]:
@@ -174,6 +178,8 @@ def settings_form_from_draft(draft: MonitorDraft) -> SettingsFormValues:
         monitor_revision_digest=monitor_digest,
         journal_revision_exists=journal_exists,
         journal_revision_digest=journal_digest,
+        institution_name=draft.institution.name or "" if draft.institution else "",
+        institution_idp_entity_id=draft.institution.idp_entity_id or "" if draft.institution else "",
     )
 
 
@@ -194,6 +200,24 @@ def settings_form_from_submission(form: FormData) -> SettingsFormValues:
 
     group_names = tuple(str(value) for value in form.getlist("settings_group"))
     group_names += tuple(row.group for row in rows)
+    institution_fields = {"institution_name", "institution_idp_entity_id"}
+    # Enumerate the existing editor/import contract so credential aliases cannot be ignored.
+    supported_fields = institution_fields | {
+        "csrf_token", "name", "keyword_expression", "output_dir", "log_level",
+        "from_date", "to_date", "window_days",
+        "monitor_revision_exists", "monitor_revision_digest", "journal_revision_exists", "journal_revision_digest",
+        "journal_name", "journal_issns", "journal_publisher_id", "journal_pending", "journal_group", "settings_group",
+        "publisher_name", "publisher_id", "publisher_access_url", "legacy_journals", "migration_issn_l",
+        "journal_import_text", "journal_import_mode", "import_confirmation_source", "import_confirmation_row", "import_confirmation_issn_l",
+        # Existing untrusted browser plan hints remain ignored; Apply always replans.
+        "resulting_journals", "plan_can_apply",
+    }
+    forbidden = any(key not in supported_fields for key in form)
+    duplicate = any(len(form.getlist(key)) > 1 for key in institution_fields)
+    institution_issues = (
+        (_form_issue("institution", "Unsupported Settings field or duplicate institution identifier. Credentials, sessions and login routes are not settings."),)
+        if forbidden or duplicate else ()
+    )
 
     return SettingsFormValues(
         name=str(form.get("name", "")),
@@ -215,6 +239,9 @@ def settings_form_from_submission(form: FormData) -> SettingsFormValues:
         monitor_revision_digest=str(form.get("monitor_revision_digest", "")),
         journal_revision_exists=str(form.get("journal_revision_exists", "")),
         journal_revision_digest=str(form.get("journal_revision_digest", "")),
+        institution_name=str(form.get("institution_name", "")),
+        institution_idp_entity_id=str(form.get("institution_idp_entity_id", "")),
+        institution_issues=institution_issues,
     )
 
 
@@ -259,7 +286,14 @@ def settings_draft_from_form(
 ) -> tuple[MonitorDraft | None, tuple[SettingsIssue, ...]]:
     """Construct application/domain values without reimplementing validation."""
 
-    issues: list[SettingsIssue] = []
+    issues: list[SettingsIssue] = list(values.institution_issues)
+    institution = None
+    try:
+        public = InstitutionConfig(name=values.institution_name, idp_entity_id=values.institution_idp_entity_id)
+        institution = public if public.name or public.idp_entity_id else None
+    except ValidationError as error:
+        detail = error.errors()[0]
+        issues.append(_form_issue("institution." + str(detail["loc"][0]), detail["msg"]))
     from_date, issue = _parse_optional_date(values.from_date, field="from_date")
     if issue is not None:
         issues.append(issue)
@@ -338,6 +372,7 @@ def settings_draft_from_form(
             log_level=values.log_level,
             monitor_revision=monitor_revision,
             journal_revision=journal_revision,
+            institution=institution,
         ),
         (),
     )

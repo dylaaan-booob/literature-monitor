@@ -5,8 +5,6 @@
   let settingsJournalScroll = null;
   let settingsPublisherScroll = null;
   let settingsDisclosures = [];
-  let pendingZoteroReturn = null;
-  let zoteroReturnRequestInFlight = false;
 
   function groupRows(editor) {
     return Array.from(editor.querySelectorAll("[data-group-rows] [data-group-row]"));
@@ -255,35 +253,6 @@
     }
   }
 
-  function rememberOpenDoi(link) {
-    const actions = link.closest(".decision-actions");
-    const form = actions?.querySelector("[data-check-zotero-form]");
-    if (!form) return;
-    pendingZoteroReturn = {form, leftPage: false, attempted: false};
-  }
-
-  function noteOpenDoiPageLeft() {
-    if (pendingZoteroReturn) pendingZoteroReturn.leftPage = true;
-  }
-
-  function reconcileAfterDoiReturn() {
-    const pending = pendingZoteroReturn;
-    if (!pending || !pending.leftPage || pending.attempted || zoteroReturnRequestInFlight) return;
-    if (document.visibilityState === "hidden") return;
-
-    pending.attempted = true;
-    zoteroReturnRequestInFlight = true;
-    const values = Object.fromEntries(new FormData(pending.form).entries());
-    Promise.resolve(htmx.ajax("POST", pending.form.action, {
-      source: pending.form,
-      target: "#workspace-root",
-      swap: "outerHTML",
-      values,
-    })).finally(() => {
-      zoteroReturnRequestInFlight = false;
-    });
-  }
-
   function syncRunAnnouncement() {
     const panel = document.getElementById("run-panel");
     const announcer = document.getElementById("run-live-announcer");
@@ -356,12 +325,6 @@
       return;
     }
 
-    const openDoiLink = target.closest("[data-open-doi]");
-    if (openDoiLink) {
-      rememberOpenDoi(openDoiLink);
-      return;
-    }
-
     const groupButton = target.closest("[data-create-group], [data-rename-group], [data-delete-group], [data-group-up], [data-group-down]");
     if (groupButton) {
       groupAction(groupButton, groupButton.closest("#settings-editor"));
@@ -415,6 +378,13 @@
   });
 
   document.body.addEventListener("htmx:beforeSwap", (event) => {
+    if (event.detail.target.id === "danger-zone") {
+      if (event.detail.xhr.status === 400 || event.detail.xhr.status === 409) {
+        event.detail.shouldSwap = true;
+        event.detail.isError = false;
+      }
+      return;
+    }
     if (event.detail.target.id === "settings-editor") {
       const viewport = document.getElementById("settings-editor")?.querySelector("[data-journal-viewport]");
       settingsJournalScroll = viewport?.scrollTop ?? null;
@@ -426,13 +396,27 @@
       return;
     }
     // 无效 expected-status 的 400 HTML 也要展示刷新后的状态；403 仍不 swap。
-    if (event.detail.xhr.status === 400) {
+    if (event.detail.xhr.status === 400 || event.detail.xhr.status === 409) {
       event.detail.shouldSwap = true;
+      event.detail.isError = false;
     }
     const root = document.getElementById("workspace-root");
     const list = root?.querySelector("#paper-list");
     workspaceScroll = list ? { view: root.dataset.activeView, top: list.scrollTop } : null;
   });
+
+  function showImportError(event) {
+    if (!event.detail.elt?.closest("[data-import-form], [data-import-poll]")) return;
+    const notice = document.querySelector("[data-import-error]");
+    if (!notice) return;
+    const code = event.detail.xhr?.status;
+    notice.textContent = code
+      ? `Import request was rejected (HTTP ${code}). Refresh this page to check the current batch.`
+      : "Cannot reach the local application. Refresh this page to check actual import progress.";
+    notice.hidden = false;
+  }
+  document.body.addEventListener("htmx:responseError", showImportError);
+  document.body.addEventListener("htmx:sendError", showImportError);
 
   document.body.addEventListener("htmx:afterSwap", (event) => {
     syncRunAnnouncement();
@@ -456,16 +440,6 @@
 
   window.addEventListener("resize", sizeWorkspacePanes);
   window.addEventListener("hashchange", revealWorkspaceHealth);
-  window.addEventListener("blur", noteOpenDoiPageLeft);
-  window.addEventListener("focus", reconcileAfterDoiReturn);
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") {
-      noteOpenDoiPageLeft();
-    } else {
-      reconcileAfterDoiReturn();
-    }
-  });
-
   window.addEventListener("beforeunload", (event) => {
     if (!settingsDirty) {
       return;

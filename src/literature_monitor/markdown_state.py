@@ -19,6 +19,8 @@ from literature_monitor.identifiers import normalize_doi
 from literature_monitor.models import (
     CanonicalPaper,
     ExternalIds,
+    ExportAttempt,
+    ExportAttemptState,
     MetadataSource,
     WorkflowStatus,
 )
@@ -78,11 +80,25 @@ class PaperMarkdownState:
     author_links: tuple[AuthorLink, ...] = ()
     status: WorkflowStatus | None = None
     discovered_at: datetime | None = None
-    zotero_key: str | None = None
     external_ids: ExternalIds | None = None
     sources: tuple[MetadataSource, ...] = ()
     journal_attribution_state: PaperJournalAttributionState = PaperJournalAttributionState.MISSING_OR_EMPTY
     journal_issns: tuple[str, ...] = ()
+    export_attempt_present: bool = False
+    export_attempt: ExportAttempt | None = None
+
+    @property
+    def effective_export_attempt_state(self) -> ExportAttemptState | None:
+        """Legacy metadata is readable but has no current import authority."""
+        if not self.export_attempt_present:
+            return None
+        if self.export_attempt is None:
+            raise ValueError("malformed export_attempt")
+        return ExportAttemptState.UNCERTAIN
+
+    @property
+    def automatic_export_eligible(self) -> bool:
+        return self.updateable and self.status is WorkflowStatus.KEPT
 
     @property
     def has_identity(self) -> bool:
@@ -629,12 +645,8 @@ def parse_paper_state(
     except (TypeError, ValueError) as error:
         problems.append(str(error))
         discovered_at = None
-    zotero_key = frontmatter.get("zotero_key")
-    if zotero_key is not None and (
-        not isinstance(zotero_key, str) or not zotero_key.strip()
-    ):
-        problems.append("zotero_key must be a non-empty string or null")
-        zotero_key = None
+    if "zotero_key" in frontmatter or frontmatter.get("status") == "in_zotero":
+        problems.append("Incompatible legacy Paper schema (in_zotero/zotero_key); export is disabled. No automatic migration.")
 
     try:
         external_ids = ExternalIds.model_validate(external_values)
@@ -647,6 +659,14 @@ def parse_paper_state(
             problems.append("current Paper requires a valid DOI")
         else:
             external_ids = external_ids.model_copy(update={"doi": doi})
+    export_attempt_present = "export_attempt" in frontmatter
+    export_attempt = None
+    if export_attempt_present:
+        try:
+            export_attempt = ExportAttempt.model_validate(frontmatter["export_attempt"])
+        except (ValidationError, ValueError):
+            # 历史字段原样保存；畸形旧记录不得阻断当前 Kept 导入。
+            export_attempt = None
     try:
         layout = analyze_body(body)
         abstract = layout.abstract
@@ -671,11 +691,12 @@ def parse_paper_state(
         author_links=author_links,
         status=status,
         discovered_at=discovered_at,
-        zotero_key=zotero_key.strip() if isinstance(zotero_key, str) else None,
         external_ids=external_ids,
         sources=tuple(sources),
         journal_attribution_state=journal_attribution_state,
         journal_issns=journal_issns,
+        export_attempt_present=export_attempt_present,
+        export_attempt=export_attempt,
     )
 
 

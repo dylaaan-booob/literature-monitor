@@ -1,11 +1,11 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.6.2 is RELEASED and is the latest published release. Python package, Provider User-Agent and Connector release identities are `0.6.2`. Permanent v0.6.2 RELEASE_HEAD and annotated tag target are `f6cf5a0a24248f321ac88410043610339d348ade` (§41.16). The v0.6.1 permanent RELEASE_HEAD and tag target remain `22bd1efb6c3534110850dfaae5a6239f74b16731`; §40.16 and earlier records retain their original version and scope.
+**Status:** Active; v0.6.3 is in release preparation and is NOT YET PUBLISHED. Python package, Provider User-Agent and Connector candidate identities are `0.6.3`; v0.6.2 remains the latest verified published version until the v0.6.3 publication transaction completes. Permanent historical release evidence for v0.6.2 is in §41.16 and for v0.6.1 in §40.16.
 
-**Stage:** v0.6.2 A1 through A7 implementation, migration, acceptance and release preparation are complete. A6_FINAL_REVIEW: PASSED; A7_RELEASE_PREPARATION: PREPARED; A7_FINAL_RELEASE_CANDIDATE_REVIEW: PASSED; V0_6_2_RELEASED: YES. FIX_1 corrected only the two stale top-status lines and its recheck passed before the authorized release. Normal main/tag pushes, GitHub Release and all three authoritative asset digests are verified (§41.16). The post-publication documentation closeout is a subsequent change outside the permanent tag target. A6 original BLOCKED/fix/browser records and §41.15 candidate evidence remain historical; physical mobile and other recorded verification limits retain their scope. Release execution and evidence reuse follow [AGENTS.md](AGENTS.md#release-execution-and-verification-reuse).
+**Stage:** v0.6.3 A0–A9 and Reset Guard Lifecycle Fix are implemented. Independent development review and manual Chrome/Zotero/Reset acceptance were reported complete before this release request; §42 records the automation evidence and prior limitations. v0.6.3 release identities, final artifacts and publication still require verification. Earlier v0.6.2 release and acceptance records remain historical (§41.16); release execution and evidence reuse follow [AGENTS.md](AGENTS.md#release-execution-and-verification-reuse).
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
-**Current contract:** §41 is the v0.6.2 development authority for its explicit venue identity, retrieval adaptation and Journal/Publisher Settings changes. §40 remains the current released v0.6.1 contract for Automatic Zotero Connector Capture. §39 remains the historical/released v0.6.0 authority; unaffected §39/§40 behavior continues to apply. §37 remains authoritative for unaffected DOI-first identity, Provider behavior, current Paper schema, single-manifestation and Zotero parent identity. Historical §§35 through 40 retain their release, live-verification, maintenance, and version-specific behavior records.
+**Current contract:** §42 governs the v0.6.3 Paper workflow, batch Connector import, access preparation, UI and Workspace Reset. §41 governs unaffected ISSN-L Journal identity, retrieval and Settings; §37 governs unaffected DOI-first identity and Provider semantics. Unchanged §39/§40 Connector security boundaries continue to apply. Earlier version-specific contracts and release records retain their historical scope.
 
 ---
 
@@ -5838,3 +5838,1801 @@ now describe the verified v0.6.2 release. The necessary documentation closeout
 is outside the permanent release tag and does not alter uploaded assets; it
 uses affected document/diff checks only. No PyPI or Chrome Web Store publication
 is claimed, and no tag, Release, asset or reviewed commit was overwritten.
+
+---
+
+## 42. v0.6.3 Keep-driven Batch Zotero Import & Federated Access Preparation — Development Contract
+
+### 42.1 Authority and Baseline
+
+§42 is the v0.6.3 development contract. Development starts from the verified v0.6.2 post-release baseline `578b26b2025ba3b62789d150478e292e83579877` on `v0.6.2-development`; §41.16 retains the v0.6.2 publication evidence. A0 establishes requirements only. It implements no feature and establishes no v0.6.3 test, live-acceptance or release result. v0.6.2 remains the released baseline until a later authorized publication is verified.
+
+For v0.6.3, this section supersedes conflicting earlier requirements only for:
+
+- Paper statuses, transitions and required Zotero linkage, including affected workflow/schema clauses in §§13-14, 19, 23, 37.5, 37.7, 39.5, 39.10 and 40.2-40.4;
+- mandatory full-My-Library enumeration, exact-DOI uniqueness reconciliation and `NOT_FOUND` preflight as import/completion authority (§§39.4-39.6 and 40.2-40.5, 40.7);
+- single-Paper user capture, process-only attempt safety, restart handling and export-completion criteria (§§39.2, 40.3, 40.8, 40.11 and conflicting earlier export clauses);
+- blanket exclusion of federated access preparation and PDF outcome observation (§§39.8-39.11, 40.6-40.7, 40.9, 40.11 and 41.7, 41.11);
+- conflicting main navigation, per-Paper save/reconciliation actions and Workspace Reset exclusions.
+
+Unchanged DOI-first identity, workspace UUIDs, Provider behavior, configured ISSN-L and Journal/Publisher ownership remain under §§37 and 41. Preserve human Markdown, safe writes, Web authorization/CSRF boundaries, server-built DOI URLs, authenticated task/bridge attribution and the separate Connector license/provenance boundary (§40.10). §42 does not restore the retired v0.5.x Browser Companion, custom acquisition/staging, PDF writer or credential/session orchestration.
+
+§§1-41 retain their original version-specific meaning, implementation evidence and release records. In particular, earlier `in_zotero`, `zotero_key`, reconciliation and single-capture requirements describe those versions; they are not v0.6.3 workflow requirements. A0 changes only this appended section and directly conflicting project rules in `AGENTS.md`. It changes no runtime, tests, README, package identity, user data or Git/publication state and performs no Reset or Zotero save.
+
+### 42.2 Paper Workflow
+
+The complete supported Paper status set is:
+
+```yaml
+status: candidate | kept | rejected | exported
+```
+
+Only these normal transitions are allowed:
+
+| Transition | Authority and observable result |
+| --- | --- |
+| `candidate → kept` | Explicit Keep immediately persists the user's final import intent through the safe Paper-write boundary, independently of Zotero or browser availability. |
+| `candidate → rejected` | Explicit Reject immediately persists the decision through the same boundary, independently of Zotero or browser availability. |
+| `kept → exported` | An attributable Connector parent-save confirmation and the matching current Paper revision authorize one atomic completion write (§42.3). |
+
+Repeated Keep/Reject requests cannot create another transition or erase a concurrent decision. A failed write must report failure and leave actual durable state intact. There is no Reject/Keep Undo. `rejected` and `exported` are long-term history: later Run/materialization may refresh permitted metadata but must not reset them to `candidate`, recreate a second candidate for the same DOI, or discard their UUID, notes or custom fields. Human-controlled state and content remain protected under the existing rerun rules.
+
+`exported` means that historical Zotero parent export completed. It makes no assertion that Zotero currently contains an item, still has a PDF, or has a unique matching DOI. Deleting or editing an item in Zotero does not automatically change the Paper. New Papers contain no generated `zotero_key`; normal import requires neither an item key nor full My Library DOI enumeration, uniqueness reconciliation or a Zotero item mirror. A returned item key is not durable workflow identity.
+
+Older `in_zotero`/key-bearing schemas are not automatically converted, reinterpreted as `exported`, stripped or repaired. Incompatible Papers cannot import; establishing a fresh supported workspace uses only the explicitly authorized Reset boundary (§42.8). This task does not authorize disposal of the existing workspace. File/BibTeX/Markdown export alone is not Connector parent confirmation and cannot mark a Paper `exported`.
+
+### 42.3 Transient Import Attempts and Historical Metadata
+
+Paper Markdown remains the sole durable source of workflow status. New v0.6.3
+imports must not persist `export_attempt`, `pending`, `uncertain`, a batch
+manifest, Zotero item keys or separate failed-import markers. Only the four
+status values in §42.2 are durable workflow states. Each explicit Import
+invocation constructs fresh process-local attempt identities; failures, timeouts,
+missing responses and process exits leave unconfirmed Papers at `kept`.
+A subsequent explicit invocation may retry them without a separate recovery
+operation. No outcome automatically retries within the same active batch.
+
+Existing `export_attempt` frontmatter is historical user data. Treat it as
+non-authoritative for new import eligibility, whether syntactically valid,
+`pending`, `uncertain`, malformed or inconsistent with the current Paper.
+Preserve its original value and all unknown fields; never silently delete,
+rewrite, auto-repair or reuse it as a new authority. A legacy field in another
+Paper, note or unimportable document cannot globally block Kept import.
+Incompatible `in_zotero`/`zotero_key` schemas retain their established
+non-migration protections; an unsafe or ambiguous target still cannot save.
+
+Maintain one Workspace operation owner across each active batch, including
+across processes, and one Connector active capture. Within the owner, derive
+an immutable plan of safe uniquely identified Kept Papers from one Workspace
+inventory. Immediately before claim and native dispatch, reread the planned
+target using safe path, inode, Workspace, UUID, normalized DOI, status and
+exact-content checks. A changed target cannot dispatch or be committed.
+No historical failed attempt establishes an ongoing live save slot.
+
+The Connector command binds an unpredictable request/invocation identity,
+DOI URL, current task tab and document/translator identity and native session.
+Its one-shot dispatch grant prevents replay, duplicate claims and duplicate
+saveItems calls. Old process callbacks cannot bind to a fresh coordinator.
+The Connector serializes task execution even when an interrupted invocation
+still has browser-side work; new commands must never induce concurrent saves
+with an actually active capture. An ambiguous dispatched outcome stops further
+automatic dispatch in that batch; the next explicit Import can retry once an
+available Connector owns the new command. This cannot establish that Zotero
+contains no pre-existing item; the interface must warn about duplicate risk.
+
+Only attributable native Desktop parent acceptance authorizes `kept → exported`.
+For automatic native `saveItems` only, the Connector preserves the HTTP status
+alongside the body. A completed `201 Created` response with an empty body
+confirms the parent; a `201` JSON response with one echoed client-side parent
+ID is also valid when that ID matches the single requested item. The pinned
+request must still match the reserved DOI, one-shot dispatch grant, native
+session and task document/translator. Reject HTTP errors, a missing transport
+response, non-201 status and a contradictory or malformed nonempty response.
+The client-side item ID is not a Zotero library key.
+The coordinator consumes the matching receipt once. The commit rereads and
+compares the planned current Paper, then atomically writes `exported` while
+preserving all other frontmatter, custom notes and body. No obsolete
+`export_attempt` is automatically cleared as part of this write. If native
+acceptance is not confirmed, keep the Paper unchanged. If the local completion
+write fails or its durability is ambiguous, report that specific condition,
+do not assert a definite failure of the upstream save and do not overwrite
+concurrent human edits. A fresh user invocation may still attempt import after
+manual duplicate inspection.
+
+### 42.4 Batch Execution
+
+`Import to Zotero` builds a single process-local plan of every safe, uniquely
+identified `kept` Paper in the current Workspace, including earlier Runs.
+The plan is frozen at invocation; a later Keep appears in the next plan.
+Candidate/rejected/exported or unsafe/ambiguous Papers are omitted with a
+truthful per-Paper reason. A malformed, unrelated or historical attempt field
+alone is not an exclusion or global blocker. Do not rescan the entire Workspace
+between saves; revalidate only the planned target and the required safe-write
+identity at claim, dispatch and completion.
+
+Explicit Import runs serially. At most one Connector capture is active for
+this Workspace and a duplicate submission during an active batch coalesces
+or rejects before a second dispatch. The application must isolate an individual
+translator/navigation pre-dispatch failure, record the result, leave that
+Paper kept and continue with other eligible Papers. An unconfirmed dispatched
+save pauses the rest of the batch because the browser task may still be
+finishing. A Connector/Zotero-wide outage may stop the batch with unsent
+Papers kept. A new explicit invocation may retry every remaining Kept Paper.
+Never resume a batch automatically after process restart and never accept
+old command, dispatch or confirmation identifiers for a new invocation.
+Native parent acceptance does not complete the browser task. Continue through
+the existing Zotero collection/attachment pipeline, then deliver the terminal
+result and release browser task ownership. If a confirmed parent outlives the
+bounded observation wait, report its confirmed parent separately from
+unverified attachments and retain the unresolved native save slot until the
+original browser-side pipeline ends; do not close that tab or overlap saves.
+An explicit, invocation-bound browser completion receipt is required to retire
+an issued native grant. It follows verified completion of the original upstream
+save pipeline, including any attachment continuation. Neither the parent receipt,
+a timeout nor a newer batch outcome can establish this completion. Lost terminal
+receipts leave Reset conservatively blocked without making the Paper durable
+state uncertain.
+
+The UI reports per-Paper parent acceptance, pre-dispatch failure, native-save
+error without acceptance, missing confirmation, local-write failure,
+skipped entries and separate PDF evidence. No failed or uncertain durable status
+or permanent warning marker is written to Paper Markdown. A retry may duplicate
+a parent already present in Zotero; normal import performs no library lookup.
+
+### 42.5 Connector and PDF Outcomes
+
+Continue to use the pinned official Zotero Connector translator and its native
+`saveItems` request to Zotero Desktop. A successful page translation alone is
+not native acceptance. Keep the existing task tab, document-generation,
+challenge, one-shot dispatch and stale-callback checks. The existing bounded
+heartbeat, command claim and dispatch endpoints are functional command
+transport and permission guards; HTTP access-log volume alone is not a reason
+to replace them with a larger messaging framework. Do not add a custom
+bibliographic importer, PDF downloader, attachment writer or Zotero mirror.
+After a terminal import, reactivate the original non-incognito Literature
+Monitor tab if its exact application origin and window still match. Close
+only the project-created task tab after successful native parent and
+attachment-pipeline completion with an accepted result, provided its document
+is still the saved document. Retain the task tab on native/attachment error,
+missing confirmation, delivery failure or user navigation for inspection.
+Never close user-owned tabs or steal focus during unfinished manual
+authentication. PDF saving remains independently `unverified` unless the
+upstream supplies attributable completion evidence.
+
+| Outcome | Meaning and Paper effect |
+| --- | --- |
+| Parent confirmed | Matching native `saveItems` acceptance with verified parent identity; commit `exported` under safe Paper CAS, irrespective of PDF. |
+| Translator/navigation failure | Before native dispatch, confirmed no-effect for this invocation; retain `kept` and continue. |
+| Native save failure | Native save path reported an error, without confirmed acceptance. Upstream side effects may still have occurred; retain `kept` and report uncertainty. |
+| Missing confirmation/timeout/interruption | Acceptance not established; retain `kept`, invalidate stale server commands, report duplicate risk on a new explicit Import. |
+| Local write failure | A parent may be accepted by Zotero but Paper CAS/durability failed; do not claim either a durable export or a proven no-effect save. |
+| PDF verified success/failure | Only attributable terminal actual-PDF save evidence may justify a corresponding PDF result; it never changes parent status. |
+| PDF unverified | Links, Snapshot metadata, native parent acceptance and missing attachment callbacks do not prove actual PDF saving or failure. Report `unverified`. |
+
+Batch results and access observations remain process-local. Treat provider
+claims about translator/native stages as diagnostic labels; the coordinator's
+own one-shot grant and invocation checks determine which outcomes can authorize
+a durable transition. PDF observation must remain independent, finite and
+non-blocking; manual Zotero inspection is the fallback wherever actual PDF
+completion cannot be verified.
+
+### 42.6 Access Service and Federation
+
+An Access Service is the actual DOI full-text landing service/SP used by a Paper, separate from its configured bibliographic Publisher. Authentication preparation is derived only from the current Kept import plan; do not log in to every configured Publisher. Resolve service identity through the server-built DOI navigation, actual landing/redirect evidence and verified application rules. Publisher names, OpenAlex Publisher IDs, DOI prefixes and manually saved Publisher Access URLs cannot select an SP or invent its authentication endpoint.
+
+The following observations have distinct meanings and remain process-local:
+
+| Observation | Meaning and limitation |
+| --- | --- |
+| IdP session | The institution's identity provider may recognize the user; this does not prove an SP session. |
+| SP session | The specific service may recognize an authenticated browser session; this does not establish access on another SP. |
+| Authentication success | A verified trusted route completed for the intended service; this does not prove full-text entitlement. |
+| Full-text authorization | Reliable service/page evidence establishes access to that particular resource; it cannot be inferred solely from any preceding session observation. |
+
+Use existing normal-profile sessions naturally through browser navigation. Permit only verified trusted CARSI/Shibboleth/OpenAthens or equivalent federation routes. Each enabled rule needs evidence for its actual SP, institution/IdP selector, allowed destinations/redirects and usable return behavior. A0 names no verified route and supplies no executable WAYFless URL. Unknown SPs, missing trusted routes, ambiguous association or failed authentication fall back to the actual service page/manual institutional access; never guess a URL or claim access succeeded.
+
+The user completes IdP credentials, MFA and CAPTCHA/challenges in ordinary Chrome. Do not enter credentials, bypass verification, inspect/extract Cookies or browser session stores, capture SAML assertions/sensitive query parameters, or persist credentials, sessions, login history or inferred expiry. Observe only the navigation and non-sensitive page/result evidence needed for the declared service outcome. Keep sensitive federation URLs/parameters out of Paper state, configuration, diagnostics and durable logs.
+
+Prepare service access once per applicable process-local context, reusing what the normal profile actually supplies without promising a session lifetime. An IdP login may help several services, but each SP retains independent outcome/entitlement handling. A failing or waiting service must not block unrelated services; skip/defer its Papers for manual access when needed. Suspended navigation must have no authority to trigger a late save outside the serial slot.
+
+Existing OpenAthens host associations and redirect behavior must coexist with other institutional routes and manual Publisher URLs. Do not overwrite profile/host associations or apply a catch-all redirect that forces unrelated hosts through one route. Verified rules must account for the actual associated host and preserve the intended DOI/service destination. Use finite redirect/hop and repeated-destination protection, with at most one automatic preparation attempt per service context in a batch; a detected loop stops orchestration and offers manual access. No cookie deletion, session reset or repeatedly forced login is a remedy.
+
+Actual trusted route availability, host-association behavior and reliable authentication/entitlement indicators are engineering evidence gates (§42.10). Insufficient evidence disables automatic preparation for that service while retaining normal Connector/manual access. Federation preparation does not expand discovery, scrape Publishers or revive the retired acquisition architecture.
+
+### 42.7 Settings and UI
+
+The daily main navigation contains exactly:
+
+```text
+Inbox
+Kept
+Settings
+```
+
+Inbox contains candidates with immediate Keep/Reject decisions. Keep is the final import intent. Kept aggregates the whole Workspace and provides one `Import to Zotero` action, serial progress and separate parent/PDF results, including skipped/blocked/uncertain reasons and required manual access. It must not require a second per-Paper selection decision. The normal workflow no longer depends on per-Paper `Save to Zotero` or `Check Zotero` reconciliation. Safe manual DOI access remains available for fallback without changing status.
+
+Rejected and Exported records remain durable history and are excluded from daily main navigation and the default import set. This does not authorize their deletion or add an Undo/history-management feature. Use current refreshed views after successful safe writes; a display must reflect actual persisted state, including a failed completion write.
+
+Institution Settings save only necessary non-sensitive institution/IdP identifiers. They contain no passwords, Cookies, SAML payloads, browser session snapshots or guessed validity times. Integrate them with the existing Settings validation/revision/safe-persistence boundary; no third configuration store or workflow database is authorized. Trusted SP routes are verified application rules, not a generalized Publisher login table the user must maintain. A configured institution identifies a preparation context, not evidence of successful authentication or entitlement.
+
+§41's configured ISSN-L, direct Publisher identity, human-managed Access URL/Group ownership and shared Journal/Publisher Settings rules remain applicable. Ordinary saves that do not change Journal identity remain network-independent. Manual Publisher Access URLs retain their manual role and do not become federation rules. Connector readiness remains a compact truthful current indication, without durable login/capture diagnostics history.
+
+### 42.8 Workspace Reset
+
+**User decision (2026-10-09):** After one explicit user confirmation, Reset
+permanently deletes the **entire directory selected by the current Workspace
+configuration**, equivalent in scope to `rm -rf Workspace`. The user accepts
+this deletion. This contract replaces the earlier recognized-output inventory,
+protected-internal-content, per-file object-custody and recovery requirements
+recorded in §§42.14–42.15. Those records retain their historical evidence only.
+
+The operation remains at Settings → Advanced & Diagnostics → Danger Zone.
+Show the actual absolute Workspace path, warn that all its contents are included,
+and require one typed `RESET` confirmation bound to that server-held target and
+current configuration. There is no per-Paper inventory or format inspection.
+Contents include `.obsidian`, custom Markdown, modified Inbox.base, .DS_Store,
+unknown files/directories, old/damaged Papers and pending/uncertain export_attempt
+markers. These do not cause refusal. Empty or already-absent Workspaces are valid
+outcomes. Reset is never automatic and starts no Run or migration.
+
+Only the current configuration-bound directory is a deletion target. Reject root,
+Home, repository/configuration roots, mount roots and other obviously dangerous
+locations. Within this repository only the dedicated `workspace/` area may be a
+Reset target; source, tests, Connector, Git metadata, configuration and other
+repository directories are refused, including case aliases. Never follow target/ancestor symlinks, redirect deletion through a
+changed path, or traverse links inside the tree into outside data. Bind the
+confirmation to the target directory identity and configuration revision, and use
+directory-relative, symlink-safe recursive deletion; unavailable platform safety
+causes refusal. Atomically capture the root into a private temporary directory and
+verify its confirmed identity there before deletion. A competing root captured
+instead remains intact with its retained location reported; a replacement at the
+public Workspace path is not deleted and prevents SUCCESS. This root-only binding
+does not inspect individual files or offer restoration. Workspace-external monitor.yaml/list.md, Git repository data,
+Zotero and Chrome data are not deletion targets. Files intentionally placed
+inside the Workspace, including copies named monitor.yaml/list.md, are included.
+
+Reset shares necessary nonblocking cross-process exclusion with Run, Batch,
+materialization and Paper/Settings writes. Separately, each authorized native-save
+dispatch creates a process-local outstanding grant and holds a shared external
+Reset guard for its Workspace. Reset must acquire this guard exclusively before
+deletion. The stable guard inode lives outside the Workspace; deleting its internal
+operation lock cannot bypass protection for an unresolved native grant. The guard
+is released only after every outstanding grant has an attributable completion
+receipt from its own browser pipeline; a newer successful Import cannot clear an
+earlier uncertain grant. The Connector verifies original request/invocation,
+DOI target, task tab, document and native session before reporting pipeline
+completion. A terminal result, parent acceptance, time limit, browser loss or
+manual assertion alone never supplies this receipt. Lost or unverifiable evidence
+keeps guard ownership until a safe external process-lifecycle boundary; Reset
+must refuse while it remains held. Other explicit Imports may acquire shared
+guard ownership; old failed/unconfirmed Paper metadata never excludes them. This
+shared guard is an empty lock, not durable workflow state. Historical attempt
+fields alone do not block Reset. Reset errors distinguish active Run/Batch,
+pending capture resolution, outstanding native grants and cross-process lock
+contention rather than inferring activity from a displayed FINISHED result.
+Reset does not revoke an already issued Zotero request, reverse external saves or
+establish that another import is safe. The UI explicitly warns of possible old
+browser/Zotero side effects; lost-process observations cannot prove revocation.
+
+No Undo, Recovery, Rollback, restoration directory, disposal inventory or automatic
+retry is provided. Deletion need not be atomic. Any deletion/validation error
+returns failure and warns that some contents may already have been permanently
+deleted; it cannot claim complete deletion or restoration. Success requires the
+configured target absent after the operation (or safely confirmed already absent).
+A subsequent **explicit Run** recreates the supported Workspace outputs; deleted
+user files and `.obsidian` are not recovered. Reset is disposal, not data repair,
+migration, Zotero cleanup, session reset or import retry.
+
+### 42.9 Scope and Non-goals
+
+v0.6.3 authorizes only the changed workflow, minimal attempt safety, serial Keep-driven import, separate outcome observation, trusted access preparation, stated UI and explicit safe Reset. It excludes:
+
+- automatic institutional credential filling, MFA/CAPTCHA bypass and credential/session extraction or storage;
+- full-Publisher login preparation, guessed federation endpoints, Publisher scraping and retired publisher-specific acquisition/login adapters;
+- Zotero item synchronization, deduplication, deletion, merging, repair, a library mirror, Collection/Group/tag routing or custom bibliographic ingestion;
+- custom PDF downloading, staging/upload, attachment creation/management or restoration of the v0.5.x PDF-write architecture;
+- a full batch audit database, durable batch queue/navigation/authentication/PDF history or an independent workflow source of truth;
+- old Paper schema migration/repair, automatic Workspace Reset, Reject/Keep Undo or new-version reminders;
+- unrelated Provider, DOI identity, Journal canonicalization, configuration ownership or discovery redesign.
+
+### 42.10 Verification and Release Gates
+
+The following are acceptance requirements for later implementation, **not checks run or passed by A0**. Evidence must state the actual command/scenario, tested inputs, environment, outcome and coverage boundary. Existing v0.6.2 tests/live records retain their historical scope and cannot establish v0.6.3 success.
+
+| Level | Required observable acceptance |
+| --- | --- |
+| Unit, network-independent | Offline Keep/Reject persistence and failed-write behavior; only the three normal transitions; reruns preserve rejected/exported, UUIDs, notes and custom fields; new Papers have no generated key; ordinary file exports never mark Zotero completion. |
+| Unit, safety/fault injection | No new persistent export-attempt marker is created; interrupted/unconfirmed imports remain kept; a later explicit invocation can retry, with a duplicate warning and no hidden durable failure state. Malformed historical attempts neither block nor overwrite user data. Local-write failure must not be misreported as no-effect or confirmed durable export. |
+| Unit, identity/concurrency | DOI, UUID, path/location, file object, status or revision changes reject dispatch/wrong writeback; confirmed-parent status writes preserve unrelated human content and old metadata; stale/duplicate callbacks and commands cannot complete or save another attempt; competing processes cannot actively save the same Paper. |
+| Integration, application/Connector | Build the all-Kept plan once, including earlier Runs; perform targeted safe checks at each save. One active serial capture; duplicate active submissions/replayed triggers cause no second save. Translator pre-dispatch failure preserves unrelated progress; ambiguous native acceptance pauses that batch but a later explicit invocation can retry. Timeout/restart reject old callback authority; unavailable services leave unsent Papers untouched. |
+| Integration, outcomes | Parent confirmation and actual PDF completion are separate; links/Snapshots/progress/parent-only confirmation yield no PDF success; prove verified success/failure attribution if supported, otherwise unverified; PDF failure leaves confirmed parent exported and does not trigger save/repair. No My Library enumeration, uniqueness or item key is needed for normal completion. |
+| Integration, access/UI | Institution identifiers use existing safe Settings persistence; three main navigation entries, immediate decisions, one Kept import action and truthful progress; existing session/manual IdP/unknown-SP fallback; isolate service failure/wait; verified rule allowlists, OpenAthens association coexistence and bounded redirect-loop fallback; no sensitive durable state. |
+| Integration, Reset/adversarial filesystem | Actual absolute path/configuration and RESET binding; whole-directory deletion including unknown/legacy/damaged content, `.obsidian` and historical pending/uncertain markers; empty/absent success; dangerous target and symlink/path-replacement safety; cross-process Run/Batch/write/live-save exclusion with a stable external lock even after the internal lock/tree disappears; injected deletion failure reports failure and possible partial deletion without recovery/retry; final absence and explicit Run recreation; configuration/Git/Zotero/Chrome outside the target untouched. |
+| Live, real normal Chrome/Zotero | An explicitly authorized batch spans at least two actual Access Services and includes kept Papers beyond the latest Run. Observe serial toolbar-free Connector parent saves and guarded exported transitions; prove isolation/fallback for a failed/unknown service. Use both an existing institutional session and user-completed IdP authentication as applicable to verified routes, with no credential/session extraction. |
+| Live, federation/PDF | Record actual DOI landing/SP identities and rule evidence; exercise OpenAthens host-association coexistence and safe loop handling in real Chrome, distinguishing controlled loop tests from genuine service behavior. Establish actual available parent/PDF completion evidence; report PDF unverified wherever reliable actual-save evidence is absent. |
+| Live, preservation/Reset | On an isolated dedicated workspace, explicitly authorize and verify Reset followed by Run. Read-only before/after evidence must show existing Zotero items and normal Chrome session continuity unaffected, Workspace-external configuration/.obsidian untouched while internal `.obsidian` is deliberately deleted, and later Run retaining rejected/exported on a non-reset supported workspace. Automated assertions alone do not prove these real-app boundaries. |
+
+Before enabling an SP rule, later work must verify its institution/service route, redirect/return behavior and non-sensitive observation capability. Unknown or unverified SPs retain manual fallback. Before reporting PDF verified success, later work must demonstrate reliable actual-save evidence with attempt/parent attribution; absent capability yields `unverified`, not a manufactured success. Before shipping batching/Reset, later work must prove cross-process exclusion, stale browser save invalidation, whole-Workspace permanent deletion boundaries and truthful failure/partial-deletion reporting under the relevant scenarios; historical attempt markers do not block Reset, and Reset does not prove import retry safe. Run must bind materialization, Provider state and LastRunSnapshot to the same locked Workspace even when configuration changes during execution. These unresolved engineering capabilities are gates, not assumed implementation facts.
+
+Final integration also requires the applicable full pytest, executable Node/Connector/UI and upstream/build checks, `uv lock --check`, `git diff --check`, and package/install/artifact verification proportionate to changed inputs. Preserve MIT/AGPL separation, exact pinned upstream provenance, protected-path exclusions and unaffected DOI/ISSN-L/Provider/Settings regressions. Record unavailable checks explicitly; fix or resolve necessary evidence gaps before release.
+
+Required real Chrome/Zotero acceptance cannot be replaced by mocks, synthetic callbacks, source inspection or historical single-Paper live evidence. No necessary live gate may remain unpassed when claiming v0.6.3 RELEASED. The absence of a proven PDF completion API does not require a downloader or claim of PDF success: the release must instead demonstrate truthful `unverified` behavior and its manual fallback. Version changes, commits, tags, pushes and publication belong to later explicitly authorized tasks. A0 ends with this contract and aligned project rules; A1 is not started.
+
+### 42.10 A4 serial whole-Workspace batch implementation evidence (2026-10-08)
+
+**A4: EXECUTED; review fix 2 implemented, independent re-review pending.
+v0.6.3 remains unreleased.**
+`V0_6_3_A4_SERIAL_ALL_KEPT_BATCH` was implemented against
+`578b26b2025ba3b62789d150478e292e83579877`, preserving the existing uncommitted
+A0–A3 inputs. This record establishes application/bridge automation evidence,
+not real Chrome/Zotero acceptance or A5–A9 completion. Independent review requested
+changes for a hidden unresolved-marker fence bypass (F1) and partial failures
+reported as successful (F2). `V0_6_3_A4_REVIEW_FIX_1` addresses both against the
+same HEAD while retaining the original uncommitted A4 work.
+Further independent review found that changing a reserved Paper's suffix could
+hide its marker from the safety scan (F3).
+`V0_6_3_A4_REVIEW_FIX_2` removes this suffix-based safety bypass while retaining
+Fix 1 and the existing A0–A4 work.
+
+`application.batch_import.BatchImportService.start(workspace)` explicitly scans
+all current eligible Kept Papers, including earlier Runs, and processes the
+frozen plan in stable filename order. `snapshot()` returns immutable process-local
+plan, phase, current Paper, compact results and separate parent/PDF statistics.
+Overlapping starts on one service coalesce. Later Keeps enter the next explicit
+invocation. Current status, DOI, exact content, location and file identity are
+checked before reservation; UUID/DOI collisions and exclusion/blocking reasons
+are exposed by `application.workspace.plan_workspace_import`. No batch queue,
+manifest, history database or automatic restart/retry is persisted.
+
+Safety inventory reads every direct entry in `Papers/` through the existing
+no-follow regular-file boundary and parses frontmatter before filtering by suffix,
+Paper type or metadata. Non-`.md` documents are never import targets. An excluded
+document containing `export_attempt` blocks new save authority even
+when its marker is malformed or lacks verifiable identity. Unsafe or unparseable
+documents also fail closed, including non-`.md` entries, links and subdirectories
+whose contents cannot be safely established by this scan. A safely parsed ordinary
+non-Paper or non-`.md` document without a marker is normally excluded.
+This scan never clears an old marker.
+Exclusions expose a compact `kind` of `normal`, `error` or `blocked`.
+`normal_excluded` counts non-target exclusions separately from `skipped_blocked`;
+candidate/rejected/exported states are normal exclusions unless a safety blocker
+applies. Invalid or otherwise unimportable Kept Papers count as errors. A completed
+batch reports `successful` only when every planned target exported and there are
+no error exclusions or safety blockers.
+
+The existing empty Workspace operation-lock inode is held through the batch,
+reservation, claim/dispatch and A3 guarded completion. Coordinator-only callers
+also acquire the same owner; A1/A3 reuse its live lock instead of reacquiring
+flock. Run/materialization and decisions already use this boundary; Settings
+Workspace-path changes now acquire applicable old/new existing Workspace locks
+and recheck them before writes. Workspace, Papers-directory and lock identities
+remain checked at the relevant boundaries. Web creates the service beside the
+existing coordinator, and old capture polling cannot consume a running batch's
+completion. No new import UI or legacy per-Paper Save/Check action was added.
+
+Safe continuation has two affirmative proofs: the exact owned terminal command
+never granted dispatch, so late claims/permissions are rejected; or the pinned
+one-shot native invocation received attributable parent acceptance, consuming
+that command's parent-save permission. A3 persistence failure remains protected,
+even when parent permission is already consumed. Retirement evidence binds the
+complete frozen attempt and exists only in that coordinator's memory. It cannot
+be rebound by copying an attempt ID to another Paper.
+
+A grant without attributable acceptance may still reach the content script or
+native save after the UI wait ends. The batch reports `paused`, retains pending/
+uncertain protection and dispatches no next Paper. File-lock release or process
+exit is not browser invalidation: unknown unresolved markers observable in this
+scan fence the Workspace save slot on a fresh process. Known safely retired markers remain
+excluded Papers but can permit unrelated continuation in their owning process.
+Confirmed parents report PDF `unverified`; A4 adds no PDF evidence producer,
+Zotero enumeration, item-key inference, download or attachment handling.
+
+**Safety scope:** this is an inventory of currently observable direct `Papers/`
+entries, not a global record of escaped browser save permissions. If an external
+actor deletes the reserved file, moves it entirely outside `Papers/`, or removes
+its marker, a fresh process cannot recover that lost evidence from the Paper-only
+design. The implementation does not revoke an already granted browser permission,
+search other locations, or persist global save tracking. Serial safety under such
+external removal is not established; file/marker absence must not be described as
+proof that an old native save stopped. Rename within `Papers/` now preserves the
+fence irrespective of suffix; an uninspectable directory entry fails closed.
+
+**Original A4 verification, before review fix 1:** `uv run pytest` completed with
+**2776 passed** and two existing dependency deprecation warnings. Focused A4/A1/A3/
+coordinator/Settings compatibility coverage completed with **311 passed**.
+`node --test connector/tests/runtime.test.cjs` completed with **82/82** harness
+cases, including the shipped native hook's delayed permission and consumed-save
+replay cases. These are original A4 results, not a full-suite run of the review fix.
+
+**Review fix 1 verification:** before production edits, the two focused F1/F2
+regressions failed. An isolated copy of the actual pre-fix Python source reproduced
+F1 with `blockers=0` and a granted B parent-dispatch permission after A's pending
+marker was hidden by `type: note`. With the fix, `tests/test_batch_import.py`
+completed with **60 passed**. The combined targeted command
+`uv run pytest tests/test_batch_import.py tests/test_application_workspace.py tests/test_export_attempts.py tests/test_capture_coordinator.py tests/test_zotero_capture.py tests/test_web_zotero_capture.py tests/test_connector_outcomes.py tests/test_web_connector_bridge.py tests/test_web_app.py`
+completed with **361 passed**, including those 60 batch tests, and two existing
+dependency deprecation warnings. `./connector/test.sh` completed with **82/82**
+harness cases; Connector source and dispatch contracts were unchanged by this fix.
+The full suite was not repeated: its earlier evidence is reused only for unaffected
+coverage. The review-fix diff was inspected and `git diff --check` passed.
+
+New deterministic regressions cover hidden pending/uncertain markers, malformed
+markers, missing/mismatched identity, invalid YAML/delimiters, different coordinators,
+normal non-target exclusions, invalid Kept metadata/duplicate DOI and safely retired
+attempts without automatic retries. Three fresh real spawned-process cases
+(pending, uncertain, malformed) confirm a blocked batch, no exposed command and
+denied dispatch permission for another valid Kept Paper. These run against temporary
+Workspaces and the actual fixed application code, with no browser or native save.
+
+**Review fix 2 verification:**
+`uv run pytest tests/test_batch_import.py -k 'review_f3_real_old_dispatch' -s`
+failed both cases before production edits and passed both afterward. Each case
+uses two independent spawned processes: the old process obtains dispatch permission,
+is terminated, and the actual Workspace flock is then acquired/released before
+renaming A to `.txt` (pending) or `.bak` (uncertain). The marker bytes survive the
+rename. The new process reports `NEW_PROCESS_COMMAND False` and
+`NEW_PROCESS_DISPATCH_GRANTED False`, rejects the old invocation and leaves B
+unchanged. This verifies application permissions and real OS process/lock behavior;
+no actual Chrome/Zotero save is performed.
+
+`uv run pytest tests/test_batch_import.py` completed with **77 passed**. The same
+nine-file targeted command recorded for Fix 1 completed with **378 passed**,
+including those 77 batch tests and all Fix 1/F2 regressions, with two existing
+dependency deprecation warnings. Seventeen new cases cover suffix changes, damaged
+or unverifiable markers, different coordinators, the two spawned-process sequences,
+normal marker-free non-`.md` documents, malformed YAML/UTF-8 and unsafe link,
+directory/FIFO entries. `./connector/test.sh` completed with **82/82** harness cases.
+Connector code/contracts and `application/batch_import.py` are unchanged by Fix 2.
+The full suite was not repeated; previous full-suite evidence applies only to
+unaffected code. The Fix 2 diff was inspected and `git diff --check` passed.
+The remaining `.md` filters in the read-only Workspace view, Paper locator and
+A1 reservation schema scan grant no native dispatch authority; coordinator
+start, claim and dispatch all revalidate through the corrected safety inventory.
+
+Python coverage separates deterministic bridge/filesystem injection from actual
+POSIX `multiprocessing` **spawn**: two competing processes permit only one grant,
+leave a different Paper unsent, and process termination releases flock without
+making stale browser authority safe. Deterministic coverage exercises multiple
+materialized Runs, full default plans, changed Papers, duplicate starts/claims/
+permissions/results, delayed positive permission replies, safe timeout
+continuation versus unsafe pause, persistence conflicts, unavailable service,
+shared operation exclusion and Workspace/Papers/lock replacements. Connector
+worker restart and callbacks are simulated in Node; these are not actual Chrome
+service-worker or Zotero observations.
+
+**Remaining gates:** independent repository review, later A5–A9 work and §42.9's
+explicitly authorized real ordinary Chrome/Zotero batch/federation/PDF/Reset and
+applicable distribution acceptance. No live app or user Workspace was modified.
+All **177** protected files under `monitor.yaml`, `src/.obsidian/` and `workspace/`
+matched preflight bytes. Existing A0–A3 work, release version and Connector source/
+provenance/license separation are preserved. No commit, push, tag, release or
+branch switch occurred. A4 rollback removes only this task's source/test/document
+hunks while retaining the pre-existing uncommitted A0–A3 changes; no user-data
+rollback is needed.
+Review fix 1 rollback removes only its hunks in `application/workspace.py`,
+`application/batch_import.py`, `tests/test_batch_import.py` and this evidence section,
+using the pre-fix snapshots while retaining the original A0–A4 uncommitted work.
+Review fix 2 rollback removes only its hunks in `application/workspace.py`,
+`tests/test_batch_import.py` and this evidence section using the pre-Fix-2 snapshots;
+it preserves Fix 1 and all preceding uncommitted work.
+
+### 42.11 A5 unified import UI implementation evidence (2026-10-08)
+
+**A5: EXECUTED; independent review pending. v0.6.3 remains unreleased.**
+`V0_6_3_A5_UNIFIED_IMPORT_UI` uses baseline
+`578b26b2025ba3b62789d150478e292e83579877` and retains all uncommitted A0–A4
+inputs, including the two review fixes. A1–A4 application/native-save mechanisms
+and the Connector source/contracts are unchanged. A6–A9 are not implemented.
+
+The primary navigation is exactly Inbox, Kept and Settings. Redundant Workspace
+tabs were removed; Rejected/Exported Markdown and existing read-only historical
+URLs remain available without a daily navigation entry. Inbox still derives
+only candidates from current Markdown. Keep/Reject reuse the existing application
+decision and reread path, including write-failure feedback and neighbor selection;
+they need no browser/Connector/Zotero availability.
+
+Kept displays the entire configured Workspace, including earlier Runs, with one
+`Import to Zotero` action and no per-Paper selection or confirmation. The action
+warns that normal import does not check My Library for matching DOIs and prior
+manual saves can create duplicates. Safe Open DOI remains a manual link, with no
+mutation or Retry authority. Pending/uncertain notices explain possible prior
+saving, blocked automatic retry and the lack of timeout/restart revocation proof.
+
+`POST /imports/start` verifies the rendered Workspace authorization against the
+real configuration and calls only `BatchImportService.start()`. Extra form fields, including caller
+Workspace paths, are rejected. Both import endpoints require the existing CSRF
+token and retain TrustedHost restrictions. The form token is an HMAC over the
+server-rendered configuration revision/file identity, resolved Workspace path,
+Workspace/Papers directory identities and existing operation-lock identity.
+A process-local nonce, consumed under a small submission mutex, rejects replay even after a
+no-effect batch finishes; a new explicit form action is required for another
+batch. Different pages share the same A4 service and its existing execution
+exclusion. This token is presentation replay protection, not another batch state,
+queue or database.
+
+`POST /imports/poll` reconstructs Markdown views and presents only `snapshot()`;
+it never consumes coordinator completion. HTMX polls only while the displayed
+phase is running. Page load, Run completion and Settings refresh never start an
+import. The panel distinguishes parent completion, errors/unresolved results,
+safety blockage, paused stale-save authority and unavailable capture service.
+It shows the current Paper, processed/planned counts, exclusion/blocker reasons,
+exported/no-effect/uncertain/skipped-blocked/normal-excluded counts and the three
+separate PDF counters. Parent completion does not assert PDF saving. HTTP refusal
+and transport failure get visible feedback without inventing a save outcome.
+Legacy per-Paper Save/Check remain CSRF-protected HTTP 410 entry points.
+
+**Automated evidence:** `tests/test_unified_import_ui.py` contains **27 passing**
+cases covering navigation, disconnected Keep/Reject and failing writes, cross-Run
+Kept membership, real A4 full-plan execution through the Web adapter, sequential
+and concurrent duplicate POSTs, completed no-effect replay, multiple-page polling
+with pending worker-owned completion, request/path/config/CSRF/host refusal,
+parent/failure phases, changed Markdown, normal history exclusions and truthful
+PDF presentation. Progress is captured before reloading Markdown so a terminal
+snapshot cannot stop polling with a stale Kept list; a deterministic regression
+checks that ordering. The PDF verified-counter fixture is synthetic snapshot evidence,
+not a PDF completion capability. Its Node DOM harness executes the shipped JS,
+including conflict refresh and HTTP/transport-error feedback.
+
+The targeted command
+`uv run pytest tests/test_unified_import_ui.py tests/test_web_app.py tests/test_web_run_settings.py tests/test_a5_settings_ui.py tests/test_application_workspace.py tests/test_application_decisions.py tests/test_batch_import.py tests/test_export_attempts.py tests/test_capture_coordinator.py tests/test_zotero_capture.py tests/test_web_zotero_capture.py tests/test_web_connector_bridge.py tests/test_connector_outcomes.py tests/test_application_settings.py --tb=short`
+completed with **661 passed**, including the A4 real spawned-process regressions,
+Run/Settings behavior and existing Node harnesses, with two existing dependency
+deprecation warnings. After the final JS error-feedback change,
+`uv run pytest tests/test_unified_import_ui.py tests/test_a5_settings_ui.py tests/test_web_run_settings.py -k 'executable or unified_import' --tb=short`
+completed with **33 passed, 160 deselected**. After the idle-heading and final
+snapshot/Markdown ordering changes, the final affected Web command
+`uv run pytest tests/test_unified_import_ui.py tests/test_web_app.py tests/test_web_run_settings.py tests/test_a5_settings_ui.py tests/test_web_zotero_capture.py tests/test_web_connector_bridge.py tests/test_batch_import.py --tb=short`
+completed with **366 passed**, including the then-current 25 A5 cases and executable Node
+harnesses. The earlier 661 result is reused for the application/Settings/save
+mechanisms unaffected by those final presentation changes. `./connector/test.sh` completed with
+**82/82** harness cases. No full pytest rerun was needed; original full-suite
+evidence applies only to unchanged inputs.
+
+The final Kept-list marker notice makes pending/uncertain protection visible
+without selecting a Paper or starting import. Both marker states leave bytes
+unchanged and the batch idle in the added regressions. The final
+`uv run pytest tests/test_unified_import_ui.py tests/test_web_app.py --tb=short`
+completed with **107 passed**, including all 27 A5 cases; prior unaffected evidence
+is reused as above.
+
+**Rendered evidence:** a separate headless WebKit test runtime, isolated outside
+the repository with fresh temporary configuration/Papers, ran actual shipped
+HTMX and JS against the local Web adapter. Desktop **1470px** and narrow
+**550px/390px** views had no horizontal overflow; screenshots were inspected.
+Unavailable/running/completed presentation, disabled active import, safe DOI
+link, two synthetic parent callbacks with PDF `unverified`, real Markdown refresh,
+Inbox membership and Settings rendering passed. This is synthetic browser/bridge
+evidence, not user Chrome, Zotero, physical-mobile or live capture acceptance.
+
+**Preservation and remaining gates:** the A5 diff and `git diff --check` passed;
+all **177** protected files matched preflight bytes. Earlier SPEC sections and all
+unrelated uncommitted work remain intact. No actual user Workspace, Chrome or
+Zotero was operated; no commit, push, tag, release or branch switch occurred.
+Independent review and later explicitly authorized live/integration/distribution
+gates remain. The Paper-only marker observability limits in §42.10 still apply.
+A5 rollback uses its external preflight snapshots and removes only its source,
+template/style/JS, test and evidence hunks, preserving preceding A0–A4 work.
+
+**A5 review fix 1: EXECUTED; independent review pending (2026-10-08).**
+Independent review identified a cross-Workspace authorization gap missed by the
+original A5 tests: a valid form rendered for A could start B after `output_dir`
+changed. Before the production fix, the two new isolated regressions reproduced
+HTTP 200 and a B command after both an external config edit and an actual Settings
+Save. Both expected HTTP 409 assertions failed. The current target-bound token
+closes this gap without a client path field or persistent form registry.
+
+Rendering uses the same parsed configuration for the displayed Papers and token;
+a changed configuration/identity during rendering issues no usable authorization.
+Submission checks the target-bound signature and consumes the nonce under the
+existing submission exclusion. The A4 `start()` API now accepts one optional
+caller target precondition: after scanning under the actual Workspace operation
+lock, it verifies that frozen authorization before publishing the plan or writing
+any pending reservation. This small interface extension closes a change between
+the Web check and worker startup, including a change during scanning. It leaves
+A1–A4 marker, ownership, native attribution, completion and stale-authority
+mechanisms intact. No new batch state, queue, durable token database or Connector
+contract was added. Settings retains its existing shared Workspace exclusion.
+
+All commands and reservations continue using the frozen authorized Workspace;
+later external configuration writes cannot redirect them to a new Workspace.
+This is target binding, not revocation of an already exposed browser command.
+An uncooperative edit after authorization cannot prove that an old native save
+ended; the existing marker and paused-authority rules and §42.10 observability
+limits still apply. Requests rejected by the form check leave the batch idle;
+startup target conflicts expose a blocked snapshot without a plan or pending
+write. HTTP 409 returns a visible warning and freshly loaded current Markdown;
+the existing executable HTMX/Node harness verifies that 409 workspace fragments
+are swapped into view. No frontend source or template change was required.
+
+`tests/test_unified_import_ui.py` now has **39 passing cases**, adding 12
+regressions for external and Settings switches, fresh B authority and application
+bridge dispatch permission, stale replay/concurrent requests, two-page concurrent fresh requests,
+configuration content/file replacement, resolved symlink retargeting,
+Workspace/Papers/lock replacement, and page-read/startup/plan timing changes.
+Rejected requests preserve both Workspaces' Paper bytes and attempt markers.
+Existing presentation tests that mocked configuration now provide a real
+temporary config revision; the Settings delegation test still forbids Web
+persistence and distinguishes readonly import identity types from write code.
+
+The affected command
+`uv run pytest tests/test_unified_import_ui.py tests/test_web_app.py tests/test_web_run_settings.py tests/test_a5_settings_ui.py tests/test_application_settings.py tests/test_batch_import.py tests/test_export_attempts.py tests/test_capture_coordinator.py tests/test_zotero_capture.py tests/test_web_zotero_capture.py tests/test_web_connector_bridge.py tests/test_connector_outcomes.py --tb=short`
+passed **580 tests**, with the two existing dependency warnings. Its **77** A4
+cases include deterministic safety regressions and actual spawned processes:
+different-Paper competition, process exit without browser-authority revocation,
+hidden type-changed markers, and renamed `.txt`/`.bak` markers after an old process
+received dispatch permission. These are real process tests, not live browser
+saves. After the annotation/enum/assertion-only edits,
+`uv run pytest tests/test_unified_import_ui.py tests/test_web_app.py tests/test_web_run_settings.py --tb=short`
+passed **269 tests**, including all 39 unified import UI cases; no full pytest run was repeated. The previous A5
+`./connector/test.sh` **82/82** result is reused for unchanged Connector inputs;
+the affected Python bridge tests ran in the 580-case command above.
+
+A separate temporary-Workspace probe, using actual application code and HTTP
+endpoints without test fixtures, produced `STALE_FORM_HTTP 409`,
+`STALE_FORM_VISIBLE True`, `NEW_WORKSPACE_RENDERED True`,
+`NEW_PROCESS_COMMAND False`, `NEW_PROCESS_DISPATCH_GRANTED False`, and
+`PAPER_BYTES_UNCHANGED True`. A fresh B page then produced HTTP 200, DOI
+`https://doi.org/10.5555/b` and an accepted dispatch; a synthetic attributable
+parent callback completed B through A3. This is isolated application/bridge
+evidence, not Chrome/Zotero live acceptance or an independent code review.
+
+The Fix 1 diff and `git diff --check` were inspected. All **177** protected files
+match the earlier A5 snapshot; all **321** other pre-fix Git-listed inputs remain
+unchanged. Preceding SPEC sections and Git HEAD/index are preserved.
+Rollback removes only these Fix 1 source/test/evidence hunks using the external
+pre-fix snapshots, retaining all A0–A5 work. Independent review and explicitly
+authorized Chrome/Zotero live acceptance remain gates; A6–A9, publication and
+real-user Workspace operations remain outside this task.
+
+### 42.12 A6 Access Service preparation implementation evidence
+
+**A6: EXECUTED; independent review pending (2026-10-08). Unreleased.**
+This evidence covers V0_6_3_A6_ACCESS_SERVICE_PREPARATION on HEAD
+`578b26b2025ba3b62789d150478e292e83579877`, preserving the uncommitted A0–A5
+implementation, A4 serial authority and A5 Workspace-target binding. It does
+not implement Institution Settings, Reset or live acceptance (A7–A9).
+
+**Identity and route gate:** the AGPL `literature-monitor-access.js` overlay
+consumes actual main-frame commits and HTTP redirect events for the currently
+owned DOI task tab. It separates the DOI resolver, observed landing origin and
+rule-verified SP. No Publisher metadata, OpenAlex Publisher identity, DOI prefix,
+manual Access URL or IdP origin selects a service. SP mapping requires exactly
+one reviewed rule matching the observed landing. Missing/ambiguous rules retain
+unknown identity and normal official bibliographic capture plus manual Open DOI.
+
+The production verified-rule table is **empty**: zero verified SP mappings and
+zero enabled federation routes. No actual CARSI/Shibboleth/OpenAthens/WAYFless URL
+has been invented or enabled. Future static rules require distinct evidence
+references for SP, institution selector, allowed destinations, usable return and
+preserved host association; exact public HTTPS origins and a safe static entry
+must pass validation. The `.example` rules in Node tests are synthetic fixtures,
+not actual institutional evidence and not production configuration. No browser
+payload or Settings field can install a rule.
+
+**Bounded preparation and fallback:** a fresh opaque context shared by the
+current batch retains service outcomes only in Connector worker memory. At most
+one automatic preparation per identified service/context is allowed. Each task
+has a monotonic 20-second preparation budget and eight observed main-frame
+redirect/commit hops; commits and redirects are conservatively counted together.
+Repeated destinations, hosts outside a verified allowlist, form-submitted
+challenges, errors and expiry stop preparation. Same-origin repeated HTTP
+redirects can conservatively fall back rather than retaining sensitive paths.
+Only a reviewed static entry and the original server-built DOI can be issued in
+the dedicated normal, non-incognito task tab. Existing Chrome profile sessions
+are used naturally; neither Cookies nor credentials are inspected or cleared.
+
+The existing `webNavigation` and `webRequest` permissions were verified in the
+pinned source and built MV3 manifest; no permission was added. A read-only
+main-frame redirect observer does not redirect unrelated hosts or request
+headers/cookies. Chrome's documented `documentId`, main-frame and transition
+semantics were checked against the official
+[webNavigation reference](https://developer.chrome.com/docs/extensions/reference/api/webNavigation).
+Only observed events establish evidence: events before task-tab binding can be
+missed, and this implementation does not claim complete chain observation or
+network cancellation. Actual event ordering and proxy behavior remain live gates.
+
+**Session/privacy boundary:** IdP session, SP session, authentication and
+resource-level entitlement are four independent fields. All remain **unknown**;
+there are no verified positive indicators or real authentication observations.
+Even a tested route return is only navigation preparation, never authentication
+or PDF/full-text proof. The bridge accepts only immutable public HTTPS origins
+and fixed reason values, rejects paths/queries/fragments/userinfo/private literal
+hosts and extra credentials/Cookie/SAML fields, and rejects unproven positive
+session assertions. Full sensitive URLs/parameters are not retained by the access
+policy, sent in summaries or written into Papers/configuration/logs/databases.
+Opaque document identifiers and bounded navigation state remain in worker memory.
+No browser storage/session persistence or OpenAthens host-association access or
+mutation was added; preservation is required by rule policy. Actual coexistence
+is not yet live-verified.
+
+**Save authority and presentation:** preparation reuses the current capture's
+A1 reservation and A4 ownership. It cannot grant native permission or consume
+completion. An optional opaque `access_context` on the server claim groups batch
+preparation; invocation payloads still contain only the A2 native identity fields.
+The new `/api/connector/access` JSON bridge accepts one matching live claimed
+attempt/tab summary before permission and rejects replay, wrong capability,
+late/finished attempts and restart callbacks. Failure/challenge reasons deny
+native dispatch. A safe pre-trigger failure can complete no-effect through A3
+and let unrelated Papers proceed; an escaped dispatch remains uncertain/paused.
+
+Every deferred readiness/navigation operation rechecks task identity, terminal
+state and deadline. A new main-frame navigation after translator readiness
+invalidates it before save; navigation after the translator trigger terminates
+as uncertain. Timeout, late navigation/permission/authentication callbacks and
+worker restart cannot revive the retired task. This uses the existing A2 native
+fence, not an assertion that browser navigation or an old native save was revoked.
+The Paper-only marker observability limits in §42.10 still apply. A5 polling shows
+sanitized current/final access reasons and keeps completion ownership in the batch
+executor. Open DOI remains the manual entry. The official translator/saveItems
+hooks are unchanged; PDF remains unverified, without a downloader or attachment
+manager.
+
+**Executed verification:**
+
+- `uv run pytest tests/test_access_preparation.py tests/test_unified_import_ui.py tests/test_web_app.py tests/test_web_run_settings.py tests/test_a5_settings_ui.py tests/test_application_settings.py tests/test_batch_import.py tests/test_export_attempts.py tests/test_capture_coordinator.py tests/test_zotero_capture.py tests/test_web_zotero_capture.py tests/test_web_connector_bridge.py tests/test_connector_outcomes.py --tb=short`
+  passed **607 tests**, with the two existing dependency warnings. This includes
+  27 new A6 HTTP/application cases, all 39 A5 UI/target-binding cases and 77 A4
+  batch cases. A4 cases include real spawned-process competition, process exit
+  after dispatch and type/extension-hidden unresolved markers. The new A6 tests
+  verify privacy rejection, readonly polling, tab/permission attribution,
+  failed-service isolation, restart/timeout fences and process-local contexts.
+- `./connector/test.sh` passed **98/98**, including 16 new A6 cases and unchanged
+  executed native A2/A4 hooks. Coverage includes synthetic DOI/SP mapping,
+  unverified rules, host/return allowlists, one preparation per service, finite
+  hops/loops, four unknown session fields, frozen OpenAthens associations,
+  forbidden Cookie/storage access, deferred navigation timeout, challenge/late
+  return, readiness navigation race, restart and late dispatch permission.
+  These are deterministic mocked browser/federation events, not Chrome, Zotero
+  or real institutional login acceptance.
+- `connector/build.sh` reconstructed the exact pinned source/submodules and
+  built Chrome/MV3 in `/tmp/lm-a6-connector.Ab37Oz`. Its patch/delta checks, overlay
+  wiring, manifest and verbatim AGPL COPYING checks passed. After the final
+  runtime race regression, the overlay-copy phase was refreshed from current
+  sources; byte comparison, `node --check`, import ordering, existing permissions
+  and zero production rules passed against the final artifact. The unchanged
+  upstream build was reused, not rebuilt a second time.
+- `uv build --out-dir /tmp/lm-a6-connector.Ab37Oz/python-dist` built wheel/sdist.
+  Archive inspection confirmed the access model and updated template in the MIT
+  wheel and excluded Connector-derived code and protected user paths from both
+  artifacts. This is build/payload evidence, not installed or live acceptance.
+
+The affected Python/HTTP and Node runtime tests ran in this task. No full pytest
+was repeated; earlier full-suite evidence is applicable only to unchanged
+implementation/dependency inputs. Browser/federation mocks never substitute for
+future explicitly authorized live gates. Enabling any actual rule requires real
+SP/selector/destination/return/host-association evidence and independent review;
+positive session/authentication/entitlement reporting additionally needs reliable
+separate indicators. Real Chrome/Zotero parent/PDF and institution acceptance
+remain outside A6.
+
+**Preservation and rollback:** the A6-specific source/test/documentation diff and
+`git diff --check` passed. All 177 protected files, preceding SPEC bytes and
+unrelated preflight Git-listed inputs, HEAD and index remain unchanged. No real
+user Workspace, Chrome or Zotero operation, commit, push, tag, release or branch
+switch occurred. The external preflight copies and A6-only diff are retained at
+`/var/folders/7c/v718694145388ns274tht_l40000gn/T/lm-a6-preflight-c3uyy6kz`;
+rollback removes only A6 hunks/new files while retaining A0–A5 work. Completion
+now stops for the requested independent review.
+
+
+**A6 review fix 1: EXECUTED; independent review pending (2026-10-08).**
+The review found that the previously tested committed-only success path omitted
+HTTP redirects during resource re-resolution. A conforming synthetic rule now
+exercises the actual `observeRedirect()` and `observe()` together: initial
+DOI-to-SP redirect, landing commit, issued federation entry, IdP commit, verified
+SP return, issued original DOI, resolver commit, second DOI-to-same-SP redirect
+and final landing. Before the fix, `./connector/test.sh` passed **98/99**: the new
+case failed with `redirect_loop` instead of the expected resource-stage reason.
+This red evidence is retained in the external pre-fix snapshot directory.
+
+The resource stage now permits one expected resolver redirect only after the
+verified SP `returnPath` and actual issuance of the original task DOI. It requires
+that exact source DOI and a landing origin allowed by the current rule, records
+only that public origin, and binds the final committed landing to it. No history
+is cleared. Repeated resolver returns, another DOI/query, an IdP destination,
+untrusted hosts, other same-origin repeats and mismatched final landings cannot
+borrow this exception. The federation-return exception also requires an actually
+issued entry. Both origin-history checks were inspected: the committed resource
+transition was already stage-specific, but could overwrite a preceding failure
+reason/cache entry; both observers now ignore failed as well as closed journeys.
+Late events therefore cannot turn fallback into a prepared service observation.
+The native dispatch/reservation/completion contracts and runtime source are
+unchanged by this fix.
+
+The limits remain 20 seconds and eight observed redirect/commit hops. The mixed
+success case completes at exactly eight hops. A longer, otherwise valid synthetic
+flow with one additional HTTP redirect reaches a ninth hop and explicitly falls
+back with `hop_limit`, without retry. Future real rules must demonstrate a usable
+flow inside these limits; this fix does not claim arbitrary real federation
+chains can complete. The production rule table remains empty, and all four
+session/authentication/entitlement observations remain unknown.
+
+Final `./connector/test.sh` passed **110/110** (12 new cases since the original
+A6 evidence). In addition to the red-green path, tests cover wrong return paths,
+unverified path policy, source/host/landing binding, one consumed exception,
+retained loop history, ninth-hop fallback, expiry/closed journeys and once-per-
+service reuse. The runtime coexistence success test now also combines actual
+mocked main-frame redirect and committed events, including the second DOI
+resolution, before its single official translator trigger. Existing failed-SP
+isolation, late navigation, worker restart and executed A2/A4 one-shot native
+hook regressions remain passing. These are synthetic browser/federation events,
+not live authentication evidence.
+
+`uv run pytest tests/test_access_preparation.py tests/test_batch_import.py tests/test_capture_coordinator.py tests/test_unified_import_ui.py tests/test_web_connector_bridge.py tests/test_connector_outcomes.py tests/test_web_zotero_capture.py --tb=short`
+passed **197 tests**, with the two existing dependency warnings. It includes A4
+actual spawned-process exclusion/stale-marker cases and A5 Workspace-binding
+regressions. Python inputs are unchanged; the earlier 607-case command remains
+applicable to its unchanged Settings and other Python coverage. No full pytest,
+Python packaging rebuild or unchanged upstream Connector rebuild was repeated.
+
+Only the access overlay build input changed. The earlier isolated MV3 artifact
+was checked against its pre-fix overlay, its copy step refreshed with the fixed
+source, and all declared overlay bytes compared with current source. Final
+`node --check`, worker import ordering, empty rules, MV3, verbatim AGPL COPYING,
+applied upstream delta paths and `git apply --reverse --check` for both unchanged
+patches passed. The existing upstream build/manifest and Python wheel/sdist
+checks are reused within that unchanged-input boundary.
+
+The fix-specific diff and `git diff --check` passed. All 177 protected files,
+327 unrelated pre-fix Git-listed inputs, preceding SPEC bytes, HEAD and index
+are preserved. Only the access overlay, Node tests and this current evidence were
+changed. No user Workspace import/write, real Chrome/Zotero, A7–A9, commit, push,
+tag, release or branch switch occurred. Red/green logs, the old overlay/test/SPEC
+copies and the fix-only diff are retained under
+`/var/folders/7c/v718694145388ns274tht_l40000gn/T/lm-a6-fix1-u1ncp10p`.
+Rollback removes only these fix hunks and refreshes the external overlay copy
+from its preserved pre-fix bytes, without resetting any A0–A6 work. Real service
+routes, event ordering, host associations, authentication/entitlement indicators
+and normal Chrome/Zotero acceptance remain separate explicitly authorized live
+gates. Work stops for the requested independent review.
+
+### 42.13 A7 Institution Settings and remaining stage ownership (2026-10-08)
+
+**A7: EXECUTED; independent review pending. v0.6.3 remains unreleased.**
+`V0_6_3_A7_INSTITUTION_SETTINGS` uses baseline
+`578b26b2025ba3b62789d150478e292e83579877` and retains A0–A6, including their
+review fixes. Remaining work is **A7 Settings → A8 Workspace Reset → A9 final
+functional closeout and user manual Live Acceptance → A10 Final Audit/Release**.
+A7 completes only Settings; it starts no Reset, manual acceptance or publication.
+
+The existing `monitor.yaml` schema now accepts optional `institution.name`
+(up to 120 Unicode letters/numbers/name punctuation) and
+`institution.idp_entity_id` (a public HTTPS entity ID without credentials,
+query, fragment or encoded payload, or a public URN; at most 512 ASCII characters).
+These are opaque public context, never navigable login actions or route authority.
+Missing/null/empty institution, null fields and blank strings mean unconfigured;
+Save omits empty context. Existing configurations need no migration. Strict
+validation rejects unknown/sensitive institution keys, invalid types, control/
+invisible characters, malicious markup and unsafe entity IDs. Submitted duplicate
+institution fields and extra credential/session/login-route fields are refused
+without projecting their values into the returned editor.
+
+Production Load, editable draft, form projection, shared Validate, Save and Reload
+carry the same context. The existing revision and safe-write transaction is reused.
+An institution-only edit bypasses metadata resolution and list rendering/writing,
+while retaining Publisher membership and both original revision checks; a final
+list revision check precedes monitor CAS. Monitor failure is `WRITE_FAILED`, and
+CAS conflict is `REVISION_CONFLICT`, with no fictitious partial Journal write.
+Combined Settings edits retain the existing two-file/partial-save semantics.
+Tests retain Journal/Publisher metadata, manual URLs, Groups, CRLF/list formatting,
+list file identity and Paper bytes. No Provider request or implicit import occurs.
+
+The new fieldset uses the existing responsive Settings grid and one Save action.
+It explains unconfigured/manual access and **Configured institution ≠ authenticated
+session ≠ full-text entitlement**, including no IdP/SP login or Zotero PDF proof.
+Journals, Publishers, Bulk Import, Groups, date policy and daily navigation remain
+unchanged. A5's complete config digest/file identity continues to bind import
+authorization: a successful institution edit rejects old forms; a config change
+between POST and locked startup refuses before reservation. No new token mechanism
+is added. A6's production `VERIFIED_RULES` remains empty; no identifier is sent to
+Connector, no route is enabled and session/authentication/entitlement remain
+`unknown`. Existing OpenAthens associations and manual Publisher URLs are separate.
+
+**Automated verification:**
+`uv run pytest tests/test_institution_settings.py tests/test_config.py tests/test_application_settings.py tests/test_a4_publisher_settings.py tests/test_a5_settings_ui.py tests/test_web_run_settings.py tests/test_unified_import_ui.py tests/test_access_preparation.py tests/test_batch_import.py tests/test_capture_coordinator.py tests/test_web_connector_bridge.py tests/test_connector_outcomes.py tests/test_web_zotero_capture.py --tb=short`
+passed **632 tests** (including **48 A7 cases**), with two existing dependency
+deprecation warnings. Coverage uses temporary Settings/Workspaces, HTTP requests,
+fault injection, actual process/lock regressions and synthetic bridge events.
+The executed Node Settings DOM harness verifies institution editing, dirty state,
+HTMX preview/swap retention and Save feedback. `./connector/test.sh` passed
+**110/110**, retaining unknown/manual fallback and OpenAthens/redirect safety.
+`node --check` passed for `web/static/app.js` and the access overlay;
+`uv lock --check` reported **Resolved 27 packages**; `git diff --check` passed.
+No lint/static type checker is configured. No new dependency, payload location or
+Connector build input is added; A7 does not repeat packaging/upstream builds or
+claim existing A6 artifacts contain A7. Final changed artifacts belong to A10.
+HTTP/DOM simulation and inherited responsive CSS are checked; actual browser
+rendering and real-app behavior are not claimed.
+
+**Manual Live Acceptance ownership:** all real normal Chrome, Zotero, institution
+authentication and user Workspace scenarios in §42.10 are performed manually by
+the user at A9. Codex handles source/tests/simulation/build verification and does
+not operate those real environments or collect browser session evidence. ChatGPT
+reviews supplied results and their evidence boundaries. The necessary §42.10
+acceptance scope is unchanged; record each actual result as PASS, FAIL or NOT TESTED.
+No missing manual result becomes PASS, and required live gates still precede any
+RELEASED claim. **MANUAL_LIVE: NOT_TESTED — USER_OWNED.** At A9, check Settings
+save/reload and narrow-screen readability, stale import-form refusal and manual
+service access without inferred login/full-text/PDF success; retain the broader
+batch/federation/PDF/preservation/isolated-Reset scenarios required by §42.10.
+
+**Preservation/rollback:** the A7-only diff was inspected. All 176 protected files
+under `monitor.yaml`, `src/.obsidian/` and `workspace/`, other pre-existing inputs,
+HEAD and index are unchanged. Only config/Settings/form/template, A7 tests and this
+appended record change. Pre-A7 copies and the task diff are retained externally at
+`/var/folders/7c/v718694145388ns274tht_l40000gn/T/lm-a7-preflight-g6nip3tk`;
+rollback applies only A7 hunks/removes the new A7 test, preserving A0–A6. No commit,
+push, tag or Release is created. Work stops for ChatGPT's AgentDock independent
+review; A8, A9 and A10 remain pending.
+
+**A7 review fix 1: EXECUTED; independent re-review pending (2026-10-08).**
+`V0_6_3_A7_REVIEW_FIX_1` corrects an incomplete form blacklist: unknown IdP/auth
+fields such as `idp_password` were discarded but their submissions still reported
+`Settings saved.` and emitted `settingsSaved`. Tests were added before production
+edits. `uv run pytest tests/test_institution_settings.py -k 'unknown_sensitive_save_fields or import_draft_rejects_sensitive' --tb=short`
+failed **38/38** on the old implementation, then passed **38/38** after the fix.
+They exercise ordinary and HTMX Save, plus Import Preview/Apply, using temporary
+Settings/Workspaces and synthetic credential markers. Cases cover `idp_password`,
+`idp_cookie`, `idp_session`, `idp_token`, `saml_assertion`, authentication/cookie/
+session/credential/OAuth/Shibboleth/OpenAthens variants and case/dotted aliases.
+
+The shared form adapter now accepts only the existing editor/import fields and
+explicitly rejects unsupported inputs with a static error, without reflecting
+their values. The two legitimate institution fields and duplicate-field check
+remain. Validation-error HTML uses the existing HTTP 200 fragment behavior;
+neither Save nor Apply reports success or emits its success event. Tests verify
+unchanged monitor/list/Paper bytes, no credential echo in HTML/headers, and retained
+public institution draft. An initial compatibility run found the existing rule
+that forged `resulting_journals` and `plan_can_apply` browser hints are ignored;
+these two inputs retain that inert behavior, while Apply still replans entirely
+on the server. No browser plan gains authority. InstitutionConfig, persistence
+types, routes, session handling and federation functionality are unchanged.
+
+Final `uv run pytest tests/test_institution_settings.py tests/test_application_settings.py tests/test_a4_publisher_settings.py tests/test_a5_settings_ui.py tests/test_web_run_settings.py tests/test_unified_import_ui.py tests/test_access_preparation.py --tb=short`
+passed **462 tests**, including **86 A7 cases**, with the two existing dependency
+warnings. This includes normal save/clear/reload, CSRF, revision/storage failures,
+HTMX/Node DOM execution, Journal Import draft retention, Publisher/Group/date and
+legacy-import compatibility, stale A5 tokens and A6 unknown/manual fallback.
+The earlier A7 Connector **110/110** evidence is reused only for unchanged
+Connector source/test inputs; it is not a new fix run. No full suite, build or
+real Chrome/Zotero/institution/User Workspace operation is performed.
+**MANUAL_LIVE: NOT_TESTED — USER_OWNED.** A8–A10 remain pending.
+
+The fix-only diff and `git diff --check` passed. All 176 protected files and other
+pre-fix inputs outside the three changed files retain their exact bytes; HEAD and
+index are unchanged. Pre-fix copies, red/green/compatibility logs and the fix-only
+diff are retained under
+`/var/folders/7c/v718694145388ns274tht_l40000gn/T/lm-a7-fix1-_xjvnx9n`.
+Rollback removes only these fix hunks, preserving all A0–A7 work. No commit, push,
+tag or Release is created. Work stops for ChatGPT's independent re-review.
+
+### 42.14 A8 Safe Workspace Reset implementation evidence (2026-10-08)
+
+**A8: EXECUTED; independent AgentDock review pending. v0.6.3 remains
+unreleased.** This stage implements only §42.8. A9 human live acceptance and
+A10 final audit/publication remain separate. No actual user Workspace, Chrome
+session, Zotero data or institutional authentication was accessed by Reset;
+all destructive test operands were independently created synthetic temporary
+Workspaces. **MANUAL_LIVE: NOT_TESTED — USER_OWNED.**
+
+**Explicit user boundary:** Settings → Advanced & Diagnostics → Danger Zone
+renders the current resolved absolute Workspace path, each verified removal
+entry (including file names beneath Papers/, Authors/ and
+.literature-monitor/), protected exclusions, and the destructive-operation
+warning. The server stores a one-use nonce with the full plan, and requires
+both the existing CSRF token and the exact user-entered `RESET`. Failed
+confirmation is consumed, duplicate/subsequent submissions cannot replay,
+and a fresh Settings page replaces the prior authorization. The POST accepts
+neither a caller-selected path nor caller-selected removal entries.
+The plan captures the monitor and Journal Settings revisions, Workspace
+identity, per-directory identities and per-file identity, size, timestamp
+and content digest. Reset acquires the Workspace operation lock and builds
+a fresh complete plan before comparing to the displayed plan; changes or
+configuration swaps refuse without destructive action.
+
+**Safe removal scope:** The target check rejects filesystem root, Home,
+repository/configuration root or unsafe ancestors, paths within browser or
+Zotero data locations, symbolic-link paths, unknown or unowned objects and
+unsupported file types/hardlinks. The same traversal requires a real
+application-owned inventory, not merely named directories or .md suffixes.
+Papers must parse as current supported documents with matching UUID
+filename and no export_attempt (including malformed, pending or uncertain
+attempts); Authors must parse as recognizable application notes; Inbox.base
+must match the default application-generated bytes; the only accepted
+metadata objects are recognized and parseable last-run.json and
+provider-state.sqlite3. Unrecognized entries, files or nested directories
+refuse the entire operation. Protected `monitor.yaml`, `list.md`,
+all `.obsidian/` content, the permanent empty operation-lock inode, browser
+data and Zotero data are excluded. No schema conversion, session reset,
+Connector invocation or implicit Run occurs.
+
+**Historical implementation boundary:** The recovery/staging mechanism below
+was the original A8 implementation. The user decision and Review Fix 1 recorded
+at the end of this section supersede its recovery requirements and implementation.
+
+**Exclusive ownership and recovery:** Run now retains the same cross-process
+flock from the initial provider phase through metadata persistence; Web Run
+reserves it before worker startup. Existing Paper mutation, Batch and native
+capture retain their A4 exclusion; Settings saves now acquire the lock even
+without a Workspace path change. Persistent unresolved attempt markers
+prevent Reset, including after process restart or where browser save
+authority cannot be proved ended. On the supported POSIX lock/no-follow
+filesystem boundary, a verified plan stages only its four allowed top-level
+application output names in an exclusive, unpredictable directory inside
+the same Workspace. Every move uses directory file descriptors; all
+contents are rechecked after staging. An interrupted stage restores
+unchanged objects where safe using kernel-level atomic no-replace rename;
+occupied or changed destinations are never overwritten. An incomplete
+rollback or cleanup reports failure with the recovery location and remaining
+staged top-level entries. No unbounded recursive deletion, second workflow
+database or operation-lock unlink occurs. No-replace rename support is
+required before destructive work; unavailable platforms fail closed.
+
+**Executed verification:** `uv run pytest -q tests/test_workspace_reset.py
+--tb=short` passed **37/37**, including actual process-held flock exclusion,
+Run-before-worker ownership, real file inode/contents substitution,
+configuration and Journal revision conflicts, symlink/directory swaps,
+pending export attempts, wrong/replayed confirmation and CSRF, protected
+content, rollback/cleanup fault injection, and subsequent explicit
+materialization. The affected A1–A7 Run/Settings/Batch regressions passed,
+as did `uv run pytest -q --tb=short` across the full repository
+(with two existing third-party deprecation warnings).
+`./connector/test.sh` passed the existing Connector runtime cases without
+rebuilding the unchanged upstream; the existing Node Settings DOM execution
+is included in the full pytest. `uv lock --check` and `git diff --check`
+passed. No configured ruff/mypy/pyright lint or type-check target exists.
+The full suite was run before the final atomic no-replace rollback change;
+the complete Reset suite was rerun against that final change.
+A prior assertion assumed same-Workspace Settings saves leave no lock inode;
+it was updated to reflect the required durable empty lock inode. All
+protected repository work and A0–A7 uncommitted changes remain preserved.
+
+**Manual acceptance ownership:** Only the user performs A9 live tests on
+a separate dedicated Workspace. Confirm the presented path and exact list,
+protected configuration and Obsidian preservation, explicit Run regeneration,
+and lack of changes to real Zotero data or the normal Chrome session. Do not
+submit credentials, session data or a detailed operation log. Current
+result: **MANUAL_LIVE: NOT_TESTED — USER_OWNED**. No commit, push,
+tag, GitHub Release or A9/A10 work is authorized in A8.
+
+
+#### A8 Review Fix 1 — user-revised permanent Reset and Run binding (2026-10-08)
+
+**A8 Review Fix 1: EXECUTED; independent ChatGPT review pending.**
+`V0_6_3_A8_REVIEW_FIX_1` uses the unchanged HEAD
+`578b26b2025ba3b62789d150478e292e83579877` and preserves all pre-fix A0–A8 work.
+The user explicitly defines Reset as permanent deletion with no Recovery,
+Rollback, undo or recovery directory. This decision replaces the earlier
+§42.8/§42.10 recovery contract and the historical mechanism above. F1 is no
+longer a defect merely because partially deleted originals cannot be restored;
+safe scope, error reporting and exclusion remain mandatory. F2, the Run lock
+and output-target mismatch, remains a defect and is fixed here.
+
+**Permanent deletion and partial failure:** `workspace_reset.execute_reset`
+compares the complete current plan with the confirmed Workspace, monitor and
+Journal revisions, object identities and removal inventory before deletion.
+It opens the recognized folders without following links, retains the shared
+cross-process lock and uses directory-descriptor-relative unlink/rmdir on the
+fixed inventory only. Each mutation checks the target/revision, remaining
+inventory, parent identity and file identity/content; final verification must
+confirm every planned output is absent before SUCCESS. The staging directory,
+move/restore logic, kernel no-replace rollback and `ResetResult.recovery` are
+removed. No recursive scavenging, retry, new state database or automatic Run is
+introduced. Protected configuration, `.obsidian/` and the permanent lock inode
+are excluded; unknown objects, path/identity changes and unresolved attempts
+continue to block or abort Reset.
+
+`ResetResult` reports `deleted`, `remaining` and `unconfirmed` separately.
+Completed deletion calls are recorded immediately. A failed call never counts
+as confirmed deletion merely because its path is now absent. Remaining entries
+must still match their original identities/content; missing, replaced or
+unreadable entries and observed new/reappeared objects are unconfirmed.
+Any deletion/validation error stops the operation and returns failure without
+restoration or automatic retry. The Web route/template remove the recovery
+location, disclose permanent deletion and display these three lists. The
+necessary adjacent `app.js` change permits the Danger Zone's 400/409 HTMX
+fragments to display; CSRF 403 and unexpected server errors keep their original
+handling. HTTP and executable Node tests cover this actual reporting path.
+Deletion is intentionally non-atomic, without a promise of recovery.
+
+**F2 bound Run target:** The CLI Run engine loads one configuration snapshot
+before acquiring its Workspace lock and passes it through preparation and
+execution. Web Run verifies its pre-reserved lock against that same loaded
+target. Materialization, Provider-state read/write and LastRunSnapshot use the
+frozen output directory, with lock identity checks before persistence; later
+configuration edits cannot redirect the current Run to an unlocked Workspace.
+The next explicit Run loads the then-current configuration. Normal Provider
+failure isolation, Run outcomes and CLI exit handling are preserved.
+
+**Executed regressions and checks:** Before the F2 fix,
+`uv run pytest tests/test_application_monitor.py -k
+run_config_switch_at_preflight --tb=short` failed both CLI-engine and real Web
+worker cases: a CHECKING_MONITOR callback changed the configured target from A
+to B, and actual Provider/last-run persistence created `.literature-monitor/`
+in unlocked B. After the fix both cases pass: B's personal file and inventory
+remain unchanged, while real materialization, Provider SQLite and last-run
+writes complete in locked A. Only remote Provider computation is mocked.
+Before the HTMX correction, `uv run pytest tests/test_workspace_reset.py -k
+reset_failure_htmx_swap_runtime --tb=short` failed because the actual app.js
+handler did not swap a Danger Zone error fragment; after correction it passes.
+A further fault-injection test introduced a personal top-level file after the
+fresh inventory returned but before the first deletion. It failed against the
+initial rewrite, which treated every extra root entry as protected. The fixed
+preserved set contains only explicit protected names and the operation lock;
+the same scenario now refuses before deleting anything and reports the new file
+as unconfirmed. Red/green evidence uses `uv run pytest
+tests/test_workspace_reset.py -k unknown_root_file_introduced --tb=short`.
+
+The targeted Reset/Run/coordinator command
+`uv run pytest tests/test_workspace_reset.py tests/test_application_monitor.py
+tests/test_run_coordinator.py --tb=short` passed **114 tests** before the final
+HTMX and post-inventory race regressions were added. Final
+`uv run pytest --tb=short` passed **3014 tests**,
+including all **46 Reset cases**, both F2 cases, executable Node Settings/Reset
+handlers and unaffected Provider/CLI/Settings/Batch/Capture tests, with only the
+two existing third-party deprecation warnings. The Reset cases use isolated
+temporary Workspaces and exercise permanent deletion, unknown/dangerous/link
+refusal, changed file/parent identity and revisions, mid-delete unlink/rmdir
+faults, missing response, newly introduced/replaced/reappeared objects,
+configuration switching, protected-content retention, pending export_attempts,
+CSRF and one-use confirmation, and explicit Run regeneration. A real child
+process paused inside Reset's destructive phase proves exclusion of CLI Run,
+Web Run startup, Settings save, Batch startup and Capture attempt reservation;
+none writes or publishes a save command while that lock is held.
+`uv lock --check` passed. No configured lint/type-check target exists. Connector
+inputs are byte-identical to the pre-fix inputs; the earlier §42.14 Connector
+verification remains applicable and no Connector build is repeated.
+
+**Scope and retained evidence:** Changes are limited to SPEC, Reset, the shared
+Run engine, their tests and the necessary Web route/template/HTMX reporting
+callers. All 177 protected files (`monitor.yaml`, repository `list.md`,
+`src/.obsidian/`, `workspace/`) retain their pre-fix bytes. Other existing inputs,
+HEAD and the index remain unchanged. Pre-fix source copies, F2/HTMX/inventory-race red/green
+logs, full/targeted test logs and the fix-only diff are retained under
+`/var/folders/7c/v718694145388ns274tht_l40000gn/T/lm-a8-fix1-0d2u_3rj`.
+If a source correction is needed, revert only this fix's hunks against those
+copies; this development source reversion provides no Reset recovery feature.
+`git diff --check` and the fix-only whitespace check passed.
+**MANUAL_LIVE: NOT_TESTED — USER_OWNED.** A9 manual acceptance and A10 final
+audit/publication remain separate; no real Chrome, Zotero, institution or user
+Workspace was operated. No commit, push, tag or Release was created. Work stops
+for ChatGPT's independent review.
+
+
+#### A8 Review Fix 2 — F3 deletion-object binding (2026-10-08)
+
+**A8 Review Fix 2: EXECUTED; independent ChatGPT review pending.**
+`V0_6_3_A8_REVIEW_FIX_2` preserves the unchanged HEAD
+`578b26b2025ba3b62789d150478e292e83579877`, all existing A0–A8 work and the
+user's permanent-deletion/no-Recovery/no-Rollback contract. F3 is confirmed:
+Fix 1 verified an object and then unlinked/rmdir'd its public name. A writer
+replacing that name after verification could cause deletion of an unverified
+object and an incorrect success result. The direct public-path disposal branch
+in the preceding Fix 1 record is superseded by the following safety boundary.
+
+**Object custody before deletion:** Reset still validates the complete confirmed
+plan, revisions, Workspace, file/parent identities and content under the shared
+cross-process lock. It then creates an unpredictable, owner-only (`0700`)
+operation-local deletion directory, opened without following links and bound
+by its directory descriptor and identity. Each output is atomically moved into
+that exclusive namespace without overwriting a destination, and only then
+compared with the original inventory's inode/type/size/timestamp/content.
+A substitute captured by the move fails validation and is never unlinked.
+Both file unlink and empty output-directory rmdir operate only relative to the
+isolation descriptor, not the replaceable public Workspace names. Papers,
+Authors, Inbox.base and both runtime metadata files share these same branches.
+Public-name reappearance or any remaining inventory/target mismatch returns
+failure even where the verified original has already been deleted. Final
+success requires all planned originals absent, no public substitutions and
+removal of the empty operation-local directory.
+
+The native claim requires macOS `renameatx_np(RENAME_EXCL)` or Linux
+`renameat2(RENAME_NOREPLACE)`. There is no ordinary rename/copy fallback.
+Missing platform support, unsupported filesystem behavior or an occupied
+isolation destination stops before deleting a captured unknown object.
+The executed filesystem evidence is macOS with Python 3.12 and independent
+local temporary Workspaces; Linux's syscall branch is not a Linux runtime
+acceptance claim. The private namespace is exclusively owned by this Reset,
+unpublished while active, and excluded from other application writers. Its
+location, inode, permissions and exact custody inventory are checked. The
+regressions cover competing writers replacing public paths and intrusion at
+the atomic-claim destination; they do not claim privilege isolation against
+an adversary able to control the Reset process or its private descriptors.
+
+**Permanent semantics and F1 reporting:** Isolation is deletion safety custody,
+not an undo/recovery feature. Successful deletion is irreversible; there is no
+restoration, rollback, automatic retry or expanded recursive cleanup. Normal
+success removes the empty isolation directory. On failure, an undeleted or
+unverified captured object remains intact at its reported isolation location;
+only an empty verified isolation directory may be cleaned. Such leftovers are
+not recovery snapshots or a persistent state database. A later Reset treats
+them as unknown content and refuses rather than resuming disposal. Existing
+`deleted`, `remaining` and `unconfirmed` lists continue to distinguish actual
+outcomes; retained entries include their actual isolation path. Missing/lost
+responses never count as confirmed deletion. Originals moved elsewhere by a
+competing writer are unconfirmed; Reset does not search outside its target to
+invent their location. Generic Web/HTMX rendering displays the updated labels
+without new route, configuration or template changes.
+
+**Red/green and executed checks:** Before production changes,
+`uv run pytest tests/test_workspace_reset.py -k
+public_path_replacement_at_final_delete --tb=short` failed **8/8** cases because
+ordinary replacement files/empty directories were actually removed. After the
+fix the same eight pass: every substitute remains, Reset returns failure and
+its original-object outcome is reported truthfully. Eight further atomic-claim
+substitution cases cover all five file categories and three directories;
+identical valid application bytes on a new inode still fail authorization.
+Additional cases cover captured symlinks, missing platform/filesystem support,
+non-overwrite destination collision and a lost native-move response. Two real
+child-process races replace the Paper before native claim or immediately before
+unlink; both preserve the substitute and report failure. The scoped sibling
+sweep confirms both Reset application-disposal sites use isolated descriptors;
+the remaining rmdir is restricted to the empty operation-created container.
+
+The targeted A8/Run/Settings/Web command
+`uv run pytest tests/test_workspace_reset.py tests/test_application_monitor.py
+tests/test_run_coordinator.py tests/test_application_settings.py
+tests/test_web_run_settings.py tests/test_a5_settings_ui.py
+tests/test_institution_settings.py --tb=short` passed **441 tests**.
+Final `uv run pytest --tb=short` passed **3037 tests**, including all **69 Reset
+cases**, F1 partial-deletion reporting, F2 frozen CLI/Web Run Workspace binding,
+CSRF/RESET/revision/export_attempt protection, multi-process exclusion, explicit
+Run regeneration and executable Node Settings/HTMX checks. Only the two existing
+third-party deprecation warnings remain. `uv lock --check`, `git diff --check`
+and fix-only whitespace checks passed. No configured lint/type-check target
+exists. Connector inputs did not change; prior §42.14 Connector evidence is
+reused without rebuilding or repeating real browser operations.
+
+**Preservation and scope:** Only `application/workspace_reset.py`,
+`tests/test_workspace_reset.py` and this appended §42.14 record changed. All
+177 protected files and other pre-fix inputs retain their bytes; HEAD and index
+remain unchanged. Pre-fix source copies, eight-case red/green logs, targeted/full
+logs and the fix-only diff are retained under
+`/var/folders/7c/v718694145388ns274tht_l40000gn/T/lm-a8-fix2-28igp8c_`.
+Development source reversion can remove only these fix hunks against those
+copies, preserving earlier work; it provides no restoration of Reset-deleted
+content. **MANUAL_LIVE: NOT_TESTED — USER_OWNED.** No actual user Workspace,
+Chrome, Zotero or institutional session was operated. No A9/A10, commit, push,
+tag or Release was started. Work stops for independent ChatGPT review.
+
+
+### 42.15 A9 final functional closeout (2026-10-08)
+
+**A9: EXECUTED; independent ChatGPT review pending. v0.6.3 is NOT RELEASED.**
+`V0_6_3_A9_FINAL_FUNCTIONAL_CLOSEOUT` keeps HEAD
+`578b26b2025ba3b62789d150478e292e83579877` and all preceding uncommitted A0–A8
+work. The current handoff reports A7 Fix 1 and A8 Fixes 1–2 independently
+reviewed, with **A8 Fix 2: REVIEW_PASSED**; this is the user's supplied review
+status, not a new independent verdict by this executor. Historical implementation
+and pending-review records above remain unchanged. Stage ownership remains
+**A7 Settings → A8 Reset → A9 functional closeout/user manual acceptance →
+A10 Final Audit/Release**. A10 has not started.
+
+**Integration review and one observed correction:** Source, callers, current
+cumulative diff (including new application/HTTP tests) and existing evidence were
+checked across Run → Inbox decisions → historical Kept → serial Connector batch
+→ parent/PDF outcomes and guarded export completion. CLI and Web Run retain one
+frozen, locked Workspace for materialization, Provider state and LastRunSnapshot.
+Reruns retain UUIDs, rejected/exported states and human content. Serial native
+permission, failure isolation and durable pending/uncertain markers remain in
+force. Ordinary file exports cannot mark Zotero completion; retired per-Paper
+Save/Check endpoints have no save/reconciliation authority. Settings retains
+revision/CSRF/safe persistence and invalidates old import context tokens. The
+three main navigation entries remain Inbox / Kept / Settings. Institution context
+is not authentication; production `VERIFIED_RULES` is empty and all four access
+observations remain unknown. Manual Publisher URLs and OpenAthens associations
+retain their separate boundaries. Reset's verified inventory, atomic object
+custody, shared cross-process lock, partial-failure reporting and explicit Run
+regeneration are unchanged from reviewed A8 Fix 2.
+
+The review found that Web Reset used `snapshot().attempt is not None` as an
+active-save test. After normal CONFIRMED or proven NO_EFFECT completion,
+`finish_resolution()` retires authority/releases ownership but intentionally
+retains the FINISHED result for display. Reset therefore incorrectly refused
+until application restart. `CaptureCoordinator.has_unresolved_save_authority`
+now reads under the coordinator lock and checks actual active ownership,
+undelivered/delivered/resolving completion, active stage and escaped-grant
+uncertainty. Web Reset uses this property. No capture state machine, persistence,
+deletion execution or retirement rule was changed. The sibling sweep found no
+other Web permission gate using the removed snapshot-presence condition; remaining
+FINISHED checks format display results. Internal security/architecture checks and
+four read-only adversarial angles returned no additional concrete defect. These
+checks do not replace the requested independent ChatGPT review.
+
+**Red/green and current automated evidence:**
+
+- Before production edits, `uv run pytest tests/test_a9_integration.py --tb=short`
+  produced **2 failed / 7 passed**: both safely retired batch outcomes failed to
+  reach the Reset executor. After the fix it produced **9 passed**. The seven
+  refusal cases cover waiting, claimed, dispatched, pending, delivered, resolving
+  and uncertain authority. All use an isolated temporary Workspace and replace
+  `execute_reset` with a non-deleting stub; actual file bytes remain unchanged.
+  HTMX failure output remains truthful and emits no success event.
+- A8 Fix 2's final diff was reproduced byte-for-byte from its pre-fix snapshot;
+  all other pre-A9 test/implementation/dependency inputs matched. Its recorded
+  `uv run pytest --tb=short` **3037 passed**, including **69 Reset cases**, is
+  reused for the unchanged Reset implementation and fault/concurrency coverage.
+  This is pre-A9 evidence, not a full-suite run of the new coordinator property.
+- Because the property/Web caller changed, current
+  `uv run pytest --ignore=tests/test_workspace_reset.py --tb=short` passed
+  **2977 tests**, including the nine new HTTP cases, executable Node UI tests,
+  batch/attempt/capture/access/Settings/DOI/ISSN-L/Provider regressions and actual
+  spawned-process tests. Only the two existing dependency deprecation warnings
+  remain. The 69 disposal tests were deliberately not rerun: A9 forbids actual
+  permanent deletion, their Reset implementation inputs are unchanged, and the
+  changed Web permission boundary is covered by non-deleting HTTP regressions.
+- `./connector/test.sh` passed **110/110** against current overlays and executed
+  native hook fixtures. These mocked browser/Zotero/federation events establish
+  serial/late-trigger/attribution/privacy behavior, never live authentication.
+  The external A6 MV3 build is reused: current overlay bytes, pinned upstream and
+  submodule revisions, four allowed upstream delta paths/reverse patch checks,
+  worker import order, MV3 manifest, verbatim AGPL COPYING, Node syntax and zero
+  production routes were checked. Connector executable build inputs did not
+  change; its current-development README's obsolete “until A3” clause was fixed.
+- The upstream ItemSaver **17 tests remain NOT_TESTED / unavailable**. A read-only
+  Puppeteer path check still finds the required Chrome `150.0.7871.24` absent.
+  No browser was downloaded/launched and the previously blocked suite was not
+  repeated. This is an explicit unresolved verification boundary, not PASS or a
+  waived release gate.
+- `uv lock --check` and `git diff --check` passed. No configured lint/typecheck
+  target exists. No `personal-dev-guard` entry point was discoverable in the
+  available skills/tools, local skill/plugin inventory or Codex configuration;
+  no claim of executing that guard is made. AGENTS, REVIEW_WORKFLOW and the
+  task's scope/protected-state restrictions were applied; no guard override or
+  approval rejection occurred.
+
+**Packaging/install precheck, not A10 release artifacts:** An isolated external
+copy of current tracked and application/test additions, excluding protected user
+state, ran `uv build --offline --out-dir <external>/python-dist`. Wheel/sdist
+built successfully with the deliberately unchanged **0.6.2** metadata. Both
+archives include current modules/templates and MIT licensing, exclude Connector/
+AGPL source and protected paths, and contain no user database or bytecode.
+SPEC is outside the default sdist payload. Offline installation into a fresh
+Python 3.12.14 venv and `uv pip check` passed (22 installed packages). From outside
+the source checkout, installed CLI help, module import location, templates/static
+HTTP requests and a synthetic materialize → Keep → institution Save/Reload →
+serial mock HTTP parent-confirmed import → exported/PDF-unverified smoke passed.
+It also verifies CSRF refusal, retired display authority and Reset preview only.
+No Provider, real browser/Zotero or Reset execution occurred. A10 must build and
+verify final versioned publication inputs; these preview packages are not published
+v0.6.3 assets. README now separates current development use from unchanged v0.6.2
+release/usage history, without a version bump or release claim.
+
+**User-owned manual acceptance:** **NOT_TESTED — USER_OWNED** for every current
+v0.6.3 live gate. The user reports each actual scenario as PASS / FAIL /
+NOT_TESTED. ChatGPT reviews the results and evidence boundaries; Codex does not
+operate real Chrome/Zotero, institutional credentials or a user Workspace.
+The high-level directions are:
+
+1. On a dedicated acceptance Workspace, check Run, immediate Keep/Reject and
+   rerun/history preservation; verify only Inbox / Kept / Settings navigation.
+2. Import historical and current Kept Papers across at least two actual Access
+   Services; observe serial toolbar-free parent saves, separate PDF reporting,
+   failed/unknown-service isolation and uncertainty/duplicate-save protection.
+3. Check normal-profile institutional/manual access and OpenAthens coexistence,
+   keeping configured context, session, authentication and resource entitlement
+   distinct. No production federation route is enabled; no synthetic route or
+   institution identifier may be counted as real authentication evidence.
+4. Only on a dedicated disposable Workspace, manually confirm permanent Reset
+   and later explicit Run; check protected configuration/.obsidian, existing
+   Zotero items and Chrome session continuity, including non-reset history.
+
+These directions preserve §42.10's required scope rather than replacing its
+release gates. Unperformed federation/parent/PDF/session/preservation cases remain
+NOT_TESTED; unavailable reliable PDF evidence remains unverified. No necessary
+live gate may be bypassed to declare RELEASED. **READY_FOR_FINAL_AUDIT: no**:
+user manual results and the unresolved upstream-test boundary remain outstanding,
+as does this handoff's independent review. No new feature or A10 action is started.
+
+**Scope, preservation and evidence:** A9 changes only README, Connector README,
+this appended record, the coordinator property/Web Reset caller and the new
+non-deleting HTTP regression file. All 177 protected files, other prior inputs,
+HEAD and index retain their preflight state. Preflight copies, red/green and
+current pytest logs, packaging source/previews/install smoke, preservation checks
+and the A9-only diff are retained at
+`/var/folders/7c/v718694145388ns274tht_l40000gn/T/lm-a9-closeout-x45xwk2j`.
+Development source reversion would remove only these A9 hunks/new test against
+the retained copies, preserving A0–A8; it does not restore Reset-deleted content.
+No real Workspace mutation, actual Reset deletion, browser/Zotero/institution
+operation, commit, push, tag or Release occurred. Work stops for the requested
+independent ChatGPT review.
+
+#### A9 user decision — whole-Workspace permanent deletion (2026-10-09)
+
+**IMPLEMENTED / AUTOMATION-VERIFIED / UNRELEASED.**
+`V0_6_3_A9_SIMPLIFY_WORKSPACE_RESET` applies the user's replacement contract:
+one explicit confirmation permanently deletes the entire configured Workspace,
+including `.obsidian`, custom/unknown files, modified Inbox.base and damaged or
+old Papers. Historical pending/uncertain markers do not block Reset. §§42.8 and
+42.10 now define this behavior; the earlier A8 inventory/object-custody contract,
+its internal-file preservation promises and the preceding A9 Reset direction
+retain historical status and are superseded. Import's durable pending/uncertain
+duplicate-save protection remains in force. Reset cannot undo a Zotero save or
+establish that another import is safe.
+
+The Reset module shrank from 442 to 119 lines. Per-file business recognition,
+inventory, content digests, isolated disposal and individual outcome lists are
+removed. Confirmation retains configuration bytes and root directory identity.
+Deletion uses the standard library's descriptor-based, symlink-safe `rmtree`;
+unsafe targets, target/ancestor links and unavailable platform safety are refused.
+Empty/absent targets succeed. Errors report failure and possible permanent partial
+deletion, with no recovery or automatic retry. A later explicit Run recreates
+application outputs, without restoring deleted user files or `.obsidian`.
+
+The necessary shared lock now has an empty, private inode outside the Workspace;
+its path hash names exclusion only, not a file inventory or workflow database.
+Run/Batch/Paper writes use it through the existing operation lock. Settings also
+locks absent targets, so removal of the Workspace/internal marker cannot split
+exclusion. A still-live escaped browser grant retains the same external flock
+after result resolution, even if the internal marker disappeared. Pure historical
+markers carry no Reset authority. The UI shows the absolute path, whole-tree
+warning and one typed RESET confirmation; CSRF, single-use server-held target and
+HTMX handling remain. Adjacent Settings/capture/lock changes are required for this
+shared exclusion; test form collectors were scoped to the Settings form because
+Reset is now normally visible. No federation, credential or Connector inputs changed.
+
+**Executed evidence:** All deletion scenarios use isolated synthetic temporary
+Workspaces. New cross-process escaped-grant tests first reproduced deletion while
+authority remained live, then passed after external ownership retention. The
+internal-marker-loss variant independently failed before removing that dependency
+from ownership retention, then passed. An unsafe external-lock error test first
+raised an uncaught exception, then passed with a truthful Reset failure result.
+Final `uv run pytest --tb=short` passed **3016 tests / 2 existing dependency
+deprecation warnings / 18.90s**, including **39 Reset cases**, executable Node UI
+tests and Import/Settings/Run/DOI/ISSN-L/Provider regressions. Coverage includes
+unknown/legacy/uncertain content, internal `.obsidian`, empty/absent roots,
+dangerous targets and symlink replacement, stale configuration/directory identity,
+injected partial deletion and lost response, current Run/Batch/browser ownership,
+competing writes after tree deletion, CSRF/HTMX and explicit Run regeneration.
+`uv lock --check` and `git diff --check` passed. No configured lint/typecheck target
+exists. The earlier Connector **110/110** result is reused for unchanged inputs;
+upstream ItemSaver's unavailable Chrome-dependent tests remain NOT_TESTED.
+
+README's unreleased development instructions match the replacement contract.
+Earlier Python package/install previews no longer cover these changed sources or
+embedded README; affected final artifacts must be rebuilt/checked in A10. No
+release build, version bump, publication or A10 work was performed here.
+
+**Preservation and handoff:** All 78 protected files from this task's current
+preflight, unrelated accumulated A0–A9 changes, HEAD and index remain unchanged.
+The user Workspace, monitor.yaml, list.md and src/.obsidian were never mutated.
+Preflight copies, failure/passing logs, preservation evidence and the task-only
+diff are retained at
+`/var/folders/7c/v718694145388ns274tht_l40000gn/T/lm-a9-reset-simplify-kwm6o7eo`.
+Source reversion can remove only these task hunks against those copies; there is
+no recovery of Reset-deleted content. **MANUAL_LIVE: NOT_TESTED — USER_OWNED**.
+Later manual acceptance should use only a dedicated disposable Workspace to
+check the displayed path/whole-tree warning, deletion including `.obsidian`,
+external configuration/Zotero/Chrome continuity and explicit Run recreation.
+These directions do not waive §42.10's other live gates. Work stops for ChatGPT's
+independent review; no commit, push, tag or Release was created.
+
+#### A9 simplified Reset review fix 1 — dangerous targets and root binding (2026-10-09)
+
+**IMPLEMENTED / AUTOMATION-VERIFIED / UNRELEASED.**
+`V0_6_3_A9_SIMPLIFY_WORKSPACE_RESET_REVIEW_FIX_1` addresses independent review F1
+(P0) and F2 (P1). Repository descendants outside the dedicated `workspace/` area
+are refused, including `src`, tests, Connector, configuration, documentation and
+Git metadata. Case aliases cannot bypass this repository boundary. A dedicated
+Workspace inside the repository remains allowed. Whole-directory semantics,
+unknown/damaged content and historical uncertain markers remain unchanged.
+
+Before recursive deletion, the root is atomically moved into a fresh mode-0700
+private sibling directory, then checked against the confirmed device/inode.
+Only that captured confirmed root is passed to descriptor-relative `rmtree`.
+A substituted root captured at rename is retained intact without calling rmtree;
+its location is reported. A replacement at the public path is never a deletion
+target and causes failure even when the confirmed root has already been deleted.
+Partial deletion or uncertain errors may leave contents in the private binding
+directory, whose location is reported; no automatic restoration, retry or recovery
+feature exists. This adds root-level binding only, not per-file inventory, schema,
+digest or object verification. External lock and Import/Run/capture behavior are
+unchanged. §42.8 includes this safety boundary; the preceding simpler implementation
+record retains historical status and does not establish these two missing checks.
+
+**Red/green evidence:** Before implementation,
+`uv run pytest tests/test_workspace_reset.py -k 'repository_non_workspace or repository_dedicated or public_root_replaced' --tb=short`
+produced **7 failed / 2 passed**: six repository targets were accepted and a
+replacement user directory was deleted. After the fix, the Reset suite passed
+**51 tests**; the added case-alias test brought coverage to 52. Full
+`uv run pytest --tb=short` passed **3029 tests / 2 existing dependency warnings /
+19.11s**, including cross-process exclusion, Settings/Web/Node, Run regeneration
+and Import pending/uncertain regressions. A final error-wording clarification and
+an opened-file assertion proving actual deletion of the confirmed root's Paper
+were checked by `uv run pytest tests/test_workspace_reset.py --tb=short`:
+**52 passed / 0.97s**. Cases also cover directory/link/disappearance at atomic
+capture, a link swap at recursive open and accurately reported retained partial
+contents. All destructive tests used isolated temporary Workspaces.
+
+`uv lock --check` and `git diff --check` passed. Connector inputs are unchanged;
+their earlier 110/110 native-test evidence is reused. No new guard entry point
+was available; the repository/task scope restrictions were applied without a
+guard bypass. This task changes only workspace_reset.py, its test file and SPEC.
+All 78 current-preflight protected files, unrelated A0–A9 work, HEAD and index
+remain unchanged. Preflight source copies, red/green/full logs and task diff are at
+`/var/folders/7c/v718694145388ns274tht_l40000gn/T/lm-a9-reset-review-fix-3rq526pu`.
+Only these source hunks can be reverted against those copies; permanently deleted
+Workspace content cannot be recovered. **MANUAL_LIVE: NOT_TESTED — USER_OWNED**.
+No real Workspace, Chrome/Zotero, commit, push, tag, release or A10 action occurred.
+Work stops for the requested independent ChatGPT review.
+
+### 42.16 Connector challenge/readiness correction evidence (2026-10-09)
+
+**Implementation requested and executed; uncommitted, unpublished.** Task:
+`V0_6_3_CONNECTOR_CHALLENGE_READINESS_FIX`. Repository HEAD remains
+`578b26b2025ba3b62789d150478e292e83579877` on `v0.6.2-development`.
+This record appends to §42; earlier version and A-stage evidence retains its
+historical scope. It establishes no v0.6.3 release readiness.
+
+**Observed causes and engineering choice.** The previous runtime adopted
+`getTabInfo(tabID).translators` without document attribution, treated navigation
+after `translatorReady` as terminal before invoking saving, and A6 classified
+repeated origins as loops even for ordinary DOI/challenge redirects. Pinned
+`_updateInfoForTab()` resets the tab cache, including same-URL loads; asynchronous
+`onTranslators()` reports can repopulate it and compete with iframe reports.
+The top-frame `instanceID` is always zero. Pinned `PageSaving.onPageLoad()` assigns
+its current document's translator array but exposes no detection-start provenance
+and permits asynchronous completion. Its DOM-change hooks do not prove that a
+late result began after challenge completion.
+
+The implementation reads current top-frame `Zotero.PageSaving.translators` with
+`browser.scripting.executeScript({target: {tabId, documentIds}, world: "ISOLATED"})`.
+No new production detection API, translator framework, permission, dependency or
+provider was introduced. A previously challenged document remains ineligible if
+only its DOM/translator array changes; it must load a new document or reach safe
+manual fallback. This is an intentional supported-capability boundary, not proof
+that same-document verification completed.
+
+**API feasibility, real isolated Chrome.** Chrome `154.0.8037.98` was launched in
+fresh temporary profiles with local, non-sensitive test pages. The probe used the
+pinned `PageSaving` source declaration with a synthetic translator array: it tests
+isolated-world access, not real translator detection. Observations:
+
+- Existing `webRequest`, `webNavigation`, `scripting` and host permissions allow
+  a non-blocking main-frame `onHeadersReceived` listener with `responseHeaders`;
+  the local response's `cf-mitigated: challenge` was visible.
+- Top navigation `onBeforeRequest`, response headers, `onResponseStarted` and
+  network completion lacked `documentId`; header/network completion preceded
+  `onBeforeNavigate` in an observed run. Request IDs covered redirect segments.
+- `onCommitted`, `getFrame`, injection results and runtime message senders exposed
+  matching top-document IDs. A same-URL reload produced another ID; a redirect
+  produced a final paper document ID. Targeting the removed ID was rejected.
+- The runtime owns an `about:blank` tab before issuing the DOI navigation. Its
+  latest main-frame request, pre-request document ID, navigation generation,
+  network completion, active frame and repeated document checks prevent adopting
+  an old active document or a late candidate. An uncorrelatable response or
+  unavailable identity never grants readiness.
+
+Primary API references: [Chrome webRequest](https://developer.chrome.com/docs/extensions/reference/api/webRequest),
+[webNavigation event ordering](https://developer.chrome.com/docs/extensions/reference/api/webNavigation),
+[scripting document targets](https://developer.chrome.com/docs/extensions/reference/api/scripting),
+and [Cloudflare response marker](https://developers.cloudflare.com/cloudflare-challenges/challenge-types/challenge-pages/detect-response/).
+The requested [challenge.ts](https://github.com/chendefine/dsh-web-fetch-playwright/blob/main/src/challenge.ts)
+and [provider.ts](https://github.com/chendefine/dsh-web-fetch-playwright/blob/main/src/provider.ts)
+were inspected as design references for response evidence, JSD exclusion, bounded
+waiting and rechecking after navigation. No code or dependency was copied.
+
+**Implemented safety.** Response challenge evidence and exact DOM markers/title/
+orchestrate structure forbid saving; ordinary JSD, standalone Turnstile and
+article text do not qualify as full-page challenge evidence. No refresh, repeated
+DOI request, credential entry, challenge interaction, Cookie inspection or secret
+storage was added. The existing one 20-second monotonic AccessJourney preparation
+budget covers all challenge, translator, online-check and access-report waits;
+500 ms polls do not restart it. The existing post-save 75-second observation and
+native stale-command protection remain separate from preparation.
+
+Before saving, the runtime rechecks current normal task-tab identity, complete
+navigation/document, DOM content/challenge, top-document translator, journey,
+generation and deadline after asynchronous operations. Before save invocation,
+navigation discards readiness and resumes the same task; after invocation it ends
+uncertain and cannot invoke another save. The narrow added upstream change in
+`src/browserExt/background.js` targets the automatic `translate` message at the
+selected `documentId` and translator, bypassing the unbound background cache.
+The manual branch and native Zotero `saveItems` implementation are unchanged.
+Dispatch is consumed once and checks selected sender/frame/document and current
+readiness before and after the bridge await. Parent acceptance retains matching
+request/invocation/DOI/session/document attribution; unrelated later DOM or
+translator changes do not replace its completion standard. PDF remains
+`unverified`. Paper statuses, exact native DOI match, serial batching and durable
+pending/uncertain semantics were not changed.
+
+Ordinary DOI navigation compares origin/path fingerprints without retaining raw
+paths or query values, allowing different same-origin paths and one same-URL
+reload. Repeated no-progress documents, repeated redirect destinations, eight-hop
+limits and timeout still fail. Verified federation keeps its origin allowlist,
+fixed entry, SP return, original DOI return, one-time exception and single
+preparation. `form_submit` still falls back conservatively: it does not reliably
+prove human participation, and is not used to relax the authentication boundary.
+
+**Executed verification.** Logs, local probe sources, baseline copies, task-only
+diff and the independent MV3 artifact are under
+`/tmp/lm-challenge-qaci43hh/` (external to the repository).
+
+| Check | Actual result and coverage |
+| --- | --- |
+| Baseline `./connector/test.sh` | `110/110` passed before edits. |
+| Final regressions against copied pre-fix overlays/patch | Exit 1, `108/132` passed; 20 of the 22 added readiness cases failed, demonstrating defects against actual pre-fix source. Original worktree was not reverted. |
+| Final `./connector/test.sh` | `132/132` passed. Actual overlay/injected function and shipped dispatch/save hook executed in Node with per-document worlds, cache resets, request/header/navigation events and deferred callbacks. Save invocation, dispatch, native call counts and terminal bridge outcomes are asserted. |
+| `uv run --locked pytest -q tests/test_connector_outcomes.py tests/test_a9_integration.py tests/test_web_connector_bridge.py tests/test_batch_import.py` | Exit 0; 117 passed, two existing deprecation warnings. Parent confirmation/Paper completion, attempt protection, bridge and serial batching covered. |
+| `uv run --locked pytest -q` | Exit 0; 3029 passed, the same two deprecation warnings. These Python results remain applicable: subsequent edits affected only Connector JavaScript, tests and documentation. |
+| `uv lock --check` | Exit 0; 27 packages resolved. |
+| External `connector/build.sh` with `LM_CONNECTOR_WORK_DIR=/tmp/lm-challenge-qaci43hh/build-work` and `LM_CONNECTOR_OUTPUT_DIR=/tmp/lm-challenge-qaci43hh/chrome-mv3` | Exit 0; clean reconstruction of pinned upstream/submodules, ordered patch application, npm/build and MV3 output. Final overlay-only changes were restaged by the same declared overlay copy operation; upstream build inputs did not change. |
+| Final artifact/source checks | Five declared upstream delta paths exactly match; reverse patch checks, all upstream/submodule pins, verbatim COPYING, unchanged manifest permissions, worker import order, final overlay bytes, JavaScript syntax and protected-path exclusions passed. Artifact retains version `0.6.2`; no version bump authorized. |
+| Real Chrome final-artifact startup | Exact MV3 artifact loaded in a fresh temporary Chrome profile. An isolated proxy rejected all network traffic, including loopback; it observed rejected bridge and Zotero probes. Runtime/access overlays initialized, Chrome/MV3 flags were true, and no active save task existed. No real bridge command, personal Zotero data or user Chrome profile was accessed. This proves startup only. |
+| `git diff --check` | Passed; current task diff/source and repository status inspected. No staging, repository commit, push, tag or release. |
+
+The added cases cover header/DOM challenges, harmless JSD/Turnstile/prose,
+new-document and same-URL passage, request/navigation disorder, early tab-creation
+events, late DOM/online/access results, unsupported same-document redetection,
+iframe/old cache rejection, finite waiting, missing identity/content, cancelled
+and consecutive navigation, navigation after invocation/during dispatch, replay,
+actual dispatch/native-save counts, and unchanged parent/PDF completion authority.
+The same-shape sweep found readiness/navigation authority in the runtime and loop
+policy in the access overlay; upstream cache/broadcast behavior is bypassed only
+for automatic saves by the declared patch. No sibling application/provider
+refactor was performed.
+
+**Review correction: provisional navigation errors (2026-10-09).** Task
+`V0_6_3_CONNECTOR_CHALLENGE_READINESS_REVIEW_FIX_1` remains uncommitted and
+unpublished at the same HEAD. Independent review reproduced an old provisional
+`onErrorOccurred` terminating preparation before a successful new document could
+commit. Chrome documents multiple pending navigation sequences in one frame;
+`processId` on `onBeforeNavigate` and `onErrorOccurred` is deprecated and `-1`.
+Neither a shared frame/URL nor the error string identifies the current document.
+
+Pre-save errors now retain pending-navigation invalidation and allow a new
+verified commit within the unchanged 20-second preparation deadline. A late
+error invalidates existing asynchronous candidates and can resume only the same
+previously committed, active, error-free document after `getFrame()` revalidation
+with matching task/generation. It cannot adopt another document, clear a newer
+navigation, replace request/header evidence, or extend the deadline. Error event
+document IDs remain in a task-local set: the errored document cannot gain
+authority through an overlapping commit callback even before `getFrame()` reports
+the error. Missing identity never grants a new document's authority. Current DOM,
+translator and response qualification still runs before saving; challenged
+documents and manual/authentication/federation restrictions remain unchanged.
+Every post-invocation navigation error remains `UNCONFIRMED` with no second save.
+
+Evidence is under
+`/var/folders/7c/v718694145388ns274tht_l40000gn/T/lm-navigation-review-7f9roaul/`:
+
+- Final `./connector/test.sh`: exit 0, **144/144** passed. Twelve new executable
+  Runtime cases cover old provisional cancellation, different/same-URL new
+  document IDs, delayed old DOM results/senders, late errors after/during commit,
+  19-second recovery, original-deadline failure with zero saves, unavailable
+  frames, late revalidation versus a newer navigation, missing error identity,
+  error-event/frame disagreement, and post-save `UNCONFIRMED`. Existing header/DOM
+  challenge, same-origin redirect, single dispatch, native save and parent
+  confirmation regressions pass in the same suite.
+- Final regressions against a copied pre-review Runtime: exit 1, **134/144**
+  passed; ten new cases fail. The worktree was never reverted.
+- Connector artifact: unchanged pinned upstream/submodule revisions and all
+  applied patches revalidated, prior compiled upstream reused, declared overlays
+  staged into a new external MV3 artifact. Its only changed build payload is
+  `literature-monitor-runtime.js`; license, permissions, version `0.6.2`, worker
+  order, syntax and protected-path exclusions pass. Chrome-generated ruleset
+  metadata from the prior startup is excluded from the build-payload comparison.
+- Exact final artifact startup: Chrome `154.0.8037.98`, fresh temporary profile,
+  all network including loopback rejected by an isolated proxy, Runtime/access
+  initialized and no active task. This is startup evidence only.
+- The earlier **3029 passing Python tests** are reused: no Python source,
+  dependency, template, configuration or native Zotero save input changed in this
+  correction. `git diff --check` passes; no commit, push, tag or release.
+
+Real Chrome provisional-error recovery during public DOI/Zotero import remains
+**NOT_TESTED**, as do the genuine Cloudflare, parent/Paper and federation live
+acceptance cases below. The absent upstream-required Chrome environment is
+unchanged. This correction establishes no overall v0.6.3 release readiness.
+
+**Live and review boundaries.** Real public DOI/Zotero import without a challenge,
+actual naturally clearing Cloudflare, persistent/human challenge fallback,
+post-invocation navigation in a real Zotero save, and real parent/Paper writeback
+are each `NOT_TESTED`. The local header probe and executable synthetic regressions
+are not Cloudflare Live PASS. Federation/CARSI remains independently `NOT_TESTED`;
+zero production SP routes remain enabled. The upstream ItemSaver browser suite
+was not repeated or declared passed; its required bundled Chrome 150.0.7871.24
+was not available, and Chrome 154 API/startup probes do not replace that suite.
+These gaps prohibit claiming complete v0.6.3 release readiness.
+
+AGENTS and `/Users/adrian/Desktop/REVIEW_WORKFLOW.md` were read. AgentDock's
+`skill://managed/personal-dev-guard/SKILL.md` was discovered and read during the
+work; its readability, restrained design, Chinese core comments and complete
+verification boundary were applied. It is an instruction skill, not a blocking
+execution hook. Stop That Shit's unconfirmed Guard observation mode was not
+claimed as enforcement. Existing unrelated changes, `monitor.yaml`,
+`src/.obsidian/` and `workspace/` were not edited or staged.
+
+Implementation is ready for the requested separate ChatGPT review through
+AgentDock against the actual repository. No independent ChatGPT review has been
+performed or represented by this execution report. Task-start source copies are
+retained externally for a bounded rollback/review that preserves earlier dirty
+work; do not reset the shared worktree to HEAD.
+
+### 42.17 Reset guard lifecycle correction — development validation (2026-10-09)
+
+**IMPLEMENTED / ISOLATED-TESTED / UNRELEASED.** Task
+`V0_6_3_RESET_GUARD_LIFECYCLE_FIX` preserves the external shared/exclusive
+Reset lock and replaces Workspace-level sticky uncertainty with separate
+process-local native dispatch grants. A grant is retired only when the original
+browser task reports actual completion of the upstream save pipeline, bound to
+its original request, invocation, DOI, tab, document and native session.
+This acknowledgment changes neither Paper state nor an old or current batch
+result; repeated, missing, stale or mismatched receipts have no authority.
+Until every grant for the Workspace is settled, the shared lock remains held
+across later Imports and Reset still refuses. The bounded Connector delivery
+attempts cannot manufacture a receipt when the bridge fails. Native request
+errors, parent-only confirmation, observation timeout and a new successful
+batch have no authority to release an old native grant. Successful confirmation
+before the upstream attachment pipeline ends also retains ownership and prevents
+the next batch dispatch. Once the correct receipt arrives, no historical
+uncertain Paper result or retained FINISHED display blocks Reset.
+
+**Pre-fix reproduction:** A new Web application was constructed on a temporary
+synthetic Workspace and driven through dispatched UNCONFIRMED → explicit retry
+CONFIRMED → COMPLETED batch. The final coordinator snapshot reported FINISHED /
+CONFIRMED while Web Reset refused with HTTP 409 and left the test Workspace
+intact. No request touched the user Workspace or running Web process.
+
+**Current checks:** The isolated Python Web, coordinator, batch and Reset
+regressions test the same sequence, guard-count ownership, mismatched/repeated
+receipts, non-deleting HTTP Reset stubs, and actual cross-process flock exclusion
+before/after a matching original receipt. The 11-module affected Python run
+passed **374/374**, followed by **12/12** passing focused Reset/A9 regressions
+after one additional error-message assertion. The pinned browser runtime's Node
+harness passed **158/158**, covering late original-pipeline callbacks,
+forged/stale sender rejection, native errors without clearance and finite
+failed-delivery retries. `git diff --check` passes. All tests run without Zotero
+or an ordinary Chrome profile; no test invokes Reset on the configured user
+Workspace.
+
+**Residual limits:** The on-disk change does not alter a Web process already
+running an older coordinator or retroactively observe that process's past save
+grant. If an original browser task disappears or an authoritative completion
+receipt cannot be delivered, a running owner retains Reset exclusion; process
+loss releases the operating system's flock without establishing native-save
+completion. No local timeout, batch display or manual assertion repairs that
+uncertainty. Real Chrome/Zotero and the existing Web process are not validated
+or restarted by this task. Independent review and user-owned live acceptance
+remain outstanding; no commit, publication or real Workspace Reset occurred.
+
+### 42.18 v0.6.3 release preparation (2026-10-09)
+
+**CANDIDATE PREPARED; PUBLICATION NOT YET VERIFIED.** This release preparation
+updates Python package metadata and the root lock entry, OpenAlex/Crossref
+User-Agent identities, the Connector build version and their version-specific
+test assertions to 0.6.3. It preserves the A0–A9 source and Reset Guard Lifecycle
+Fix, earlier version-specific contracts, user-managed Markdown and unrelated
+local state. The remaining verification and publication actions are authorized
+by the user's explicit release request.
+
+**Current checks:** `uv lock --offline`, `uv lock --check` and the affected
+OpenAlex, Crossref and Connector-boundary pytest run passed (**454 tests**).
+`uv build --offline --no-sources` produced a 0.6.3 wheel and sdist;
+both exclude the Connector and protected local paths. The wheel's MIT metadata
+and version are correct. Offline installation into an isolated Python 3.12
+environment passed `uv pip check` for **22 packages**, and the installed CLI
+help executed. The Connector runtime Node harness passed on current sources;
+`git diff --check` passed. Existing broader Python, Node and live evidence
+is reused only where tested inputs remain applicable, without claiming a new
+real-browser run.
+
+**Connector construction:** The initial clean remote upstream fetch failed
+with an empty HTTP response. An existing exact pinned upstream checkout with
+the five locked submodules was copied outside the repository, its previous
+source delta was reversed, and the current declared patches were applied.
+Pinned revision, changed-path inventory, license equality and installed
+Node dependencies were checked. The supported upstream 0.6.3 build succeeded;
+the resulting MV3 manifest, worker overlay ordering, JavaScript syntax and
+verbatim AGPL COPYING were verified against the current tracked overlays.
+This was a fresh local build from verified cached source, not a fresh network
+download.
+
+**Live acceptance provenance:** The user reports completed independent
+reviews, real Zotero parent/PDF save observations, batch import across two
+Access Services, dedicated Workspace Reset → explicit Run and upstream ItemSaver
+**17 tests**. These are user-reported or previously recorded evidence, not
+newly executed live checks in this preparation. Application PDF reporting
+remains `unverified` unless authoritative attachment completion is available;
+the production verified federation rule table remains empty. No configured
+Workspace Reset, normal Chrome/Zotero operation, commit, tag, push or Release
+occurred during the preparation checks.

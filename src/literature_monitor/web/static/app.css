@@ -193,6 +193,9 @@ button:disabled {
 }
 
 @media (min-width: 761px) {
+  .batch-import ~ .workspace-grid {
+    min-height: min(20rem, 65vh);
+  }
   .workspace-grid {
     height: var(--workspace-pane-height, auto);
   }
@@ -461,6 +464,21 @@ html[data-settings-dirty="true"] .dirty-indicator {
   gap: .5rem;
   margin-top: 1rem;
 }
+
+.batch-import { overflow-wrap: anywhere; }
+.batch-import .section-heading { flex-wrap: wrap; gap: .75rem; }
+.batch-import h2 { margin: 0; }
+.batch-statistics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .8rem 2rem;
+  margin: .5rem 0 1rem;
+}
+.batch-statistics dt { color: #566273; font-size: .9rem; }
+.batch-statistics dd { margin: 0; font-size: 1.4rem; font-variant-numeric: tabular-nums; }
+.batch-reasons { padding-left: 1.3rem; }
+.batch-reasons li { margin: .4rem 0; }
+.batch-import button:active { transform: scale(.98); }
 
 .notice {
   border-radius: .45rem;

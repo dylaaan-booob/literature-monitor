@@ -68,7 +68,6 @@ def make_paper(
     status: WorkflowStatus = WorkflowStatus.CANDIDATE,
     title: str = "Causal Paper",
     paper_id: UUID | None = None,
-    zotero_key: str | None = None,
 ) -> WorkspacePaper:
     identifier = paper_id or uuid4()
     return WorkspacePaper(
@@ -96,7 +95,6 @@ def make_paper(
                 retrieved_at=datetime(2026, 9, 20, 10, 0, tzinfo=timezone.utc),
             ),
         ),
-        zotero_key=zotero_key,
     )
 
 
@@ -223,6 +221,7 @@ def test_workspace_page_defaults_to_inbox_and_returns_html(
     candidate = make_paper(title="Inbox Paper")
     kept = make_paper(status=WorkflowStatus.KEPT, title="Kept Paper")
     snapshot = WorkspaceSnapshot(papers=(candidate, kept), issues=())
+    write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
     monkeypatch.setattr(web_app, "load_workspace", lambda output_dir, *, journals: snapshot)
     app = create_app(tmp_path / "monitor.yaml")
@@ -246,7 +245,7 @@ def test_workspace_page_defaults_to_inbox_and_returns_html(
         ("inbox", WorkflowStatus.CANDIDATE, "Inbox Paper"),
         ("kept", WorkflowStatus.KEPT, "Kept Paper"),
         ("rejected", WorkflowStatus.REJECTED, "Rejected Paper"),
-        ("in-zotero", WorkflowStatus.IN_ZOTERO, "Zotero Paper"),
+        ("exported", WorkflowStatus.EXPORTED, "Zotero Paper"),
     ),
 )
 def test_workspace_views_derive_from_snapshot_membership(
@@ -262,10 +261,11 @@ def test_workspace_views_derive_from_snapshot_membership(
             (WorkflowStatus.CANDIDATE, "Inbox Paper"),
             (WorkflowStatus.KEPT, "Kept Paper"),
             (WorkflowStatus.REJECTED, "Rejected Paper"),
-            (WorkflowStatus.IN_ZOTERO, "Zotero Paper"),
+            (WorkflowStatus.EXPORTED, "Zotero Paper"),
         )
     )
     snapshot = WorkspaceSnapshot(papers=papers, issues=())
+    write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
     monkeypatch.setattr(web_app, "load_workspace", lambda output_dir, *, journals: snapshot)
     app = create_app(tmp_path / "monitor.yaml")
@@ -294,6 +294,7 @@ def test_valid_papers_render_with_only_workspace_issue_indicator(
             WorkspaceIssue(path=tmp_path / "other.md", message="invalid status"),
         ),
     )
+    write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
     monkeypatch.setattr(web_app, "load_workspace", lambda output_dir, *, journals: snapshot)
     app = create_app(tmp_path / "monitor.yaml")
@@ -382,6 +383,7 @@ def test_workspace_health_fragment_replaces_old_issue_surface(
         papers=(paper,),
         issues=(WorkspaceIssue(path=tmp_path / "broken.md", message="broken Paper"),),
     )
+    write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
     monkeypatch.setattr(web_app, "load_workspace", lambda output_dir, *, journals: snapshot)
     app = create_app(tmp_path / "monitor.yaml")
@@ -409,6 +411,7 @@ def test_paper_list_renders_projected_metadata(
 ) -> None:
     paper = make_paper(title="Projected Metadata")
     snapshot = WorkspaceSnapshot(papers=(paper,), issues=())
+    write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
     monkeypatch.setattr(web_app, "load_workspace", lambda output_dir, *, journals: snapshot)
     app = create_app(tmp_path / "monitor.yaml")
@@ -428,8 +431,9 @@ def test_paper_detail_is_uuid_addressed_and_renders_existing_projection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    paper = make_paper(title="Detailed Paper", zotero_key="ZOT123")
+    paper = make_paper(title="Detailed Paper")
     snapshot = WorkspaceSnapshot(papers=(paper,), issues=())
+    write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
     monkeypatch.setattr(web_app, "load_workspace", lambda output_dir, *, journals: snapshot)
     app = create_app(tmp_path / "monitor.yaml")
@@ -446,7 +450,6 @@ def test_paper_detail_is_uuid_addressed_and_renders_existing_projection(
     assert "<h3>Versions</h3>" not in response.text
     assert "journal_final" not in response.text
     assert "openalex · W123" in response.text
-    assert "ZOT123" in response.text
 
 
 @pytest.mark.parametrize(
@@ -457,7 +460,7 @@ def test_paper_detail_is_uuid_addressed_and_renders_existing_projection(
         (WorkflowStatus.KEPT, "10.1000/a?b#c(d)", None, "https://doi.org/10.1000/a%3Fb%23c%28d%29"),
         (WorkflowStatus.CANDIDATE, "10.1000/example", None, None),
         (WorkflowStatus.REJECTED, "10.1000/example", None, None),
-        (WorkflowStatus.IN_ZOTERO, "10.1000/example", None, None),
+        (WorkflowStatus.EXPORTED, "10.1000/example", None, None),
         (WorkflowStatus.KEPT, None, None, None),
         (WorkflowStatus.KEPT, "", None, None),
         (WorkflowStatus.KEPT, 123, None, None),
@@ -478,13 +481,9 @@ def test_open_doi_and_check_zotero_are_server_normalized_kept_only_presentation(
     # Bypass model validation to exercise malformed adapter input without changing the domain schema.
     paper = replace(make_paper(status=status), external_ids=ExternalIds.model_construct(doi=doi, arxiv=arxiv))
     snapshot = WorkspaceSnapshot(papers=(paper,), issues=())
-    monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
-    monkeypatch.setattr(web_app, "load_workspace", lambda path, *, journals: snapshot)
-    monkeypatch.setattr(
-        web_app,
-        "reconcile_paper_with_zotero",
-        lambda *args: pytest.fail("Open DOI presentation must not mutate"),
-    )
+    write_valid_config(tmp_path)
+    monkeypatch.setattr(web_app, "load_config", lambda _: fake_config(tmp_path))
+    monkeypatch.setattr(web_app, "load_workspace", lambda *_, **kwargs: snapshot)
     normalized_inputs = []
     original_normalize = web_app.normalize_doi
 
@@ -493,7 +492,7 @@ def test_open_doi_and_check_zotero_are_server_normalized_kept_only_presentation(
         return original_normalize(value)
 
     monkeypatch.setattr(web_app, "normalize_doi", normalize)
-    view = {WorkflowStatus.CANDIDATE: "inbox", WorkflowStatus.IN_ZOTERO: "in-zotero"}.get(status, status.value)
+    view = {WorkflowStatus.CANDIDATE: "inbox", WorkflowStatus.EXPORTED: "exported"}.get(status, status.value)
 
     class CaptureActions(HTMLParser):
         def __init__(self):
@@ -531,130 +530,27 @@ def test_open_doi_and_check_zotero_are_server_normalized_kept_only_presentation(
             assert "Save to Zotero" not in response.text
             assert "Open DOI" not in response.text and "Check Zotero" not in response.text
         else:
-            assert (
-                len(parser.open_links) == 1
-                and len(parser.check_forms) == 1
-                and len(parser.save_forms) == 1
-            )
-            assert response.text.index("Save to Zotero") < response.text.index("Open DOI")
-            assert response.text.index("Open DOI") < response.text.index("Check Zotero")
-            assert '<button type="submit">Save to Zotero</button>' in response.text
-            assert '<a class="button secondary"' in response.text
-            assert '<button type="submit" class="secondary">Check Zotero</button>' in response.text
-            save_form = parser.save_forms[0]
-            assert save_form["action"] == save_form["hx-post"] == (
-                f"/papers/{paper.paper_id}/save-to-zotero"
-            )
-            assert save_form["hx-target"] == "#workspace-root"
-            assert save_form["hx-swap"] == "outerHTML"
+            assert len(parser.open_links) == 1
+            assert not parser.check_forms and not parser.save_forms
             link = parser.open_links[0]
             assert link["href"] == expected_url
             assert link["target"] == "_blank"
             assert set(link["rel"].split()) == {"noopener", "noreferrer"}
             assert link["referrerpolicy"] == "no-referrer"
-            assert set(link) == {
-                "class", "href", "target", "rel", "referrerpolicy", "data-open-doi"
-            }
-            form = parser.check_forms[0]
-            assert form["action"] == form["hx-post"] == f"/papers/{paper.paper_id}/check-zotero"
-            assert form["hx-target"] == "#workspace-root" and form["hx-swap"] == "outerHTML"
-            assert 'name="expected_status" value="kept"' in response.text
-            assert 'name="csrf_token"' in response.text
-            assert 'name="doi"' not in response.text
-            assert 'name="output_dir"' not in response.text
-            assert 'name="request_id"' not in response.text
-            assert 'name="outcome"' not in response.text
-            assert "<script>bad</script>" not in response.text
+            assert "Export controls are unavailable during the workflow transition" not in response.text
         assert "Add PDF to Zotero" not in response.text
         assert "HX-Trigger" not in response.headers
     assert normalized_inputs == ([doi, doi] if status is WorkflowStatus.KEPT else [])
-    assert paper.status is status and paper.zotero_key is None
+    assert paper.status is status
 
 
-def test_open_doi_return_reconciliation_is_one_shot_page_local_js(tmp_path):
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("Node is unavailable for the executable Open DOI return-flow test")
-    with TestClient(create_app(tmp_path / "monitor.yaml"), base_url="http://localhost") as client:
-        javascript = client.get("/static/app.js").text
-    assert 'htmx.ajax("POST", pending.form.action' in javascript
-    for forbidden in ("localStorage", "sessionStorage", "document.cookie", "indexedDB"):
-        assert forbidden not in javascript
-    return_flow = javascript.split("function rememberOpenDoi(link)", 1)[1].split("function syncRunAnnouncement", 1)[0]
-    for forbidden in ("setTimeout", "setInterval", "inspect_attachments"):
-        assert forbidden not in return_flow
-    harness = r"""
-const vm = require("node:vm");
-const assert = require("node:assert/strict");
-const handlers = {};
-const windowHandlers = {};
-const requests = [];
-class Element {}
-class Form extends Element {
-  constructor() {
-    super();
-    this.action = "/papers/paper-1/check-zotero";
-    this.values = [["csrf_token", "csrf"], ["expected_status", "kept"], ["view", "kept"], ["position", "0"]];
-  }
-}
-class Link extends Element {
-  constructor(form) { super(); this.form = form; }
-  closest(selector) {
-    if (selector === "[data-open-doi]") return this;
-    if (selector === ".decision-actions") return {querySelector: () => this.form};
-    return null;
-  }
-}
-class FormData {
-  constructor(form) { this.values = form.values; }
-  entries() { return this.values[Symbol.iterator](); }
-}
-const document = {
-  documentElement: {dataset: {}},
-  visibilityState: "visible",
-  getElementById: () => null,
-  querySelector: () => null,
-  addEventListener: (name, handler) => { handlers[name] = handler; },
-  body: {addEventListener: () => {}},
-};
-const htmx = {ajax: (method, path, options) => {
-  requests.push({method, path, options});
-  return Promise.resolve();
-}};
-vm.runInNewContext(SOURCE, {
-  document, Element, HTMLElement: Element, HTMLDetailsElement: Element, FormData, htmx,
-  window: {location: {hash: ""}, innerWidth: 1024, innerHeight: 800,
-           addEventListener: (name, handler) => { windowHandlers[name] = handler; }},
-});
-(async () => {
-  const form = new Form();
-  handlers.click({target: new Link(form)});
-  windowHandlers.focus();
-  assert.equal(requests.length, 0);
-  windowHandlers.blur();
-  windowHandlers.focus();
-  handlers.visibilitychange();
-  windowHandlers.focus();
-  await Promise.resolve();
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].method, "POST");
-  assert.equal(requests[0].path, form.action);
-  assert.equal(requests[0].options.target, "#workspace-root");
-  assert.equal(requests[0].options.swap, "outerHTML");
-  assert.deepEqual({...requests[0].options.values}, {
-    csrf_token: "csrf", expected_status: "kept", view: "kept", position: "0"
-  });
-})().catch(error => { console.error(error); process.exitCode = 1; });
-"""
-    harness = "const SOURCE = " + json.dumps(javascript) + ";\n" + harness
-    result = subprocess.run([node], input=harness, text=True, capture_output=True)
-    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_unknown_paper_detail_is_safe_normal_fragment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
     monkeypatch.setattr(
         web_app,
@@ -678,6 +574,7 @@ def test_missing_and_invalid_csrf_block_decision_mutation(
     paper = make_paper()
     snapshot = WorkspaceSnapshot(papers=(paper,), issues=())
     calls: list[tuple[object, ...]] = []
+    write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
     monkeypatch.setattr(web_app, "load_workspace", lambda output_dir, *, journals: snapshot)
 
@@ -724,6 +621,7 @@ def test_valid_csrf_reaches_keep_boundary_with_submitted_expected_status(
     snapshot = WorkspaceSnapshot(papers=(paper,), issues=())
     captured: list[tuple[Path, UUID, WorkflowStatus]] = []
     workspace_loads: list[Path] = []
+    write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
 
     def fake_load_workspace(output_dir: Path, *, journals) -> WorkspaceSnapshot:
@@ -764,14 +662,7 @@ def test_valid_csrf_reaches_keep_boundary_with_submitted_expected_status(
     assert workspace_loads == [tmp_path, tmp_path]
 
 
-@pytest.mark.parametrize(
-    ("route_suffix", "attribute", "expected_status"),
-    (
-        ("keep", "keep_paper", WorkflowStatus.CANDIDATE),
-        ("reject", "reject_paper", WorkflowStatus.CANDIDATE),
-        ("check-zotero", "reconcile_paper_with_zotero", WorkflowStatus.KEPT),
-    ),
-)
+@pytest.mark.parametrize(('route_suffix', 'attribute', 'expected_status'), (('keep', 'keep_paper', WorkflowStatus.CANDIDATE), ('reject', 'reject_paper', WorkflowStatus.CANDIDATE)))
 def test_each_decision_route_calls_exact_application_action(
     route_suffix: str,
     attribute: str,
@@ -782,6 +673,7 @@ def test_each_decision_route_calls_exact_application_action(
     paper = make_paper(status=expected_status)
     snapshot = WorkspaceSnapshot(papers=(paper,), issues=())
     called: list[str] = []
+    write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
     monkeypatch.setattr(web_app, "load_workspace", lambda output_dir, *, journals: snapshot)
 
@@ -833,6 +725,7 @@ def test_state_conflict_renders_message_and_refreshed_disk_state(
         WorkspaceSnapshot(papers=(current,), issues=()),
     ]
     load_calls = 0
+    write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
 
     def fake_load_workspace(output_dir: Path, *, journals) -> WorkspaceSnapshot:
@@ -888,6 +781,7 @@ def test_selection_is_current_view_only_and_detail_click_keeps_list_target(tmp_p
     candidate = make_paper(title="Current view Paper")
     kept = make_paper(title="Other view Paper", status=WorkflowStatus.KEPT)
     snapshot = WorkspaceSnapshot((candidate, kept), ())
+    write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
     monkeypatch.setattr(web_app, "load_workspace", lambda output, *, journals: snapshot)
     requested = candidate if in_view else kept
@@ -932,6 +826,7 @@ def test_successful_decision_uses_refreshed_view_for_safe_neighbor_navigation(
     ), ())
     current = before
     loads, calls = [], []
+    write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
 
     def load(output, *, journals):
@@ -971,6 +866,7 @@ def test_failed_decision_ignores_position_and_revalidates_original_uuid(tmp_path
         for paper in before.papers
     ), ())
     current, calls = before, []
+    write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
     monkeypatch.setattr(web_app, "load_workspace", lambda output, *, journals: current)
 
@@ -996,6 +892,7 @@ def test_failed_decision_ignores_position_and_revalidates_original_uuid(tmp_path
 def test_workspace_refresh_revalidates_transient_selected_uuid(tmp_path, monkeypatch, left_view):
     paper = make_paper()
     current = WorkspaceSnapshot((paper,), ())
+    write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
     monkeypatch.setattr(web_app, "load_workspace", lambda output, *, journals: current)
     with TestClient(create_app(tmp_path / "monitor.yaml"), base_url="http://localhost") as client:
@@ -1025,6 +922,7 @@ def test_workspace_pane_css_and_transient_selection_contract(tmp_path):
 def test_pre_action_failure_has_no_neighbor_navigation_or_mutation(tmp_path, monkeypatch, failure):
     target, peer = make_paper(title="Original"), make_paper(title="Peer")
     current = WorkspaceSnapshot((target, peer), ())
+    write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
     monkeypatch.setattr(web_app, "load_workspace", lambda output, *, journals: current)
     monkeypatch.setattr(web_app, "keep_paper", lambda *args: pytest.fail("invalid input must not mutate"))
@@ -1064,6 +962,7 @@ def test_expected_decision_failures_remain_normal_html_states(
 ) -> None:
     paper = make_paper()
     snapshot = WorkspaceSnapshot(papers=(paper,), issues=())
+    write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
     monkeypatch.setattr(web_app, "load_workspace", lambda output_dir, *, journals: snapshot)
 
@@ -1118,6 +1017,7 @@ def test_no_generic_status_and_run_settings_routes_are_explicit(tmp_path: Path) 
 
 def test_web_zotero_export_is_removed(tmp_path, monkeypatch):
     paper = make_paper(status=WorkflowStatus.KEPT)
+    write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda path: fake_config(tmp_path))
     monkeypatch.setattr(web_app, "load_workspace", lambda path, *, journals: WorkspaceSnapshot(papers=(paper,), issues=()))
     app = create_app(tmp_path / "monitor.yaml")
@@ -1134,75 +1034,6 @@ def test_web_zotero_export_is_removed(tmp_path, monkeypatch):
     assert not (Path(web_app.__file__).parent / "templates/fragments/zotero_export.html").exists()
 
 
-@pytest.mark.parametrize("duplicate", [False, True])
-def test_check_zotero_route_verifies_zotero_and_refreshes_real_workspace_without_false_navigation(
-    tmp_path, monkeypatch, duplicate,
-):
-    config_path, output_dir = write_valid_config(tmp_path)
-    papers_dir = output_dir / "Papers"
-    papers_dir.mkdir(parents=True)
-    paths = []
-    for ordinal in (1, 2):
-        paper = CanonicalPaper(
-            id=UUID(int=ordinal), metadata=CanonicalMetadata(title=f"Kept {ordinal}", journal="Biometrics"),
-            external_ids=ExternalIds(doi=f"10.5555/reconcile-{ordinal}"), authors=(Author(name="Ada Author"),),
-            workflow=Workflow(status=WorkflowStatus.KEPT, discovered_at=datetime(2026, 9, 20, tzinfo=timezone.utc),
-                              zotero_key="PARENT01" if ordinal == 1 else None),
-        )
-        path = papers_dir / f"{ordinal}.md"
-        path.write_text(render_paper_markdown(paper, ("ada-author",)))
-        paths.append(path)
-    before = {path: path.read_bytes() for path in paths}
-    requests = []
-    clients = []
-
-    def respond(request):
-        requests.append(request)
-        assert request.method == "GET" and request.url.path == "/api/users/0/items"
-        assert "Zotero-API-Key" not in request.headers and "Authorization" not in request.headers
-        keys = ["PARENT01", "PARENT02"] if duplicate else ["PARENT01"]
-        return httpx.Response(200, headers={
-            "Zotero-Server-ID": "local-instance", "Last-Modified-Version": "4", "Total-Results": str(len(keys)),
-        }, json=[{"key": key, "data": {
-            "key": key, "itemType": "journalArticle", "DOI": "HTTPS://DOI.ORG/10.5555/RECONCILE-1",
-        }} for key in keys])
-
-    def factory():
-        client = ZoteroLocalClient(transport=httpx.MockTransport(respond))
-        clients.append(client)
-        return client
-
-    monkeypatch.setattr(decisions, "_ZoteroLocalClient", factory)
-    with TestClient(create_app(config_path), base_url="http://localhost") as client:
-        page = client.get("/", params={"view": "kept", "paper": str(UUID(int=1))})
-        form = {
-            "csrf_token": csrf_from_html(page.text), "expected_status": "kept", "view": "kept", "position": "0",
-        }
-        response = client.post(f"/papers/{UUID(int=1)}/check-zotero", data=form)
-        retry = client.post(f"/papers/{UUID(int=1)}/check-zotero", data=form) if duplicate else None
-        in_zotero = client.get("/fragments/workspace", params={"view": "in-zotero"})
-
-    assert response.status_code == 200 and len(requests) == (2 if duplicate else 1)
-    assert all(client._http.is_closed for client in clients)
-    state = parse_paper_state(paths[0], paths[0].read_text(), output_dir / "Authors")
-    assert state is not None and state.updateable
-    if duplicate:
-        assert state.status is WorkflowStatus.KEPT
-        assert {path: path.read_bytes() for path in paths} == before
-        assert "Multiple exact DOI matches" in response.text
-        assert selected_id(response.text) == str(UUID(int=1))
-        assert 'data-selection-stepped="false"' in response.text
-        assert retry is not None and retry.status_code == 200
-        assert "Multiple exact DOI matches" in retry.text
-        assert selected_id(retry.text) == str(UUID(int=1))
-        assert listed_ids(in_zotero.text) == []
-    else:
-        assert state.status is WorkflowStatus.IN_ZOTERO and state.zotero_key == "PARENT01"
-        assert paths[1].read_bytes() == before[paths[1]]
-        assert listed_ids(response.text) == [str(UUID(int=2))]
-        assert selected_id(response.text) == str(UUID(int=2))
-        assert 'data-selection-stepped="true"' in response.text
-        assert listed_ids(in_zotero.text) == [str(UUID(int=1))]
 
 
 def test_settings_get_is_recoverable_editor(tmp_path: Path) -> None:
@@ -1289,9 +1120,9 @@ def test_sectioned_web_list_uses_saved_journals_and_one_flat_selection_order(tmp
         ("ungrouped", "Ungrouped"), ("unmapped", "Unmapped journals"),
     ]
     assert listed_ids(page.text) == [str(UUID(int=i)) for i in (2, 1, 3, 4, 5)]
-    nav = re.search(r'<nav class="view-tabs".*?</nav>', page.text, re.S).group()
-    assert re.findall(r'href="/\?view=([^"]+)"', nav) == ["inbox", "kept", "rejected", "in-zotero"]
-    assert page.text.count('class="view-tabs"') == 1 and "Empty group" not in page.text
+    nav = re.search(r'<nav class="top-nav".*?</nav>', page.text, re.S).group()
+    assert re.findall(r'href="([^"]+)"', nav) == ["/?view=inbox", "/?view=kept", "/settings"]
+    assert 'class="view-tabs"' not in page.text and "Empty group" not in page.text
     assert '<h1>Inbox</h1>\n    <span class="count">5</span>' in page.text
     assert selected_id(page.text) == str(UUID(int=3)) and page.text.count('aria-current="true"') == 1
     assert 'name="position" value="2"' in page.text
@@ -1361,4 +1192,5 @@ def test_workspace_reload_after_settings_save_reprojects_groups_without_paper_wr
     ]
     assert listed_ids(refreshed.text) == [str(UUID(int=i)) for i in (3, 2, 1, 4, 5)]
     assert all(p.read_bytes() == value for p, value in before.items())
-    assert sorted(p.name for p in output_dir.iterdir()) == ["Papers"]
+    # Same-workspace Settings saves now retain the shared A8 operation-lock inode.
+    assert sorted(p.name for p in output_dir.iterdir()) == [".literature-monitor-operation.lock", "Papers"]

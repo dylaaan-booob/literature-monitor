@@ -1,10 +1,10 @@
 # Literature Monitor Connector
 
-This directory defines the independent browser component released with
-v0.6.2, retaining the v0.6.1 protocol under SPEC §40. It is derived from the official
+This directory defines the independent browser component for v0.6.3,
+following the v0.6.3 batch/Connector contract in SPEC §42. It is derived from the official
 Zotero Connector source and is separate from the MIT Python
 `literature_monitor` package. The tracked build entry point generates the
-Chrome/MV3 artifact with version `0.6.2`.
+Chrome/MV3 artifact with version `0.6.3`.
 
 A1 establishes source provenance, licensing, reconstruction and Chrome/MV3
 build boundaries. A5 adds the independent Literature Monitor automatic-capture
@@ -115,13 +115,37 @@ auto-selected, and the automatic path disables generic webpage fallback and
 Zotero-server fallback. Immediately before the translator save is triggered,
 Zotero Desktop reachability is checked again.
 
-The A5 upstream hook observes successful local `saveItems` acceptance for the
-top-level bibliographic item before collection lookup and attachment work.
-That signal is the only automatic `CONFIRMED` evidence. Deterministic
-pre-parent failures report `FAILED`; ambiguity after the save trigger,
-including observation timeout or task-tab closure, reports `UNCONFIRMED`.
-No outcome waits for PDF/Snapshot completion. Task tabs are left open for
-inspection/recovery.
+The current development hook observes successful local `saveItems` acceptance
+for the matching bibliographic item before collection lookup and attachment
+work. It binds the request, DOI target, save invocation, task tab and native
+session, consumes one live dispatch permission and rejects expired commands.
+Native HTTP `201 Created` is accepted with an empty body, or with one echoed
+matching client-side parent ID; errors, missing responses and mismatches do not
+prove acceptance. Only attributable native acceptance yields parent `CONFIRMED`. Explicit
+pre-dispatch failures are no-effect (`FAILED` in the legacy adapter); ambiguous
+errors after dispatch are uncertain (`UNCONFIRMED`). In unreleased v0.6.3,
+matching confirmed parent acceptance atomically marks the Paper `exported`.
+Import attempts are process-local, with no new persisted `export_attempt`.
+Historical frontmatter fields remain untouched; an explicit later Import can
+retry an unconfirmed or failed `kept` Paper after duplicate inspection. Native
+save error, translator failure, missing acceptance and local Paper-write error
+have distinct transient result semantics. An active Connector task and one-shot
+dispatch authorization still prevent concurrent saves and duplicate delivery.
+The task continues the upstream Zotero collection and attachment pipeline
+before terminal delivery. After completion, the runtime returns focus to the
+original verified Literature Monitor tab. It closes only an unchanged
+project-created task tab on confirmed success, and retains failed or uncertain
+tabs for inspection; ongoing manual login is not interrupted.
+The legacy per-Paper completion and library-reconciliation workflow is retired.
+The application aggregates all eligible Kept Papers and issues these commands
+serially. Real v0.6.3 acceptance remains NOT_TESTED — USER_OWNED (SPEC §42.15).
+
+PDF is independently `unverified`: links, Snapshots, metadata and progress do not
+prove an actual saved PDF. Inspect Zotero Desktop for actual attachments, and
+inspect the retained task tab on failures. Parent completion waits for the
+existing native attachment pipeline to settle (or a bounded timeout), but
+never repeats the parent save. See `PROVENANCE.md` for
+the exact pinned-source findings and remaining live gates.
 
 ## Source layout
 
@@ -138,3 +162,17 @@ inspection/recovery.
 
 No Connector-derived source belongs under `src/literature_monitor`, and the
 Python wheel/sdist must not contain this component or its generated artifacts.
+
+## Unreleased v0.6.3 Access Service preparation
+
+The runtime observes the owned DOI tab's actual landing origin. It does not
+identify an Access Service from Publisher metadata or infer institutional access
+from a login redirect. No real federation route is currently verified or enabled;
+unknown services use ordinary bibliographic capture plus Open DOI for manual
+access. IdP session, SP session, authentication and full-text entitlement remain
+separate unknown observations. A challenge or failed/expired preparation stops
+that task, without allowing a late save callback to resume it.
+
+Reviewed future rules must preserve existing OpenAthens host associations and
+satisfy origin/return allowlists and finite preparation limits. Deterministic
+fixtures are not institution login evidence. See SPEC §42.12 and PROVENANCE.md.

@@ -16,3 +16,21 @@ This artifact preserves the A1 source/license/build boundary and includes
 the v0.6.1 A5 Literature Monitor automatic-capture delta: localhost bridge
 runtime, dedicated DOI task-tab orchestration, pinned upstream translator save
 integration, and attachment-independent top-level save observation.
+
+Unreleased v0.6.3 A2 source delta adds invocation/session attribution,
+one-shot live parent-dispatch permission, finite stale-command rejection,
+and separate parent/PDF outcome reporting. PDF remains unverified because
+this pinned source provides no established actual-PDF completion evidence.
+
+Unreleased v0.6.3 A6 adds an AGPL Access Service policy overlay and bounded
+main-frame navigation observation in the current DOI task tab. The production
+verified-rule table is empty: no automatic federation route is enabled.
+Session/authentication/entitlement observations remain unknown. Existing proxy
+host associations and official native parent/PDF boundaries are preserved.
+
+Unreleased v0.6.3 challenge/readiness correction binds automatic translation and
+native dispatch to the selected top document, observes challenge responses/DOM,
+and recovers pre-save navigation within the original preparation deadline.
+Ordinary DOI same-origin progress is bounded separately from verified federation.
+A challenged document cannot regain eligibility from unversioned DOM/translator
+changes; new-document checks or safe manual fallback are required.
