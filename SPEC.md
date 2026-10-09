@@ -1,8 +1,8 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; v0.6.3 is in release preparation and is NOT YET PUBLISHED. Python package, Provider User-Agent and Connector candidate identities are `0.6.3`; v0.6.2 remains the latest verified published version until the v0.6.3 publication transaction completes. Permanent historical release evidence for v0.6.2 is in §41.16 and for v0.6.1 in §40.16.
+**Status:** Active; **v0.6.3 is RELEASED**. Python package, Provider User-Agent and Connector release identities are `0.6.3`. The permanent release commit is `24a4f81c07543205f6bd16c6fef8e67808d698c8`, the annotated `v0.6.3` tag peels to that commit, and all three GitHub Release assets have verified SHA-256 digests (§42.19). v0.6.2 and v0.6.1 retain their historical release evidence in §§41.16 and 40.16.
 
-**Stage:** v0.6.3 A0–A9 and Reset Guard Lifecycle Fix are implemented. Independent development review and manual Chrome/Zotero/Reset acceptance were reported complete before this release request; §42 records the automation evidence and prior limitations. v0.6.3 release identities, final artifacts and publication still require verification. Earlier v0.6.2 release and acceptance records remain historical (§41.16); release execution and evidence reuse follow [AGENTS.md](AGENTS.md#release-execution-and-verification-reuse).
+**Stage:** v0.6.3 A0–A9, Reset Guard Lifecycle Fix, final packaging, permanent tag, main push and GitHub Release publication are complete and verified (§42.19). Independent development review and real Chrome/Zotero/Reset acceptance were reported complete by the user; the distinction between user-reported live results and executed release checks remains explicit. Earlier v0.6.2 release and acceptance records remain historical (§41.16). Documentation closeout follows the immutable release tag without modifying its assets.
 **Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
 
 **Current contract:** §42 governs the v0.6.3 Paper workflow, batch Connector import, access preparation, UI and Workspace Reset. §41 governs unaffected ISSN-L Journal identity, retrieval and Settings; §37 governs unaffected DOI-first identity and Provider semantics. Unchanged §39/§40 Connector security boundaries continue to apply. Earlier version-specific contracts and release records retain their historical scope.
@@ -7636,3 +7636,50 @@ remains `unverified` unless authoritative attachment completion is available;
 the production verified federation rule table remains empty. No configured
 Workspace Reset, normal Chrome/Zotero operation, commit, tag, push or Release
 occurred during the preparation checks.
+
+### 42.19 v0.6.3 release and documentation closeout (2026-10-09)
+
+**RELEASED; REMOTE REFERENCES AND ASSETS VERIFIED.** The permanent v0.6.3
+release commit is `24a4f81c07543205f6bd16c6fef8e67808d698c8` (78 scoped
+files). Its annotated `v0.6.3` tag object is
+`6a4c5ba6543a99cdf1f2da32c0f6b48ab1c30a55`, peeling to the exact
+release commit. Normal push advanced `origin/main` from
+`578b26b2025ba3b62789d150478e292e83579877` to the release commit;
+the tag push and readback returned the same target. No force push or tag rewrite
+was used, and the `v0.6.2-development` checkout was not switched.
+
+[GitHub Release v0.6.3](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.3)
+was published at `2026-10-09T12:56:05Z` as a non-draft, non-prerelease
+release whose targetCommitish matches the release commit. The three remote
+asset sizes and SHA-256 values exactly match the locally inspected artifacts:
+
+| Released asset | SHA-256 |
+| --- | --- |
+| `literature_monitor-0.6.3-py3-none-any.whl` | `2d44455647c688f35b2dba5ba41d125c502185bec684f9ea1a6c564ee7fbe061` |
+| `literature_monitor-0.6.3.tar.gz` | `fc929595a18486795536a841202619ecc92af2a6f18eeff3fb883a518202f201` |
+| `literature-monitor-connector-0.6.3-chrome-mv3.zip` | `be7627734890a9ed756d050f1e13b4d7c6d8977b81c799d451e901c0dbcdcc6c` |
+
+The Python wheel's 68 actual application payload files were compared
+byte-for-byte against release HEAD; all matched. Wheel metadata reports
+0.6.3 and MIT, and the wheel/sdist exclude Connector-derived AGPL code
+and protected user paths. Offline Python installation, `uv pip check` and
+CLI smoke passed; version/Provider/Connector boundary pytest passed 454
+cases. The Connector ZIP includes the independently constructed Chrome/MV3
+payload, AGPL COPYING, 1,991 pinned upstream source files (including the
+current patched source), and all 16 release-commit Connector source files
+(patches, overlays, provenance and build tools). All 2,317 ZIP entries passed
+complete byte readback and ZIP integrity checks. MV3 version, worker order,
+exact pins, declared patch paths and license separation passed. The local
+verified-source fallback after the failed public upstream fetch is documented
+in §42.18, without representing it as a fresh network checkout.
+
+Existing A9 integration, independent review, guard lifecycle and user-owned
+live acceptance records retain their own scopes. The user separately reports
+successful actual parent/PDF saves, two Access Service imports, Reset → Run,
+and upstream ItemSaver's 17 tests. A PDF observed in Zotero does not add a
+new attributable application PDF receipt, and verified federation routes remain
+empty. No real personal Workspace, Zotero or ordinary browser session was
+modified by release preparation, packaging or publication. No PyPI or Chrome
+Web Store distribution is asserted. This documentation-only closeout is
+subsequent to the immutable release tag and does not modify released assets
+or re-run unchanged functional tests.

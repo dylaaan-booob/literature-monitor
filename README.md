@@ -8,10 +8,13 @@ safely updates durable Paper and Author Markdown, and exports kept papers.
 
 ## Release and development status
 
-**v0.6.3 is in release preparation and is NOT YET PUBLISHED.** The last verified published release is v0.6.2.
+**v0.6.3 is RELEASED** as the current GitHub release.
+[GitHub Release v0.6.3](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.3)
+contains the verified Python wheel, sdist and separate Chrome/MV3 Connector ZIP
+with corresponding AGPL source. Python package, Provider User-Agent and Connector
+identities are `0.6.3`. The previous
 [GitHub Release v0.6.2](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.2)
-contains the verified Python wheel, sdist and separate Chrome/MV3 Connector ZIP.
-Python package, Provider User-Agent and Connector release identities are `0.6.2`.
+retains its own release artifacts and historical contract.
 [SPEC §41](SPEC.md#41-v062-issn-l-venue-identity--journalspublishers-settings---development-contract)
 defines the venue identity and Settings contract;
 [SPEC §41.16](SPEC.md#4116-v062-release-and-documentation-closeout-2026-10-08)
@@ -49,7 +52,7 @@ release execution and validation reuse. Detailed historical release and live
 evidence remain in SPEC; historical validation does not establish success for
 the current release beyond its recorded scope.
 
-The usage instructions below describe released v0.6.2 under
+The legacy usage instructions below describe v0.6.2 under
 [SPEC §41](SPEC.md#41-v062-issn-l-venue-identity--journalspublishers-settings---development-contract).
 The [v0.6.1 README](https://github.com/dylaaan-booob/literature-monitor/blob/v0.6.1/README.md)
 retains the previous configuration and Settings interface.
@@ -83,19 +86,18 @@ A7 candidate validation and original SHA-256 values remain in
 [SPEC §41.16](SPEC.md#4116-v062-release-and-documentation-closeout-2026-10-08)
 records the published artifacts and reused validation evidence.
 
-## v0.6.3 release candidate
+## v0.6.3 workflow and acceptance
 
 A0–A9 and the Reset Guard Lifecycle Fix implement [SPEC §42](SPEC.md#42-v063-keep-driven-batch-zotero-import--federated-access-preparation--development-contract).
-The candidate is **not yet published**. Existing Python and Connector automated
-checks are recorded in §§42.15–42.17; the user additionally reports completed
-real Chrome/Zotero parent and PDF saves, serial import across two Access Services,
-dedicated Workspace Reset → explicit Run, and all 17 upstream ItemSaver tests.
-These user-reported live results remain distinct from recorded automated checks;
-actual PDF completion is still `unverified` in the application without an
-attributable upstream attachment receipt. Final versioned artifacts and remote
-publication require separate verification.
+Local release-candidate checks, final artifacts and publication verification are
+recorded in §§42.18–42.19. The user reports completed real Chrome/Zotero parent
+and PDF saves, serial imports across two Access Services, dedicated Workspace
+Reset → explicit Run and all 17 upstream ItemSaver tests. Those live reports are
+distinct from the executed automated checks; actual PDF completion still remains
+`unverified` in the application without an attributable upstream attachment
+receipt. The permanent release tag points to the verified v0.6.3 package inputs.
 
-The development UI has exactly **Inbox / Kept / Settings**. Run creates
+The v0.6.3 UI has exactly **Inbox / Kept / Settings**. Run creates
 `candidate` Papers; Keep/Reject persists immediately. Kept aggregates eligible
 Papers across Runs. Its single Import action processes the set serially through
 the separate Connector. Attributable parent acceptance marks `exported`; PDF

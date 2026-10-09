@@ -115,7 +115,7 @@ auto-selected, and the automatic path disables generic webpage fallback and
 Zotero-server fallback. Immediately before the translator save is triggered,
 Zotero Desktop reachability is checked again.
 
-The current development hook observes successful local `saveItems` acceptance
+The v0.6.3 hook observes successful local `saveItems` acceptance
 for the matching bibliographic item before collection lookup and attachment
 work. It binds the request, DOI target, save invocation, task tab and native
 session, consumes one live dispatch permission and rejects expired commands.
@@ -123,7 +123,7 @@ Native HTTP `201 Created` is accepted with an empty body, or with one echoed
 matching client-side parent ID; errors, missing responses and mismatches do not
 prove acceptance. Only attributable native acceptance yields parent `CONFIRMED`. Explicit
 pre-dispatch failures are no-effect (`FAILED` in the legacy adapter); ambiguous
-errors after dispatch are uncertain (`UNCONFIRMED`). In unreleased v0.6.3,
+errors after dispatch are uncertain (`UNCONFIRMED`). In v0.6.3,
 matching confirmed parent acceptance atomically marks the Paper `exported`.
 Import attempts are process-local, with no new persisted `export_attempt`.
 Historical frontmatter fields remain untouched; an explicit later Import can
@@ -138,7 +138,7 @@ project-created task tab on confirmed success, and retains failed or uncertain
 tabs for inspection; ongoing manual login is not interrupted.
 The legacy per-Paper completion and library-reconciliation workflow is retired.
 The application aggregates all eligible Kept Papers and issues these commands
-serially. Real v0.6.3 acceptance remains NOT_TESTED — USER_OWNED (SPEC §42.15).
+serially. User-reported v0.6.3 live acceptance and its evidence limits are recorded in SPEC §42.19.
 
 PDF is independently `unverified`: links, Snapshots, metadata and progress do not
 prove an actual saved PDF. Inspect Zotero Desktop for actual attachments, and
