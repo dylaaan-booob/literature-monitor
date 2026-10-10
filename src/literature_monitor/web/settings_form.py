@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import json
-import hashlib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import date
 from itertools import zip_longest
 from pathlib import Path
@@ -12,7 +11,6 @@ from pathlib import Path
 from pydantic import ValidationError
 from starlette.datastructures import FormData
 
-from literature_monitor.application.journal_import import JournalImportMode, JournalImportPlan
 from literature_monitor.application.journal_migration import MigrationConfirmation
 from literature_monitor.application.settings import (
     ContentRevision,
@@ -20,7 +18,7 @@ from literature_monitor.application.settings import (
     SettingsIssue,
     SettingsIssueSource,
 )
-from literature_monitor.config import InstitutionConfig, JournalConfig, LegacyJournal, LogLevel, PublisherConfig
+from literature_monitor.config import AccessService, InstitutionConfig, JournalConfig, LegacyJournal, LogLevel, PublisherConfig
 from literature_monitor.date_range import DateRangeSpec
 from literature_monitor.url_safety import normalize_public_http_url
 
@@ -38,14 +36,26 @@ class SettingsJournalRow:
 class SettingsPublisherRow:
     name: str
     publisher_id: str
-    access_url: str = ""
+    publisher_url: str = ""
+    access_service_id: str = ""
+
+    @property
+    def access_url(self) -> str:
+        return self.publisher_url
 
     @property
     def safe_access_url(self) -> str | None:
         try:
-            return normalize_public_http_url(self.access_url)
+            return normalize_public_http_url(self.publisher_url)
         except ValueError:
             return None
+
+
+@dataclass(frozen=True)
+class SettingsAccessServiceRow:
+    id: str
+    name: str
+    access_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -63,6 +73,7 @@ class SettingsFormValues:
     journal_revision_exists: str
     journal_revision_digest: str
     publishers: tuple[SettingsPublisherRow, ...] = ()
+    access_services: tuple[SettingsAccessServiceRow, ...] = ()
     legacy_journals: str = ""
     migration_targets: tuple[str, ...] = ()
     groups: tuple[str, ...] = ()  # Presentation only; empty Groups are not durable.
@@ -76,51 +87,6 @@ class SettingsFormValues:
             return tuple(LegacyJournal.model_validate(j) for j in json.loads(self.legacy_journals)) if self.legacy_journals else ()
         except (ValueError, TypeError):
             return ()
-
-
-@dataclass(frozen=True)
-class SettingsImportValues:
-    contents: str = ""
-    mode: str = JournalImportMode.MERGE.value
-    plan: JournalImportPlan | None = None
-    error: str | None = None
-    confirmation_source: str = ""
-    confirmation_rows: tuple[str, ...] = ()
-    confirmation_targets: tuple[str, ...] = ()
-
-    @property
-    def source_revision(self) -> str:
-        return hashlib.sha256(self.contents.encode("utf-8")).hexdigest()
-
-    def target_for(self, source_row: int) -> str:
-        return next((target for row, target in zip(self.confirmation_rows, self.confirmation_targets)
-                     if row == str(source_row)), "")
-
-    def confirmations(self, plan: JournalImportPlan) -> tuple[MigrationConfirmation, ...]:
-        if not self.confirmation_rows and not self.confirmation_targets:
-            return ()
-        if self.confirmation_source != self.source_revision:
-            raise ValueError("Import source changed; Preview and confirm the current rows again.")
-        if self.confirmation_rows != tuple(str(row.source_row) for row in plan.legacy_rows) or len(self.confirmation_targets) != len(plan.legacy_rows):
-            raise ValueError("Import confirmation rows do not match this source; Preview again.")
-        return tuple(MigrationConfirmation(i, target, "explicit user confirmation for this import row")
-                     for i, target in enumerate(self.confirmation_targets, 1) if target.strip())
-
-
-def settings_form_after_import(
-    values: SettingsFormValues, draft: MonitorDraft,
-) -> SettingsFormValues:
-    """Project imported Journals, retaining only genuinely empty draft Groups."""
-
-    projected = settings_form_from_draft(draft)
-    previously_represented = {row.group for row in values.journals if row.group}
-    empty_groups = tuple(group for group in values.groups if group not in previously_represented)
-    # A2 changes only Journals. Preserve raw non-Journal browser strings/revisions.
-    previous = {row.issns: row for row in values.journals}
-    rows = tuple(replace(row, pending=previous[row.issns].pending if row.issns in previous else True)
-                 for row in projected.journals)
-    return replace(values, journals=rows,
-                   groups=tuple(dict.fromkeys(projected.groups + empty_groups)))
 
 
 def _revision_fields(revision: ContentRevision) -> tuple[str, str]:
@@ -154,7 +120,9 @@ def settings_form_from_draft(draft: MonitorDraft) -> SettingsFormValues:
         name=draft.name,
         keyword_expression=draft.keyword_expression,
         journals=rows,
-        publishers=tuple(SettingsPublisherRow(p.name, p.publisher_id, p.access_url or "") for p in draft.publishers),
+        publishers=tuple(SettingsPublisherRow(p.name, p.publisher_id, p.publisher_url or "",
+                                               p.access_service_id or "") for p in draft.publishers),
+        access_services=tuple(SettingsAccessServiceRow(s.id, s.name, s.access_url or "") for s in draft.access_services),
         legacy_journals=json.dumps([j.model_dump() for j in draft.legacy_journals]) if draft.legacy_journals else "",
         groups=tuple(dict.fromkeys(row.group for row in rows if row.group)),
         from_date=(
@@ -195,6 +163,16 @@ def settings_form_from_submission(form: FormData) -> SettingsFormValues:
         SettingsJournalRow(name=name, issns=issn_values, group=group, publisher_id=publisher, pending=bool(is_pending))
         for name, issn_values, group, publisher, is_pending in zip_longest(names, issns, assignments, publishers, pending, fillvalue="")
     )
+    order_values = tuple(str(v) for v in form.getlist("journal_order"))
+    order_is_numeric = all(item.isascii() and item.isdecimal() and len(item) <= 12 for item in order_values)
+    invalid_order = bool(order_values) and (
+        len(order_values) != len(rows)
+        or not order_is_numeric
+        or len({int(value) for value in order_values}) != len(order_values)
+    )
+    if order_values and not invalid_order:
+        # 可视 Group 容器会改变表单节点顺序；保存仍须采用草稿原有 Journal 顺序。
+        rows = tuple(row for _, row in sorted(zip((int(value) for value in order_values), rows)))
     if not rows:
         rows = (SettingsJournalRow(name="Pending resolution", issns="", pending=True),)
 
@@ -206,27 +184,59 @@ def settings_form_from_submission(form: FormData) -> SettingsFormValues:
         "csrf_token", "name", "keyword_expression", "output_dir", "log_level",
         "from_date", "to_date", "window_days",
         "monitor_revision_exists", "monitor_revision_digest", "journal_revision_exists", "journal_revision_digest",
-        "journal_name", "journal_issns", "journal_publisher_id", "journal_pending", "journal_group", "settings_group",
-        "publisher_name", "publisher_id", "publisher_access_url", "legacy_journals", "migration_issn_l",
-        "journal_import_text", "journal_import_mode", "import_confirmation_source", "import_confirmation_row", "import_confirmation_issn_l",
-        # Existing untrusted browser plan hints remain ignored; Apply always replans.
-        "resulting_journals", "plan_can_apply",
+        "journal_name", "journal_issns", "journal_publisher_id", "journal_pending", "journal_group", "journal_order", "settings_group",
+        "publisher_name", "publisher_id", "publisher_access_url", "publisher_access_service_id", "publisher_order",
+        "service_id", "service_name", "service_access_url", "legacy_journals", "migration_issn_l",
+        "settings_deletion_proof", "confirm_settings_deletions",
+        "markdown_file", "markdown_import_payload", "markdown_import_filename",
+        "markdown_import_proof", "confirm_full_import", "import_discard",
+        "export_discard", "reload_step", "reload_word",
+        "access_upgrade_proof", "confirm_access_upgrade", "upgrade_discard",
     }
     forbidden = any(key not in supported_fields for key in form)
     duplicate = any(len(form.getlist(key)) > 1 for key in institution_fields)
+    publisher_lengths = {len(form.getlist(key)) for key in (
+        "publisher_name", "publisher_id", "publisher_access_url", "publisher_access_service_id"
+    )}
+    service_lengths = {len(form.getlist(key)) for key in ("service_id", "service_name", "service_access_url")}
+    incomplete_rows = len(publisher_lengths) != 1 or len(service_lengths) != 1
+    publisher_order = tuple(str(v) for v in form.getlist("publisher_order"))
+    invalid_publisher_order = bool(publisher_order) and (
+        len(publisher_order) != len(form.getlist("publisher_id"))
+        or any(not value.isascii() or not value.isdecimal() or len(value) > 12 for value in publisher_order)
+    )
+    if publisher_order and not invalid_publisher_order:
+        invalid_publisher_order = len({int(value) for value in publisher_order}) != len(publisher_order)
     institution_issues = (
         (_form_issue("institution", "Unsupported Settings field or duplicate institution identifier. Credentials, sessions and login routes are not settings."),)
         if forbidden or duplicate else ()
     )
+    if incomplete_rows:
+        institution_issues += (_form_issue(
+            "access_services", "Incomplete Publisher/Access Service form rows; reload Settings before saving.",
+        ),)
+    if invalid_order:
+        institution_issues += (_form_issue("journals", "Invalid Journal order. Reload Settings before saving."),)
+    if invalid_publisher_order:
+        institution_issues += (_form_issue("publishers", "Invalid Publisher order. Reload Settings before saving."),)
+
+    publisher_rows = tuple(SettingsPublisherRow(name, identity, url, service_id) for name, identity, url, service_id in zip_longest(
+        (str(v) for v in form.getlist("publisher_name")),
+        (str(v) for v in form.getlist("publisher_id")),
+        (str(v) for v in form.getlist("publisher_access_url")),
+        (str(v) for v in form.getlist("publisher_access_service_id")), fillvalue=""))
+    if publisher_order and not invalid_publisher_order:
+        publisher_rows = tuple(item for _, item in sorted(zip(map(int, publisher_order), publisher_rows)))
 
     return SettingsFormValues(
         name=str(form.get("name", "")),
         keyword_expression=str(form.get("keyword_expression", "")),
         journals=rows,
-        publishers=tuple(SettingsPublisherRow(name, identity, url) for name, identity, url in zip_longest(
-            (str(v) for v in form.getlist("publisher_name")),
-            (str(v) for v in form.getlist("publisher_id")),
-            (str(v) for v in form.getlist("publisher_access_url")), fillvalue="")),
+        publishers=publisher_rows,
+        access_services=tuple(SettingsAccessServiceRow(identity, name, url) for identity, name, url in zip_longest(
+            (str(v) for v in form.getlist("service_id")),
+            (str(v) for v in form.getlist("service_name")),
+            (str(v) for v in form.getlist("service_access_url")), fillvalue="")),
         legacy_journals=str(form.get("legacy_journals", "")),
         migration_targets=tuple(str(v) for v in form.getlist("migration_issn_l")),
         groups=tuple(dict.fromkeys(group for group in group_names if group.strip())),
@@ -324,10 +334,15 @@ def settings_draft_from_form(
         issues.append(issue)
 
     publishers = []
+    access_services = []
     legacy = ()
     confirmations = ()
     try:
-        publishers = [PublisherConfig(name=p.name, publisher_id=p.publisher_id, access_url=p.access_url) for p in values.publishers]
+        publishers = [PublisherConfig(name=p.name, publisher_id=p.publisher_id,
+                                      publisher_url=p.publisher_url, access_service_id=p.access_service_id or None)
+                      for p in values.publishers]
+        access_services = [AccessService(id=s.id, name=s.name, access_url=s.access_url)
+                           for s in values.access_services]
         if values.legacy_journals:
             legacy = tuple(LegacyJournal.model_validate(j) for j in json.loads(values.legacy_journals))
             if len(values.migration_targets) > len(legacy):
@@ -335,7 +350,7 @@ def settings_draft_from_form(
             confirmations = tuple(MigrationConfirmation(i, value, "explicit user confirmation in Settings")
                                   for i, value in enumerate(values.migration_targets, 1) if value.strip())
     except (ValueError, TypeError) as error:
-        issues.append(_form_issue("publishers/legacy_journals", str(error)))
+        issues.append(_form_issue("publishers/access_services/legacy_journals", str(error)))
     journals: list[JournalConfig] = []
     pending_ids = []
     for row in values.journals:
@@ -361,6 +376,7 @@ def settings_draft_from_form(
             journals=tuple(journals),
             pending_journal_ids=tuple(pending_ids),
             publishers=tuple(publishers),
+            access_services=tuple(access_services),
             legacy_journals=legacy,
             migration_confirmations=confirmations,
             date_spec=DateRangeSpec(

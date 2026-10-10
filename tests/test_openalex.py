@@ -1600,7 +1600,7 @@ def test_canonical_singleton_checks_only_configured_identity_with_bearer_key():
     assert not issues and len(transport.requests) == 1
     assert transport.requests[0].url.path == '/sources/issn:2168-2267'
     assert transport.requests[0].headers['Authorization'] == 'Bearer secret'
-    assert transport.requests[0].headers['User-Agent'] == 'literature-monitor/0.6.3'
+    assert transport.requests[0].headers['User-Agent'] == 'literature-monitor/0.6.4'
 
 
 @pytest.mark.parametrize('damage', ['name', 'provider_issn_l', 'malformed_alias', 'absent', 'type', 'id', 'ambiguous'])

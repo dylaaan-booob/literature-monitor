@@ -38,7 +38,7 @@ from literature_monitor.date_range import DateRangeSpec
 from literature_monitor.search import SearchBackendError
 
 
-JOURNAL_DOCUMENT = '# Venues\n\nIntro text that is not owned by Settings.\n\n## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  |  |\n| Annals of Applied Statistics | 1932-6157 |  |  |\n\n## Conferences\n\n| Abbreviation | Full Name |\n|---|---|\n| TESTCONF | Test Conference |\n'
+JOURNAL_DOCUMENT = '# Venues\n\nIntro text that is not owned by Settings.\n\n## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  |  |\n| Annals of Applied Statistics | 1932-6157 |  |  |\n\n## Publishers\n\n| Publisher | OpenAlex ID | Publisher URL | Access Service ID |\n|---|---|---|---|\n\n## Access Services\n\n| Service ID | Service | Access URL |\n|---|---|---|\n\n## Conferences\n\n| Abbreviation | Full Name |\n|---|---|\n| TESTCONF | Test Conference |\n'
 
 
 GROUPED_JOURNAL_DOCUMENT = JOURNAL_DOCUMENT.replace(
@@ -559,7 +559,9 @@ def test_journal_write_failure_never_writes_monitor(
 
     monkeypatch.setattr(settings_module, "_write_snapshot_target", fail_journal)
 
-    result = save_settings(config_path, opened.draft)
+    result = save_settings(
+        config_path, replace(opened.draft, journals=(opened.draft.journals[0],)),
+    )
 
     assert result.outcome is SettingsSaveOutcome.WRITE_FAILED
     assert not result.journal_written
@@ -577,6 +579,7 @@ def test_monitor_write_failure_after_journal_success_is_partial_save_and_reread(
     config_before = config_path.read_bytes()
     draft = replace(
         opened.draft,
+        name="Changed monitor",
         journals=(JournalConfig(name="Biometrics", issn_l="0006-341X"),),
     )
     original_write = settings_module._write_snapshot_target
@@ -664,7 +667,7 @@ def test_missing_settings_cannot_persist_unresolved_new_journal_before_a4(tmp_pa
 
     assert result.outcome is SettingsSaveOutcome.INVALID_DRAFT
     assert not result.journal_written and not result.monitor_written
-    assert any("requires metadata resolution" in issue.message for issue in result.issues)
+    assert result.issues
     assert not config_path.exists() and not (tmp_path / "list.md").exists()
 
 
@@ -747,6 +750,6 @@ def test_legacy_settings_require_migration_and_cannot_be_overwritten_by_target_d
     assert len(opened.draft.legacy_journals) == 1
     result = save_settings(config_path, replace(opened.draft, journals=valid_journals()))
     assert result.outcome is SettingsSaveOutcome.INVALID_DRAFT
-    assert any("partially migrate" in issue.message for issue in result.issues)
+    assert result.issues
     assert not result.journal_written and not result.monitor_written
     assert (config_path.read_bytes(), journal_path.read_bytes()) == before

@@ -7683,3 +7683,126 @@ modified by release preparation, packaging or publication. No PyPI or Chrome
 Web Store distribution is asserted. This documentation-only closeout is
 subsequent to the immutable release tag and does not modify released assets
 or re-run unchanged functional tests.
+
+## 43. v0.6.4 Journals & Access — Development Contract
+
+### 43.1 Authority and baseline
+
+§43 is the normative v0.6.4 contract for Journals & Access, Access Mapping, Markdown Import/Export and the one-time configuration upgrade. Development begins on `main` at `510b9308aae76afac105bfd9fa265bb11f1a3b8e`, with the same local and `origin/main` baseline. §42.19 records the verified v0.6.3 release. **v0.6.3 remains the latest RELEASED version; v0.6.4 is UNRELEASED.** A0 establishes documentation requirements only: no product implementation, real configuration migration, software version change, commit or publication.
+
+§43 supersedes conflicting parts of §41.5's CSV/TSV/Merge/Replace/Apply-to-Draft import, §41.6's earlier Publisher table and §41.9's Settings layout, plus any earlier conflicting Settings persistence or Access Mapping representation. §41's ISSN-L configured identity, verified OpenAlex Source relationship, direct Publisher ID, machine-managed metadata and unmodified retrieval rules still apply. §42 retains authority for Kept, Connector Import, Workspace Reset, institution authentication, actual Service/SP recognition and trusted automatic access routing. §§1–42, particularly §42.19, retain their original version-specific evidence and historical release meaning without revision.
+
+### 43.2 Settings UI and draft
+
+Rename Settings **Journals & Publishers** to **Journals & Access**. Default presentation is a read-only overview; **Organize** enters editing mode with **Journal Groups** and **Access Mapping** views. Both views, all ordinary Settings fields and every HTMX partial update share one unsaved **Settings Draft**, one base `list.md` revision and the applicable base `monitor.yaml` revision. Switching views, searching or refreshing fragments may not discard edits or silently advance those revisions. The user persists ordinary edits using one unified **Save**.
+
+Journal Groups provides Journal search, multi-select, drag-and-drop, individual and batch **Assign** (including a non-drag pathway), and Group create, rename and delete. Group assignments are user-owned. **Ungrouped** represents a blank Group. Creating an empty Group is valid in a draft, but with membership stored on Journal rows, empty Groups are not promised persistent storage; state this limitation in the interface. Renaming a Group updates its members in the draft. Deleting a nonempty Group requires explicit confirmation and moves its Journals to Ungrouped.
+
+Access Mapping uses **Access Services as containers** and **Publishers as nodes**; an Unassigned container/pool displays unassigned Publishers. Support Service create, name and URL editing, delete, Publisher drag-and-drop, selection and individual/batch **Assign** to a Service or Unassigned. Deleting any Service requires confirmation, and its assigned Publishers become Unassigned. Both editors must offer usable keyboard/touch/assistive alternatives to dragging. Show affected members and pending changes before destructive edits. No separate Save per view or independent draft is permitted.
+
+Prefer existing Jinja2, HTMX and native JavaScript. SortableJS is only a candidate bounded dependency; do not introduce React, free-form drawing, graph coordinates, a graph-layout database or another UI framework. Maintain responsive, scrollable, accessible desktop and narrow-window presentation without horizontal overflow.
+
+### 43.3 Canonical Markdown schema and data ownership
+
+`list.md` is the **single durable configuration authority** for Journals, Publishers and Access Services. Managed sections have these columns:
+
+```markdown
+## Journals
+
+| Journal | ISSN-L | Publisher ID | Group |
+| --- | --- | --- | --- |
+
+## Publishers
+
+| Publisher | OpenAlex ID | Publisher URL | Access Service ID |
+| --- | --- | --- | --- |
+
+## Access Services
+
+| Service ID | Service | Access URL |
+| --- | --- | --- |
+```
+
+- `Journal.issn_l` is the stable normalized, checksum-valid ISSN-L identity under §41. `Journal.publisher_id` is its machine-managed direct Publisher relationship. Journal canonical name and Publisher ID remain machine metadata, while `Journal.group` is user-maintained. Group names live in Journal rows, not an independent Groups table.
+- `Publisher.publisher_id` is the direct OpenAlex Publisher ID stored as `OpenAlex ID`, never derived from name, domain, imprint parentage or corporate relationship. Publisher canonical name stays machine-managed. `Publisher.publisher_url` renames the existing user-managed Publisher Access URL as `Publisher URL`; preserve its manually entered or intentionally blank value and its manual-shortcut meaning. Provider refresh must not overwrite it.
+- `Publisher.access_service_id` is the optional **default** Service relationship; blank means **Unassigned**. A Service membership is derived from Publisher foreign keys, without a separate stored Publisher member list.
+- `AccessService.id` (`Service ID`) is unique, opaque and stable, generated at Service creation independently from its name and URL; it cannot change when either changes. `AccessService.name` (`Service`) is user-maintained. `AccessService.access_url` (`Access URL`) may be blank or a safe public HTTP/HTTPS URL satisfying §41.7's host, userinfo, IP and scheme safety rules.
+- `## Conferences` and all other non-managed sections remain full-file content, never additional Journal discovery input. Do not store node positions, service login state, credentials, Cookies, browser sessions or login history.
+
+`monitor.yaml` continues to own Monitor and Institution configuration; no Access Mapping belongs there. No third config file, independent persistent mapping registry or transaction database is authorized.
+
+### 43.4 Relations, validation and deletion effects
+
+A Publisher belongs to **zero or one** default Service. A Service has **zero or many** Publishers; empty Services are valid. Every nonblank Publisher Service ID must resolve to an existing Service ID; each nonblank Journal Publisher ID must resolve to a direct Publisher. Groups and Services are independent: no Group edit changes Access Mapping and no Service edit changes Journal Group.
+
+Before Save or import, reject duplicate Service IDs, duplicate or conflicting Service names after trimming/case-folding, blank Service names, malformed/unsafe URLs, duplicate or invalid Publisher IDs, and dangling references. Do not silently guess, rename, deduplicate or repair invalid relationships. Group deletion and Service deletion have explicit confirmation and must display affected members. Removing the last Journal associated with a Publisher may remove that Publisher under §41.7; its Access Mapping and URL would then be lost. Show that cascade in the confirmation or Preview before applying the Journal removal.
+
+For an existing configured ISSN-L, imported canonical Journal name and machine Publisher relationship must not change silently. A conflicting machine-managed value is rejected as an import identity conflict; correction requires an explicit separately verified metadata/identity workflow. New Journals follow §41's configured ISSN-L, unambiguous OpenAlex Source membership and verified name/direct Publisher resolution. A newly created Publisher begins **Unassigned** regardless of URL or name similarity.
+
+Missing optional mapping, blank Access URLs and empty Services do **not** prevent normal Run. A user-set Service default supplies future manual access-list context only; it is not proof of the actual DOI destination, Service/SP identity, login, session, entitlement or PDF authorization.
+
+### 43.5 Full Markdown Import, Preview, Confirm, Export and Reload
+
+The single supported import flow is **Import Markdown → Preview Changes → Confirm Import → direct safe save**. Remove CSV/TSV, pasted table, Merge, Replace and Apply to Draft from the formal v0.6.4 product flow. Accept only a complete valid UTF-8 `.md` configuration file representing the **entire `list.md`**; it never includes the independent `monitor.yaml`. Import performs **whole-file replacement**, without automatic row/section merging or a second ordinary Save.
+
+Preview compares the entire current disk file with the proposed file: Journals and their machine fields, Group memberships and removals, Publishers and their URLs, Services/IDs/URLs/memberships, and additions, removals or replacements of Conferences and all other Markdown sections. Show deletion/cascade effects and conflicts. **Preview and Cancel write nothing** and do not mutate or discard a current unsaved Settings Draft. The complete import must adopt the imported Conferences and other non-managed sections; never splice old identically named sections into the replacement.
+
+Before Confirm, verify the exact selected source content and its digest/identity confirmations, the previewed changes, new/existing Journal machine metadata, all target tables/references, and the current target file revision and safe destination/path/symlink state. A changed source, stale Preview, external target edit, invalid/ambiguous identity, invalid URL or dangling reference rejects the entire operation **before any write**. Confirmation writes the one complete validated file with established compare-before-replace/CAS and atomic replacement, then rereads and reports the real saved revision. No partial import, guessed fixes, silent merge or stale-confirm write is permitted.
+
+Preview retains all current unsaved draft changes across Organize views. If Confirm would replace edited draft-managed content, require an explicit **Save or Discard** choice before Confirm; Save invalidates the old Preview, requiring fresh Preview against the saved revision. Discard is explicit and never silently discards monitor/institution edits. Import itself never persists unrelated Monitor draft changes. A successful import reloads the saved list revision and corresponding draft state; other editors with older revisions encounter a conflict.
+
+**Export Markdown** copies the current saved, complete `list.md`, including unknown sections and Conferences, as a valid re-importable file. It excludes `monitor.yaml` and unsaved draft content. For a dirty draft, prompt **Save or Discard**, never infer a choice. The Export → Import round trip preserves full accepted content, stable IDs and non-managed sections, with only explicitly documented deterministic managed-table normalization allowed. **Reload from Disk** explicitly discards draft edits and loads actual disk contents and revisions. External changes cause version conflicts; there is no implicit three-way merge.
+
+### 43.6 Ordinary Save, write safety and one-time upgrade
+
+Ordinary Settings Save validates the single draft, checks original monitor/list revisions, prepares targets, and **writes only files with actual content changes**. Managed `list.md` changes update only managed sections, preserving Conferences, unknown sections and manual content under existing section-preserving rules. A pure Journal/Group/Publisher/Access Mapping Save must not rewrite `monitor.yaml`. A monitor/institution-only Save must not rewrite `list.md`. A no-op Save rewrites nothing. Keep existing revision/CAS, safe-path and symlink checks, compare-before-replace, atomic file replacement, readback, meaningful conflict reporting and truthful actual write results. If both files change, preserve §41.8's list-before-monitor order and report real partial success on second-file failure. Do not add a transaction database, automatic merge or rollback system.
+
+A legacy `list.md` using §41's four-column Journals and three-column `Publishers | OpenAlex ID | Access URL`, without `## Access Services`, requires **one explicit one-time upgrade** before new-schema Settings writes. Launching the app, opening Settings and normal Run never initiate a write. On first edit/Save or relevant import attempt requiring the new schema, detect the legacy structure, show Upgrade Preview and request confirmation. Refusal preserves disk and draft. Just before the upgrade write, revalidate the current source bytes and revision. Invalid legacy records, ambiguous IDs, unsafe paths, interrupted writing or external modification stop the upgrade with the original file intact. Recover via explicit Reload and renewed Preview, not silent retry/overwrite.
+
+Migration must use **the user's actual disk file**, preserving every existing Journal ISSN-L/name/direct Publisher ID and Group, every Publisher ID/name/user-maintained Access URL (renamed to Publisher URL without reinterpretation), Conferences, unknown sections and human changes. Add blank `Access Service ID` fields and the empty `## Access Services` table without inventing Services. Never replace user data with the tracked default/example, silently change machine metadata or execute this migration in A0. Once upgraded, canonical Settings Save/Import/Export use only §43's schema; do not maintain permanent parallel legacy writing/parsing paths.
+
+Before an explicit upgrade, valid legacy configuration may continue to support **read-only normal Run/discovery** through a bounded legacy reader preserving existing ISSN-L and Publisher semantics; it must not require Access Mapping, create Services, rewrite the file or silently upgrade. Invalid legacy data still fails existing validation. This compatibility path is temporary and limited to pre-upgrade Run, not a long-term second product data model.
+
+### 43.7 v0.6.3 compatibility and exclusions
+
+§42's durable Kept, serial native Connector Import, separately truthful parent/PDF outcomes, institution settings, Workspace Reset, trusted access rules and actual DOI landing/SP recognition remain in force. A configured Publisher-to-Service default or Service URL cannot replace §42.6's live destination identification, verified application allowlist, redirect/return safety or non-sensitive evidence of authentication and full-text entitlement. Unknown routes retain safe manual navigation; do not infer trust from the entered mapping.
+
+v0.6.4 only prepares mapping input for a **future manual Kept access list**. No automatic login, credential/session handling, PDF download, PDF/Zotero attachment changes or Zotero Import redesign is authorized. Run, Workspace, Kept and Connector are regression boundaries, not new deliverables.
+
+### 43.8 A0–A8 delivery plan
+
+| Stage | Boundary and exit conditions |
+| --- | --- |
+| **A0** Baseline and contract | Verify branch/HEAD/dirty files, switch safely to `main`, append §43 and align AGENTS/README. No code, config migration or commit. |
+| **A1** Access Service schema and migration | Implement canonical managed Markdown schema, stable Service IDs, preserved Publisher URL meaning, explicit one-time upgrade and bounded pre-upgrade Run reader. Verify real legacy content in isolated copies and failure recovery. |
+| **A2** Settings persistence | Implement versioned shared draft, relations, metadata protection, CAS and changed-file-only Save; verify adversarial conflicts and pure-Markdown isolation from monitor.yaml. |
+| **A3** Journal Groups | Implement search, multi-select, drag/non-drag batch Assign, Group creation/rename/delete, Ungrouped and correct deletion confirmations; empty Group draft semantics. |
+| **A4** Access Mapping | Implement Service create/edit/delete, publisher nodes and Unassigned, drag/non-drag Assign, membership and cascade confirmations, stable IDs and one default Service per Publisher. |
+| **A5** Markdown Import/Export | Replace prior CSV/TSV and Merge/Replace/Apply flow with complete Markdown Preview/Confirm safe write, draft guards, Reload and saved-file Export. Verify round trip and non-managed content. |
+| **A6** Integrated Settings UI | Connect overview and both Organize views to one HTMX-safe draft and Save; verify keyboard, narrow-window layout, scroll and shared-state consistency. |
+| **A7** Integration and live acceptance | Validate migration in isolated real-schema copies, filesystem/conflict failures, desktop/narrow-window browser interaction and Run/Workspace/Kept/Zotero regressions without modifying real user data. |
+| **A8** Final audit and readiness | Review final implementation diff and acceptance evidence, resolve substantive findings and document residual verification gaps. Version changes, commits, tags, pushes and publication require separate authorization. |
+
+Stages are work boundaries for later tasks, not completed results of A0. Later tasks may refine the implementation decomposition but cannot relax these invariants without an explicit contract update.
+
+### 43.9 Required verification and A0 closeout boundary
+
+Later acceptance must demonstrate complete Markdown import/export round trip; Group and Access Mapping independence; stable Service ID after renaming/URL changes; unique single default Service per Publisher; machine Journal/Publisher metadata protection; atomic rejection of invalid/stale imports and external write conflicts; and no `monitor.yaml` rewrite for a Markdown-only Save. Validate safe Group/Service deletion cascades, actual legacy file content and failed-upgrade byte preservation, HTMX multi-view draft consistency, keyboard/non-drag controls, real desktop and narrow-window accessibility, and ordinary Run, Workspace, Kept and Zotero Import regression. Test old-config Run and optional/incomplete mappings, without creating false trusted access or requiring authentication.
+
+No A1–A8 functional test, real browser acceptance or release result is established by A0. A0's evidence is limited to Git status/HEAD, in-scope document diffs, §43/AGENTS/README alignment, untouched v0.6.3 historical records and SHA-256 preservation of real user files.
+
+### 43.10 A7 acceptance evidence and A8 review follow-up (2026-10-10; UNRELEASED)
+
+This section records **observed development evidence**, not a v0.6.4 commit, release, or final-audit approval. All A7 migration/browser work used isolated copies and an isolated Chrome profile. The A7 evidence directory is `/private/tmp/lm-a7-real.B5SdtE/` (temporary local evidence, not a packaged or durable artifact); its scripts and screenshots describe the exact exercised workflow. A8 subsequently identified an Upgrade directory-sync reporting defect (P1); targeted corrective code and tests closed that finding and the evidence-record finding. Independent A8 final review returned **READY_FOR_COMMIT**; the separately authorized v0.6.4 release is pending remote publication verification.
+
+**Independently checked A7 inputs and artifacts (2026-10-10).** An isolated copy of the real legacy `list.md` was previewed and explicitly upgraded: 72 Journals, 20 direct Publishers and 0 Access Services. Checks compared original and upgraded Journal ISSN-L, name, Publisher ID and Group, each Publisher ID/name/manual URL, and non-managed Conferences/notes. Preview/refusal/stale-preview cases preserved bytes; the successful confirmed upgrade wrote only the isolated copy. The actual user `list.md` and `monitor.yaml` remained untouched. After whole-file Chrome Import/Export, `candidate.md`, isolated saved `list.md` and `downloads/list.md` were each 10,990 bytes with identical SHA-256 `000170ae2589f9fa9ede7983167280ef668be7a64725183dd648f2100d1b2ea1`. Six PNGs were independently found and sized: `desktop_overview.png`, `desktop_mapping_before_save.png` and `desktop_import_preview.png` at 1440×900; `narrow_overview.png`, `narrow_groups.png`, `narrow_mapping.png` at 550×850. Browser version was Chrome 154.0.8037.98.
+
+**A7 executed verification categories and limits.** Python regression commands used `PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:cacheprovider -q` with the nine A1–A6/Settings modules (`test_access_service_schema.py`, `test_settings_draft_persistence_a2.py`, `test_journal_groups_a3.py`, `test_access_mapping_a4.py`, `test_full_markdown_import_a5.py`, `test_integrated_settings_ui_a6.py`, `test_a6_fix1.py`, `test_application_settings.py`, `test_institution_settings.py`) and fourteen §42 regressions (`test_web_app.py`, `test_web_run_settings.py`, `test_run_coordinator.py`, `test_application_run_state.py`, `test_application_workspace.py`, `test_batch_import.py`, `test_connector_outcomes.py`, `test_connector_boundary.py`, `test_web_connector_bridge.py`, `test_access_preparation.py`, `test_workspace_reset.py`, `test_zotero_capture.py`, `test_web_zotero_capture.py`, `test_zotero_local.py`); both batches exited successfully. Node DOM exercises ran within the Python suites and `node --check src/literature_monitor/web/static/app.js` passed. These are offline/fixture regressions, **not** a live user Zotero Library run.
+
+The headless Chrome/CDP scripts `chrome_acceptance.mjs`, `chrome_extended.mjs` and `chrome_final_checks.mjs` exercised real Blink interactions: read-only Overview and a single Save (asserted), Journal search/selection and Group Assign (observed in console; selection/assignment counts not all asserted), Service creation and Publisher non-drag Assign (creation asserted, assignment count logged), delete-confirmation visibility (logged), shared Save (saved contents and monitor text asserted), native Markdown upload/Preview/Confirm (Preview availability and exact saved bytes asserted), saved-file Export (download events and matching on-disk bytes independently checked; the script logged the Boolean rather than asserting it), dirty-draft guards/reload, and view-change draft retention (initial value asserted; later retention logged). `chrome_final_checks.mjs` generated genuine mouse drag events and logged source, target and final Group; the observed target Group changed, but the script did **not** assert equality of final Group and expected target. The narrow-window scripts logged `documentElement.scrollWidth` and `body.scrollWidth` at the 550-pixel viewport width in inspected states, supporting **no observed page-level horizontal overflow**; they did not assert every internal container's layout or touch usability.
+
+**Evidence naming correction.** `narrow_overview.png` was captured while the Mapping view remained active, despite its name; it is **not** evidence of a separately captured 550×850 Overview state.
+
+**NOT_VERIFIED / residual acceptance boundary.** The real keyboard-event CDP exercise (`chrome_keyboard.mjs`) did not produce a reliable success result; a later `Runtime.evaluate` timeout occurred, and its cause was not established. Physical touch/assistive-device interaction, non-headless graphical Chrome, and real Zotero Library integration were not performed. Successful Node DOM event tests and the available non-drag controls do not convert these untested environments into PASS. These gaps must remain explicit during independent final audit; no real user Library or Workspace changes are authorized merely to close the documentation record.
+
+**A8 P1 repair status (2026-10-10).** Final audit reproduced a directory-`fsync` failure after Legacy Upgrade's atomic `os.replace`: a `TextWriteCommittedError` had been reported as “Upgrade not written” even though the isolated file was already in the current Schema. The targeted repair distinguishes verified post-replace bytes, inode and revision from an unconfirmable readback; the Web response reports directory durability uncertainty and reloads verified saved state. This was implemented and passed independent A8 re-review as part of the uncommitted v0.6.4 change set; it is not evidence of publication. No software version, v0.6.3 release record, Git tag or publication state is altered.

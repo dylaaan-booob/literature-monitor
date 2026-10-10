@@ -117,10 +117,15 @@ def test_ordinary_save_offline(tmp_path,change):
     elif change=='output': updates['output_dir']=Path('other')
     elif change=='name': updates['name']='Changed'
     elif change=='log': updates['log_level']='DEBUG'
-    else: updates['publishers']=(draft.publishers[0].model_copy(update={'access_url':None if change=='clear' else 'https://new.example'}),)
+    else: updates['publishers']=(draft.publishers[0].model_copy(update={'publisher_url':None if change=='clear' else 'https://new.example'}),)
     def forbidden(req): pytest.fail('ordinary Save must perform no HTTP request')
     with OpenAlexClient(transport=httpx.MockTransport(forbidden)) as client:
         saved=save_settings(config,replace(draft,**updates),client=client)
+    if change == 'remove':
+        # Removing the last association would discard a manually owned Publisher URL.
+        assert saved.outcome is SettingsSaveOutcome.INVALID_DRAFT
+        assert 'Preview/Confirm' in saved.issues[0].message
+        return
     assert saved.outcome is SettingsSaveOutcome.SAVED
     if change=='remove': assert saved.state.draft.publishers == ()
     elif change=='clear': assert saved.state.draft.publishers[0].access_url is None
@@ -176,7 +181,7 @@ def test_machine_tampering_and_unsafe_url_rejected_offline(tmp_path,field):
     if field.startswith('journal'):
         draft=replace(draft,journals=(draft.journals[0].model_copy(update={'name':'Tampered'} if field=='journal_name' else {'publisher_id':P2}),))
     else:
-        update={'name':'Tampered'} if field=='publisher_name' else {'publisher_id':P2} if field=='publisher_id' else {'access_url':'http://localhost'}
+        update={'name':'Tampered'} if field=='publisher_name' else {'publisher_id':P2} if field=='publisher_id' else {'publisher_url':'http://localhost'}
         draft=replace(draft,publishers=(draft.publishers[0].model_copy(update=update),))
     def forbidden(req): pytest.fail('tampering must fail offline')
     with OpenAlexClient(transport=httpx.MockTransport(forbidden)) as client:
@@ -193,20 +198,21 @@ def legacy_setup(tmp_path, identifiers=A, *, output='workspace'):
 @pytest.mark.parametrize('confirmed', [False,True])
 def test_legacy_save_auto_and_explicit_outside_old_set(tmp_path,confirmed):
     config,path,draft=legacy_setup(tmp_path)
+    before = config.read_bytes(), path.read_bytes()
     if confirmed: draft=replace(draft,migration_confirmations=(MigrationConfirmation(1,B,'explicit user correction'),))
     client,_=provider(sources=[source(aliases=(A,B),candidate=A)],publishers=[pub()])
     with client: saved=save_settings(config,draft,client=client)
-    assert saved.outcome is SettingsSaveOutcome.SAVED, saved.issues
-    assert saved.state.draft.journals[0].issn_l == (B if confirmed else A)
-    assert saved.state.draft.journals[0].name=='Canonical Source'
-    assert not saved.state.draft.legacy_journals
+    assert saved.outcome is SettingsSaveOutcome.INVALID_DRAFT
+    assert (config.read_bytes(), path.read_bytes()) == before
 
 
 def test_legacy_explicit_target_disagrees_with_provider_candidate(tmp_path):
     config,path,draft=legacy_setup(tmp_path)
+    before = config.read_bytes(), path.read_bytes()
     client,_=provider(sources=[source(aliases=(A,B),candidate=B)],publishers=[pub()])
     with client: saved=save_settings(config,replace(draft,journals=(JournalConfig(name='hint',issn_l=A,group='Stats'),)),client=client)
-    assert saved.outcome is SettingsSaveOutcome.SAVED and saved.state.draft.journals[0].issn_l==A
+    assert saved.outcome is SettingsSaveOutcome.INVALID_DRAFT
+    assert (config.read_bytes(), path.read_bytes()) == before
 
 
 @pytest.mark.parametrize('failure',['confirmation','missing','rate','timeout','malformed_paper','unsafe_workspace'])
@@ -278,7 +284,8 @@ def test_complete_target_preparation_and_partial_save(tmp_path,monkeypatch,fail_
     monkeypatch.setattr(settings,'_render_monitor_yaml',render)
     monkeypatch.setattr(settings,'_write_snapshot_target',write)
     client,_=provider(sources=[source()],publishers=[pub()])
-    with client: saved=save_settings(config,replace(draft,journals=draft.journals+(JournalConfig(name='hint',issn_l=B),)),client=client)
+    with client: saved=save_settings(config,replace(draft,name='Edited monitor',
+        journals=draft.journals+(JournalConfig(name='hint',issn_l=B),)),client=client)
     assert config.read_bytes()==before[0]
     if fail_at=='monitor':
         assert saved.outcome is SettingsSaveOutcome.PARTIAL_SAVE and saved.journal_written and not saved.monitor_written
@@ -348,8 +355,9 @@ def test_web_legacy_load_save_requires_no_paper_directory(tmp_path,monkeypatch):
         data=browser_settings_submission(browser.get('/settings').text)
         assert (config.read_bytes(),path.read_bytes())==before
         response=browser.post('/settings/save',data=data)
-        assert response.headers['HX-Trigger']=='settingsSaved'
-    assert load_settings(config).draft.journals[0].issn_l==A and calls==['/sources','/publishers']
+        assert 'HX-Trigger' not in response.headers
+        assert (config.read_bytes(),path.read_bytes())==before
+    assert load_settings(config).draft.legacy_journals and not calls
 
 
 def test_explicit_legacy_confirmation_checks_contradictory_source_observation(tmp_path):

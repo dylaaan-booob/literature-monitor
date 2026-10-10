@@ -1071,7 +1071,9 @@ def test_vendored_htmx_is_local_and_package_relative(
 def seed_grouped_workspace(tmp_path: Path) -> tuple[Path, Path]:
     config_path, output_dir = write_valid_config(tmp_path)
     (tmp_path / "list.md").write_text(
-        '## Journals\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  | Z Statistics |\n| Annals of Statistics | 0090-5364 |  |  |\n| JASA | 0162-1459 |  | A Methods |\n| Psychometrika | 0033-3123 |  | Z Statistics |\n| Unused | 0092-5853 |  | Empty group |\n',
+        '## Journals\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  | Z Statistics |\n| Annals of Statistics | 0090-5364 |  |  |\n| JASA | 0162-1459 |  | A Methods |\n| Psychometrika | 0033-3123 |  | Z Statistics |\n| Unused | 0092-5853 |  | Empty group |\n'
+        '\n## Publishers\n\n| Publisher | OpenAlex ID | Publisher URL | Access Service ID |\n|---|---|---|---|\n'
+        '\n## Access Services\n\n| Service ID | Service | Access URL |\n|---|---|---|\n',
     )
     for ordinal, title, issn, status in (
         (1, "Z grouped", "0006-341X", WorkflowStatus.CANDIDATE),

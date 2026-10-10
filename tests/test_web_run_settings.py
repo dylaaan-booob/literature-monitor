@@ -1831,9 +1831,9 @@ def test_partial_save_is_warning_and_uses_returned_disk_state_revisions(
     assert "partially saved" in response.text
     assert "Journal data written: yes" in response.text
     assert "Monitor config written: no" in response.text
-    assert 'value="Old Monitor From Disk"' in response.text
-    assert 'value="monitor-after-partial"' in response.text
-    assert 'value="journal-after-partial"' in response.text
+    assert 'name="name" value="Attempted New Monitor"' in response.text
+    assert "monitor-after-partial" in response.text
+    assert "journal-after-partial" in response.text
     assert "Attempted New Monitor" in response.text
     assert "Settings saved." not in response.text
     assert 'class="notice success"' not in response.text
@@ -1897,11 +1897,24 @@ def test_dirty_form_script_is_browser_only_and_save_event_driven(tmp_path: Path)
     assert 'hx-post="/settings/save"' in settings.text
 
 
+_EMPTY_CURRENT_TABLES = (
+    "\n## Publishers\n\n| Publisher | OpenAlex ID | Publisher URL | Access Service ID |\n"
+    "| --- | --- | --- | --- |\n\n"
+    "## Access Services\n\n| Service ID | Service | Access URL |\n"
+    "| --- | --- | --- |\n"
+)
+
+
+def write_current_journals(path: Path, content: str, *, encoding: str = "utf-8") -> None:
+    """Build a canonical §43 file for legacy UI regression fixtures."""
+    assert "## Publishers" not in content and "## Access Services" not in content
+    path.write_text(content.rstrip("\n") + "\n" + _EMPTY_CURRENT_TABLES, encoding=encoding)
+
+
 @pytest.fixture
 def health_config(tmp_path: Path) -> Path:
-    (tmp_path / "list.md").write_text(
+    write_current_journals(tmp_path / "list.md",
         '## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  |  |\n',
-        encoding="utf-8",
     )
     config_path = tmp_path / "monitor.yaml"
     config_path.write_text(
@@ -1923,7 +1936,7 @@ def broken_health_paper(config_path: Path, workspace: str) -> Path:
 def test_grouped_settings_import_preview_save_preserves_visible_assignment(health_config: Path) -> None:
     group = "统计 & <Models> \"B\""
     journal_path = health_config.parent / "list.md"
-    journal_path.write_text(
+    write_current_journals(journal_path,
         f"## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  | {group} |\n",
         encoding="utf-8",
     )
@@ -2214,7 +2227,7 @@ def test_organization_preview_noop_order_and_empty_group_save(health_config, gro
     rows = [("A", "0006-341X", "X" if grouped else ""), ("B", "0090-5364", ""),
             ("C", "0162-1459", "Y" if grouped else ""), ("D", "0033-3123", "X" if grouped else "")]
     header = "| Journal | ISSN-L | Publisher ID | Group |\n"
-    path.write_text("## Journals\n" + header + ('|---|---|---|---|\n' if grouped else '|---|---|---|---|\n') + "".join(
+    write_current_journals(path, "## Journals\n" + header + ('|---|---|---|---|\n' if grouped else '|---|---|---|---|\n') + "".join(
         f"| {name} | {issn} |  | {group} |\n" for name, issn, group in rows
     ))
     before = (health_config.read_bytes(), path.read_bytes())
@@ -2243,7 +2256,7 @@ def test_organization_save_through_real_boundary(health_config, operation):
     grouped = operation != "assignment"
     rows = [("A", "0006-341X", "X" if grouped else ""), ("B", "0090-5364", ""),
             ("C", "0162-1459", "Y" if grouped else ""), ("D", "0033-3123", "X" if grouped else "")]
-    path.write_text("## Journals\n| Journal | ISSN-L | Publisher ID | Group |\n" +
+    write_current_journals(path, "## Journals\n| Journal | ISSN-L | Publisher ID | Group |\n" +
                     ('|---|---|---|---|\n' if grouped else '|---|---|---|---|\n') + "".join(
                         f"| {n} | {i} |  | {g} |\n" for n, i, g in rows))
     if operation == "assignment":
@@ -2281,12 +2294,15 @@ def test_journal_organization_markup_and_responsive_scope(health_config):
             assert "open" not in attrs and not any(a.get("id") == "settings-form" for a in ancestors)
         for child in node["children"]: visit(child, (*ancestors, attrs))
     visit(tree)
-    for marker in ("data-group-rows", "data-create-group", "data-rename-group", "data-delete-group", "data-group-up", "data-group-down", "data-journal-viewport"):
+    for marker in ("data-group-rows", "data-create-group", "data-rename-group", "data-delete-group", "data-group-up", "data-group-down",
+                   "data-journal-viewport", "data-journal-search", "data-select-journal", "data-assign-selected",
+                   "data-group-drop", "data-confirm-delete", "data-cancel-delete"):
         assert marker in page
     assert '<select name="journal_group">' in page
     assert '<option value="统计 &amp; &lt;x&gt; &#34;y&#34;" selected>' in page
     assert 'type="hidden" name="journal_group"' not in page
-    assert "draggable" not in page
+    assert 'draggable="true"' in page
+    assert 'name="journal_order"' in page
     desktop = re.search(r"\[data-journal-viewport\],\s*\[data-publisher-viewport\] \{([^}]*)", css)[1]
     mobile = css.split("@media (max-width: 760px)", 1)[1]
     assert "max-height: 55vh" in desktop and "overflow-y: auto" in desktop
@@ -2301,11 +2317,13 @@ class Element {
   constructor(tag, attrs = {}) {
     this.tag = tag; this.attrs = {...attrs}; this.children = []; this.parentNode = null;
     this.dataset = {}; this.scrollTop = 0; this._value = attrs.value || ""; this.textContent = "";
+    this.checked = "checked" in attrs;
     for (const [key, value] of Object.entries(attrs)) if (key.startsWith("data-")) {
       this.dataset[key.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value || "";
     }
   }
   get id() { return this.attrs.id; }
+  focus() {}
   get nextSibling() { return this.parentNode?.children[this.parentNode.children.indexOf(this) + 1] || null; }
   get options() { return this.children; }
   get value() { return this.tag === "select" ? (this.selected?.value || "") : this._value; }
@@ -2380,12 +2398,14 @@ const document = {
   documentElement: {dataset: {}},
   getElementById: id => dom.querySelector(`#${id}`),
   querySelector: selector => dom.querySelector(selector),
+  querySelectorAll: selector => dom.querySelectorAll(selector),
   createElement: tag => new Element(tag),
   addEventListener: (name, handler) => handlers[name] = handler,
   body: {addEventListener: (name, handler) => bodyHandlers[name] = handler},
 };
 vm.runInNewContext(SOURCE, {
-  document, TextDecoder, Element, HTMLElement: Element, HTMLDetailsElement: Element, HTMLTemplateElement: Template,
+  document, TextDecoder, URL, crypto: require("node:crypto").webcrypto,
+  Element, HTMLElement: Element, HTMLDetailsElement: Element, HTMLTemplateElement: Template,
   window: {location: {hash: ""}, addEventListener: (name, handler) => windowHandlers[name] = handler, innerWidth: 600},
   fetch: () => assert.fail("Organization must not request the server"),
 });
@@ -2416,68 +2436,116 @@ def test_executable_group_operations_and_preview_scroll(health_config):
     harness = SETTINGS_NODE_DOM + r'''
 const editor = () => document.getElementById("settings-editor");
 const groups = () => editor().querySelectorAll("[data-group-rows] [data-group-row]");
-const group = name => groups().find(row => row.dataset.groupName === name);
+const group = name => groups().find(g => g.dataset.groupName === name);
 const rows = () => editor().querySelectorAll("[data-journal-rows] .journal-row");
 const name = row => row.querySelector('[name="journal_name"]').value;
 const assignment = row => row.querySelector('[name="journal_group"]');
 const row = n => rows().find(r => name(r) === n);
-const firstOrder = () => [...new Set(rows().map(r => assignment(r).value).filter(Boolean))];
-const represented = () => groups().map(g => g.dataset.groupName).filter(g => rows().some(r => assignment(r).value === g));
+const members = n => rows().filter(r => assignment(r).value === n);
 const click = target => { assert.ok(target); handlers.click({target}); };
-const dirty = () => assert.equal(document.documentElement.dataset.settingsDirty, "true");
 const clean = () => bodyHandlers.settingsSaved();
-const content = () => rows().map(r => [name(r), r.querySelector('[name="journal_issns"]').value]).sort();
-const create = value => { editor().querySelector("[data-new-group]").value = value; click(editor().querySelector("[data-create-group]")); };
-const assign = (n, value) => { const target = assignment(row(n)); target.value = value; handlers.change({target}); dirty(); assert.deepEqual(firstOrder(), represented()); };
-const rename = (old, value) => { const target = group(old).querySelector("[data-group-edit]"); target.value = value; click(group(old).querySelector("[data-rename-group]")); };
-const original = content(), originalOrder = rows().map(name);
-const revisions = ["monitor_revision_digest", "journal_revision_digest"].map(n => editor().querySelector(`[name="${n}"]`).value);
-assert.deepEqual(firstOrder(), ["X", "Y", "x", "Ungrouped", "Unmapped journals"]);
-assert.deepEqual(rows().map(name), originalOrder); // script initialization must never regroup
-create("   "); assert.equal(groups().length, 5);
-create("  Empty  "); dirty(); assert.ok(group("Empty")); assert.equal(firstOrder().length, 5);
-create("Empty"); assert.equal(groups().length, 6);
-// Enter in Group fields applies the browser operation, never submits Save.
+const dirty = () => assert.equal(document.documentElement.dataset.settingsDirty, "true");
+const create = n => { editor().querySelector("[data-new-group]").value = n; click(editor().querySelector("[data-create-group]")); };
+const rename = (old, n) => { group(old).querySelector("[data-group-edit]").value = n; click(group(old).querySelector("[data-rename-group]")); };
+const drag = (journal, destination) => {
+  const transfer = {setData(type, value) {this[type] = value;}};
+  handlers.dragstart({target: journal, dataTransfer: transfer});
+  const target = destination === "" ? editor().querySelector('[data-group-container][data-group-name=""]') : group(destination);
+  let prevented = false;
+  handlers.dragover({target, dataTransfer: transfer, preventDefault: () => prevented = true});
+  assert.equal(prevented, true);
+  assert.equal(target.dataset.dropActive, "true");
+  handlers.drop({target, dataTransfer: transfer, preventDefault() {}});
+  handlers.dragend({});
+  assert.equal(target.dataset.dropActive, "false");
+};
+const originalIds = new Map(rows().map(r => [name(r), [r.querySelector('[name="journal_issns"]').value, r.querySelector('[name="journal_publisher_id"]').value]]));
+const revisions = ["monitor_revision_digest", "journal_revision_digest"].map(n => editor().querySelector('[name="' + n + '"]').value);
+
+assert.equal(rows().length, originalIds.size);
+assert.equal(members("X").length, 32);
+assert.equal(members("Y").length, 1);
+assert.equal(rows().every(r => r.closest("[data-group-container]").dataset.groupName === assignment(r).value), true);
+create(" "); assert.equal(groups().length, 5);
+create(" Empty "); dirty(); assert.ok(group("Empty")); assert.equal(members("Empty").length, 0);
+create("empty"); assert.equal(groups().length, 6);
+assert.equal(editor().querySelector("[data-group-error]").hidden, false);
 let prevented = false;
 editor().querySelector("[data-new-group]").value = "Keyboard";
 handlers.keydown({target: editor().querySelector("[data-new-group]"), key: "Enter", preventDefault: () => prevented = true});
 assert.ok(prevented && group("Keyboard"));
-let edit = group("Keyboard").querySelector("[data-group-edit]"); edit.value = "Keyboard renamed";
-handlers.keydown({target: edit, key: "Enter", preventDefault: () => {}});
-assert.ok(group("Keyboard renamed")); click(group("Keyboard renamed").querySelector("[data-delete-group]"));
-const safe = '统计 & <x> "y"'; create(safe); dirty();
-assert.ok(assignment(row("A")).options.some(o => o.value === safe && o.textContent === safe));
-rename("X", "New"); dirty(); assert.equal(assignment(row("A")).value, "New"); assert.equal(assignment(row("D")).value, "New");
+group("Keyboard").querySelector("[data-group-edit]").value = "Keyboard Renamed";
+handlers.keydown({target: group("Keyboard").querySelector("[data-group-edit]"), key: "Enter", preventDefault: () => {}});
+assert.ok(group("Keyboard Renamed"));
+click(group("Keyboard Renamed").querySelector("[data-delete-group]"));
+assert.equal(group("Keyboard Renamed"), undefined);
+const special = '统计 & <x> "y"'; create(special);
+assert.ok(assignment(row("A")).options.some(o => o.value === special && o.textContent === special));
+
+rename("X", "Y");
+assert.ok(group("X")); assert.equal(members("X").length, 32); assert.equal(members("Y").length, 1);
+assert.equal(editor().querySelector("[data-group-error]").hidden, false);
+rename("X", "Renamed"); dirty();
+assert.equal(members("Renamed").length, 32);
+assert.equal(assignment(row("A")).value, "Renamed");
 assert.equal(assignment(row("E")).value, "x");
-rename("New", "   "); assert.ok(group("New"));
-rename("New", "X");
-const xMembers = rows().filter(r => assignment(r).value === "X").map(name);
-clean(); click(group("Y").querySelector("[data-group-up]")); dirty();
-assert.deepEqual(firstOrder(), ["Y", "X", "x", "Ungrouped", "Unmapped journals"]);
-assert.deepEqual(content(), original); assert.deepEqual(rows().filter(r => assignment(r).value === "X").map(name), xMembers);
-clean(); click(group("Y").querySelector("[data-group-down]")); dirty();
-assert.deepEqual(firstOrder(), ["X", "Y", "x", "Ungrouped", "Unmapped journals"]);
-assert.deepEqual(content(), original); assert.deepEqual(rows().filter(r => assignment(r).value === "X").map(name), xMembers);
-// Move an empty Group to first, then give it its first member.
-while (groups()[0] !== group("Empty")) click(group("Empty").querySelector("[data-group-up]"));
-const assignmentsBefore = new Map(rows().map(r => [name(r), assignment(r).value]));
-assign("B", "Empty"); assert.equal(firstOrder()[0], "Empty");
-for (const r of rows()) if (name(r) !== "B") assert.equal(assignment(r).value, assignmentsBefore.get(name(r)));
-assign("B", ""); assert.ok(group("Empty"));
-assign("B", "Ungrouped"); assert.equal(assignment(row("F")).value, "Ungrouped"); assign("B", "");
-// Coalesce an exact existing target, but preserve case-distinct identities.
-rename("X", "Y"); assert.equal(groups().filter(g => g.dataset.groupName === "Y").length, 1);
-assert.equal(assignment(row("A")).value, "Y"); assert.equal(assignment(row("E")).value, "x");
-assert.deepEqual(firstOrder(), represented());
-clean(); click(group("Y").querySelector("[data-delete-group]")); dirty();
-assert.equal(group("Y"), undefined); assert.equal(assignment(row("A")).value, ""); assert.equal(assignment(row("D")).value, "");
-assert.deepEqual(content(), original);
-clean(); click(row("E").querySelector("[data-remove-journal]")); dirty(); assert.ok(group("x")); assert.equal(row("E"), undefined);
-clean(); click(editor().querySelector("[data-add-journal]")); dirty();
-const added = rows().at(-1); assert.equal(name(added), "Pending resolution"); assert.equal(added.querySelector('[name="journal_issns"]').value, "");
-assert.equal(assignment(added).value, ""); assert.ok(assignment(added).options.some(o => o.value === safe));
-click(added.querySelector("[data-remove-journal]")); assert.equal(rows().length, original.length - 1);
-assert.deepEqual(["monitor_revision_digest", "journal_revision_digest"].map(n => editor().querySelector(`[name="${n}"]`).value), revisions);
+const search = editor().querySelector("[data-journal-search]");
+clean(); search.value = "0090-5364"; handlers.input({target: search});
+assert.equal(document.documentElement.dataset.settingsDirty, "false");
+assert.deepEqual(rows().filter(r => !r.hidden).map(name), ["B"]);
+click(editor().querySelector("[data-select-visible]"));
+assert.deepEqual(rows().filter(r => r.querySelector("[data-select-journal]").checked).map(name), ["B"]);
+assert.equal(document.documentElement.dataset.settingsDirty, "false");
+editor().querySelector("[data-batch-group]").value = "Renamed";
+click(editor().querySelector("[data-assign-selected]")); dirty();
+assert.equal(assignment(row("B")).value, "Renamed");
+assert.equal(members("Renamed").length, 33);
+assert.equal(row("B").closest("[data-group-container]"), group("Renamed"));
+search.value = "A"; handlers.input({target: search});
+assert.ok(editor().querySelector("[data-selection-status]").textContent.includes("hidden by search"));
+click(editor().querySelector("[data-clear-selection]"));
+assert.equal(rows().some(r => r.querySelector("[data-select-journal]").checked), false);
+search.value = ""; handlers.input({target: search});
+clean(); const single = assignment(row("B")); single.value = "";
+handlers.change({target: single}); dirty();
+assert.equal(row("B").closest("[data-group-container]").dataset.groupName, "");
+drag(row("C"), ""); assert.equal(assignment(row("C")).value, "");
+drag(row("C"), "Y"); assert.equal(assignment(row("C")).value, "Y");
+
+clean(); click(group("Y").querySelector("[data-delete-group]"));
+const panel = group("Y").querySelector("[data-delete-confirm]");
+assert.equal(panel.hidden, false);
+assert.equal(panel.querySelectorAll("[data-delete-members] li").length, 1);
+assert.ok(panel.querySelector("[data-delete-summary]").textContent.includes("1 Journals"));
+assert.equal(document.documentElement.dataset.settingsDirty, "false");
+click(panel.querySelector("[data-cancel-delete]"));
+assert.equal(panel.hidden, true);
+assert.equal(assignment(row("C")).value, "Y");
+// An outdated preview cannot delete a changed membership.
+click(group("Y").querySelector("[data-delete-group]"));
+const another = assignment(row("B")); another.value = "Y"; handlers.change({target: another});
+click(panel.querySelector("[data-confirm-delete]"));
+assert.ok(group("Y")); assert.equal(assignment(row("C")).value, "Y");
+click(group("Y").querySelector("[data-delete-group]"));
+assert.equal(panel.querySelectorAll("[data-delete-members] li").length, 2);
+click(panel.querySelector("[data-confirm-delete]"));
+assert.equal(group("Y"), undefined);
+assert.equal(assignment(row("C")).value, "");
+assert.equal(assignment(row("B")).value, "");
+create("Disposable"); clean(); click(group("Disposable").querySelector("[data-delete-group]"));
+assert.equal(group("Disposable"), undefined); dirty();
+
+click(row("E").querySelector("[data-remove-journal]")); dirty(); assert.equal(row("E"), undefined);
+const count = rows().length;
+click(editor().querySelector("[data-add-journal]")); dirty();
+const added = rows().find(r => r.hasAttribute("data-pending-journal"));
+assert.ok(added); assert.equal(assignment(added).value, "");
+assert.equal(added.querySelector('[name="journal_issns"]').value, "");
+click(added.querySelector("[data-remove-journal]")); assert.equal(rows().length, count);
+for (const r of rows()) {
+  assert.deepEqual([r.querySelector('[name="journal_issns"]').value, r.querySelector('[name="journal_publisher_id"]').value], originalIds.get(name(r)));
+}
+assert.deepEqual(["monitor_revision_digest", "journal_revision_digest"].map(n => editor().querySelector('[name="' + n + '"]').value), revisions);
 const draftRows = rows().map(r => [name(r), r.querySelector('[name="journal_issns"]').value, assignment(r).value]);
 const draftGroups = groups().map(g => g.dataset.groupName);
 if (!VALIDATED) {
@@ -2489,22 +2557,27 @@ if (!VALIDATED) {
   console.log(JSON.stringify(fields));
   process.exit(0);
 }
-// Actual Validate response replaces the entire editor. Scroll and dirty state survive.
 let viewport = editor().querySelector("[data-journal-viewport]"); viewport.scrollTop = 487;
 bodyHandlers["htmx:beforeSwap"]({detail: {target: editor()}});
 dom = build(VALIDATED);
 bodyHandlers["htmx:afterSwap"]({detail: {target: editor()}});
-assert.equal(editor().querySelector("[data-journal-viewport]").scrollTop, 487); dirty(); assert.ok(group("Empty"));
-assert.deepEqual(rows().map(r => [name(r), r.querySelector('[name="journal_issns"]').value, assignment(r).value]), draftRows);
+assert.equal(editor().querySelector("[data-journal-viewport]").scrollTop, 487);
+assert.ok(group("Empty"));
 assert.deepEqual(groups().map(g => g.dataset.groupName), draftGroups);
-// Workspace scroll retains separate storage while Settings is pending.
+assert.deepEqual(
+  rows().map(r => [name(r), r.querySelector('[name="journal_issns"]').value, assignment(r).value]).sort((a, b) => a[0].localeCompare(b[0])),
+  draftRows.sort((a, b) => a[0].localeCompare(b[0]))
+);
+assert.deepEqual(["monitor_revision_digest", "journal_revision_digest"].map(n => editor().querySelector('[name="' + n + '"]').value), revisions);
 const workspace = new Element("section", {id: "workspace-root", "data-active-view": "inbox"});
 const list = new Element("div", {id: "paper-list"}); workspace.append(list); dom.append(workspace);
 list.scrollTop = 173; viewport = editor().querySelector("[data-journal-viewport]"); viewport.scrollTop = 291;
 bodyHandlers["htmx:beforeSwap"]({detail: {target: editor()}});
 bodyHandlers["htmx:beforeSwap"]({detail: {target: workspace, xhr: {status: 400}}});
-list.scrollTop = 0; bodyHandlers["htmx:afterSwap"]({detail: {target: workspace}}); assert.equal(list.scrollTop, 173);
-viewport.scrollTop = 0; bodyHandlers["htmx:afterSwap"]({detail: {target: editor()}}); assert.equal(viewport.scrollTop, 291);
+list.scrollTop = 0; bodyHandlers["htmx:afterSwap"]({detail: {target: workspace}});
+assert.equal(list.scrollTop, 173);
+viewport.scrollTop = 0; bodyHandlers["htmx:afterSwap"]({detail: {target: editor()}});
+assert.equal(viewport.scrollTop, 291);
 clean(); assert.equal(document.documentElement.dataset.settingsDirty, "false");
 '''
     preamble = "const SOURCE = " + json.dumps(javascript) + "; const PAGE = " + json.dumps(SettingsDOM(page).root) + ";\n"
@@ -2537,6 +2610,7 @@ def test_organized_save_keeps_existing_failure_semantics(health_config, monkeypa
             path.write_bytes(path.read_bytes() + b"\n")
             journal_before = path.read_bytes()
         else:
+            data["name"] = "Organization and Monitor edited"
             original_write = application_settings._write_snapshot_target
             calls = []
             def fail_monitor(target, contents, snapshot):
@@ -2557,10 +2631,11 @@ def test_organized_save_keeps_existing_failure_semantics(health_config, monkeypa
             assert calls == [path, health_config]
             assert "Settings were partially saved" in response.text
             assert 'name="settings_group" value="Assigned"' in response.text
-            assert 'name="settings_group" value="Empty"' not in response.text
+            assert 'name="settings_group" value="Empty"' in response.text
             state = load_settings(health_config)
             assert state.draft.journals[0].group == "Assigned"
-            assert f'name="journal_revision_digest" value="{state.draft.journal_revision.digest}"' in response.text
+            assert f'name="journal_revision_digest" value="{data["journal_revision_digest"]}"' in response.text
+            assert state.draft.journal_revision.digest != data["journal_revision_digest"]
 
 
 def browser_settings_submission(html):
@@ -2600,31 +2675,31 @@ def assert_import_does_not_write(config_path, before):
     assert sorted(p.name for p in config_path.parent.iterdir()) == ["list.md", "monitor.yaml"]
 
 
-def test_bulk_import_markup_defaults_and_security(health_config):
+def test_full_markdown_import_markup_defaults_and_security(health_config):
     app = create_app(health_config)
     with TestClient(app, base_url="http://localhost") as client:
         html = client.get("/settings").text
-    assert "Bulk import Journals" in html and "data-transient-import" in html
-    assert 'type="file" data-journal-import-file' in html
-    assert 'accept=".csv,.tsv,.md,text/csv,text/tab-separated-values,text/markdown,text/plain"' in html
-    assert 'name="journal_import_text"' in html
-    assert '<option value="MERGE" selected>Merge</option>' in html
-    assert '<option value="REPLACE" >Replace</option>' in html
+    assert "Import complete Markdown configuration" in html and "data-transient-import" in html
+    assert 'name="markdown_file"' in html
+    assert 'accept=".md,text/markdown"' in html
+    assert 'name="journal_import_text"' not in html
+    assert 'name="journal_import_mode"' not in html
+    assert "Apply to draft" not in html
     assert 'hx-post="/settings/import/preview"' in html and 'data-import-apply' not in html
     assert 'hx-post="/settings/import/preview"' in html and 'hx-post="/settings/save"' in html
     assert html.split('<form id="settings-form"', 1)[1].split("</form>", 1)[0].count('type="submit"') == 1
     assert app.openapi_url is None and app.docs_url is None
 
 
-@pytest.mark.parametrize("route", ["preview", "apply"])
+@pytest.mark.parametrize("route", ["preview", "confirm"])
 @pytest.mark.parametrize("csrf", [None, "wrong", "不是 token"])
 def test_import_csrf_precedes_core_and_has_no_side_effects(health_config, monkeypatch, route, csrf):
     def forbidden(*args, **kwargs): pytest.fail("CSRF failure must not invoke the import core")
-    monkeypatch.setattr(web_app, "preview_journal_import", forbidden)
-    monkeypatch.setattr(web_app, "apply_journal_import", forbidden)
+    monkeypatch.setattr(web_app, "preview_full_markdown", forbidden)
+    monkeypatch.setattr(web_app, "confirm_full_markdown", forbidden)
     before = (health_config.read_bytes(), (health_config.parent / "list.md").read_bytes())
     with TestClient(create_app(health_config), base_url="http://localhost") as client:
-        data = valid_settings_form(csrf or "unused", journal_import_text="Journal,ISSN-L\nA,0006-341X\n")
+        data = valid_settings_form(csrf or "unused")
         if csrf is None: data.pop("csrf_token")
         response = client.post(f"/settings/import/{route}", data=data)
         assert response.status_code == 403 and "HX-Trigger" not in response.headers
@@ -2632,354 +2707,31 @@ def test_import_csrf_precedes_core_and_has_no_side_effects(health_config, monkey
     assert_import_does_not_write(health_config, before)
 
 
-@pytest.mark.parametrize("route", ["preview", "apply"])
-@pytest.mark.parametrize("mode", ["REPLAC", "", "replace", '<script>bad</script>'])
-def test_invalid_import_mode_preserves_current_values_without_core(health_config, monkeypatch, route, mode):
-    app = create_app(health_config)
-    before = (health_config.read_bytes(), (health_config.parent / "list.md").read_bytes())
-    with TestClient(app, base_url="http://localhost") as client:
-        data = browser_settings_submission(client.get("/settings").text)
-        data.update(journal_import_mode=mode, journal_import_text='</textarea><script>bad</script>', settings_group=["Empty"], name="Unsaved")
-        def forbidden(*args, **kwargs): pytest.fail("Malformed mode must not invoke import")
-        monkeypatch.setattr(web_app, "preview_journal_import", forbidden)
-        monkeypatch.setattr(web_app, "apply_journal_import", forbidden)
-        response = client.post(f"/settings/import/{route}", data=data)
-    values = browser_settings_values(response.text)
-    assert values.name == "Unsaved" and values.groups == ("Empty",)
-    assert "Choose Merge or Replace" in response.text and "HX-Trigger" not in response.headers
-    assert 'data-import-apply' not in response.text and '<script>bad</script>' not in response.text
-    assert browser_settings_submission(response.text)["journal_import_mode"] == [mode]
-    assert browser_settings_submission(response.text)["journal_import_text"] == ['</textarea><script>bad</script>']
-    assert_import_does_not_write(health_config, before)
 
-
-@pytest.mark.parametrize("route", ["preview", "apply"])
+@pytest.mark.parametrize("route", ["preview", "confirm"])
 @pytest.mark.parametrize("field,invalid", [("window_days", "abc"), ("from_date", "bad"), ("monitor_revision_exists", "bad"), ("journal_name", "")])
 def test_unconstructable_current_draft_is_not_substituted(health_config, monkeypatch, route, field, invalid):
     app = create_app(health_config)
     before = (health_config.read_bytes(), (health_config.parent / "list.md").read_bytes())
     with TestClient(app, base_url="http://localhost") as client:
         data = browser_settings_submission(client.get("/settings").text)
-        data.update(journal_import_text="Journal,ISSN-L\nNew,0090-5364\n", settings_group=["Empty"], **{field: invalid})
-        def forbidden(*args, **kwargs): pytest.fail("Invalid current form must not invoke import or reread disk")
-        for function in ("preview_journal_import", "apply_journal_import", "load_settings", "load_config"):
+        data.update(settings_group=["Empty"], **{field: invalid})
+        def forbidden(*args, **kwargs): pytest.fail("Invalid current form must not invoke Import")
+        for function in ("preview_full_markdown", "confirm_full_markdown"):
             monkeypatch.setattr(web_app, function, forbidden)
         response = client.post(f"/settings/import/{route}", data=data)
     assert browser_settings_submission(response.text)[field] == [invalid]
     assert browser_settings_values(response.text).groups == ("Empty",)
     assert "Settings issues" in response.text and "HX-Trigger" not in response.headers
-    assert 'data-import-apply' not in response.text
+    assert 'data-markdown-preview' not in response.text
     assert_import_does_not_write(health_config, before)
 
 
-def test_merge_preview_apply_save_uses_current_unsaved_draft(health_config, monkeypatch):
-    before = (health_config.read_bytes(), (health_config.parent / "list.md").read_bytes())
-    app = create_app(health_config)
-    with TestClient(app, base_url="http://localhost") as client:
-        page = client.get("/settings")
-        data = browser_settings_submission(page.text)
-        original_revisions = {f: data[f] for f in ("monitor_revision_digest", "journal_revision_digest")}
-        data.update(name="Current unsaved name", keyword_expression="causal AND inference", window_days="21",
-                    journal_name=["Draft B", "Biometrics"], journal_issns=["0090-5364", "0006-341X"],
-                    journal_group=["Other", "DraftGroup"], settings_group=["Other", "DraftGroup", "Empty"],
-                    journal_import_text="Journal,ISSN-L,Group\nbiometrics,0006-341X,\nDraft B,0090-5364,Moved\nNew,0033-3123,NewGroup\n")
-        data.pop("journal_import_mode")  # Server default must remain Merge.
-        # Import endpoints must not fetch disk state, validate/save, or run retrieval.
-        with monkeypatch.context() as patch:
-            def forbidden(*args, **kwargs): pytest.fail("Preview/Apply must use only the submitted draft and pure core")
-            for function in ("load_settings", "load_config", "save_settings"):
-                patch.setattr(web_app, function, forbidden)
-            patch.setattr(app.state.run_coordinator, "start", forbidden)
-            preview = client.post("/settings/import/preview", data=data)
-            assert preview.status_code == 200 and "HX-Trigger" not in preview.headers
-            assert set(re.findall(r'data-import-change="([^"]+)"', preview.text)) == {"NO_OP_DUPLICATE", "GROUP_MOVE", "ADD"}
-            assert "Source rows: 2" in preview.text
-            assert "Group: Other → Moved" in preview.text and 'data-import-apply' in preview.text
-            assert browser_settings_values(preview.text).journals == (
-                settings_form.SettingsJournalRow("Draft B", "0090-5364", "Other"),
-                settings_form.SettingsJournalRow("Biometrics", "0006-341X", "DraftGroup"),
-            )
-            applied = client.post("/settings/import/apply", data=browser_settings_submission(preview.text))
-        assert applied.headers["HX-Trigger"] == "settingsDraftChanged"
-        assert "unsaved Settings draft" in applied.text
-        current = browser_settings_submission(applied.text)
-        values = browser_settings_values(applied.text)
-        assert values.groups == ("Moved", "DraftGroup", "NewGroup", "Empty")
-        assert values.journals == (
-            settings_form.SettingsJournalRow("Draft B", "0090-5364", "Moved"),
-            settings_form.SettingsJournalRow("Biometrics", "0006-341X", "DraftGroup"),
-            settings_form.SettingsJournalRow("New", "0033-3123", "NewGroup", pending=True),
-        )
-        assert values.name == "Current unsaved name" and values.keyword_expression == "causal AND inference"
-        assert values.window_days == "21"
-        for f, revision_value in original_revisions.items(): assert current[f] == revision_value
-        assert_import_does_not_write(health_config, before)
-        validated = client.post("/settings/import/preview", data=current)
-        assert "id=\"settings-editor\"" in validated.text and "HX-Trigger" not in validated.headers
-        assert browser_settings_values(validated.text) == values
-        assert_import_does_not_write(health_config, before)
-        saved = client.post("/settings/save", data=browser_settings_submission(validated.text))
-        assert "HX-Trigger" not in saved.headers and "requires metadata resolution" in saved.text
-        assert "Empty" in browser_settings_values(saved.text).groups
-    assert_import_does_not_write(health_config, before)
 
 
-def test_replace_preview_exposes_all_removals_and_order_changes(health_config):
-    path = health_config.parent / "list.md"
-    path.write_text('## Journals\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| A | 0006-341X |  | X |\n| B | 0162-1459 |  | Y |\n| C | 0033-3123 |  | RemovedGroup |\n')
-    before = (health_config.read_bytes(), path.read_bytes())
-    with TestClient(create_app(health_config), base_url="http://localhost") as client:
-        data = browser_settings_submission(client.get("/settings").text)
-        data.update(settings_group=["X", "Y", "RemovedGroup", "Empty"], journal_import_mode="REPLACE",
-                    journal_import_text="Journal,ISSN-L,Group\nB,0162-1459,\nA,0006-341X,Changed\n")
-        preview = client.post("/settings/import/preview", data=data)
-        assert set(re.findall(r'data-import-change="([^"]+)"', preview.text)) == {"ORDER_CHANGE", "GROUP_MOVE", "REMOVE"}
-        assert "Removed ISSNs: 0033-3123" in preview.text
-        assert "Position: 2 → 1" in preview.text and "Position: 1 → 2" in preview.text
-        applied = client.post("/settings/import/apply", data=browser_settings_submission(preview.text))
-        values = browser_settings_values(applied.text)
-        assert applied.headers["HX-Trigger"] == "settingsDraftChanged"
-        assert values.groups == ("Y", "Changed", "Empty")  # RemovedGroup is not resurrected as empty.
-        assert values.journals == (settings_form.SettingsJournalRow("B", "0162-1459", "Y"), settings_form.SettingsJournalRow("A", "0006-341X", "Changed"))
-        assert_import_does_not_write(health_config, before)
-        saved = client.post("/settings/save", data=browser_settings_submission(applied.text))
-        assert saved.headers["HX-Trigger"] == "settingsSaved"
-    assert load_config(health_config).journals == (
-        JournalConfig(name="B", issn_l="0162-1459", group="Y"), JournalConfig(name="A", issn_l="0006-341X", group="Changed"),
-    )
 
 
-@pytest.mark.parametrize("contents,kind", [
-    ("This is arbitrary prose, not a supported table.", "FORMAT_ERROR"),
-    ("Journal,ISSN-L\nNew,not-an-issn\nPeer,0090-5364\n", "INVALID_ROW"),
-    ("Journal,ISSN-L,Group\nFirst,0090-5364,X\nOther,0090-5364,Y\nPeer,0033-3123,\n", "CONFLICT"),
-    ("Journal,ISSN/EISSN\nOther name,not-an-issn\nPeer,0033-3123\n", "INVALID_ROW"),
-    ("Journal,ISSN-L,Group\nNew,0090-5364,X\nNew,0090-5364,Y\nPeer,0033-3123,\n", "CONFLICT"),
-    ("Journal,ISSN-L\nNew,0090-5364,unexpected\n", "INVALID_ROW"),
-])
-def test_import_blocking_is_whole_apply_and_preserves_exact_form(health_config, contents, kind):
-    before = (health_config.read_bytes(), (health_config.parent / "list.md").read_bytes())
-    with TestClient(create_app(health_config), base_url="http://localhost") as client:
-        data = browser_settings_submission(client.get("/settings").text)
-        data.update(settings_group=["Empty"], journal_import_text=contents, name=" Unsaved name ", output_dir=" output ")
-        expected_values = settings_form.settings_form_from_submission(FormData([
-            (n, v) for n, values in data.items() for v in (values if isinstance(values, list) else [values])
-        ]))
-        preview = client.post("/settings/import/preview", data=data)
-        assert f'data-import-change="{kind}"' in preview.text
-        assert "Apply blocked" in preview.text and 'data-import-apply' not in preview.text
-        applied = client.post("/settings/import/apply", data=browser_settings_submission(preview.text))
-        for response in (preview, applied):
-            assert browser_settings_values(response.text) == expected_values
-            assert browser_settings_submission(response.text)["journal_import_text"] == [contents]
-            assert "HX-Trigger" not in response.headers
-            assert 'data-import-apply' not in response.text
-        if "conflicting non-empty Groups" in preview.text:
-            assert "Group: X → Y" in preview.text and "Source rows: 2, 3" in preview.text
-    assert_import_does_not_write(health_config, before)
 
-
-@pytest.mark.parametrize("source", ["csv", "tsv", "markdown"])
-def test_web_import_formats_and_safe_unicode_roundtrip(health_config, source):
-    group = '统计 & <x> "y"'
-    if source == "csv":
-        contents = '\ufeffJournal,ISSN-L,Group\nBiometrics,0006-341X,"统计 & <x> ""y"""\n'
-    elif source == "tsv":
-        contents = f'Journal\tISSN-L\tGroup\nBiometrics\t0006-341X\t"统计 & <x> ""y"""\n'
-    else:
-        contents = f"## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  | {group} |\n"
-    before = (health_config.read_bytes(), (health_config.parent / "list.md").read_bytes())
-    with TestClient(create_app(health_config), base_url="http://localhost") as client:
-        data = browser_settings_submission(client.get("/settings").text)
-        data["journal_import_text"] = contents
-        preview = client.post("/settings/import/preview", data=data)
-        assert "Ready to Apply" in preview.text and 'data-import-change="GROUP_MOVE"' in preview.text
-        assert browser_settings_submission(preview.text)["journal_import_text"] == [contents]
-        applied = client.post("/settings/import/apply", data=browser_settings_submission(preview.text))
-    assert applied.headers["HX-Trigger"] == "settingsDraftChanged"
-    assert browser_settings_values(applied.text).journals[0].group == group
-    assert 'value="统计 &amp; &lt;x&gt; &#34;y&#34;" selected' in applied.text
-    assert_import_does_not_write(health_config, before)
-
-
-def test_apply_replans_changed_draft_and_ignores_browser_plan(health_config):
-    before = (health_config.read_bytes(), (health_config.parent / "list.md").read_bytes())
-    with TestClient(create_app(health_config), base_url="http://localhost") as client:
-        data = browser_settings_submission(client.get("/settings").text)
-        data["journal_import_text"] = "Journal,ISSN-L\nNew,0090-5364\n"
-        preview = client.post("/settings/import/preview", data=data)
-        assert "Ready to Apply" in preview.text
-        changed = browser_settings_submission(preview.text)
-        changed.update(journal_name=["Biometrics", "Draft owner"], journal_issns=["0006-341X", "0090-5364"],
-                       journal_group=["", "DraftGroup"], settings_group=["DraftGroup", "Empty"],
-                       resulting_journals='[{"name":"Trusted?","issn":["0033-3123"]}]', plan_can_apply="true")
-        applied = client.post("/settings/import/apply", data=changed)
-        assert "unsaved Settings draft" in applied.text and 'data-import-change="NO_OP_DUPLICATE"' in applied.text
-        assert "Draft owner" in applied.text and "Trusted?" not in applied.text
-        assert applied.headers["HX-Trigger"] == "settingsDraftChanged"
-        assert browser_settings_values(applied.text).journals == (
-            settings_form.SettingsJournalRow("Biometrics", "0006-341X", ""),
-            settings_form.SettingsJournalRow("Draft owner", "0090-5364", "DraftGroup"),
-        )
-        assert browser_settings_values(applied.text).groups == ("DraftGroup", "Empty")
-    assert_import_does_not_write(health_config, before)
-
-
-def test_import_apply_preserves_open_revision_for_external_change_conflict(health_config):
-    path = health_config.parent / "list.md"
-    with TestClient(create_app(health_config), base_url="http://localhost") as client:
-        data = browser_settings_submission(client.get("/settings").text)
-        revision_before = data["journal_revision_digest"]
-        data["journal_import_text"] = "Journal,ISSN-L,Group\nNew,0090-5364,Imported\n"
-        preview = client.post("/settings/import/preview", data=data)
-        applied = client.post("/settings/import/apply", data=browser_settings_submission(preview.text))
-        assert browser_settings_submission(applied.text)["journal_revision_digest"] == revision_before
-        path.write_bytes(path.read_bytes() + b"\n# External user edit\n")
-        external_bytes = path.read_bytes()
-        monitor_before = health_config.read_bytes()
-        saved = client.post("/settings/save", data=browser_settings_submission(applied.text))
-        assert "files changed since this editor was opened" in saved.text and "HX-Trigger" not in saved.headers
-        assert browser_settings_submission(saved.text)["journal_revision_digest"] == revision_before
-        assert browser_settings_values(saved.text).journals == browser_settings_values(applied.text).journals
-    assert path.read_bytes() == external_bytes and health_config.read_bytes() == monitor_before
-
-
-@pytest.mark.parametrize("file_kind", ["csv", "tsv", "md", "plain", "invalid_utf8", "binary", "read_failure"])
-def test_executable_import_file_dirty_events_and_fragment_scroll(health_config, file_kind):
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("Node is unavailable for executable import file/DOM tests")
-    if file_kind == "tsv":
-        text = "Journal\tISSN-L\tGroup\nNew\t0090-5364\tImported\n"
-    elif file_kind == "md":
-        text = '## Journals\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| New | 0090-5364 |  | Imported |\n'
-    else:
-        text = "\ufeffJournal,ISSN-L,Group\nNew,0090-5364,Imported\n"
-    journal_path = health_config.parent / "list.md"
-    existing = [("Biometrics", "0006-341X")]
-    for i in range(30):
-        digits = f"777{i:04d}"
-        check = (11 - sum(int(d) * weight for d, weight in zip(digits, range(8, 1, -1))) % 11) % 11
-        existing.append((f"Existing {i}", digits[:4] + "-" + digits[4:] + ("X" if check == 10 else str(check))))
-    journal_path.write_text('## Journals\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n' + "".join(f"| {n} | {i} |  |  |\n" for n, i in existing))
-    app = create_app(health_config)
-    before = (health_config.read_bytes(), (health_config.parent / "list.md").read_bytes())
-    with TestClient(app, base_url="http://localhost") as client:
-        page = client.get("/settings").text
-        javascript = client.get("/static/app.js").text
-    harness = SETTINGS_NODE_DOM + r'''
-const editor = () => document.getElementById("settings-editor");
-const clean = () => assert.equal(document.documentElement.dataset.settingsDirty, "false");
-const dirty = () => assert.equal(document.documentElement.dataset.settingsDirty, "true");
-const control = selector => editor().querySelector(selector);
-const swap = (tree, top = 419, event = null) => {
-  control("[data-journal-viewport]").scrollTop = top;
-  bodyHandlers["htmx:beforeSwap"]({detail: {target: editor()}});
-  if (event) bodyHandlers[event]();
-  dom = build(tree);
-  bodyHandlers["htmx:afterSwap"]({detail: {target: editor()}});
-  assert.equal(control("[data-journal-viewport]").scrollTop, top);
-};
-(async () => {
-  clean();
-  const textarea = control("[data-journal-import-text]"), input = control("[data-journal-import-file]");
-  assert.equal(input.attrs.name, undefined);
-  let bytes = Buffer.from(TEXT, "utf8");
-  if (KIND === "invalid_utf8") bytes = Buffer.from([0xff, 0xfe, 0x00]);
-  const file = {
-    name: KIND === "binary" ? "journals.xlsx" : KIND === "plain" ? "journals.txt" : `journals.${KIND}`,
-    type: KIND === "binary" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : "text/plain",
-    arrayBuffer: async () => {
-      if (KIND === "read_failure") throw new Error("Read failed");
-      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-    },
-  };
-  input.files = [file];
-  textarea.value = "Old source must not survive invalid input";
-  handlers.change({target: input});
-  clean();
-  await new Promise(resolve => setImmediate(resolve));
-  const failed = ["invalid_utf8", "binary", "read_failure"].includes(KIND);
-  if (failed) {
-    assert.equal(textarea.value, ""); assert.equal(control("[data-import-file-error]").hidden, false);
-    assert.ok(control("[data-import-file-error]").textContent.includes("UTF-8"));
-    assert.equal(control("[data-import-preview]").disabled, true); clean();
-    // Pasting a supported source recovers without changing Settings dirty state.
-    textarea.value = TEXT; handlers.input({target: textarea});
-  }
-  assert.equal(textarea.value, TEXT); assert.equal(textarea.disabled, false); clean();
-  assert.equal(control("[data-import-preview]").disabled, false);
-  const mode = control('[name="journal_import_mode"]');
-  mode.value = "REPLACE"; handlers.change({target: mode}); clean();
-  mode.value = "MERGE"; handlers.change({target: mode}); clean();
-  handlers.input({target: textarea}); clean();
-  handlers.click({target: control("[data-import-preview]")}); clean();
-  if (!RESPONSES) {
-    const fields = {};
-    for (const field of editor().querySelectorAll("input, select, textarea")) {
-      if (field.attrs.name) (fields[field.attrs.name] ||= []).push(field.value);
-    }
-    assert.equal(fields.journal_import_text[0], TEXT);
-    assert.ok(!Object.keys(fields).some(key => /file|path/i.test(key)));
-    console.log(JSON.stringify(fields)); return;
-  }
-  swap(RESPONSES.preview); clean();
-  assert.equal(control("[data-journal-import-text]").value, TEXT);
-  assert.ok(control("[data-import-apply]"));
-  // Preview and blocked Apply must also preserve an already-dirty editor.
-  handlers.input({target: control('[name="name"]')}); dirty();
-  swap(RESPONSES.preview, 321); dirty(); swap(RESPONSES.blocked, 325); dirty();
-  bodyHandlers.settingsSaved(); clean(); swap(RESPONSES.blocked, 327); clean();
-  assert.equal(control("[data-import-apply]"), null);
-  swap(RESPONSES.applied, 421, "settingsDraftChanged"); dirty();
-  const journals = () => editor().querySelectorAll("[data-journal-rows] .journal-row");
-  assert.equal(journals().length, ROWCOUNT + 1);
-  const newRow = journals().find(row => row.querySelector('[name="journal_name"]').value === "New");
-  assert.equal(newRow.querySelector('[name="journal_group"]').value, "Imported");
-  // The imported editor is still the ordinary A6 editor.
-  let group = editor().querySelectorAll("[data-group-rows] [data-group-row]").find(g => g.dataset.groupName === "Imported");
-  group.querySelector("[data-group-edit]").value = "Renamed";
-  handlers.click({target: group.querySelector("[data-rename-group]")}); dirty();
-  assert.equal(newRow.querySelector('[name="journal_group"]').value, "Renamed");
-  control("[data-new-group]").value = "Empty";
-  handlers.click({target: control("[data-create-group]")});
-  group = editor().querySelectorAll("[data-group-rows] [data-group-row]").find(g => g.dataset.groupName === "Empty");
-  handlers.click({target: group.querySelector("[data-group-up]")});
-  handlers.click({target: group.querySelector("[data-group-down]")});
-  handlers.click({target: group.querySelector("[data-delete-group]")}); dirty();
-  assert.equal(newRow.querySelector('[name="journal_group"]').value, "Renamed");
-  swap(RESPONSES.validated, 431); dirty();
-  // Unresolved metadata blocks Save and preserves the unsaved dirty editor.
-  swap(RESPONSES.saved, 439); dirty();
-})().catch(error => { console.error(error); process.exitCode = 1; });
-'''
-    preamble = ("const SOURCE = " + json.dumps(javascript) + "; const PAGE = " + json.dumps(SettingsDOM(page).root) +
-                "; const TEXT = " + json.dumps(text) + "; const KIND = " + json.dumps(file_kind) + "; const ROWCOUNT = " + str(len(existing)) + ";\n")
-    initial = subprocess.run([node], input=preamble + "const RESPONSES = null;\n" + harness, text=True, capture_output=True)
-    assert initial.returncode == 0, initial.stdout + initial.stderr
-    data = json.loads(initial.stdout)
-    assert data["journal_import_text"] == [text]
-    with TestClient(app, base_url="http://localhost") as client:
-        preview = client.post("/settings/import/preview", data=data)
-        assert "HX-Trigger" not in preview.headers and "Ready to Apply" in preview.text
-        blocked_data = browser_settings_submission(preview.text)
-        blocked_data["journal_import_text"] = "unsupported text"
-        blocked = client.post("/settings/import/apply", data=blocked_data)
-        assert "HX-Trigger" not in blocked.headers and "Apply blocked" in blocked.text
-        applied = client.post("/settings/import/apply", data=browser_settings_submission(preview.text))
-        assert applied.headers["HX-Trigger"] == "settingsDraftChanged"
-        validated = client.post("/settings/import/preview", data=browser_settings_submission(applied.text))
-        assert "HX-Trigger" not in validated.headers and "id=\"settings-editor\"" in validated.text
-        assert_import_does_not_write(health_config, before)
-        saved = client.post("/settings/save", data=browser_settings_submission(validated.text))
-        assert "HX-Trigger" not in saved.headers and "requires metadata resolution" in saved.text
-        assert_import_does_not_write(health_config, before)
-    responses = {key: SettingsDOM(response.text).root for key, response in (
-        ("preview", preview), ("blocked", blocked), ("applied", applied), ("validated", validated), ("saved", saved),
-    )}
-    result = subprocess.run([node], input=preamble + "const RESPONSES = " + json.dumps(responses) + ";\n" + harness,
-                            text=True, capture_output=True)
-    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.fixture

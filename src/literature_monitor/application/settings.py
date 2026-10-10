@@ -15,6 +15,10 @@ from typing import Any
 import yaml
 
 from literature_monitor.config import (
+    AccessService,
+    detect_list_schema,
+    parse_access_services_text,
+    validate_access_mapping,
     ConfigurationError,
     InstitutionConfig,
     JournalConfig,
@@ -65,6 +69,9 @@ __all__ = [
     "SettingsValidationResult",
     "SettingsSaveOutcome",
     "SettingsSaveResult",
+    "SettingsDeletionApproval",
+    "SettingsDeletionPlan",
+    "plan_settings_deletions",
     "load_settings",
     "validate_settings",
     "save_settings",
@@ -88,10 +95,59 @@ class MonitorDraft:
     monitor_revision: ContentRevision
     journal_revision: ContentRevision
     publishers: tuple[PublisherConfig, ...] = ()
+    access_services: tuple[AccessService, ...] = ()
     legacy_journals: tuple[LegacyJournal, ...] = ()
     migration_confirmations: tuple[MigrationConfirmation, ...] = ()
     pending_journal_ids: tuple[str, ...] = ()  # Transient Add/Import placeholders.
     institution: InstitutionConfig | None = None
+
+
+@dataclass(frozen=True)
+class SettingsDeletionPlan:
+    services: tuple[AccessService, ...]
+    service_members: tuple[tuple[str, tuple[PublisherConfig, ...]], ...]
+    publishers: tuple[PublisherConfig, ...]
+
+    @property
+    def required(self) -> bool:
+        return bool(self.services or self.publishers)
+
+
+@dataclass(frozen=True)
+class SettingsDeletionApproval:
+    monitor_revision: ContentRevision
+    journal_revision: ContentRevision
+    service_ids: tuple[str, ...]
+    publisher_ids: tuple[str, ...]
+
+
+def plan_settings_deletions(saved: MonitorDraft, proposed: MonitorDraft) -> SettingsDeletionPlan:
+    """Derive destructive effects from stored identities, not browser-supplied hints."""
+    remaining_services = {service.id for service in proposed.access_services}
+    removed_services = tuple(service for service in saved.access_services if service.id not in remaining_services)
+    active_publishers = {journal.publisher_id for journal in proposed.journals if journal.publisher_id}
+    saved_by_issn = {journal.issn_l: journal for journal in saved.journals}
+    for journal in proposed.journals:
+        # 旧 ISSN-L 重新加入时可能仍是无 Publisher ID 的待解析行，
+        # 解析阶段将恢复磁盘中已验证的 Publisher 关系，不应误判为级联删除。
+        if journal.issn_l in proposed.pending_journal_ids and journal.publisher_id is None:
+            previous = saved_by_issn.get(journal.issn_l)
+            if previous and previous.publisher_id:
+                active_publishers.add(previous.publisher_id)
+    assigned_now = {publisher.publisher_id: publisher.access_service_id for publisher in proposed.publishers}
+    # 只有实际继续保留、且解除外键的 Publisher 才会因 Service 删除变为 Unassigned。
+    # 已重新指向其他 Service 的对象以及随 Journal 级联删除的对象不列作解绑。
+    members = tuple((service.id, tuple(
+        publisher for publisher in saved.publishers
+        if publisher.access_service_id == service.id
+        and publisher.publisher_id in active_publishers
+        and publisher.publisher_id in assigned_now
+        and assigned_now[publisher.publisher_id] is None
+    )) for service in removed_services)
+    cascades = tuple(publisher for publisher in saved.publishers
+                     if publisher.publisher_id not in active_publishers
+                     and (publisher.publisher_url or publisher.access_service_id))
+    return SettingsDeletionPlan(removed_services, members, cascades)
 
 
 class SettingsIssueSource(str, Enum):
@@ -401,6 +457,7 @@ def load_settings(config_path: Path) -> SettingsLoadResult:
     journal_issues: list[SettingsIssue] = []
     journals: tuple[JournalConfig, ...] = ()
     publishers: tuple[PublisherConfig, ...] = ()
+    access_services: tuple[AccessService, ...] = ()
     legacy_journals: tuple[LegacyJournal, ...] = ()
     if not journal_snapshot.revision.exists:
         journal_issues.append(
@@ -414,9 +471,11 @@ def load_settings(config_path: Path) -> SettingsLoadResult:
         assert journal_snapshot.issue is not None
         journal_issues.append(journal_snapshot.issue)
     else:
+        contents = journal_snapshot.contents
+        # 单个受管理区段损坏时，保留其他区段以及 Journals 中仍可信的行；
+        # 联合 Schema 校验仅决定是否允许保存，不应清空可展示的数据。
         try:
-            publishers = parse_publisher_whitelist_text(journal_snapshot.contents, path=journal_path)
-            journals, legacy_journals, damage = _journal_storage(journal_snapshot.contents, journal_path)
+            journals, legacy_journals, damage = _journal_storage(contents, journal_path)
             if damage is not None:
                 journal_issues.append(SettingsIssue(SettingsIssueSource.JOURNAL_DATA, str(damage), field="journals", path=journal_path))
         except ConfigurationError as error:
@@ -428,12 +487,33 @@ def load_settings(config_path: Path) -> SettingsLoadResult:
                     path=journal_path,
                 )
             )
+        try:
+            publishers = parse_publisher_whitelist_text(contents, path=journal_path)
+        except ConfigurationError as error:
+            journal_issues.append(SettingsIssue(SettingsIssueSource.JOURNAL_DATA, str(error), field="publishers", path=journal_path))
+        headings = {line.strip() for line in contents.splitlines()}
+        if "## Access Services" in headings:
+            try:
+                access_services = parse_access_services_text(contents, path=journal_path)
+            except ConfigurationError as error:
+                journal_issues.append(SettingsIssue(SettingsIssueSource.JOURNAL_DATA, str(error), field="access_services", path=journal_path))
+        if not journal_issues and not legacy_journals and (
+            "## Publishers" in headings or "## Access Services" in headings
+        ):
+            try:
+                detect_list_schema(contents, path=journal_path)
+            except ConfigurationError as error:
+                field = error.field or (
+                    "access_services" if "## Access Services" not in headings else "publishers"
+                )
+                journal_issues.append(SettingsIssue(SettingsIssueSource.JOURNAL_DATA, str(error), field=field, path=journal_path))
 
     draft = MonitorDraft(
         name=fields.name,
         keyword_expression=fields.keyword_expression,
         journals=journals,
         publishers=publishers,
+        access_services=access_services,
         legacy_journals=legacy_journals,
         date_spec=fields.date_spec,
         output_dir=fields.output_dir,
@@ -494,6 +574,7 @@ def validate_settings(
             ),
         )
         validate_publisher_configs(draft.publishers)
+        validate_access_mapping(draft.publishers, draft.access_services)
         if draft.legacy_journals and not draft.journals:
             validate_search_expression(definition.keyword_ast)
             resolved = resolve_date_range(definition.date_spec, today=date.today())
@@ -634,6 +715,7 @@ def _result_from_state(
 
 def save_settings(
     config_path: Path, draft: MonitorDraft, *, client: OpenAlexClient | None = None,
+    deletion_approval: SettingsDeletionApproval | None = None,
 ) -> SettingsSaveResult:
     """Workspace-path changes share exclusion with batch/Run/decisions (§42.4)."""
     state = load_settings(config_path)
@@ -649,7 +731,8 @@ def save_settings(
                 else:
                     # Reset owns absent targets too; existence cannot bypass exclusion.
                     stack.enter_context(workspace_path_lock(path))
-            return _save_settings(config_path, draft, client=client, operation_locks=tuple(locks))
+            return _save_settings(config_path, draft, client=client, operation_locks=tuple(locks),
+                                  deletion_approval=deletion_approval)
     except (CompareReadError, ContentChangedError, OSError) as error:
         invalid_path = isinstance(error, OSError) and error.errno in (errno.ELOOP, errno.ENOTDIR)
         return _result_from_state(
@@ -665,6 +748,7 @@ def _save_settings(
     config_path: Path,
     draft: MonitorDraft,
     *, client: OpenAlexClient | None = None, operation_locks: tuple = (),
+    deletion_approval: SettingsDeletionApproval | None = None,
 ) -> SettingsSaveResult:
     """Validate and persist Settings with explicit two-file failure semantics."""
 
@@ -728,17 +812,58 @@ def _save_settings(
         )
 
     storage_fields, _ = _monitor_fields(config_path, monitor_snapshot)
-    institution_only = (
-        not stored_state.issues and not draft.legacy_journals
-        and draft.institution != stored_state.draft.institution
-        and replace(draft, institution=stored_state.draft.institution) == stored_state.draft
+    list_unchanged = (
+        (draft.journals, draft.publishers, draft.access_services)
+        == (stored_state.draft.journals, stored_state.draft.publishers, stored_state.draft.access_services)
     )
+    # 缺失的 Monitor 可以由用户明确提交的有效 Draft 首次创建；
+    # 已存在但损坏的 Monitor，以及任何 Journal/Mapping 问题都不能借此覆盖。
+    blocking_issues = tuple(
+        issue for issue in stored_state.issues
+        if not (
+            not monitor_snapshot.revision.exists
+            and issue.source is SettingsIssueSource.MONITOR_CONFIG
+            and issue.message == "monitor config file is missing"
+        )
+    )
+    # 仅 Preview/Confirm 可以升级 §41。可信行恢复仅用于展示，损坏磁盘不能经普通 Save 修复。
+    try:
+        if blocking_issues:
+            raise ConfigurationError("Settings storage has unresolved issues; reload or repair explicitly")
+        if journal_snapshot.contents is None:
+            raise ConfigurationError("journal configuration is missing")
+        headings = {line.strip() for line in journal_snapshot.contents.splitlines()}
+        if _journal_table_is_legacy(journal_snapshot.contents):
+            raise ConfigurationError("legacy ISSN/EISSN storage must be migrated explicitly")
+        validate_publisher_membership(stored_state.draft.journals, stored_state.draft.publishers)
+        if "## Publishers" in headings or "## Access Services" in headings or not list_unchanged:
+            if detect_list_schema(journal_snapshot.contents, path=journal_path) != "current":
+                raise ConfigurationError("explicit Access schema upgrade Preview/Confirm required")
+        # 只更新 Monitor/Institution 时允许历史上没有 Publishers 区段的只读 Journal 表。
+        # 该路径从不生成或写入任何 list.md。
+        deletion_plan = plan_settings_deletions(stored_state.draft, draft)
+        if deletion_plan.required:
+            expected = SettingsDeletionApproval(
+                draft.monitor_revision, draft.journal_revision,
+                tuple(s.id for s in deletion_plan.services),
+                tuple(p.publisher_id for p in deletion_plan.publishers),
+            )
+            if deletion_approval != expected:
+                raise ConfigurationError("Deletion requires current Settings Preview/Confirm",
+                                         field="access_services" if deletion_plan.services else "publishers")
+    except ConfigurationError as error:
+        return _result_from_state(
+            outcome=SettingsSaveOutcome.INVALID_DRAFT, validation=validation,
+            state=stored_state,
+            issues=(SettingsIssue(SettingsIssueSource.JOURNAL_DATA, str(error),
+                                  field=error.field, path=journal_path),),
+            journal_written=False, monitor_written=False,
+        )
 
     try:
-        if institution_only:
-            validate_publisher_membership(draft.journals, draft.publishers)
-        else:
-            draft = _resolve_settings_targets(config_path, draft, journal_snapshot, storage_fields, client)
+        if not list_unchanged:
+            draft = _resolve_settings_targets(config_path, draft, journal_snapshot, storage_fields, client,
+                                             deletion_approval=deletion_approval)
         validation = validate_settings(config_path, draft)
         if validation.outcome is SettingsValidationOutcome.INVALID:
             raise ConfigurationError("; ".join(i.message for i in validation.issues))
@@ -763,10 +888,27 @@ def _save_settings(
             journal_written=False, monitor_written=False,
         )
     try:
-        # Both complete targets exist before the first CAS write starts.
-        journal_target = (journal_snapshot.contents if institution_only else
-                          render_settings_list_text(journal_snapshot.contents, draft.journals, draft.publishers, path=journal_path))
-        monitor_target = _render_monitor_yaml(draft, venue_whitelist=storage_fields.venue_whitelist)
+        # 数据归属决定写入目标。即使原 YAML 排序或排版不同，纯 Markdown 编辑也不触及它。
+        journal_changed = (
+            (draft.journals, draft.publishers, draft.access_services)
+            != (stored_state.draft.journals, stored_state.draft.publishers, stored_state.draft.access_services)
+        )
+        monitor_changed = (
+            not monitor_snapshot.revision.exists
+            or _draft_monitor_mapping(draft, venue_whitelist=storage_fields.venue_whitelist)
+            != _draft_monitor_mapping(stored_state.draft, venue_whitelist=storage_fields.venue_whitelist)
+        )
+        journal_target = (
+            render_settings_list_text(journal_snapshot.contents, draft.journals, draft.publishers,
+                                      access_services=draft.access_services, path=journal_path)
+            if journal_changed else journal_snapshot.contents
+        )
+        monitor_target = (
+            _render_monitor_yaml(draft, venue_whitelist=storage_fields.venue_whitelist)
+            if monitor_changed else monitor_snapshot.contents
+        )
+        journal_changed = journal_changed and journal_target != journal_snapshot.contents
+        monitor_changed = monitor_changed and monitor_target != monitor_snapshot.contents
     except ConfigurationError as error:
         return _result_from_state(
             outcome=SettingsSaveOutcome.INVALID_DRAFT, validation=validation,
@@ -777,9 +919,14 @@ def _save_settings(
     try:
         for lock in operation_locks:
             lock.verify()
-        if not institution_only:
+        # list-only Save 仍在实际写入边界检查未写的 monitor 原始版本。
+        if journal_changed and _read_snapshot(
+            config_path, source=SettingsIssueSource.MONITOR_CONFIG,
+        ).revision != draft.monitor_revision:
+            raise ContentChangedError("monitor config changed before journal data write")
+        if journal_changed:
             _write_snapshot_target(journal_path, journal_target, journal_snapshot)
-    except (ContentChangedError, FileExistsError):
+    except (ContentChangedError, FileExistsError) as error:
         state = load_settings(config_path)
         return _result_from_state(
             outcome=SettingsSaveOutcome.REVISION_CONFLICT,
@@ -787,9 +934,8 @@ def _save_settings(
             state=state,
             issues=(
                 SettingsIssue(
-                    source=SettingsIssueSource.JOURNAL_DATA,
-                    message="journal data changed before it could be written",
-                    path=journal_path,
+                    source=SettingsIssueSource.STORAGE,
+                    message=f"Settings revision conflict before journal data write: {error}",
                 ),
             ),
             journal_written=False,
@@ -797,31 +943,34 @@ def _save_settings(
         )
     except (CompareReadError, OSError) as error:
         state = load_settings(config_path)
+        # 安全写入在替换成功后也可能于目录 fsync 抛错；以真实磁盘内容确认结果。
+        committed = journal_changed and state.draft.journal_revision.digest == _digest(journal_target)
         return _result_from_state(
-            outcome=SettingsSaveOutcome.WRITE_FAILED,
+            outcome=SettingsSaveOutcome.PARTIAL_SAVE if committed else SettingsSaveOutcome.WRITE_FAILED,
             validation=validation,
             state=state,
             issues=(
                 SettingsIssue(
                     source=SettingsIssueSource.JOURNAL_DATA,
-                    message=f"unable to write journal data: {error}",
+                    message=f"unable to finish journal data write: {error}",
                     path=journal_path,
                 ),
             ),
-            journal_written=False,
+            journal_written=committed,
             monitor_written=False,
         )
 
     try:
         for lock in operation_locks:
             lock.verify()
-        if institution_only and _read_snapshot(journal_path, source=SettingsIssueSource.JOURNAL_DATA).revision != draft.journal_revision:
+        if not journal_changed and _read_snapshot(journal_path, source=SettingsIssueSource.JOURNAL_DATA).revision != draft.journal_revision:
             raise ContentChangedError("journal data changed before monitor configuration write")
-        _write_snapshot_target(config_path, monitor_target, monitor_snapshot)
+        if monitor_changed:
+            _write_snapshot_target(config_path, monitor_target, monitor_snapshot)
     except (ContentChangedError, FileExistsError) as error:
         state = load_settings(config_path)
         return _result_from_state(
-            outcome=SettingsSaveOutcome.REVISION_CONFLICT if institution_only else SettingsSaveOutcome.PARTIAL_SAVE,
+            outcome=SettingsSaveOutcome.PARTIAL_SAVE if journal_changed else SettingsSaveOutcome.REVISION_CONFLICT,
             validation=validation,
             state=state,
             issues=(
@@ -831,24 +980,25 @@ def _save_settings(
                     path=config_path,
                 ),
             ),
-            journal_written=not institution_only,
+            journal_written=journal_changed,
             monitor_written=False,
         )
     except (CompareReadError, OSError) as error:
         state = load_settings(config_path)
+        committed = monitor_changed and state.draft.monitor_revision.digest == _digest(monitor_target)
         return _result_from_state(
-            outcome=SettingsSaveOutcome.WRITE_FAILED if institution_only else SettingsSaveOutcome.PARTIAL_SAVE,
+            outcome=SettingsSaveOutcome.PARTIAL_SAVE if journal_changed or committed else SettingsSaveOutcome.WRITE_FAILED,
             validation=validation,
             state=state,
             issues=(
                 SettingsIssue(
                     source=SettingsIssueSource.MONITOR_CONFIG,
-                    message=f"unable to write monitor config: {error}",
+                    message=f"unable to finish monitor config write: {error}",
                     path=config_path,
                 ),
             ),
-            journal_written=not institution_only,
-            monitor_written=False,
+            journal_written=journal_changed,
+            monitor_written=committed,
         )
 
     state = load_settings(config_path)
@@ -857,13 +1007,14 @@ def _save_settings(
         validation=validation,
         state=state,
         issues=state.issues,
-        journal_written=not institution_only,
-        monitor_written=True,
+        journal_written=journal_changed,
+        monitor_written=monitor_changed,
     )
 
 
 def _resolve_settings_targets(config_path: Path, draft: MonitorDraft, snapshot: _FileSnapshot,
-                              fields: _DraftFields, client: OpenAlexClient | None) -> MonitorDraft:
+                              fields: _DraftFields, client: OpenAlexClient | None,
+                              *, deletion_approval: SettingsDeletionApproval | None = None) -> MonitorDraft:
     contents = snapshot.contents
     persisted, legacy, damage = _journal_storage(contents, config_path) if contents else ((), (), None)
     saved_publishers = parse_publisher_whitelist_text(contents, path=config_path) if contents else ()
@@ -920,12 +1071,23 @@ def _resolve_settings_targets(config_path: Path, draft: MonitorDraft, snapshot: 
                                                          publisher_id=evidence.publisher_id, group=journal.group)
             journals = tuple(canonical.get(j.issn_l, j) for j in journals)
         active = tuple(dict.fromkeys(j.publisher_id for j in journals if j.publisher_id is not None))
+        # Provider 解析可能改变实际级联集合，必须重新核对已确认的目标。
+        cascaded = [p for p in saved_publishers if p.publisher_id not in active
+                    and (p.publisher_url or p.access_service_id)]
+        if cascaded and (deletion_approval is None
+                         or deletion_approval.publisher_ids != tuple(p.publisher_id for p in cascaded)
+                         or deletion_approval.journal_revision != draft.journal_revision
+                         or deletion_approval.monitor_revision != draft.monitor_revision):
+            raise ConfigurationError(
+                "Publisher removal requires a cascade Preview/Confirm (Publisher URL / Access Mapping): "
+                + ", ".join(p.publisher_id for p in cascaded), field="publishers",
+            )
         if damage is not None and any(p not in active for p in by_publisher):
             raise ConfigurationError("Journal repair would discard saved Publisher metadata/Access URLs; restore their Journal associations", field="publishers")
         missing = [p for p in active if p not in by_publisher]
         if missing and not needs_network:
             raise ConfigurationError("active Publisher durable metadata missing; explicit migration required", field="publishers")
         metadata = resolve_publisher_metadata(provider, missing) if missing else ()
-    initialized = {m.publisher_id: PublisherConfig(publisher_id=m.publisher_id, name=m.display_name, access_url=m.homepage_url) for m in metadata}
+    initialized = {m.publisher_id: PublisherConfig(publisher_id=m.publisher_id, name=m.display_name, publisher_url=m.homepage_url) for m in metadata}
     publishers = tuple(submitted_publishers.get(p, by_publisher.get(p)) or initialized[p] for p in active)
     return replace(draft, journals=journals, publishers=publishers, legacy_journals=(), migration_confirmations=(), pending_journal_ids=())

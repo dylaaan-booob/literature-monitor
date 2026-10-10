@@ -149,7 +149,7 @@ def test_unknown_sensitive_save_fields_rejected_without_echo_or_write(tmp_path, 
     assert all(secret.encode() not in content for content in before)
 
 
-@pytest.mark.parametrize("endpoint", ["preview", "apply"])
+@pytest.mark.parametrize("endpoint", ["preview", "confirm"])
 @pytest.mark.parametrize("field", ["idp_password", "idp_cookie", "idp_session", "idp_token", "saml_assertion"])
 def test_import_draft_rejects_sensitive_fields_without_apply_or_echo(tmp_path, endpoint, field):
     config, venues, _ = setup(tmp_path)
@@ -158,11 +158,10 @@ def test_import_draft_rejects_sensitive_fields_without_apply_or_echo(tmp_path, e
     secret = "SENSITIVE-IMPORT-PROBE-MUST-NOT-APPEAR"
     with TestClient(create_app(config), base_url="http://localhost") as client:
         data = browser_settings_submission(client.get("/settings").text)
-        data.update(institution_name=[PUBLIC.name], institution_idp_entity_id=[PUBLIC.idp_entity_id],
-                    journal_import_text=["Journal,ISSN-L\nHint,0006-341X\n"], journal_import_mode=["MERGE"])
+        data.update(institution_name=[PUBLIC.name], institution_idp_entity_id=[PUBLIC.idp_entity_id])
         response = client.post("/settings/import/" + endpoint, data={**data, field: [secret]},
                                headers={"HX-Request": "true"})
-        assert f"Import could not be {'applied' if endpoint == 'apply' else 'previewed'}." in response.text
+        assert ("Import not written" if endpoint == "confirm" else "Import Preview blocked") in response.text
         assert "settingsDraftChanged" not in response.headers.get("HX-Trigger", "")
         assert "settingsSaved" not in response.headers.get("HX-Trigger", "")
         assert secret not in response.text and secret not in str(response.headers)
@@ -277,18 +276,18 @@ def test_web_csrf_form_roundtrip_preview_and_single_save(tmp_path):
         assert "Configured institution ≠ authenticated session ≠ full-text entitlement" in page
         fields = browser_settings_submission(page)
         fields.update(institution_name=[PUBLIC.name], institution_idp_entity_id=[PUBLIC.idp_entity_id])
-        for endpoint in ("/settings/save", "/settings/import/preview", "/settings/import/apply"):
+        for endpoint in ("/settings/save", "/settings/import/preview", "/settings/import/confirm"):
             assert client.post(endpoint, data={**fields, "csrf_token": ["wrong"]}).status_code == 403
         duplicate = client.post("/settings/save", data={**fields, "institution_name": ["First", "Second"]})
         assert "Settings were not saved." in duplicate.text
         invalid = client.post("/settings/save", data={**fields, "institution_name": ["<script>alert(1)</script>"]})
         assert "Settings were not saved." in invalid.text and "<script>alert(1)</script>" not in invalid.text
-        fields["journal_import_text"] = ["Journal,ISSN-L\nHint,0006-341X\n"]
-        preview = client.post("/settings/import/preview", data=fields, headers={"HX-Request": "true"})
+        preview = client.post("/settings/import/preview", data=fields,
+                              files={"markdown_file": ("saved.md", venues.read_bytes(), "text/markdown")},
+                              headers={"HX-Request": "true"})
         assert browser_settings_submission(preview.text)["institution_name"] == [PUBLIC.name]
-        applied = client.post("/settings/import/apply", data=fields, headers={"HX-Request": "true"})
-        assert "settingsDraftChanged" in applied.headers["HX-Trigger"]
-        assert browser_settings_submission(applied.text)["institution_idp_entity_id"] == [PUBLIC.idp_entity_id]
+        assert "settingsDraftChanged" not in preview.headers.get("HX-Trigger", "")
+        assert browser_settings_submission(preview.text)["institution_idp_entity_id"] == [PUBLIC.idp_entity_id]
         assert (config.read_bytes(), venues.read_bytes()) == before
         saved = client.post("/settings/save", data=fields, headers={"HX-Request": "true"})
         assert saved.headers["HX-Trigger"] == "settingsSaved" and "Settings saved." in saved.text
@@ -352,8 +351,7 @@ def test_executable_settings_dom_institution_edit_and_htmx_preview(tmp_path):
     with TestClient(create_app(config), base_url="http://localhost") as client:
         page = client.get("/settings").text
         fields = browser_settings_submission(page)
-        fields.update(institution_name=[PUBLIC.name], institution_idp_entity_id=[PUBLIC.idp_entity_id],
-                      journal_import_text=["Journal,ISSN-L\nHint,0006-341X\n"])
+        fields.update(institution_name=[PUBLIC.name], institution_idp_entity_id=[PUBLIC.idp_entity_id])
         response = client.post("/settings/import/preview", data=fields).text
         source = client.get("/static/app.js").text
     script = f"const PAGE={json.dumps(SettingsDOM(page).root)}, SOURCE={json.dumps(source)}, RESPONSE={json.dumps(SettingsDOM(response).root)};\n" + SETTINGS_NODE_DOM + r'''

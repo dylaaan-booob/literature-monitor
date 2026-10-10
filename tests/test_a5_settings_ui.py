@@ -90,30 +90,6 @@ def test_unified_74_journals_20_publishers_offline_get_and_routes(tmp_path, offl
     assert settings.validate_settings(config, draft).outcome is settings.SettingsValidationOutcome.VALID
 
 
-@pytest.mark.parametrize('url', ['https://edited.example/login', ''])
-def test_visible_url_survives_import_preview_apply_then_offline_save(tmp_path, offline, url):
-    config, path, _ = setup(tmp_path)
-    before = config.read_bytes(), path.read_bytes()
-    with TestClient(create_app(config), base_url='http://localhost') as browser:
-        data = browser_settings_submission(browser.get('/settings').text)
-        old_revision = data['journal_revision_digest']
-        data.update(publisher_access_url=[url], journal_import_text=['Journal,ISSN-L,Group\nHint,0006-341X,Changed\n'])
-        preview = browser.post('/settings/import/preview', data=data)
-        assert browser_settings_values(preview.text).publishers[0].access_url == url
-        assert 'open' in nodes(preview.text, attribute='data-settings-disclosure')[0]['attrs']
-        applied = browser.post('/settings/import/apply', data=browser_settings_submission(preview.text))
-        values = browser_settings_values(applied.text)
-        assert values.publishers[0].access_url == url
-        assert values.journals[0].group == 'Changed'
-        assert values.journal_revision_digest == old_revision[0]
-        assert (config.read_bytes(), path.read_bytes()) == before
-        saved = browser.post('/settings/save', data=browser_settings_submission(applied.text))
-        assert saved.headers['HX-Trigger'] == 'settingsSaved'
-        assert browser_settings_values(saved.text).publishers[0].access_url == url
-        again = browser.get('/settings').text
-        assert browser_settings_values(again).publishers[0].access_url == url
-        assert bool(nodes(again, attribute='data-publisher-open')) == bool(url)
-    assert settings.load_settings(config).draft.publishers[0].access_url == (url or None)
 
 
 @pytest.mark.parametrize('url', ['http://localhost', 'javascript:alert(1)', 'https://u:p@example.org', 'not a URL', 'https://example.org\n'])
@@ -142,6 +118,7 @@ def test_pending_issn_l_save_provider_canonicalization(tmp_path, monkeypatch):
         for field, new in [('journal_name', 'Pending resolution'), ('journal_issns', B),
                            ('journal_publisher_id', ''), ('journal_pending', '1'), ('journal_group', 'Stats')]:
             data[field].append(new)
+        data['journal_order'].append(str(len(data['journal_order'])))
         saved = browser.post('/settings/save', data=data)
         assert saved.headers['HX-Trigger'] == 'settingsSaved'
         values = browser_settings_values(saved.text)
@@ -165,6 +142,7 @@ def test_pending_resolution_failure_keeps_issn_and_url_without_writes(tmp_path, 
         for field, new in [('journal_name', 'Pending resolution'), ('journal_issns', B),
                            ('journal_publisher_id', ''), ('journal_pending', '1'), ('journal_group', '')]:
             data[field].append(new)
+        data['journal_order'].append(str(len(data['journal_order'])))
         data['publisher_access_url'] = ['https://draft.example']
         saved = browser.post('/settings/save', data=data)
         assert 'HX-Trigger' not in saved.headers
@@ -188,16 +166,10 @@ def test_legacy_explicit_confirmation_ui_uses_a4_save(tmp_path, monkeypatch, tar
         assert data['migration_issn_l'] == ['']
         data['migration_issn_l'] = [target]
         result = browser.post('/settings/save', data=data)
-        if target == B:
-            assert result.headers['HX-Trigger'] == 'settingsSaved'
-            assert browser_settings_values(result.text).journals[0].issns == B
-            assert 'data-legacy-migration' not in result.text
-            assert settings.load_settings(config).draft.journals[0].group == 'Stats'
-        else:
-            assert 'HX-Trigger' not in result.headers
-            assert 'data-legacy-migration' in result.text
-            assert browser_settings_submission(result.text)['migration_issn_l'] == [target]
-            assert (config.read_bytes(), path.read_bytes()) == before
+        assert 'HX-Trigger' not in result.headers
+        assert 'data-legacy-migration' in result.text
+        assert browser_settings_submission(result.text)['migration_issn_l'] == [target]
+        assert (config.read_bytes(), path.read_bytes()) == before
 
 
 @pytest.mark.parametrize('failure', ['list', 'monitor', 'conflict'])
@@ -220,9 +192,10 @@ def test_publisher_save_failure_partial_and_conflict_truthful_state(tmp_path, mo
         values = browser_settings_values(result.text)
         assert values.publishers[0].access_url == 'https://attempted.example'
         if failure == 'monitor':
-            assert 'Partial save.' in result.text and 'reread disk state' in result.text
-            assert values.name != 'Attempted monitor'
-            assert values.journal_revision_digest == settings.load_settings(config).draft.journal_revision.digest
+            assert 'partially saved' in result.text
+            assert values.name == 'Attempted monitor'
+            assert values.journal_revision_digest == data['journal_revision_digest'][0]
+            assert settings.load_settings(config).draft.journal_revision.digest != values.journal_revision_digest
             assert 'Attempted monitor' in result.text
         else:
             assert values.name == 'Attempted monitor'
@@ -239,7 +212,7 @@ def test_executable_publisher_link_dirty_dual_scroll_and_htmx_draft(tmp_path, of
     with TestClient(create_app(config), base_url='http://localhost') as browser:
         page = browser.get('/settings').text
         data = browser_settings_submission(page)
-        data.update(publisher_access_url=['https://draft.example'], journal_import_text=['Journal,ISSN-L\nHint,0006-341X\n'])
+        data.update(publisher_access_url=['https://draft.example'])
         response = browser.post('/settings/import/preview', data=data).text
     source_js = Path('src/literature_monitor/web/static/app.js').read_text()
     script = f'const PAGE={json.dumps(SettingsDOM(page).root)}, SOURCE={json.dumps(source_js)}, RESPONSE={json.dumps(SettingsDOM(response).root)};\n' + SETTINGS_NODE_DOM + r'''
@@ -280,7 +253,14 @@ def test_web_remove_shared_and_last_association_offline(tmp_path, offline, keep_
         data = browser_settings_submission(browser.get('/settings').text)
         for name in ('journal_name', 'journal_issns', 'journal_publisher_id', 'journal_pending', 'journal_group'):
             data[name] = data[name][1 if keep_shared else 2:]
+        data['journal_order'] = data['journal_order'][1 if keep_shared else 2:]
         result = browser.post('/settings/save', data=data)
+        if not keep_shared:
+            assert 'HX-Trigger' not in result.headers
+            assert 'data-settings-deletion-preview' in result.text
+            assert 'Publisher One' in result.text or 'Publisher A' in result.text
+            assert len(settings.load_settings(config).draft.publishers) == 1
+            return
         assert result.headers['HX-Trigger'] == 'settingsSaved'
         values = browser_settings_values(result.text)
         assert len(values.publishers) == int(keep_shared)
@@ -298,6 +278,7 @@ def test_empty_journal_submission_recovers_editable_pending_row(tmp_path, offlin
         data = browser_settings_submission(browser.get('/settings').text)
         for name in ('journal_name', 'journal_issns', 'journal_publisher_id', 'journal_pending', 'journal_group'):
             data.pop(name)
+        data.pop('journal_order')
         result = browser.post('/settings/save', data=data)
         assert 'HX-Trigger' not in result.headers
         values = browser_settings_values(result.text)

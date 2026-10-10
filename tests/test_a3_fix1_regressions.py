@@ -95,7 +95,7 @@ def test_import_apply_is_draft_only_and_save_enforces_resolution(tmp_path, new_i
         assert load_config(config).journals[0].group == 'Methods'
 
 
-@pytest.mark.parametrize('mutation', ['journal_name', 'journal_publisher_id', 'import'])
+@pytest.mark.parametrize('mutation', ['journal_name', 'journal_publisher_id'])
 def test_web_save_cannot_persist_machine_metadata_tampering_or_new_import(tmp_path, mutation, monkeypatch):
     from literature_monitor.openalex import OpenAlexClient, OpenAlexRequestError
     def unavailable(*args, **kwargs):
@@ -105,13 +105,7 @@ def test_web_save_cannot_persist_machine_metadata_tampering_or_new_import(tmp_pa
     before = config.read_bytes(), path.read_bytes()
     with TestClient(create_app(config), base_url='http://localhost') as client:
         data = browser_settings_submission(client.get('/settings').text)
-        if mutation == 'import':
-            data['journal_import_text'] = f'Journal,ISSN-L\nNew hint,{X}\n'
-            applied = client.post('/settings/import/apply', data=data)
-            assert applied.headers['HX-Trigger'] == 'settingsDraftChanged'
-            data = browser_settings_submission(applied.text)
-        else:
-            data[mutation][0] = 'Tampered name' if mutation == 'journal_name' else 'https://openalex.org/P99'
+        data[mutation][0] = 'Tampered name' if mutation == 'journal_name' else 'https://openalex.org/P99'
         saved = client.post('/settings/save', data=data)
         assert saved.status_code == 200 and 'HX-Trigger' not in saved.headers
         assert 'metadata' in saved.text

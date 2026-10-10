@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import base64
+import binascii
 import os
 import secrets
 import threading
@@ -16,11 +18,12 @@ from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.datastructures import UploadFile
 
 from literature_monitor.application.decisions import (
     DecisionOutcome,
@@ -30,12 +33,11 @@ from literature_monitor.application.decisions import (
 )
 from literature_monitor.application.export_attempts import ExportCompletionOutcome
 from literature_monitor.application.workspace_reset import ResetPlan, ResetRefused, preview_reset, execute_reset
-from literature_monitor.application.journal_import import (
-    JournalImportMode,
-    apply_journal_import,
-    preview_journal_import,
-)
 from literature_monitor.application.settings import (
+    SettingsDeletionApproval,
+    SettingsDeletionPlan,
+    SettingsIssueSource,
+    _read_snapshot,
     SettingsIssue,
     SettingsLoadResult,
     SettingsSaveOutcome,
@@ -43,14 +45,25 @@ from literature_monitor.application.settings import (
     SettingsValidationOutcome,
     SettingsValidationResult,
     load_settings,
+    plan_settings_deletions,
     save_settings,
+    validate_settings,
 )
 from literature_monitor.application.workspace import (
     WorkspacePaper,
     WorkspaceSnapshot,
     load_workspace,
 )
-from literature_monitor.config import ConfigurationError, LoadedConfig, load_config
+from literature_monitor.config import ConfigurationError, LoadedConfig, load_config, parse_settings_list_text, detect_list_schema
+from literature_monitor.application.full_markdown_import import (
+    MAX_MARKDOWN_BYTES, MarkdownImportCommittedWarning, preview_full_markdown, confirm_full_markdown,
+)
+from literature_monitor.application.access_service_migration import (
+    AccessSchemaUpgradeCommittedWarning, AccessSchemaUpgradeStateUncertain,
+    preview_access_schema_upgrade, confirm_access_schema_upgrade,
+)
+from literature_monitor.openalex import OpenAlexError
+from literature_monitor.safe_write import CompareReadError
 from literature_monitor.identifiers import normalize_doi
 from literature_monitor.safe_write import ContentChangedError, WorkspaceOperationLock
 from literature_monitor.models import WorkflowStatus
@@ -76,9 +89,7 @@ from literature_monitor.web.run_coordinator import (
 from literature_monitor.web.run_presentation import build_run_presentation
 from literature_monitor.web.settings_form import (
     SettingsFormValues,
-    SettingsImportValues,
     settings_draft_from_form,
-    settings_form_after_import,
     settings_form_from_draft,
     settings_form_from_submission,
 )
@@ -442,8 +453,26 @@ def _settings_context(
     attempted_values: SettingsFormValues | None = None,
     message: str | None = None,
     message_tone: str = "warning",
-    import_values: SettingsImportValues | None = None,
+    deletion_plan: SettingsDeletionPlan | None = None,
+    deletion_proof: str = "",
+    markdown_plan=None,
+    markdown_contents: str = "",
+    markdown_filename: str = "",
+    markdown_proof: str = "",
+    markdown_dirty: bool = False,
+    markdown_export_guard: bool = False,
+    markdown_reload_guard: bool = False,
+    access_upgrade_plan=None,
+    access_upgrade_proof: str = "",
+    access_upgrade_dirty: bool = False,
 ) -> dict[str, object]:
+    disk = disk_state or load_settings(request.app.state.config_path)
+    current_list = _read_snapshot(disk.journal_path, source=SettingsIssueSource.JOURNAL_DATA)
+    try:
+        needs_access_upgrade = (current_list.contents is not None
+                                and detect_list_schema(current_list.contents, path=disk.journal_path) == "legacy")
+    except ConfigurationError:
+        needs_access_upgrade = False
     return {
         "request": request,
         "csrf_token": csrf_token,
@@ -455,7 +484,20 @@ def _settings_context(
         "settings_attempted": attempted_values,
         "settings_message": message,
         "settings_message_tone": message_tone,
-        "settings_import": import_values or SettingsImportValues(),
+        "settings_deletion_plan": deletion_plan,
+        "settings_deletion_proof": deletion_proof,
+        "markdown_plan": markdown_plan,
+        "markdown_contents": markdown_contents,
+        "markdown_payload": base64.b64encode(markdown_contents.encode("utf-8")).decode("ascii"),
+        "markdown_filename": markdown_filename,
+        "markdown_proof": markdown_proof,
+        "markdown_dirty": markdown_dirty,
+        "markdown_export_guard": markdown_export_guard,
+        "markdown_reload_guard": markdown_reload_guard,
+        "access_upgrade_plan": access_upgrade_plan,
+        "access_upgrade_proof": access_upgrade_proof,
+        "access_upgrade_dirty": access_upgrade_dirty,
+        "needs_access_upgrade": needs_access_upgrade,
     }
 
 
@@ -464,6 +506,7 @@ def create_app(config_path: Path) -> FastAPI:
 
     resolved_config_path = config_path.resolve()
     csrf_token = secrets.token_urlsafe(32)
+    deletion_key = secrets.token_bytes(32)
     app = FastAPI(
         title="Literature Monitor",
         docs_url=None,
@@ -710,69 +753,225 @@ def create_app(config_path: Path) -> FastAPI:
             {"run_snapshot": snapshot},
         )
 
-    async def import_settings_route(request: Request, *, apply: bool) -> HTMLResponse:
-        form = await request.form()
-        submitted_csrf = form.get("csrf_token")
-        if not _csrf_valid(str(submitted_csrf) if submitted_csrf is not None else None, csrf_token):
-            return HTMLResponse('<p class="notice error">Invalid or missing CSRF token.</p>', status_code=403)
+    def markdown_reply(request: Request, values: SettingsFormValues, *, message: str,
+                       plan=None, contents: str = "", filename: str = "",
+                       proof: str = "", dirty: bool = False, issues=(),
+                       export_guard: bool = False, reload_guard: bool = False,
+                       upgrade_plan=None, upgrade_proof: str = "",
+                       upgrade_dirty: bool = False) -> HTMLResponse:
+        return templates.TemplateResponse(request, "fragments/settings_editor.html",
+            _settings_context(request=request, csrf_token=csrf_token, form_values=values,
+                issues=issues, message=message, markdown_plan=plan,
+                markdown_contents=contents, markdown_filename=filename,
+                markdown_proof=proof, markdown_dirty=dirty,
+                markdown_export_guard=export_guard, markdown_reload_guard=reload_guard,
+                access_upgrade_plan=upgrade_plan, access_upgrade_proof=upgrade_proof,
+                access_upgrade_dirty=upgrade_dirty))
 
+    def submitted_settings(form):
         values = settings_form_from_submission(form)
         draft, issues = settings_draft_from_form(values)
-        import_values = SettingsImportValues(
-            contents=str(form.get("journal_import_text", "")),
-            mode=str(form.get("journal_import_mode", JournalImportMode.MERGE.value)),
-            confirmation_source=str(form.get("import_confirmation_source", "")),
-            confirmation_rows=tuple(str(v) for v in form.getlist("import_confirmation_row")),
-            confirmation_targets=tuple(str(v) for v in form.getlist("import_confirmation_issn_l")),
-        )
+        disk = load_settings(resolved_config_path)
+        # Empty A3 Groups are presentation-only draft objects: compare them explicitly.
+        # They are not part of MonitorDraft, but Import/Export must not discard them silently.
+        occupied_groups = {row.group for row in values.journals if row.group}
+        empty_draft_groups = {group for group in values.groups if group and group not in occupied_groups}
+        dirty = draft is None or draft != disk.draft or bool(empty_draft_groups)
+        return values, draft, issues, disk, dirty
+
+    def require_settings_csrf(form) -> bool:
+        supplied = form.get("csrf_token")
+        return _csrf_valid(str(supplied) if supplied is not None else None, csrf_token)
+
+    @app.post("/settings/upgrade/preview", response_class=HTMLResponse)
+    async def preview_access_upgrade(request: Request) -> HTMLResponse:
+        form = await request.form()
+        if not require_settings_csrf(form):
+            return HTMLResponse("Invalid or missing CSRF token.", status_code=403)
+        values, draft, issues, disk, dirty = submitted_settings(form)
         try:
-            mode = JournalImportMode(import_values.mode)
-        except ValueError:
-            mode = None
-            import_values = replace(import_values, error="Choose Merge or Replace before importing.")
+            if draft is None or issues:
+                raise ConfigurationError("Invalid Settings draft prevents Access schema Upgrade")
+            plan = preview_access_schema_upgrade(disk.journal_path)
+            proof = hmac.new(deletion_key, repr((plan, draft)).encode("utf-8"), hashlib.sha256).hexdigest()
+            return markdown_reply(request, values, message="Legacy Access schema Upgrade Preview; no files changed.",
+                                  upgrade_plan=plan, upgrade_proof=proof, upgrade_dirty=dirty)
+        except (ConfigurationError, ContentChangedError, OSError, ValueError) as error:
+            return markdown_reply(request, values, message=f"Upgrade Preview blocked: {error}", issues=issues)
 
-        applied = False
-        message = "Import could not be applied." if apply else "Import could not be previewed."
-        if draft is not None and mode is not None:
-            plan = preview_journal_import(draft, import_values.contents, mode=mode)
-            stale_source = bool(import_values.confirmation_source and import_values.confirmation_source != import_values.source_revision)
-            if apply:
-                try:
-                    confirmations = import_values.confirmations(plan)
-                    result = apply_journal_import(draft, import_values.contents, mode=mode, confirmations=confirmations)
-                    plan = result.plan
-                    applied = result.applied
-                except ValueError as error:
-                    import_values = replace(import_values, error=str(error))
-                if applied:
-                    values = settings_form_after_import(values, result.draft)
-                    message = "Import applied to the unsaved Settings draft. Save to persist it."
-                else:
-                    message = "Import Apply blocked; the current draft is unchanged."
-            else:
-                message = "Import preview ready." if plan.can_apply or plan.can_reconcile else "Import Apply blocked."
-            if stale_source:
-                import_values = replace(import_values, confirmation_rows=(), confirmation_targets=(),
-                                        error="Import source changed; confirm the current rows again.")
-            import_values = replace(import_values, plan=plan)
-
-        response = templates.TemplateResponse(
-            request, "fragments/settings_editor.html",
-            _settings_context(request=request, csrf_token=csrf_token, form_values=values,
-                              issues=issues, import_values=import_values, message=message,
-                              message_tone="success" if applied else "warning"),
-        )
-        if applied:
-            response.headers["HX-Trigger"] = "settingsDraftChanged"
-        return response
+    @app.post("/settings/upgrade/confirm", response_class=HTMLResponse)
+    async def confirm_access_upgrade(request: Request) -> HTMLResponse:
+        form = await request.form()
+        if not require_settings_csrf(form):
+            return HTMLResponse("Invalid or missing CSRF token.", status_code=403)
+        values, draft, issues, disk, dirty = submitted_settings(form)
+        try:
+            if draft is None or issues:
+                raise ConfigurationError("Invalid Settings draft prevents Access schema Upgrade")
+            if str(form.get("confirm_access_upgrade", "")) != "yes":
+                raise ConfigurationError("Explicit Upgrade confirmation required")
+            if dirty and str(form.get("upgrade_discard", "")) != "yes":
+                raise ConfigurationError("Unsaved Settings Draft: Save or explicitly Discard before Upgrade")
+            plan = preview_access_schema_upgrade(disk.journal_path)
+            expected = hmac.new(deletion_key, repr((plan, draft)).encode("utf-8"), hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(str(form.get("access_upgrade_proof", "")), expected):
+                raise ContentChangedError("Access schema Upgrade confirmation is stale; Preview again")
+            if (draft.journal_revision != disk.draft.journal_revision
+                    or draft.monitor_revision != disk.draft.monitor_revision):
+                raise ContentChangedError("Settings changed since Upgrade Preview")
+            confirm_access_schema_upgrade(plan, confirmed=True)
+            saved = load_settings(resolved_config_path)
+            response = markdown_reply(request, settings_form_from_draft(saved.draft),
+                                      message="Access schema upgrade saved. Review and Preview Markdown Import again.",
+                                      issues=saved.issues)
+            response.headers["HX-Trigger"] = "settingsSaved"
+            return response
+        except AccessSchemaUpgradeCommittedWarning as warning:
+            saved = load_settings(resolved_config_path)
+            if saved.issues or saved.draft.journal_revision.digest != warning.revision:
+                return markdown_reply(
+                    request, values, issues=saved.issues,
+                    message="Upgrade write occurred, but disk state changed or could not be reread reliably. "
+                            "Durability is unconfirmed. Inspect storage and Reload; do not retry Upgrade directly.",
+                )
+            response = markdown_reply(
+                request, settings_form_from_draft(saved.draft), issues=saved.issues,
+                message="Legacy Access schema upgrade wrote list.md, but directory synchronization failed. "
+                        "Durable persistence is not confirmed. "
+                        f"Current disk revision: {warning.revision}. "
+                        "Check storage health; do not retry Upgrade directly.",
+            )
+            response.headers["HX-Trigger"] = "settingsSaved"
+            return response
+        except AccessSchemaUpgradeStateUncertain as error:
+            return markdown_reply(
+                request, values, issues=issues,
+                message=f"Legacy Access schema Upgrade write state cannot be confirmed: {error}. "
+                        "Durability is unconfirmed; inspect storage and Reload before any further changes. "
+                        "Do not retry Upgrade directly.",
+            )
+        except (ConfigurationError, ContentChangedError, CompareReadError, OSError, ValueError) as error:
+            return markdown_reply(request, values, message=f"Upgrade not written: {error}", issues=issues)
 
     @app.post("/settings/import/preview", response_class=HTMLResponse)
-    async def preview_settings_import(request: Request) -> HTMLResponse:
-        return await import_settings_route(request, apply=False)
+    async def preview_markdown_import(request: Request) -> HTMLResponse:
+        form = await request.form()
+        if not require_settings_csrf(form):
+            return HTMLResponse("Invalid or missing CSRF token.", status_code=403)
+        values, draft, issues, disk, dirty = submitted_settings(form)
+        upload = form.get("markdown_file")
+        try:
+            if draft is None or issues:
+                raise ConfigurationError("Invalid Settings draft; preserve it and correct errors before Import")
+            if not isinstance(upload, UploadFile) or not upload.filename:
+                raise ConfigurationError("Choose a complete UTF-8 .md file")
+            filename = upload.filename
+            if not filename.lower().endswith(".md") or Path(filename).name != filename:
+                raise ConfigurationError("Import requires a complete .md file")
+            blob = await upload.read(MAX_MARKDOWN_BYTES + 1)
+            if len(blob) > MAX_MARKDOWN_BYTES:
+                raise ConfigurationError("Markdown Import file exceeds 1 MiB")
+            contents = blob.decode("utf-8", errors="strict")
+            plan = preview_full_markdown(disk.journal_path, contents, filename=filename)
+            proof = hmac.new(deletion_key, repr((plan, draft)).encode("utf-8"), hashlib.sha256).hexdigest()
+            return markdown_reply(request, values, message="Full Markdown replacement Preview; no files changed.",
+                plan=plan, contents=contents, filename=filename, proof=proof, dirty=dirty)
+        except (ConfigurationError, ContentChangedError, OSError, UnicodeError, ValueError) as error:
+            return markdown_reply(request, values, message=f"Import Preview blocked: {error}", issues=issues)
 
-    @app.post("/settings/import/apply", response_class=HTMLResponse)
-    async def apply_settings_import(request: Request) -> HTMLResponse:
-        return await import_settings_route(request, apply=True)
+    @app.post("/settings/import/confirm", response_class=HTMLResponse)
+    async def confirm_markdown_import(request: Request) -> HTMLResponse:
+        form = await request.form()
+        if not require_settings_csrf(form):
+            return HTMLResponse("Invalid or missing CSRF token.", status_code=403)
+        values, draft, issues, disk, dirty = submitted_settings(form)
+        payload = str(form.get("markdown_import_payload", ""))
+        filename = str(form.get("markdown_import_filename", ""))
+        try:
+            if draft is None or issues:
+                raise ConfigurationError("Invalid draft; cannot confirm Import")
+            if form.get("confirm_full_import") != "yes":
+                raise ConfigurationError("Explicit Confirm Import required")
+            if dirty and form.get("import_discard") != "yes":
+                raise ConfigurationError("Unsaved Settings Draft: Save or explicitly Discard before Import")
+            # Base64 preserves the uploaded bytes exactly: browser FormData normalizes
+            # textarea newlines, which would otherwise invalidate a valid LF-based source.
+            try:
+                binary = base64.b64decode(payload, validate=True)
+                if len(binary) > MAX_MARKDOWN_BYTES:
+                    raise ValueError("source exceeds 1 MiB")
+                contents = binary.decode("utf-8", errors="strict")
+            except (ValueError, UnicodeError, binascii.Error) as error:
+                raise ConfigurationError("Import source payload changed or is invalid; Preview again") from error
+            plan = preview_full_markdown(disk.journal_path, contents, filename=filename)
+            expected = hmac.new(deletion_key, repr((plan, draft)).encode("utf-8"), hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(str(form.get("markdown_import_proof", "")), expected):
+                raise ContentChangedError("Import source, draft, plan or target revision changed; Preview again")
+            if (draft.journal_revision != disk.draft.journal_revision
+                    or draft.monitor_revision != disk.draft.monitor_revision):
+                raise ContentChangedError("Settings revisions changed; Reload and Preview again")
+            def verify_monitor_before_list_write() -> None:
+                monitor_snapshot = _read_snapshot(
+                    resolved_config_path, source=SettingsIssueSource.MONITOR_CONFIG,
+                )
+                if monitor_snapshot.issue or monitor_snapshot.revision != draft.monitor_revision:
+                    raise ContentChangedError("monitor.yaml changed before list.md Import replacement")
+            digest = confirm_full_markdown(plan, before_write=verify_monitor_before_list_write)
+            saved = load_settings(resolved_config_path)
+            response = markdown_reply(request, settings_form_from_draft(saved.draft),
+                message=f"Full Markdown Import saved to list.md. New revision: {digest}")
+            response.headers["HX-Trigger"] = "settingsSaved"
+            return response
+        except MarkdownImportCommittedWarning as warning:
+            saved = load_settings(resolved_config_path)
+            response = markdown_reply(
+                request, settings_form_from_draft(saved.draft),
+                message=f"Import reached list.md but directory synchronization failed. Actual saved revision: {warning.revision}. Verify storage health.",
+                issues=saved.issues,
+            )
+            response.headers["HX-Trigger"] = "settingsSaved"
+            return response
+        except (ConfigurationError, ContentChangedError, CompareReadError, OSError, UnicodeError, ValueError, OpenAlexError) as error:
+            return markdown_reply(request, values, message=f"Import not written: {error}", issues=issues)
+
+    @app.post("/settings/export", response_class=HTMLResponse)
+    async def export_markdown(request: Request):
+        form = await request.form()
+        if not require_settings_csrf(form):
+            return HTMLResponse("Invalid or missing CSRF token.", status_code=403)
+        values, draft, issues, disk, dirty = submitted_settings(form)
+        if dirty and form.get("export_discard") != "yes":
+            return markdown_reply(request, values, message="Unsaved Settings Draft: Save or explicitly Discard before Export.",
+                issues=issues, export_guard=True)
+        try:
+            snap = _read_snapshot(disk.journal_path, source=SettingsIssueSource.JOURNAL_DATA)
+            if snap.issue or snap.contents is None:
+                raise ConfigurationError(snap.issue.message if snap.issue else "list.md missing")
+            parse_settings_list_text(snap.contents, path=disk.journal_path)
+            if any(candidate.is_symlink() for candidate in (disk.journal_path, *disk.journal_path.parents)):
+                raise ConfigurationError("Unsafe saved Markdown path")
+            return Response(content=snap.contents.encode("utf-8"),
+                media_type="text/markdown; charset=utf-8",
+                headers={"Content-Disposition": 'attachment; filename="list.md"',
+                         "Cache-Control": "no-store"})
+        except (ConfigurationError, OSError) as error:
+            return markdown_reply(request, values, message=f"Export blocked: {error}", issues=issues)
+
+    @app.post("/settings/reload", response_class=HTMLResponse)
+    async def reload_markdown(request: Request) -> HTMLResponse:
+        form = await request.form()
+        if not require_settings_csrf(form):
+            return HTMLResponse("Invalid or missing CSRF token.", status_code=403)
+        values, draft, issues, disk, dirty = submitted_settings(form)
+        if form.get("reload_step") != "confirm" or form.get("reload_word") != "RELOAD":
+            return markdown_reply(request, values,
+                message="Reload discards unsaved Journals, Groups, Mapping, Monitor and Institution edits. Confirm explicitly.",
+                reload_guard=True)
+        saved = load_settings(resolved_config_path)
+        response = markdown_reply(request, settings_form_from_draft(saved.draft),
+            message="Reloaded both Settings files from disk. Prior unsaved edits discarded.", issues=saved.issues)
+        response.headers["HX-Trigger"] = "settingsSaved"
+        return response
 
     @app.post("/settings/save", response_class=HTMLResponse)
     async def save_settings_route(request: Request) -> HTMLResponse:
@@ -802,7 +1001,37 @@ def create_app(config_path: Path) -> FastAPI:
                 ),
             )
 
-        result = save_settings(config_path, draft)
+        disk = load_settings(config_path)
+        plan = plan_settings_deletions(disk.draft, draft)
+        proof = hmac.new(deletion_key, repr((draft, plan)).encode("utf-8"), hashlib.sha256).hexdigest()
+        approved = (
+            plan.required
+            and str(form.get("confirm_settings_deletions", "")) == "yes"
+            and hmac.compare_digest(str(form.get("settings_deletion_proof", "")), proof)
+        )
+        # 确认仅由本进程签发，精确绑定全部草稿字段、真实删除目标及原始版本。
+        # 不保存草稿副本；变更草稿、服务成员或文件版本都需重新预览。
+        if plan.required and not approved and not disk.issues and (
+            draft.monitor_revision == disk.draft.monitor_revision
+            and draft.journal_revision == disk.draft.journal_revision
+        ) and validate_settings(config_path, draft).outcome is SettingsValidationOutcome.VALID:
+            return templates.TemplateResponse(
+                request, "fragments/settings_editor.html",
+                _settings_context(
+                    request=request, csrf_token=csrf_token, form_values=values,
+                    deletion_plan=plan, deletion_proof=proof,
+                    message="Review the affected Services and Publishers, then confirm this Save.",
+                ),
+            )
+        approval = SettingsDeletionApproval(
+            draft.monitor_revision, draft.journal_revision,
+            tuple(service.id for service in plan.services),
+            tuple(publisher.publisher_id for publisher in plan.publishers),
+        ) if approved else None
+        result = (
+            save_settings(config_path, draft, deletion_approval=approval)
+            if approval is not None else save_settings(config_path, draft)
+        )
         if result.outcome is SettingsSaveOutcome.SAVED:
             response = templates.TemplateResponse(
                 request,
@@ -823,10 +1052,13 @@ def create_app(config_path: Path) -> FastAPI:
             return response
 
         if result.outcome is SettingsSaveOutcome.PARTIAL_SAVE:
-            form_values = settings_form_from_draft(result.state.draft)
+            # 保留提交时的字段与原始 revision；只读磁盘状态单独报告实际写入。
+            form_values = values
             message = (
-                "Settings were partially saved: journal data was written, "
-                "but monitor configuration was not written."
+                "Settings were partially saved: "
+                f"journal data written: {'yes' if result.journal_written else 'no'}, "
+                f"monitor configuration written: {'yes' if result.monitor_written else 'no'}. "
+                "Reload and reconcile before another Save."
             )
         elif result.outcome is SettingsSaveOutcome.REVISION_CONFLICT:
             form_values = values

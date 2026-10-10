@@ -24,7 +24,11 @@ def invocation(cmd, tab=10):
             "doi_url": cmd.doi_url, "tab_id": tab, "session_id": "native-session"}
 
 
-def result(client, cmd, outcome):
+def result(client, cmd, outcome, *, settle=True):
+    if outcome == "CONFIRMED" and settle:
+        # §42 requires a separate upstream pipeline-complete receipt.
+        assert client.post("/api/connector/native-save-settled",
+                           json=invocation(cmd)).status_code == 200
     return client.post("/api/connector/result", json={**invocation(cmd), "outcome": outcome,
                                                      "pdf_outcome": "unverified"})
 
@@ -48,7 +52,7 @@ def test_origin_observation_is_readonly_and_official_parent_stays_pdf_unverified
             assert "Access Service unknown" in html and "https://landing.example" in html
             assert "resource entitlement: unknown" in html
         # 观测既不能证明 parent，也不能替代一次性、匹配 tab 的 native permission。
-        assert result(client, cmd, "CONFIRMED").status_code == 409
+        assert result(client, cmd, "CONFIRMED", settle=False).status_code == 409
         assert client.post("/api/connector/dispatch", json=invocation(cmd, 11)).status_code == 409
         assert client.post("/api/connector/dispatch", json=invocation(cmd)).json()["accepted"] is True
         assert client.post("/api/connector/access", json=body).status_code == 409

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -13,7 +14,7 @@ from typing import Annotated, Any
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StringConstraints, ValidationError, field_validator
 
 from literature_monitor.date_range import (
     DEFAULT_WINDOW_DAYS,
@@ -75,20 +76,61 @@ class JournalConfig(BaseModel):
 
 
 class PublisherConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
     publisher_id: str
     name: NonEmptyStr
-    access_url: str | None = None
+    publisher_url: str | None = Field(default=None, validation_alias=AliasChoices("publisher_url", "access_url"))
+    access_service_id: str | None = None
 
     @field_validator("publisher_id")
     @classmethod
     def normalize_identity(cls, value: str) -> str:
         return normalize_publisher_id(value)
 
+    @field_validator("publisher_url")
+    @classmethod
+    def normalize_publisher_url(cls, value: str | None) -> str | None:
+        return normalize_public_http_url(value)
+
+    @field_validator("access_service_id")
+    @classmethod
+    def normalize_service_id(cls, value: str | None) -> str | None:
+        if value in (None, ""):
+            return None
+        return validate_access_service_id(value)
+
+    @property
+    def access_url(self) -> str | None:
+        """Compatibility for the v0.6.3 presentation adapter until A2."""
+        return self.publisher_url
+
+
+def validate_access_service_id(value: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"svc_[0-9a-f]{32}", value):
+        raise ValueError("Service ID must be svc_ followed by 32 lowercase hexadecimal digits")
+    return value
+
+
+class AccessService(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str
+    name: NonEmptyStr
+    access_url: str | None = None
+
+    @classmethod
+    def create(cls, name: str, access_url: str | None = None) -> AccessService:
+        return cls(id="svc_" + uuid.uuid4().hex, name=name, access_url=access_url)
+
+    @field_validator("id")
+    @classmethod
+    def normalize_identity(cls, value: str) -> str:
+        return validate_access_service_id(value)
+
     @field_validator("access_url")
     @classmethod
-    def normalize_access_url(cls, value: str | None) -> str | None:
+    def normalize_url(cls, value: str | None) -> str | None:
         return normalize_public_http_url(value)
 
 
@@ -433,7 +475,7 @@ def validate_journal_storage(journals: Sequence[JournalConfig]) -> None:
         for field, value in (("name", journal.name), ("group", journal.group)):
             if value is None:
                 continue
-            unsafe = any(character in value for character in ("|", "\n", "\r"))
+            unsafe = not _markdown_cell_safe(value)
             if field == "group" and value.splitlines() != [value]:
                 unsafe = True
             if unsafe:
@@ -444,6 +486,15 @@ def validate_journal_storage(journals: Sequence[JournalConfig]) -> None:
                     ),
                     field="journals",
                 )
+
+
+def _markdown_cell_safe(value: str) -> bool:
+    return (
+        "|" not in value
+        and "\n" not in value
+        and "\r" not in value
+        and all(not unicodedata.category(char).startswith("C") for char in value)
+    )
 
 
 def render_journal_whitelist_text(
@@ -648,7 +699,9 @@ def load_config(path: Path) -> LoadedConfig:
     definition = parse_monitor_definition(path, raw)
     whitelist = resolve_config_path(path, definition.venue_whitelist, "list.md")
     try:
-        journals = parse_journal_whitelist(whitelist)
+        # Run 只依赖有效的 Journal 身份；不完整的可选 Access Mapping
+        # 仍由 Settings/Import 严格校验，不参与文献检索准入判定。
+        journals = parse_journal_whitelist_text(_read_text(whitelist), path=whitelist)
     except ConfigurationError as error:
         raise ConfigurationError(
             f"{path}: field 'venue_whitelist': {error}",
@@ -668,41 +721,147 @@ def validate_publisher_configs(publishers: Sequence[PublisherConfig]) -> tuple[P
             raise ConfigurationError(str(error), field="publishers") from error
         if item.publisher_id in seen:
             raise ConfigurationError(f"duplicate Publisher ID {item.publisher_id}", field="publishers")
-        for value in (item.name, item.access_url):
-            if value is not None and any(c == "|" or ord(c) < 32 or ord(c) == 127 for c in value):
+        for value in (item.name, item.publisher_url):
+            if value is not None and not _markdown_cell_safe(value):
                 raise ConfigurationError("Publisher content cannot be represented in Markdown table", field="publishers")
         seen.add(item.publisher_id)
         normalized.append(item)
     return tuple(normalized)
 
 
-def parse_publisher_whitelist_text(contents: str, *, path: Path) -> tuple[PublisherConfig, ...]:
+def validate_access_services(services: Sequence[AccessService]) -> tuple[AccessService, ...]:
+    normalized: list[AccessService] = []
+    identities: set[str] = set()
+    names: set[str] = set()
+    for service in services:
+        try:
+            item = AccessService.model_validate(service.model_dump())
+        except ValueError as error:
+            raise ConfigurationError(str(error), field="access_services") from error
+        name_key = item.name.strip().casefold()
+        if item.id in identities:
+            raise ConfigurationError(f"duplicate Access Service ID {item.id}", field="access_services")
+        if name_key in names:
+            raise ConfigurationError(f"conflicting Access Service name {item.name!r}", field="access_services")
+        if any(not _markdown_cell_safe(value) for value in (item.name, item.access_url) if value is not None):
+            raise ConfigurationError("Access Service content cannot be represented in Markdown", field="access_services")
+        identities.add(item.id)
+        names.add(name_key)
+        normalized.append(item)
+    return tuple(normalized)
+
+
+def validate_access_mapping(publishers: Sequence[PublisherConfig], services: Sequence[AccessService]) -> None:
+    identities = {service.id for service in validate_access_services(services)}
+    for publisher in validate_publisher_configs(publishers):
+        if publisher.access_service_id is not None and publisher.access_service_id not in identities:
+            raise ConfigurationError(
+                f"Publisher {publisher.publisher_id} references unknown Access Service {publisher.access_service_id}",
+                field="access_services",
+            )
+
+
+def _managed_rows(contents: str, path: Path, section_name: str, columns: tuple[str, ...] | None = None
+                  ) -> tuple[tuple[str, ...], tuple[tuple[int, tuple[str, ...]], ...]] | None:
     lines = contents.splitlines()
-    headings = [i for i, line in enumerate(lines) if line.strip() == "## Publishers"]
+    headings = [i for i, line in enumerate(lines) if line.strip() == f"## {section_name}"]
+    if len(headings) > 1:
+        raise ConfigurationError(f"duplicate {section_name} section", path=path)
     if not headings:
-        return ()  # Pre-A4 documents are read without rewriting them.
-    if len(headings) != 1:
-        raise ConfigurationError("expected exactly one Publishers section", field="publishers", path=path)
-    section = []
-    for i in range(headings[0] + 1, len(lines)):
+        return None
+    start = headings[0] + 1
+    section: list[tuple[int, str]] = []
+    for i in range(start, len(lines)):
         if _HEADING_PATTERN.match(lines[i].strip()):
             break
         if lines[i].strip():
             section.append((i + 1, lines[i]))
     if len(section) < 2:
-        raise ConfigurationError("Publishers table is missing", field="publishers", path=path)
-    header = parse_journal_table_cells(section[0][1], path, section[0][0], 3)
-    separator = parse_journal_table_cells(section[1][1], path, section[1][0], 3)
-    if header != ("Publisher", "OpenAlex ID", "Access URL") or not all(_SEPARATOR_PATTERN.fullmatch(c) for c in separator):
-        raise ConfigurationError("invalid Publishers table header/separator", field="publishers", path=path)
+        raise ConfigurationError(f"{path}: {section_name} table is missing", path=path)
+    header = parse_journal_table_cells(section[0][1], path, section[0][0], len(columns) if columns else None)
+    if columns is not None and header != columns:
+        raise ConfigurationError(f"{path}: invalid {section_name} table header", path=path)
+    separator = parse_journal_table_cells(section[1][1], path, section[1][0], len(header))
+    if not all(_SEPARATOR_PATTERN.fullmatch(cell) for cell in separator):
+        raise ConfigurationError(f"{path}: invalid {section_name} table separator", path=path)
+    return header, tuple(
+        (number, parse_journal_table_cells(line, path, number, len(header)))
+        for number, line in section[2:]
+    )
+
+
+def detect_list_schema(contents: str, *, path: Path) -> str:
+    """Distinguish §41 storage from §43; reject partly converted configurations."""
+    journals = _managed_rows(contents, path, "Journals",
+                             ("Journal", "ISSN-L", "Publisher ID", "Group"))
+    if journals is None:
+        raise ConfigurationError(f"{path}: missing Journals section", field="journals", path=path)
+    publishers = _managed_rows(contents, path, "Publishers")
+    if publishers is None:
+        raise ConfigurationError(f"{path}: missing Publishers section", field="publishers", path=path)
+    services = _managed_rows(contents, path, "Access Services")
+    header = publishers[0]
+    if header == ("Publisher", "OpenAlex ID", "Access URL") and services is None:
+        schema = "legacy"
+    elif header == ("Publisher", "OpenAlex ID", "Publisher URL", "Access Service ID") and services is not None:
+        if services[0] != ("Service ID", "Service", "Access URL"):
+            raise ConfigurationError(f"{path}: invalid Access Services header", field="access_services", path=path)
+        schema = "current"
+    else:
+        raise ConfigurationError(f"{path}: mixed or incomplete Journals & Access schema", path=path)
+    parsed_journals = parse_journal_whitelist_text(contents, path=path)
+    validate_journal_storage(parsed_journals)
+    parsed_publishers = parse_publisher_whitelist_text(contents, path=path)
+    validate_publisher_membership(parsed_journals, parsed_publishers)
+    if schema == "current":
+        validate_access_mapping(parsed_publishers, parse_access_services_text(contents, path=path))
+    return schema
+
+
+def parse_publisher_whitelist_text(contents: str, *, path: Path) -> tuple[PublisherConfig, ...]:
+    section = _managed_rows(contents, path, "Publishers")
+    if section is None:
+        return ()  # Pre-A4 documents are read without rewriting them.
+    header, rows = section
+    if header not in (
+        ("Publisher", "OpenAlex ID", "Access URL"),
+        ("Publisher", "OpenAlex ID", "Publisher URL", "Access Service ID"),
+    ):
+        raise ConfigurationError("invalid Publishers table header", field="publishers", path=path)
     result = []
-    for number, line in section[2:]:
-        name, identity, url = parse_journal_table_cells(line, path, number, 3)
+    for number, cells in rows:
+        name, identity, url = cells[:3]
         try:
-            result.append(PublisherConfig(name=name, publisher_id=identity, access_url=url or None))
+            result.append(PublisherConfig(name=name, publisher_id=identity, publisher_url=url or None,
+                                          access_service_id=(cells[3] or None) if len(cells) == 4 else None))
         except ValueError as error:
             raise ConfigurationError(f"{path}:{number}: {error}", field="publishers", path=path) from error
     return validate_publisher_configs(result)
+
+
+def parse_access_services_text(contents: str, *, path: Path) -> tuple[AccessService, ...]:
+    section = _managed_rows(contents, path, "Access Services",
+                            ("Service ID", "Service", "Access URL"))
+    if section is None:
+        raise ConfigurationError(f"{path}: missing Access Services section", field="access_services", path=path)
+    result: list[AccessService] = []
+    for number, (identity, name, url) in section[1]:
+        try:
+            result.append(AccessService(id=identity, name=name, access_url=url or None))
+        except ValueError as error:
+            raise ConfigurationError(f"{path}:{number}: {error}", field="access_services", path=path) from error
+    return validate_access_services(result)
+
+
+def parse_settings_list_text(contents: str, *, path: Path
+                             ) -> tuple[tuple[JournalConfig, ...], tuple[PublisherConfig, ...], tuple[AccessService, ...]]:
+    if detect_list_schema(contents, path=path) != "current":
+        raise ConfigurationError(f"{path}: explicit v0.6.4 schema upgrade required", path=path)
+    return (
+        parse_journal_whitelist_text(contents, path=path),
+        parse_publisher_whitelist_text(contents, path=path),
+        parse_access_services_text(contents, path=path),
+    )
 
 
 def validate_publisher_membership(journals: Sequence[JournalConfig], publishers: Sequence[PublisherConfig]) -> None:
@@ -711,21 +870,46 @@ def validate_publisher_membership(journals: Sequence[JournalConfig], publishers:
 
 
 def render_settings_list_text(existing_contents: str | None, journals: Sequence[JournalConfig],
-                              publishers: Sequence[PublisherConfig], *, path: Path) -> str:
-    """Prepare one coherent list target; neither section has an independent write path."""
+                              publishers: Sequence[PublisherConfig], *, path: Path,
+                              access_services: Sequence[AccessService] | None = None) -> str:
+    """Render §43's managed tables; preserve every other Markdown section."""
+    if access_services is None and existing_contents is not None and any(
+        line.strip() == "## Access Services" for line in existing_contents.splitlines()
+    ):
+        current = parse_settings_list_text(existing_contents, path=path)
+        if current[2] or any(p.access_service_id for p in current[1]):
+            raise ConfigurationError("explicit Access Services are required to preserve saved mapping",
+                                     field="access_services", path=path)
     publishers = validate_publisher_configs(publishers)
+    services = validate_access_services(access_services or ())
+    validate_access_mapping(publishers, services)
     validate_publisher_membership(journals, publishers)
     target = render_journal_whitelist_text(existing_contents, journals, path=path)
     lines = target.splitlines(keepends=True)
-    headings = [i for i, line in enumerate(lines) if line.strip() == "## Publishers"]
-    if len(headings) > 1:
-        raise ConfigurationError("duplicate Publishers section", field="publishers", path=path)
-    start = headings[0] if headings else next((i for i, line in enumerate(lines) if line.strip() == "## Conferences"), len(lines))
-    end = start if not headings else next((i for i in range(start + 1, len(lines)) if _HEADING_PATTERN.match(lines[i].strip())), len(lines))
-    rows = ["## Publishers", "", "| Publisher | OpenAlex ID | Access URL |", "| --- | --- | --- |"]
-    rows.extend(f"| {p.name} | {p.publisher_id} | {p.access_url or ''} |" for p in publishers)
-    section = "\n".join(rows) + "\n\n"
-    prefix = "".join(lines[:start])
-    if prefix and not prefix.endswith("\n\n"):
-        prefix += "\n" if prefix.endswith("\n") else "\n\n"
-    return prefix + section + "".join(lines[end:])
+    for heading in ("## Publishers", "## Access Services"):
+        if sum(line.strip() == heading for line in lines) > 1:
+            raise ConfigurationError(f"duplicate {heading} section", path=path)
+    # Replace managed blocks independently to preserve intervening human sections.
+    def replace_section(source: str, heading: str, rows: list[str]) -> str:
+        current_lines = source.splitlines(keepends=True)
+        indexes = [i for i, line in enumerate(current_lines) if line.strip() == heading]
+        if len(indexes) > 1:
+            raise ConfigurationError(f"duplicate {heading} section", path=path)
+        begin = indexes[0] if indexes else next(
+            (i for i, line in enumerate(current_lines) if line.strip() == "## Conferences"), len(current_lines))
+        finish = next((i for i in range(begin + 1, len(current_lines))
+                       if _HEADING_PATTERN.match(current_lines[i].strip())), len(current_lines)) if indexes else begin
+        prefix = "".join(current_lines[:begin])
+        if prefix and not prefix.endswith("\n\n"):
+            prefix += "\n" if prefix.endswith("\n") else "\n\n"
+        return prefix + "\n".join(rows) + "\n\n" + "".join(current_lines[finish:])
+
+    publisher_rows = ["## Publishers", "", "| Publisher | OpenAlex ID | Publisher URL | Access Service ID |",
+                      "| --- | --- | --- | --- |"]
+    publisher_rows.extend(f"| {p.name} | {p.publisher_id} | {p.publisher_url or ''} | {p.access_service_id or ''} |"
+                          for p in publishers)
+    target = replace_section(target, "## Publishers", publisher_rows)
+    service_rows = ["## Access Services", "", "| Service ID | Service | Access URL |", "| --- | --- | --- |"]
+    service_rows.extend(f"| {service.id} | {service.name} | {service.access_url or ''} |" for service in services)
+    target = replace_section(target, "## Access Services", service_rows)
+    return target

@@ -1,6 +1,6 @@
 [project]
 name = "literature-monitor"
-version = "0.6.3"
+version = "0.6.4"
 description = "A lightweight journal-monitoring workflow"
 readme = "README.md"
 license = "MIT"

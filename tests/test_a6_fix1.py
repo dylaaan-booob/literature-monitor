@@ -91,23 +91,17 @@ def test_f4_explicit_repair_preserves_other_sections_and_publishers(tmp_path, mo
     assert state.draft.publishers == original.publishers
     if mode == 'bad_row':
         assert state.draft.journals == original.journals
-    before_tail = path.read_text().split('## Conferences', 1)[1]
+    else:
+        assert state.draft.journals == ()
+    before = config.read_bytes(), path.read_bytes()
     journal = original.journals[0] if mode == 'bad_row' else JournalConfig(name='Untrusted hint', issn_l=A, group='Recovered')
     client, calls = provider(sources=[source(aliases=(A,), candidate=A, publisher=P1)], publishers=[])
     with client:
         result = settings.save_settings(config, replace(state.draft, journals=(journal,)), client=client)
-    assert result.outcome is settings.SettingsSaveOutcome.SAVED, result.issues
-    assert result.state.draft.publishers == original.publishers
-    assert result.state.draft.journals[0].name == ('Canonical A' if mode == 'bad_row' else 'Canonical Source')
-    assert result.state.draft.journals[0].publisher_id == P1
-    assert calls == ([] if mode == 'bad_row' else ['/sources'])
-    tail = path.read_text().split('## Conferences', 1)[1]
-    if mode == 'missing':
-        # Existing append-on-repair semantics retain every original byte.
-        assert tail.startswith(before_tail)
-        assert tail[len(before_tail):].lstrip().startswith('## Journals')
-    else:
-        assert tail == before_tail
+    # A1 does not allow the old Settings form to repair/upgrade ambiguous data.
+    assert result.outcome is settings.SettingsSaveOutcome.INVALID_DRAFT
+    assert not calls
+    assert (config.read_bytes(), path.read_bytes()) == before
 
 
 @pytest.mark.parametrize('failure', ['missing_source', 'provider', 'publisher_loss', 'conflict'])
@@ -125,7 +119,7 @@ def test_f4_repair_failure_writes_neither_file(tmp_path, failure):
     client, _ = provider(sources=rows, fail='/sources' if failure == 'provider' else None, during=during)
     with client:
         result = settings.save_settings(config, replace(state.draft, journals=(JournalConfig(name='hint', issn_l=A),)), client=client)
-    assert result.outcome is (settings.SettingsSaveOutcome.REVISION_CONFLICT if failure == 'conflict' else settings.SettingsSaveOutcome.INVALID_DRAFT)
+    assert result.outcome is settings.SettingsSaveOutcome.INVALID_DRAFT
     assert not result.journal_written and not result.monitor_written
     assert path.read_bytes() == before[1]
     if failure != 'conflict':
@@ -135,6 +129,7 @@ def test_f4_repair_failure_writes_neither_file(tmp_path, failure):
 def test_f4_valid_row_metadata_cannot_be_forged_by_damaging_another_row(tmp_path):
     config, path, original = damaged_settings(tmp_path, 'bad_row')
     state = settings.load_settings(config)
+    assert state.draft.journals == original.journals
     before = config.read_bytes(), path.read_bytes()
     forged = original.journals[0].model_copy(update={'name': 'Forged', 'publisher_id': P2})
     client, calls = provider()
@@ -184,16 +179,14 @@ def test_f4_web_repair_and_partial_save(tmp_path, monkeypatch):
         if p == config: raise OSError('monitor write unavailable')
         return write(p, contents, snapshot)
     monkeypatch.setattr(settings, '_write_snapshot_target', fail_monitor)
-    before = config.read_bytes()
+    before = config.read_bytes(), path.read_bytes()
     with TestClient(create_app(config), base_url='http://localhost') as browser:
         data = browser_settings_submission(browser.get('/settings').text)
         data.update(journal_name=['Pending resolution'], journal_issns=[A], journal_publisher_id=[''], journal_pending=['1'], journal_group=['Recovered'])
         response = browser.post('/settings/save', data=data)
         assert 'HX-Trigger' not in response.headers
-        assert 'partial' in response.text.lower()
-        assert browser_settings_values(response.text).journals[0].name == 'Canonical Source'
-    assert config.read_bytes() == before
-    assert settings.load_settings(config).draft.journals[0].group == 'Recovered'
+        assert 'Settings issues' in response.text
+    assert (config.read_bytes(), path.read_bytes()) == before
 
 
 @pytest.mark.parametrize('mode', list(JournalImportMode))
@@ -221,105 +214,13 @@ def test_f2_real_group_conflict_still_blocks_and_same_name_distinct_ids_coexist(
     assert result.applied and {j.issn_l for j in result.draft.journals} == {A, B}
 
 
-@pytest.mark.parametrize('mode', list(JournalImportMode))
-@pytest.mark.parametrize('confirmed', [False, True])
-def test_f3_legacy_web_preview_apply_save_and_draft_preservation(tmp_path, monkeypatch, mode, confirmed):
-    from literature_monitor.application import journal_import
-    config, path, _ = setup(tmp_path)
-    legacy_id = '1541-0420' if confirmed else B
-    contents = f'Journal,ISSN/EISSN,Group\nLegacy hint,{legacy_id},Methods\n'
-    metadata, calls = provider(sources=[source(aliases=(legacy_id, B), publisher=None)])
-    monkeypatch.setattr(journal_import, 'OpenAlexClient', lambda **kw: metadata)
-    before = config.read_bytes(), path.read_bytes()
-    with TestClient(create_app(config), base_url='http://localhost') as browser:
-        data = browser_settings_submission(browser.get('/settings').text)
-        revisions = data['monitor_revision_digest'], data['journal_revision_digest']
-        data.update(journal_import_text=[contents], journal_import_mode=[mode.value], publisher_access_url=[''], keyword_expression=['statistics'])
-        preview = browser.post('/settings/import/preview', data=data)
-        assert not calls and (config.read_bytes(), path.read_bytes()) == before
-        assert nodes(preview.text, attribute='data-import-apply')
-        fields = browser_settings_submission(preview.text)
-        assert fields['import_confirmation_issn_l'] == [''] and fields['import_confirmation_row'] == ['2']
-        assert legacy_id in preview.text and 'Methods' in preview.text
-        fields['import_confirmation_issn_l'] = [B if confirmed else '']
-        applied = browser.post('/settings/import/apply', data=fields)
-        assert applied.headers.get('HX-Trigger') == 'settingsDraftChanged', applied.text
-        fields = browser_settings_submission(applied.text)
-        assert fields['journal_import_text'] == [contents]
-        assert fields['import_confirmation_issn_l'] == [B if confirmed else '']
-        assert fields['publisher_access_url'] == ['']
-        assert fields['keyword_expression'] == ['statistics']
-        assert (fields['monitor_revision_digest'], fields['journal_revision_digest']) == revisions
-        rows = browser_settings_values(applied.text).journals
-        assert [j.issns for j in rows] == ([A, B] if mode is JournalImportMode.MERGE else [B])
-        assert rows[-1].group == 'Methods'
-        assert (config.read_bytes(), path.read_bytes()) == before
-        # Save must still resolve a genuinely new durable identity and perform CAS.
-        save_metadata, _ = provider(sources=[source(publisher=None)])
-        monkeypatch.setattr(settings, 'OpenAlexClient', lambda **kw: save_metadata)
-        saved = browser.post('/settings/save', data=fields)
-        assert saved.headers.get('HX-Trigger') == 'settingsSaved', saved.text
-    final = settings.load_settings(config).draft
-    assert final.journals[-1].issn_l == B and final.journals[-1].name == 'Canonical Source'
-    assert final.keyword_expression == 'statistics'
 
 
-@pytest.mark.parametrize('failure', ['provider', 'ambiguous', 'invalid_confirmation', 'absent_confirmation', 'duplicate', 'stale_source', 'wrong_row'])
-def test_f3_whole_apply_failure_preserves_input_and_zero_writes(tmp_path, monkeypatch, failure):
-    from literature_monitor.application import journal_import
-    config, path, _ = setup(tmp_path)
-    legacy_id = '1541-0420'
-    contents = f'Journal,ISSN/EISSN,Group\nHint,{legacy_id},Methods\n'
-    if failure == 'duplicate': contents += f'Other,{B},Methods\n'
-    sources = [source(aliases=(legacy_id, B), publisher=None)]
-    if failure == 'ambiguous': sources += [source(aliases=(legacy_id, B), publisher=None, sid='S3')]
-    metadata, calls = provider(sources=sources, fail='/sources' if failure == 'provider' else None)
-    monkeypatch.setattr(journal_import, 'OpenAlexClient', lambda **kw: metadata)
-    before = config.read_bytes(), path.read_bytes()
-    with TestClient(create_app(config), base_url='http://localhost') as browser:
-        data = browser_settings_submission(browser.get('/settings').text)
-        data.update(journal_import_text=[contents], publisher_access_url=['https://draft.example'], keyword_expression=['statistics'])
-        preview = browser.post('/settings/import/preview', data=data)
-        assert not calls
-        fields = browser_settings_submission(preview.text)
-        assert 'import_confirmation_issn_l' in fields
-        targets = ['invalid' if failure == 'invalid_confirmation' else '' if failure == 'absent_confirmation' else B]
-        if failure == 'duplicate': targets += ['']
-        fields['import_confirmation_issn_l'] = targets
-        if failure == 'stale_source': fields['journal_import_text'] = [contents.replace(legacy_id, A)]
-        if failure == 'wrong_row': fields['import_confirmation_row'] = ['999']
-        response = browser.post('/settings/import/apply', data=fields)
-        assert 'HX-Trigger' not in response.headers
-        values = browser_settings_values(response.text)
-        assert values.journals[0].issns == A and len(values.journals) == 1
-        assert values.publishers[0].access_url == 'https://draft.example'
-        assert values.keyword_expression == 'statistics'
-        assert values.journal_revision_digest == data['journal_revision_digest'][0]
-        again = browser_settings_submission(response.text)
-        assert again['journal_import_text'] == fields['journal_import_text']
-        if failure not in ('stale_source', 'wrong_row'):
-            assert again['import_confirmation_issn_l'] == targets
-        if failure in ('invalid_confirmation', 'stale_source', 'wrong_row'): assert not calls
-        assert (config.read_bytes(), path.read_bytes()) == before
 
 
-def test_f3_persisted_migration_confirmation_cannot_confirm_import(tmp_path, monkeypatch):
-    from literature_monitor.application import journal_import
-    config, _, _ = setup(tmp_path)
-    metadata, _ = provider(sources=[source(aliases=('1541-0420', B), publisher=None)])
-    monkeypatch.setattr(journal_import, 'OpenAlexClient', lambda **kw: metadata)
-    with TestClient(create_app(config), base_url='http://localhost') as browser:
-        data = browser_settings_submission(browser.get('/settings').text)
-        data['journal_import_text'] = ['Journal,ISSN/EISSN\nHint,1541-0420\n']
-        preview = browser.post('/settings/import/preview', data=data)
-        fields = browser_settings_submission(preview.text)
-        fields['migration_issn_l'] = [B]
-        response = browser.post('/settings/import/apply', data=fields)
-        assert 'HX-Trigger' not in response.headers
-        assert 'confirmation' in response.text.lower()
 
 
-@pytest.mark.parametrize('entry', ['add', 'import'])
+@pytest.mark.parametrize('entry', ['add'])
 @pytest.mark.parametrize('url', ['', 'https://edited.example/login'])
 def test_f5_remove_reintroduce_saved_identity_offline_web_save(tmp_path, monkeypatch, entry, url):
     config, path, original = setup(tmp_path)
@@ -329,14 +230,7 @@ def test_f5_remove_reintroduce_saved_identity_offline_web_save(tmp_path, monkeyp
         for name in ('journal_name', 'journal_issns', 'journal_group', 'journal_publisher_id', 'journal_pending'):
             data[name] = []
         data['publisher_access_url'] = [url]
-        if entry == 'add':
-            data.update(journal_name=['Pending resolution'], journal_issns=[A], journal_publisher_id=[''], journal_pending=['1'], journal_group=['Methods'])
-        else:
-            data['journal_import_text'] = [f'Journal,ISSN-L,Group\nReintroduced hint,{A},Methods\n']
-            preview = browser.post('/settings/import/preview', data=data)
-            applied = browser.post('/settings/import/apply', data=browser_settings_submission(preview.text))
-            assert applied.headers.get('HX-Trigger') == 'settingsDraftChanged', applied.text
-            data = browser_settings_submission(applied.text)
+        data.update(journal_name=['Pending resolution'], journal_issns=[A], journal_publisher_id=[''], journal_pending=['1'], journal_group=['Methods'])
         response = browser.post('/settings/save', data=data)
         assert response.headers.get('HX-Trigger') == 'settingsSaved', response.text
         values = browser_settings_values(response.text)
@@ -393,43 +287,3 @@ def test_f4_symlink_monitor_never_overwrites_target(tmp_path, web):
         result = settings.save_settings(config, original)
         assert result.outcome is settings.SettingsSaveOutcome.WRITE_FAILED
     assert config.is_symlink() and (target.read_bytes(), path.read_bytes()) == before
-
-
-def test_f3_node_confirmation_survives_htmx_and_source_edit_invalidates_it(tmp_path, monkeypatch):
-    from literature_monitor.application import journal_import
-    from test_web_run_settings import SettingsDOM, SETTINGS_NODE_DOM
-    config, _, _ = setup(tmp_path)
-    metadata, _ = provider(fail='/sources')
-    monkeypatch.setattr(journal_import, 'OpenAlexClient', lambda **kw: metadata)
-    with TestClient(create_app(config), base_url='http://localhost') as browser:
-        data = browser_settings_submission(browser.get('/settings').text)
-        data.update(journal_import_text=['Journal,ISSN/EISSN\nHint,1541-0420\n'], publisher_access_url=[''])
-        page = browser.post('/settings/import/preview', data=data).text
-        fields = browser_settings_submission(page)
-        fields['import_confirmation_issn_l'] = [B]
-        response = browser.post('/settings/import/apply', data=fields).text
-    source_js = Path('src/literature_monitor/web/static/app.js').read_text()
-    script = f'const PAGE={json.dumps(SettingsDOM(page).root)}, SOURCE={json.dumps(source_js)}, RESPONSE={json.dumps(SettingsDOM(response).root)};\n' + SETTINGS_NODE_DOM + r'''
-const editor = () => document.getElementById('settings-editor');
-let confirmation = editor().querySelector('[name="import_confirmation_issn_l"]');
-confirmation.value = '0090-5364'; handlers.input({target: confirmation});
-assert.notEqual(document.documentElement.dataset.settingsDirty, 'true');
-editor().querySelector('[data-journal-viewport]').scrollTop = 87;
-editor().querySelector('[data-publisher-viewport]').scrollTop = 101;
-editor().querySelector('[data-settings-disclosure="groups"]').open = true;
-bodyHandlers['htmx:beforeSwap']({detail: {target: editor()}});
-dom = build(RESPONSE);
-bodyHandlers['htmx:afterSwap']({detail: {target: editor()}});
-assert.equal(editor().querySelector('[name="import_confirmation_issn_l"]').value, '0090-5364');
-assert.equal(editor().querySelector('[name="publisher_access_url"]').value, '');
-assert.equal(editor().querySelector('[data-journal-viewport]').scrollTop, 87);
-assert.equal(editor().querySelector('[data-publisher-viewport]').scrollTop, 101);
-assert.equal(editor().querySelector('[data-settings-disclosure="groups"]').open, true);
-bodyHandlers.settingsDraftChanged();
-assert.equal(document.documentElement.dataset.settingsDirty, 'true');
-const textarea = editor().querySelector('[data-journal-import-text]');
-textarea.value = 'Journal,ISSN/EISSN\nOther,0006-341X\n'; handlers.input({target: textarea});
-assert.equal(editor().querySelector('[name="import_confirmation_issn_l"]'), null);
-'''
-    result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr

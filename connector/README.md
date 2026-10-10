@@ -1,10 +1,10 @@
 # Literature Monitor Connector
 
-This directory defines the independent browser component for v0.6.3,
+This directory defines the independent browser component for the v0.6.4 release,
 following the v0.6.3 batch/Connector contract in SPEC §42. It is derived from the official
 Zotero Connector source and is separate from the MIT Python
 `literature_monitor` package. The tracked build entry point generates the
-Chrome/MV3 artifact with version `0.6.3`.
+Chrome/MV3 artifact with version `0.6.4`.
 
 A1 establishes source provenance, licensing, reconstruction and Chrome/MV3
 build boundaries. A5 adds the independent Literature Monitor automatic-capture

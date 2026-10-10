@@ -8,7 +8,7 @@
   </div>
 
   {% if settings_message %}
-    <div class="notice {{ settings_message_tone }}">{{ settings_message }}</div>
+    <div class="notice {{ settings_message_tone }}" data-settings-message role="status" aria-live="polite" tabindex="-1">{{ settings_message }}</div>
   {% endif %}
 
   {% if settings_save and settings_save.outcome.value == "PARTIAL_SAVE" %}
@@ -16,12 +16,12 @@
       <strong>Partial save.</strong>
       Journal data written: {{ "yes" if settings_save.journal_written else "no" }}.
       Monitor config written: {{ "yes" if settings_save.monitor_written else "no" }}.
-      The editor below reflects the reread disk state.
+      The disk-state panel shows the reread files; the editor retains the attempted values and original revisions.
     </div>
   {% endif %}
 
   {% if settings_issues %}
-    <section class="settings-issues" aria-label="Settings issues">
+    <section class="settings-issues" aria-label="Settings issues" role="alert" tabindex="-1">
       <h2>Issues</h2>
       <ul>
         {% for issue in settings_issues %}
@@ -69,7 +69,8 @@
         <dt>Keyword expression</dt><dd>{{ settings_attempted.keyword_expression }}</dd>
         <dt>Output workspace</dt><dd>{{ settings_attempted.output_dir }}</dd>
         <dt>Journal rows</dt><dd>{{ settings_attempted.journals|length }}</dd>
-        {% for publisher in settings_attempted.publishers %}<dt>{{ publisher.name }} Access URL</dt><dd>{{ publisher.access_url or "Blank" }}</dd>{% endfor %}
+        {% for publisher in settings_attempted.publishers %}<dt>{{ publisher.name }} Publisher URL</dt><dd>{{ publisher.publisher_url or "Blank" }}</dd>{% endfor %}
+        {% for service in settings_attempted.access_services %}<dt>Access Service {{ service.id }}</dt><dd>{{ service.name }} — {{ service.access_url or "Blank URL" }}</dd>{% endfor %}
       </dl>
     </details>
   {% endif %}
@@ -91,6 +92,34 @@
       <input type="hidden" name="legacy_journals" value="{{ settings_form.legacy_journals }}">
     {% endif %}
 
+      {% if needs_access_upgrade %}
+        <section class="notice warning">
+          <p>The saved list.md uses the legacy Publisher/Access URL schema. Markdown Import requires an explicit one-time Upgrade Preview and Confirm. No automatic file rewrite occurs.</p>
+          <button type="button" class="secondary" data-preview-access-upgrade
+                  hx-post="/settings/upgrade/preview" hx-include="#settings-form"
+                  hx-target="#settings-editor" hx-swap="outerHTML">Preview one-time Access schema Upgrade</button>
+          {% if access_upgrade_plan %}
+            <section class="notice warning" data-access-upgrade-plan>
+              <h3>Confirm Legacy Access schema Upgrade</h3>
+              <p>{{ access_upgrade_plan.journal_count }} Journals and {{ access_upgrade_plan.publisher_count }} Publishers preserved. All non-managed sections remain. New Access Services table is initially empty.</p>
+              <p>Current saved revision: {{ access_upgrade_plan.source_digest }}</p>
+              {% if access_upgrade_dirty %}<p>Unsaved Draft must be Saved or explicitly Discarded. Saving invalidates this Preview.</p>{% endif %}
+              <input type="hidden" name="access_upgrade_proof" value="{{ access_upgrade_proof }}">
+              <input type="hidden" name="confirm_access_upgrade" value="yes">
+              {% if access_upgrade_dirty %}
+                <button type="button" data-confirm-access-upgrade hx-post="/settings/upgrade/confirm"
+                        hx-vals='{"upgrade_discard":"yes"}' hx-include="#settings-form"
+                        hx-target="#settings-editor" hx-swap="outerHTML">Discard Draft and Confirm Upgrade</button>
+              {% else %}
+                <button type="button" data-confirm-access-upgrade hx-post="/settings/upgrade/confirm"
+                        hx-include="#settings-form" hx-target="#settings-editor"
+                        hx-swap="outerHTML">Confirm Upgrade</button>
+              {% endif %}
+              <button type="button" class="secondary" data-cancel-access-upgrade>Cancel</button>
+            </section>
+          {% endif %}
+        </section>
+      {% endif %}
     <h2>Monitor configuration</h2>
     <div class="form-grid">
       <label>
@@ -156,9 +185,68 @@
       <p class="muted">Automatic federated access is unavailable until a service route is verified. Use the Paper's service page or your manual Publisher Access URL; existing OpenAthens host associations remain independent.</p>
     </fieldset>
 
-    <fieldset class="venue-settings">
-      <legend>Journals &amp; Publishers</legend>
-      <section aria-labelledby="settings-journals-heading">
+    <fieldset class="venue-settings" data-integrated-settings>
+      <legend>Journals &amp; Access</legend>
+      <div class="settings-view-toolbar" role="group" aria-label="Journals and Access view">
+        <button type="button" data-settings-view-button="overview" aria-controls="settings-overview" aria-pressed="true">Overview</button>
+        <button type="button" class="secondary" data-settings-view-button="groups" aria-controls="settings-journal-groups" aria-pressed="false">Organize · Journal Groups</button>
+        <button type="button" class="secondary" data-settings-view-button="mapping" aria-controls="settings-access-mapping" aria-pressed="false">Organize · Access Mapping</button>
+        <span class="muted" data-settings-view-status role="status" aria-live="polite">Read-only Overview</span>
+      </div>
+      <p class="muted">Overview reflects this page's current draft, including unsaved changes. Organize edits use the one Settings Save at the bottom. Switching views never writes files.</p>
+      <section id="settings-overview" data-settings-overview aria-labelledby="settings-overview-title">
+        <h2 id="settings-overview-title">Current draft · read-only Overview</h2>
+        <div data-overview-content aria-live="polite">
+          <dl class="overview-statistics">
+            <div><dt>Journals</dt><dd>{{ settings_form.journals|rejectattr("issns", "equalto", "")|list|length if not settings_form.legacy_journals else settings_form.legacy_rows|length }}</dd></div>
+            <div><dt>Groups</dt><dd>{{ settings_form.groups|length }}</dd></div>
+            <div><dt>Ungrouped Journals</dt><dd>{{ settings_form.journals|rejectattr("issns", "equalto", "")|selectattr("group", "equalto", "")|list|length }}</dd></div>
+            <div><dt>Publishers</dt><dd>{{ settings_form.publishers|length }}</dd></div>
+            <div><dt>Access Services</dt><dd>{{ settings_form.access_services|length }}</dd></div>
+            <div><dt>Unassigned Publishers</dt><dd>{{ settings_form.publishers|selectattr("access_service_id", "equalto", "")|list|length }}</dd></div>
+          </dl>
+          <p>Group memberships and Access Service relationships are shown in the corresponding Organize views.</p>
+        </div>
+      </section>
+      <section class="settings-file-actions" aria-label="Saved Markdown file actions">
+        <h2>Markdown file actions</h2>
+        <p class="muted">Save changes to the shared draft; Import replaces the complete list.md; Export reads saved list.md; Reload explicitly discards the draft. Each action has separate checks.</p>
+        <details class="journal-import" data-settings-disclosure="import" data-transient-import aria-label="Import complete Markdown configuration" {% if markdown_plan %}open{% endif %}>
+          <summary>Import complete Markdown configuration</summary>
+          <p class="muted">Choose a complete UTF-8 .md file (up to 1 MiB). Import replaces the entire saved list.md, including Conferences and all other text; monitor.yaml is not imported.</p>
+          <label>Import Markdown (.md)
+            <input type="file" name="markdown_file" data-journal-import-file accept=".md,text/markdown">
+          </label>
+          <p class="notice error" data-import-file-error role="alert" hidden></p>
+          <button type="button" class="secondary" data-import-preview
+                  hx-post="/settings/import/preview" hx-encoding="multipart/form-data"
+                  hx-include="#settings-form" hx-target="#settings-editor" hx-swap="outerHTML">Preview Changes</button>
+          {% if markdown_plan %}
+            <div class="import-preview" data-markdown-preview data-source-digest="{{ markdown_plan.source_digest }}">
+              <h3>Whole-file replacement Preview</h3>
+              <p>Selected file: {{ markdown_filename }} · SHA-256: {{ markdown_plan.source_digest }}</p>
+              <p>Saved list.md revision: {{ markdown_plan.target_digest }}</p>
+              <p>Conferences, unknown sections and all user-authored text are replaced by the selected file, not merged.</p>
+              <ul>{% for change in markdown_plan.changes %}<li>{{ change }}</li>{% else %}<li>No content changes</li>{% endfor %}</ul>
+              <input type="hidden" name="markdown_import_payload" value="{{ markdown_payload }}">
+              <input type="hidden" name="markdown_import_filename" value="{{ markdown_filename }}">
+              <input type="hidden" name="markdown_import_proof" value="{{ markdown_proof }}">
+              <input type="hidden" name="confirm_full_import" value="yes">
+              {% if markdown_dirty %}
+                <p class="notice warning">Unsaved Settings Draft: Save before importing and Preview again, or explicitly discard all unsaved edits (including Monitor/Institution changes).</p>
+                <button type="button" data-import-confirm-discard
+                        hx-post="/settings/import/confirm" hx-include="#settings-form" hx-vals='{"import_discard":"yes"}'
+                        hx-target="#settings-editor" hx-swap="outerHTML">Discard unsaved Draft and Confirm Import</button>
+              {% else %}
+                <button type="button" data-import-confirm hx-post="/settings/import/confirm"
+                        hx-include="#settings-form" hx-target="#settings-editor" hx-swap="outerHTML">Confirm Import</button>
+              {% endif %}
+              <button type="button" class="secondary" data-cancel-markdown-preview>Cancel Import</button>
+            </div>
+          {% endif %}
+        </details>
+      </section>
+      <section id="settings-journal-groups" data-settings-view="groups" aria-labelledby="settings-journals-heading" hidden>
         <div class="section-heading">
           <h2 id="settings-journals-heading">Journals <span class="muted" data-journal-count>{{ settings_form.legacy_rows|length if settings_form.legacy_rows else settings_form.journals|length }}</span></h2>
           {% if not settings_form.legacy_journals %}<button type="button" class="secondary" data-add-journal>Add journal</button>{% endif %}
@@ -172,7 +260,7 @@
           </div>
           <div data-journal-viewport>
             {% for legacy in settings_form.legacy_rows %}
-              <div class="config-row legacy-journal-row">
+              <div class="config-row legacy-journal-row" data-legacy-group="{{ legacy.group or '' }}" data-legacy-issns="{{ legacy.issn|join(' / ') }}">
                 <div class="config-metadata"><strong>{{ legacy.name }}</strong><div class="muted">Legacy identifiers: {{ legacy.issn|join(" / ") }}</div><div class="muted">Group: {{ legacy.group or "Ungrouped" }}</div></div>
                 <label>Confirmed ISSN-L <input name="migration_issn_l" value="{{ settings_form.migration_targets[loop.index0] if loop.index0 < settings_form.migration_targets|length else '' }}" placeholder="Optional confirmation" autocomplete="off"></label>
               </div>
@@ -180,95 +268,59 @@
           </div>
         {% else %}
           <p class="muted">Canonical metadata is read-only. Add by ISSN-L; Save resolves new Journals. Replace an identity with Remove and Add.</p>
-        <details class="journal-import" data-settings-disclosure="import" {% if settings_import.plan or settings_import.error %}open{% endif %} data-transient-import aria-label="Bulk import Journals">
-          <summary>Bulk import Journals</summary>
-          <label>Local UTF-8 file
-            <input type="file" data-journal-import-file accept=".csv,.tsv,.md,text/csv,text/tab-separated-values,text/markdown,text/plain">
-          </label>
-          <p class="notice error" data-import-file-error role="alert" hidden></p>
-          <label>Import source
-            <textarea name="journal_import_text" data-journal-import-text rows="5">{{ settings_import.contents }}</textarea>
-          </label>
-          <label>Import mode
-            <select name="journal_import_mode">
-              <option value="MERGE" {{ "selected" if settings_import.mode == "MERGE" else "" }}>Merge</option>
-              <option value="REPLACE" {{ "selected" if settings_import.mode == "REPLACE" else "" }}>Replace</option>
-              {% if settings_import.mode not in ("MERGE", "REPLACE") %}
-                <option value="{{ settings_import.mode }}" selected>Invalid mode: {{ settings_import.mode }}</option>
-              {% endif %}
-            </select>
-          </label>
-          <p class="muted">Merge keeps current Journals. Replace previews removals. Both edit this unsaved draft.</p>
-          <button type="button" class="secondary" data-import-preview
-                  hx-post="/settings/import/preview" hx-include="#settings-form"
-                  hx-target="#settings-editor" hx-swap="outerHTML">Preview</button>
-          {% if settings_import.error %}<p class="notice error">{{ settings_import.error }}</p>{% endif %}
-          {% if settings_import.plan %}
-            <div class="import-preview" data-import-plan>
-              <h3>{{ "Ready to Apply" if settings_import.plan.can_apply else "Ready to reconcile" if settings_import.plan.can_reconcile else "Apply blocked" }}</h3>
-              {% if settings_import.plan.legacy_rows %}
-                <p class="muted">Legacy import: Apply reconciles all identifiers. Enter an independently confirmed ISSN-L when automatic establishment is insufficient. Unresolved rows block the whole Apply.</p>
-                <input type="hidden" name="import_confirmation_source" value="{{ settings_import.source_revision }}">
-                {% for row in settings_import.plan.legacy_rows %}
-                  <div class="config-row">
-                    <div class="config-metadata"><strong>Source row {{ row.source_row }}: {{ row.name }}</strong><div>Legacy identifiers: {{ row.issn_cell }}</div><div>Group: {{ row.group or "Ungrouped" }}</div></div>
-                    <input type="hidden" name="import_confirmation_row" value="{{ row.source_row }}">
-                    <label>Confirmed ISSN-L <input name="import_confirmation_issn_l" value="{{ settings_import.target_for(row.source_row) }}" placeholder="Optional confirmation" autocomplete="off"></label>
-                  </div>
-                {% endfor %}
-              {% endif %}
-              <p>{{ settings_import.plan.mode.value }}{% if settings_import.plan.source_format %} · {{ settings_import.plan.source_format.value }}{% endif %}</p>
-              <ul class="import-entries">
-                {% set change_labels = {"ADD": "Add", "NO_OP_DUPLICATE": "No-op duplicate", "ISSN_MERGE": "ISSN merge", "ISSN_REMOVE": "ISSN remove", "GROUP_MOVE": "Group move", "ORDER_CHANGE": "Order change", "REMOVE": "Remove", "CONFLICT": "Conflict", "INVALID_ROW": "Invalid row", "FORMAT_ERROR": "Format error"} %}
-                {% for entry in settings_import.plan.entries %}
-                  <li data-import-change="{{ entry.kind.value }}">
-                    <strong>{{ change_labels.get(entry.kind.value, entry.kind.value) }}</strong>
-                    {% if entry.journal_name %} · {{ entry.journal_name }}{% endif %}
-                    {% if entry.source_rows %}<span> · Source rows: {{ entry.source_rows|join(", ") }}</span>{% endif %}
-                    {% if entry.added_issns %}<div>Added ISSNs: {{ entry.added_issns|join(", ") }}</div>{% endif %}
-                    {% if entry.removed_issns %}<div>Removed ISSNs: {{ entry.removed_issns|join(", ") }}</div>{% endif %}
-                    {% if entry.kind.value == "GROUP_MOVE" or (entry.kind.value == "CONFLICT" and (entry.previous_group is not none or entry.new_group is not none)) %}<div>Group: {{ entry.previous_group or "Ungrouped" }} → {{ entry.new_group or "Ungrouped" }}</div>{% endif %}
-                    {% if entry.kind.value == "ADD" and entry.new_group %}<div>Group: {{ entry.new_group }}</div>{% endif %}
-                    {% if entry.kind.value == "REMOVE" %}<div>Previous Group: {{ entry.previous_group or "Ungrouped" }}</div>{% endif %}
-                    {% if entry.previous_position is not none and entry.new_position is not none %}<div>Position: {{ entry.previous_position + 1 }} → {{ entry.new_position + 1 }}</div>{% endif %}
-                    {% if entry.previous_issns or entry.new_issns %}<div>ISSN order: {{ entry.previous_issns|join(", ") }} → {{ entry.new_issns|join(", ") }}</div>{% endif %}
-                    {% if entry.message %}<div>{{ entry.message }}</div>{% endif %}
-                  </li>
-                {% endfor %}
-              </ul>
-              {% if settings_import.plan.can_apply or settings_import.plan.can_reconcile %}
-                <button type="button" data-import-apply
-                        hx-post="/settings/import/apply" hx-include="#settings-form"
-                        hx-target="#settings-editor" hx-swap="outerHTML">{{ "Reconcile and Apply" if settings_import.plan.can_reconcile and not settings_import.plan.can_apply else "Apply to draft" }}</button>
-              {% endif %}
-            </div>
-          {% endif %}
-        </details>
-        <details data-settings-disclosure="groups" class="journal-organization" aria-label="Journal groups">
-          <summary>Organize Groups</summary>
-          <div class="group-create">
-            <label>New Group name <input data-new-group autocomplete="off"></label>
-            <button type="button" class="secondary" data-create-group>Create Group</button>
-          </div>
-          <div data-group-rows>
-            {% for group in settings_form.groups %}
-              <div class="group-row" data-group-row data-group-name="{{ group }}">
-                <input type="hidden" name="settings_group" value="{{ group }}">
-                <label>Group name <input data-group-edit value="{{ group }}" autocomplete="off"></label>
-                <div class="group-actions">
-                  <button type="button" class="secondary" data-rename-group>Rename</button>
-                  <button type="button" class="secondary" data-group-up>Up</button>
-                  <button type="button" class="secondary" data-group-down>Down</button>
-                  <button type="button" class="secondary" data-delete-group>Delete</button>
-                </div>
-              </div>
-            {% endfor %}
-          </div>
-        </details>
         <div data-journal-viewport>
         <div data-journal-rows>
+          <details data-settings-disclosure="groups" class="journal-organization" aria-label="Journal groups" open>
+            <summary>Journal Groups — Organize</summary>
+            <p class="muted">Drag Journals into Groups, or select and Assign. Empty Groups exist only in this draft; after Save, only Groups assigned to Journals persist.</p>
+            <div class="group-create">
+              <label>New Group name <input data-new-group autocomplete="off"></label>
+              <button type="button" class="secondary" data-create-group>Create Group</button>
+            </div>
+            <p data-group-error role="alert" class="notice error" hidden></p>
+            <div class="journal-tools">
+              <label>Search Journals <input type="search" data-journal-search placeholder="Name, ISSN-L, Publisher ID" autocomplete="off"></label>
+              <label>Assign selected Journals
+                <select data-batch-group><option value="">Ungrouped</option>{% for group in settings_form.groups %}<option value="{{ group }}">{{ "Ungrouped (named Group)" if group == "Ungrouped" else group }}</option>{% endfor %}</select>
+              </label>
+              <button type="button" class="secondary" data-assign-selected>Assign</button>
+              <button type="button" class="secondary" data-select-visible>Select visible</button>
+              <button type="button" class="secondary" data-clear-selection>Clear selection</button>
+            </div>
+            <p class="muted" data-selection-status role="status" aria-live="polite">0 Journals selected</p>
+            <section class="journal-group-container" data-group-container data-group-name="" data-group-drop>
+              <h3>Ungrouped <span class="muted" data-member-count></span></h3>
+              <div data-group-members></div>
+            </section>
+            <div data-group-rows>
+              {% for group in settings_form.groups %}
+                <section class="journal-group-container" data-group-row data-group-container data-group-drop data-group-name="{{ group }}">
+                  <input type="hidden" name="settings_group" value="{{ group }}">
+                  <div class="group-row">
+                    <label>Group name <input data-group-edit value="{{ group }}" autocomplete="off"></label>
+                    <div class="group-actions">
+                      <button type="button" class="secondary" data-rename-group>Rename</button>
+                      <button type="button" class="secondary" data-group-up>Up</button>
+                      <button type="button" class="secondary" data-group-down>Down</button>
+                      <button type="button" class="secondary" data-delete-group>Delete</button>
+                    </div>
+                  </div>
+                  <p class="muted" data-member-count></p>
+                  <div data-delete-confirm hidden>
+                    <p data-delete-summary></p>
+                    <ul data-delete-members></ul>
+                    <button type="button" data-confirm-delete>Confirm: move Journals to Ungrouped</button>
+                    <button type="button" class="secondary" data-cancel-delete>Cancel</button>
+                  </div>
+                  <div data-group-members></div>
+                </section>
+              {% endfor %}
+            </div>
+          </details>
           {% for row in settings_form.journals %}
-            <div class="config-row journal-row" {{ 'data-pending-journal' if row.pending else '' }}>
+            <div class="config-row journal-row" draggable="true" {{ 'data-pending-journal' if row.pending else '' }}>
+              <input type="hidden" name="journal_order" value="{{ loop.index0 }}">
+              <label class="journal-select"><input type="checkbox" data-select-journal aria-label="Select {{ row.name }}"> Select</label>
               <div class="config-metadata">
                 <strong>{{ "Pending resolution" if row.pending else row.name }}</strong>
                 <input type="hidden" name="journal_name" value="{{ row.name }}">
@@ -286,10 +338,11 @@
                 <select name="journal_group">
                   <option value="" {{ "selected" if not row.group else "" }}>Ungrouped</option>
                   {% for group in settings_form.groups %}
-                    <option value="{{ group }}" {{ "selected" if row.group == group else "" }}>{{ group }}</option>
+                    <option value="{{ group }}" {{ "selected" if row.group == group else "" }}>{{ "Ungrouped (named Group)" if group == "Ungrouped" else group }}</option>
                   {% endfor %}
                 </select>
               </label>
+              <span class="muted" data-journal-group-label>Group: {{ row.group or "Ungrouped" }}</span>
               <button type="button" class="secondary" data-remove-journal>Remove</button>
             </div>
           {% endfor %}
@@ -298,19 +351,31 @@
         {% endif %}
       </section>
       <template data-group-template>
-        <div class="group-row" data-group-row data-group-name="">
+        <section class="journal-group-container" data-group-row data-group-container data-group-drop data-group-name="">
           <input type="hidden" name="settings_group" value="">
-          <label>Group name <input data-group-edit value="" autocomplete="off"></label>
-          <div class="group-actions">
-            <button type="button" class="secondary" data-rename-group>Rename</button>
-            <button type="button" class="secondary" data-group-up>Up</button>
-            <button type="button" class="secondary" data-group-down>Down</button>
-            <button type="button" class="secondary" data-delete-group>Delete</button>
+          <div class="group-row">
+            <label>Group name <input data-group-edit value="" autocomplete="off"></label>
+            <div class="group-actions">
+              <button type="button" class="secondary" data-rename-group>Rename</button>
+              <button type="button" class="secondary" data-group-up>Up</button>
+              <button type="button" class="secondary" data-group-down>Down</button>
+              <button type="button" class="secondary" data-delete-group>Delete</button>
+            </div>
           </div>
-        </div>
+          <p class="muted" data-member-count></p>
+          <div data-delete-confirm hidden>
+            <p data-delete-summary></p>
+            <ul data-delete-members></ul>
+            <button type="button" data-confirm-delete>Confirm: move Journals to Ungrouped</button>
+            <button type="button" class="secondary" data-cancel-delete>Cancel</button>
+          </div>
+          <div data-group-members></div>
+        </section>
       </template>
       <template data-journal-template>
-        <div class="config-row journal-row" data-pending-journal>
+        <div class="config-row journal-row" data-pending-journal draggable="true">
+          <input type="hidden" name="journal_order" value="">
+          <label class="journal-select"><input type="checkbox" data-select-journal aria-label="Select pending Journal"> Select</label>
           <div class="config-metadata">
             <strong>Pending resolution</strong>
             <input type="hidden" name="journal_name" value="Pending resolution">
@@ -321,22 +386,80 @@
           <label>Group
             <select name="journal_group"><option value="" selected>Ungrouped</option></select>
           </label>
+          <span class="muted" data-journal-group-label>Group: Ungrouped</span>
           <button type="button" class="secondary" data-remove-journal>Remove</button>
         </div>
       </template>
-      <section class="publisher-settings" aria-labelledby="settings-publishers-heading">
-        <h2 id="settings-publishers-heading">Publishers <span class="muted">{{ settings_form.publishers|length }}</span></h2>
-        <p class="muted">Publishers follow the Journals saved above. Access URLs are yours to edit or clear. Open links update after Save or Preview.</p>
+      <section id="settings-access-mapping" class="access-mapping" aria-labelledby="settings-mapping-heading" data-access-mapping data-settings-view="mapping" hidden>
+        <h2 id="settings-mapping-heading">Access Mapping — Organize</h2>
+        <p class="muted">Services are manual access shortcuts, not login or entitlement evidence. Publishers retain machine-managed names and IDs. All changes use the single Settings Save.</p>
+        <p class="notice error" data-mapping-error role="alert" hidden></p>
+        <div class="service-create">
+          <label>New Service name <input data-new-service-name autocomplete="off"></label>
+          <label>Optional Access URL <input data-new-service-url inputmode="url" autocomplete="off"></label>
+          <button type="button" class="secondary" data-create-service>Create Service</button>
+        </div>
+        <div class="publisher-tools">
+          <label>Assign selected Publishers
+            <select data-batch-service><option value="">Unassigned</option>
+              {% for service in settings_form.access_services %}<option value="{{ service.id }}">{{ service.name }}</option>{% endfor %}
+            </select>
+          </label>
+          <button type="button" class="secondary" data-assign-publishers>Assign</button>
+          <button type="button" class="secondary" data-clear-publishers>Clear selection</button>
+          <span data-publisher-selection role="status" aria-live="polite">0 Publishers selected</span>
+        </div>
         <div data-publisher-viewport>
+          <section class="mapping-container" data-mapping-container data-service-target="">
+            <h3>Unassigned <span class="muted" data-publisher-count></span></h3>
+            <div data-publisher-members></div>
+          </section>
+          <div data-service-rows>
+            {% for service in settings_form.access_services %}
+              <section class="mapping-container" data-service-row data-mapping-container data-service-target="{{ service.id }}">
+                <input type="hidden" name="service_id" value="{{ service.id }}">
+                <div class="service-heading">
+                  <label>Service name <input name="service_name" value="{{ service.name }}" autocomplete="off"></label>
+                  <label>Access URL <input name="service_access_url" value="{{ service.access_url or '' }}" autocomplete="off" inputmode="url"></label>
+                  <button type="button" class="secondary" data-edit-service>Validate edits</button>
+                  <button type="button" class="secondary" data-delete-service>Delete</button>
+                </div>
+                <p class="muted">ID: {{ service.id }} · <span data-publisher-count></span></p>
+                <div data-service-delete-preview hidden>
+                  <p data-service-delete-summary></p>
+                  <ul data-service-delete-members></ul>
+                  <button type="button" data-confirm-service-delete>Confirm: delete Service and unassign Publishers</button>
+                  <button type="button" class="secondary" data-cancel-service-delete>Cancel</button>
+                </div>
+                <div data-publisher-members></div>
+              </section>
+            {% endfor %}
+          </div>
           {% for publisher in settings_form.publishers %}
-            <div class="config-row publisher-row" data-publisher-row>
+            <div class="config-row publisher-row" data-publisher-row
+                 data-saved-publisher-url="{{ publisher.publisher_url }}"
+                 data-saved-service-id="{{ publisher.access_service_id }}"
+                 draggable="true">
+              <input type="hidden" name="publisher_order" value="{{ loop.index0 }}">
+              <label class="publisher-select"><input type="checkbox" data-select-publisher aria-label="Select {{ publisher.name }}"> Select</label>
               <div class="config-metadata">
                 <strong>{{ publisher.name }}</strong>
                 <div class="muted config-id">{{ publisher.publisher_id }}</div>
                 <input type="hidden" name="publisher_name" value="{{ publisher.name }}">
                 <input type="hidden" name="publisher_id" value="{{ publisher.publisher_id }}">
               </div>
-              <label>Access URL <input name="publisher_access_url" value="{{ publisher.access_url }}" inputmode="url" autocomplete="off" placeholder="Optional public HTTP(S) URL"></label>
+              <label>Publisher URL <input name="publisher_access_url" value="{{ publisher.publisher_url }}" inputmode="url" autocomplete="off" placeholder="Optional public HTTP(S) URL"></label>
+              <label>Default Service
+                <select name="publisher_access_service_id">
+                  <option value="" {{ "selected" if not publisher.access_service_id else "" }}>Unassigned</option>
+                  {% for service in settings_form.access_services %}
+                    <option value="{{ service.id }}" {{ "selected" if publisher.access_service_id == service.id else "" }}>{{ service.name }}</option>
+                  {% endfor %}
+                  {% if publisher.access_service_id and publisher.access_service_id not in settings_form.access_services|map(attribute="id")|list %}
+                    <option value="{{ publisher.access_service_id }}" selected>Invalid Service ID: {{ publisher.access_service_id }}</option>
+                  {% endif %}
+                </select>
+              </label>
               <div class="publisher-open">
                 {% if publisher.safe_access_url %}<a href="{{ publisher.safe_access_url }}" data-publisher-open data-access-url="{{ publisher.safe_access_url }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open</a>{% endif %}
               </div>
@@ -346,10 +469,84 @@
           {% endfor %}
         </div>
       </section>
+      <template data-service-template>
+        <section class="mapping-container" data-service-row data-mapping-container data-service-target="">
+          <input type="hidden" name="service_id" value="">
+          <div class="service-heading">
+            <label>Service name <input name="service_name" value="" autocomplete="off"></label>
+            <label>Access URL <input name="service_access_url" value="" inputmode="url" autocomplete="off"></label>
+            <button type="button" class="secondary" data-edit-service>Validate edits</button>
+            <button type="button" class="secondary" data-delete-service>Delete</button>
+          </div>
+          <p class="muted">ID: <span data-service-id-label></span> · <span data-publisher-count>0 Publishers</span></p>
+          <div data-service-delete-preview hidden>
+            <p data-service-delete-summary></p>
+            <ul data-service-delete-members></ul>
+            <button type="button" data-confirm-service-delete>Confirm: delete Service and unassign Publishers</button>
+            <button type="button" class="secondary" data-cancel-service-delete>Cancel</button>
+          </div>
+          <div data-publisher-members></div>
+        </section>
+      </template>
+      <div class="notice warning" data-journal-cascade-preview hidden>
+        <p data-journal-cascade-summary></p>
+        <ul data-journal-cascade-members></ul>
+        <button type="button" data-confirm-journal-remove>Confirm Journal removal</button>
+        <button type="button" class="secondary" data-cancel-journal-remove>Cancel</button>
+      </div>
     </fieldset>
 
+    {% if settings_deletion_plan and settings_deletion_plan.required %}
+      <section class="notice warning" data-settings-deletion-preview>
+        <h2>Confirm destructive Settings Save</h2>
+        <p>Review the actual saved objects affected by this draft. Cancel leaves files unchanged. Changes to the draft require a fresh preview.</p>
+        {% for service in settings_deletion_plan.services %}
+          <h3>Delete Service: {{ service.name }} ({{ service.id }})</h3>
+          <p>Assigned Publishers will become Unassigned; the Service itself will be removed.</p>
+          {% for service_id, members in settings_deletion_plan.service_members if service_id == service.id %}
+            <p>{{ members|length }} affected Publishers</p>
+            <ul>{% for publisher in members %}<li>{{ publisher.name }} ({{ publisher.publisher_id }})</li>{% endfor %}</ul>
+          {% endfor %}
+        {% endfor %}
+        {% if settings_deletion_plan.publishers %}
+          <h3>Journal removal cascades to {{ settings_deletion_plan.publishers|length }} Publishers</h3>
+          <p>Removing the last associated Journal also removes the following Publisher metadata. Access Services themselves remain.</p>
+          <ul>
+            {% for publisher in settings_deletion_plan.publishers %}
+              <li>{{ publisher.name }} ({{ publisher.publisher_id }}) · Publisher URL: {{ publisher.publisher_url or "None" }} · Service ID: {{ publisher.access_service_id or "Unassigned" }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+        <input type="hidden" name="settings_deletion_proof" value="{{ settings_deletion_proof }}">
+        <button type="submit" name="confirm_settings_deletions" value="yes">Confirm deletions and Save</button>
+        <button type="button" class="secondary" data-cancel-settings-preview>Cancel</button>
+      </section>
+    {% endif %}
+    {% if markdown_export_guard %}
+      <section class="notice warning" data-export-guard>
+        <p>Export reads the saved complete list.md only. Save your unsaved Draft first, or explicitly discard it for Export.</p>
+        <button type="button" data-export-discard>Discard Draft and Export Saved Markdown</button>
+        <button type="button" class="secondary" data-cancel-markdown-guard>Cancel</button>
+      </section>
+    {% endif %}
+    {% if markdown_reload_guard %}
+      <section class="notice warning" data-reload-guard>
+        <p>Reload discards all unsaved edits to Journal Groups, Access Mapping, Monitor and Institution. It reads both files and their current revisions, without merging or upgrading them.</p>
+        <input type="hidden" name="reload_step" value="confirm">
+        <label>Type RELOAD to discard edits
+          <input name="reload_word" value="" autocomplete="off" placeholder="RELOAD">
+        </label>
+        <button type="button" data-reload-confirm hx-post="/settings/reload"
+                hx-include="#settings-form" hx-target="#settings-editor" hx-swap="outerHTML">Confirm Reload from Disk</button>
+        <button type="button" class="secondary" data-cancel-markdown-guard>Cancel</button>
+      </section>
+    {% endif %}
     <div class="form-actions">
       <button type="submit">Save</button>
+      <button type="button" class="secondary" data-export-markdown>Export Markdown</button>
+      <button type="button" class="secondary" data-reload-markdown
+              hx-post="/settings/reload" hx-include="#settings-form"
+              hx-target="#settings-editor" hx-swap="outerHTML">Reload from Disk</button>
     </div>
   </form>
 </section>
