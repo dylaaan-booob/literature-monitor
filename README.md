@@ -8,23 +8,24 @@ safely updates durable Paper and Author Markdown, and exports kept papers.
 
 ## Release and development status
 
-**v0.6.3 remains the latest RELEASED version until v0.6.4 publication is verified.
+**v0.6.4 Journals & Access is RELEASED** as the latest verified GitHub release:
+[GitHub Release v0.6.4](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.4).
+The verified assets are the 0.6.4 Python wheel, sdist and separately AGPLv3-licensed
+Chrome/MV3 Connector ZIP. Python package, OpenAlex/Crossref User-Agent and Connector
+versions are `0.6.4`. See [SPEC §43.11](SPEC.md#4311-v064-release-verification-and-closeout-2026-10-10)
+for immutable tag/asset checksums and the retained acceptance limits. Historical
 [GitHub Release v0.6.3](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.3)
-contains the verified Python wheel, sdist and separate Chrome/MV3 Connector ZIP
-with corresponding AGPL source. Python package, Provider User-Agent and Connector
-identities are `0.6.3`. The previous
-[GitHub Release v0.6.2](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.2)
-retains its own release artifacts and historical contract.
+and [GitHub Release v0.6.2](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.2)
+retain their original release assets and contracts.
 
-**v0.6.4 Journals & Access remains IN DEVELOPMENT and UNRELEASED on `main`.**
-[SPEC §43](SPEC.md#43-v064-journals--access--development-contract) covers
-Journal Groups, Publisher-to-Access-Service mapping, complete `list.md`
+[SPEC §43](SPEC.md#43-v064-journals--access--development-contract) defines
+v0.6.4 Journal Groups, Publisher-to-Access-Service Mapping, complete `list.md`
 Markdown Import/Export, the shared Settings draft and explicit legacy upgrade.
-A0–A7 implementation and acceptance review completed. A8 Final Audit identified
-Legacy Upgrade directory-sync reporting and A7 evidence findings, both repaired
-and independently reviewed. A8 returned **READY_FOR_COMMIT**. The v0.6.4
-release transaction is authorized and in preparation; release success is not
-established until remote Tag, Release and assets have been verified.
+A0–A7 implementation and acceptance review completed. A8's two review findings
+were repaired and independently verified before the release commit. The annotated
+`v0.6.4` tag is fixed on commit `c90651cdba98aa1a606a880ecae8b8891aed8bca`;
+all three GitHub assets were downloaded and compared byte-for-byte to the reviewed
+local builds. A separate documentation closeout follows without moving the tag.
 
 A7 used an isolated real-legacy `list.md` copy and headless Chrome 154 at
 1440×900 and 550×850, with offline Run/Workspace/Kept/Zotero regression tests.
@@ -34,9 +35,9 @@ events (CDP timeout cause unresolved), physical touch, non-headless Chrome and
 a real Zotero Library run remain NOT_VERIFIED. The file named
 `narrow_overview.png` shows Mapping, not an Overview acceptance screenshot.
 See [SPEC §43.10](SPEC.md#4310-a7-acceptance-evidence-and-a8-review-follow-up-2026-10-10-unreleased)
-for the evidence boundaries. Until publication verification, **v0.6.4 remains
-UNRELEASED; v0.6.3 is the latest verified published version.** The usage
-sections below describe released historical behavior.
+for the evidence boundaries. These gaps remain explicitly **NOT_VERIFIED**;
+publishing v0.6.4 does not make them live acceptance PASS. The historical
+usage sections below retain their original version-specific behavior.
 
 [SPEC §41](SPEC.md#41-v062-issn-l-venue-identity--journalspublishers-settings---development-contract)
 defines the venue identity and Settings contract;
