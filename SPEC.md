@@ -7834,7 +7834,7 @@ Release publication was verified through both remote Git refs and the GitHub API
 
 ### 44.1 Authority & Baseline
 
-**v0.6.4 is RELEASED; v0.6.5 is implemented in the current uncommitted working tree and remains UNRELEASED.** The baseline is `main` at `a45e91a9395372125d88dd536b512a511bf2cf6d`; §43.11 remains the authoritative v0.6.4 publication closeout. §44 describes the current implementation contract. Automated verification records below retain their original tested behavior and counts. The user reports that manual real-browser acceptance has all passed; this is user-reported evidence, not Codex-independent live verification. The final submission audit and isolated release checks are complete (§44.11); publication remains pending. A0 was documentation-only; its original scope and the earlier development/release records remain historical.
+**v0.6.5 is RELEASED (§44.12); v0.6.4 retains its historical verified release (§43.11).** The baseline is `main` at `a45e91a9395372125d88dd536b512a511bf2cf6d`; §43.11 remains the authoritative v0.6.4 publication closeout. §44 describes the current implementation contract. Automated verification records below retain their original tested behavior and counts. The user reports that manual real-browser acceptance has all passed; this is user-reported evidence, not Codex-independent live verification. The final submission audit and isolated release checks are complete (§44.11); remote tag, Release and downloaded assets are verified (§44.12). A0 was documentation-only; its original scope and the earlier development/release records remain historical.
 
 §44 supersedes prior provisions **only to the extent they conflict with the new CARSI Portal Preparation or Mapping Pack**. In particular, §42.6's Kept-import-plan/actual DOI landing-SP selection does not determine the inputs to this independent CARSI portal action; §42.7's Kept import UI gains a separate optional action; and §43.7's v0.6.4 exclusion of automatic access preparation no longer excludes this defined v0.6.5 workflow. The original §42 DOI Capture, native Zotero Connector Import, trusted actual-Service handling within import, parent/PDF evidence and status-transition guards, process-local authorization, security, authentication-data protection and safe writes continue to govern their respective workflows. §43 still governs canonical `list.md` data ownership, Settings, full Markdown Import/Export, Preview/Confirm and safe persistence. All §§1–43 version-specific contracts and historical release evidence remain unchanged.
 
@@ -7923,7 +7923,7 @@ Kept keeps independent **CARSI Preparation** and **Manual Service Access** secti
 
 The existing low-frequency Connector Bridge heartbeat/claim checks may remain to support Zotero Import. Idle Preparation has no additional dedicated loop, and active Visit listeners, timers and transient event records must be bounded and disposed. Do not remove upstream Zotero keepalive without independent evidence that native imports remain safe. Human IdP/MFA waiting is separate from the ten-second Visit observation limit, but cancellation and stale-Connector recovery still apply.
 
-**Current real-browser acceptance: user-reported PASS; Codex-independent live verification: NOT_VERIFIED.** The user reports that manual acceptance has all passed. This report is distinct from automated checks and is not a Codex observation of Chrome/CARSI. Earlier strict final-navigation evidence remains tied to its historical implementation, rather than proving the current Opened/retained-tabs/cancel/restart lifecycle. The final submission audit is complete (§44.11); publication remains pending.
+**Current real-browser acceptance: user-reported PASS; Codex-independent live verification: NOT_VERIFIED.** The user reports that manual acceptance has all passed. This report is distinct from automated checks and is not a Codex observation of Chrome/CARSI. Earlier strict final-navigation evidence remains tied to its historical implementation, rather than proving the current Opened/retained-tabs/cancel/restart lifecycle. The final submission audit is complete (§44.11), and publication is verified (§44.12).
 
 ### 44.9 Scope & Non-goals
 
@@ -8030,3 +8030,24 @@ The user explicitly authorized commit and publication after reporting all manual
 - Connector Manifest V3/version, unchanged permission sets against v0.6.4, access/CARSI/runtime worker order, exact upstream/five-submodule pins, declared patch delta, overlay bytes and AGPL license — **PASS**. The ZIP includes `chrome-mv3/` plus the reviewed delta/build instructions and corresponding pinned patched source, without Git metadata, node_modules or protected user data.
 
 **Preservation and delivery boundary:** all **78** protected files recorded at release start retain identical bytes and modification times. The real dirty `list.md`, untracked `monitor.yaml`, `src/.obsidian/` and `workspace/` are excluded from staging and all release assets. SPEC §§1–43 remain unchanged; only a separating blank line precedes new §44. No real Chrome/CARSI login, credential/session inspection or Zotero Library operation was performed. The user-reported manual PASS remains distinct from Codex-independent live verification, which is **NOT_VERIFIED**. GitHub currently reports **zero configured Actions workflows** and zero check runs/status contexts; this is not a CI PASS. Publication verification and final immutable asset digests are recorded separately below once complete.
+
+### 44.12 v0.6.5 Publication Verification and Closeout (2026-10-11)
+
+**Release status: RELEASED.** Publication was explicitly authorized by the user. This closeout supersedes preceding pre-publication status statements without modifying the historical development/acceptance evidence above or any release record in §§1-43.
+
+- Release commit: `615acf103081913619dbe0256f115dc9fad26726`, pushed normally to `origin/main`.
+- Annotated tag: `v0.6.5`; tag object `a7285edcb00455bde2d89647c0917f576bbfc727`, peeled target `615acf103081913619dbe0256f115dc9fad26726`. Local and remote values match.
+- GitHub Release: [Literature Monitor v0.6.5: CARSI Access Preparation](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.5), published at `2026-10-11T10:07:02Z`, non-draft, non-prerelease, confirmed as the latest stable Release.
+- Exactly three intended assets are uploaded. All three were downloaded from the Release and compared byte-for-byte against the inspected local artifacts; GitHub's authoritative `sha256` digests and sizes also match.
+
+| Asset | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `literature_monitor-0.6.5-py3-none-any.whl` | 293817 | `50bd9e7af0d253e2080e8f05283d6c791640b582b5225ab48af6321bd28881fd` |
+| `literature_monitor-0.6.5.tar.gz` | 277931 | `032e2c5e5baca508f90a942cb84dc3350a2b687e72d5bd8f73e7022d24cd55d6` |
+| `literature-monitor-connector-0.6.5-chrome-mv3.zip` | 10578184 | `806f25ca1fd86cf947f715a4ea4a66ca94523534c1ea40c4703fb2a063d860f4` |
+
+The Python wheel/sdist are MIT; the separate Connector ZIP is AGPLv3 and includes the extension plus its reviewed delta/build instructions and pinned patched corresponding source. No package registry, Chrome Web Store or hosted application deployment is part of this release. GitHub reports zero configured Actions workflows and zero check runs/status contexts for the release commit; no CI success is claimed.
+
+The functional checks and isolated installation evidence are in §44.11. Manual real-browser acceptance is **user-reported PASS**; Codex-independent live Chrome/CARSI/Zotero Library verification remains **NOT_VERIFIED**. Opened proves only an attributable official click and target opening. Every Preparation page remains open for the user, and institutional login/MFA remains user controlled. The existing two Python dependency deprecation warnings are non-blocking.
+
+This documentation-only closeout follows the release commit on `main`; the annotated tag and all three asset bytes remain fixed. Embedded package/source documentation retains the release-preparation snapshot; this later record confirms publication without rebuilding or overwriting the verified assets. All 78 protected files retain their release-start bytes and modification times. The dirty real `list.md`, untracked `monitor.yaml`, `src/.obsidian/`, Workspace/Paper/Author data and Zotero Library were neither staged nor changed by this release transaction.

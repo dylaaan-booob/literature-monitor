@@ -1,6 +1,6 @@
 # Literature Monitor Connector
 
-This directory defines the independent browser component for the v0.6.5 release candidate,
+This directory defines the independent browser component for the v0.6.5 release,
 following the v0.6.3 batch/Connector contract in SPEC §42. It is derived from the official
 Zotero Connector source and is separate from the MIT Python
 `literature_monitor` package. The tracked build entry point generates the
@@ -166,7 +166,7 @@ the exact pinned-source findings and remaining live gates.
 No Connector-derived source belongs under `src/literature_monitor`, and the
 Python wheel/sdist must not contain this component or its generated artifacts.
 
-## Unreleased v0.6.5 A4 verification boundary
+## v0.6.5 CARSI Preparation verification boundary
 
 `literature-monitor-carsi.js` starts with the official resource list at
 `https://ds.carsi.edu.cn/resource/resource.php` in a task-associated normal,
@@ -219,9 +219,10 @@ and native Parent Save settlement remain independent and unchanged.
 The page selectors came from user-inspected Chrome DevTools evidence. Current
 automated evidence is recorded in SPEC §44.10. The user reports that manual
 real-browser acceptance has all passed; **Codex has not independently verified
-that live acceptance**. v0.6.5 is implemented in the uncommitted working tree,
-with final submission audit and isolated release checks complete (SPEC §44.11),
-and remains **unreleased** pending publication verification.
+that live acceptance**. v0.6.5 is **released**, with final audit/build checks in
+SPEC §44.11 and verified tag/downloaded asset digests in §44.12. The ZIP includes
+`chrome-mv3/` and `corresponding-source/` with pinned upstream source, the reviewed
+delta, licenses and build instructions.
 
 ## Unreleased v0.6.3 Access Service preparation
 

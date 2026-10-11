@@ -8,10 +8,13 @@ safely updates durable Paper and Author Markdown, and exports kept papers.
 
 ## Release and development status
 
-**v0.6.5 CARSI Preparation is the current release candidate.** Publication checks
-are in progress; the implementation is complete and version fields are 0.6.5.
-[SPEC §44](SPEC.md#44-v065-institutional-access-preparation--development-contract)
-records the current contract and verification evidence.
+**v0.6.5 CARSI Preparation is RELEASED** as the latest verified GitHub release:
+[GitHub Release v0.6.5](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.5).
+The wheel, sdist and separate Chrome/MV3 Connector ZIP were downloaded and matched
+to the verified local builds. [SPEC §44.11](SPEC.md#4411-v065-release-preparation-and-final-audit-2026-10-11)
+records 3,085 Python tests, 163 Runtime tests, 25 CARSI Executor tests and isolated
+installation checks; [§44.12](SPEC.md#4412-v065-publication-verification-and-closeout-2026-10-11)
+records the fixed tag and asset SHA-256 values.
 
 Kept offers optional **Prepare CARSI Access** for CARSI Services related to all
 current Kept Papers, deduplicated in saved configuration order. **Manual Login**
