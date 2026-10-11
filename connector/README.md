@@ -6,6 +6,12 @@ Zotero Connector source and is separate from the MIT Python
 `literature_monitor` package. The tracked build entry point generates the
 Chrome/MV3 artifact with version `0.6.6`.
 
+v0.6.6 is **released**. [SPEC §45.8](../SPEC.md#458-v066-release-preparation-and-validation-reuse)
+records the reconstructed build and version checks;
+[§45.9](../SPEC.md#459-v066-publication-verification-and-closeout) records the
+published ZIP and downloaded digest verification. The v0.6.5 CARSI behavior and
+upstream pins are unchanged; the current Python server accepts the 0.6.6 handshake.
+
 A1 establishes source provenance, licensing, reconstruction and Chrome/MV3
 build boundaries. A5 adds the independent Literature Monitor automatic-capture
 runtime within that AGPL component: localhost heartbeat/claim/result transport,

@@ -8,22 +8,19 @@ safely updates durable Paper and Author Markdown, and exports kept papers.
 
 ## Release and development status
 
-**v0.6.6 is unreleased development.** Its bounded code and documentation
-simplification is defined in [SPEC §45](SPEC.md#45-v066-codebase--documentation-simplification--development-contract).
+**v0.6.6 Codebase & Documentation Simplification is RELEASED** as the latest
+verified [GitHub Release](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.6).
 T1 through T4 have completed independent review. ChatGPT's independent T5
 offline integration audit passed **3040 Python tests (2 warnings), 163 Runtime
 tests and 25 CARSI Executor tests**; see [SPEC §45.7](SPEC.md#457-t5-final-integration-audit-evidence).
-Python metadata, Provider User-Agent strings and the Connector now use version
-`0.6.6`. Final distribution builds and publication verification are in progress.
-The current guide below includes the implemented v0.6.6 Import correction.
-
-**v0.6.5 CARSI Preparation is RELEASED** as the latest verified GitHub release:
-[GitHub Release v0.6.5](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.5).
-The wheel, sdist and separate Chrome/MV3 Connector ZIP were downloaded and matched
-to the verified local builds. [SPEC §44.11](SPEC.md#4411-v065-release-preparation-and-final-audit-2026-10-11)
-records 3,085 Python tests, 163 Runtime tests, 25 CARSI Executor tests and isolated
-installation checks; [§44.12](SPEC.md#4412-v065-publication-verification-and-closeout-2026-10-11)
-records the fixed tag and asset SHA-256 values.
+Version finalization passed **528 targeted Python tests**, including the 0.6.6
+CARSI handshake. The wheel, sdist and separate Connector ZIP passed content
+checks. A fresh wheel installation passed CLI and HTTP smoke checks; all three
+downloads matched the inspected builds.
+[SPEC §45.8](SPEC.md#458-v066-release-preparation-and-validation-reuse) records
+build evidence; [§45.9](SPEC.md#459-v066-publication-verification-and-closeout)
+records the fixed tag and asset SHA-256 values. Embedded artifact documentation
+retains the verified release-preparation snapshot.
 
 Kept offers optional **Prepare CARSI Access** for CARSI Services related to all
 current Kept Papers, deduplicated in saved configuration order. **Manual Login**
@@ -46,6 +43,13 @@ Codex-executed automated verification and is not independent live verification.
 The Python wheel/sdist remain MIT; the separate Chrome/MV3 Connector is AGPLv3.
 
 ### Historical releases
+
+[v0.6.5 CARSI Preparation](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.5)
+introduced the current optional Preparation action and AI Mapping Pack.
+[SPEC §44.11](SPEC.md#4411-v065-release-preparation-and-final-audit-2026-10-11)
+records its 3,085 Python tests, 163 Runtime tests, 25 CARSI Executor tests and
+isolated installation checks; [§44.12](SPEC.md#4412-v065-publication-verification-and-closeout-2026-10-11)
+preserves the fixed tag and verified asset digests.
 
 [v0.6.4 Journals & Access](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.4)
 introduced the shared Settings draft, Journal Groups, Access Mapping and full
@@ -339,7 +343,7 @@ active capture attempt are transient process-local state.
 ### Connector prerequisites
 
 - Run **Zotero Desktop** and the local Web UI bridge at `http://127.0.0.1:8000`.
-- Download and extract the **v0.6.6 Connector ZIP** when published. In Chrome,
+- Download and extract the published **v0.6.6 Connector ZIP**. In Chrome,
   open `chrome://extensions/`, enable Developer Mode, choose **Load unpacked**,
   and select `chrome-mv3/`; see [Connector instructions](connector/README.md).
 - Settings must show the Connector as `connected` before Import. The official

@@ -8143,3 +8143,24 @@ T5's independent full-suite result in §45.7 remains the reused integration base
 - `connector/build.sh` with repository-external work/output directories: **PASS**. The reconstructed MV3 build has version 0.6.6, the same permissions as the checksum-verified published 0.6.5 ZIP, unchanged upstream/five-submodule pins, declared patch delta, exact overlays, worker order and AGPL license. Its ZIP includes the built extension, corresponding patched source/submodules and Literature Monitor delta/build instructions, without Git metadata, node_modules or protected data.
 
 All 78 protected files retain their release-start bytes and modification times. Real list.md, monitor.yaml, src/.obsidian/, Workspace/Paper/Author data and Zotero Library remain excluded from staging and all assets. SPEC sections 1 through 44 and the earlier development/audit records remain unchanged. GitHub reports zero configured Actions workflows; this is not a CI PASS. No live Chrome/CARSI login or networked OpenAlex verification was repeated. The built assets retain their release-preparation documentation snapshot; publication identity and remote asset digests are recorded below after verification.
+
+### 45.9 v0.6.6 Publication Verification and Closeout
+
+**v0.6.6 is RELEASED and is the latest verified release.** This publication record supersedes the earlier development/pending status in §45 without rewriting its historical audit evidence.
+
+- Release commit and peeled annotated tag `v0.6.6^{}`: `1d12727efa2310327af2b43b604b26050d2e1224`.
+- Annotated tag object: `b4dadf8db6bb271146433d192d0107e4defcdfe7`.
+- [GitHub Release v0.6.6](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.6), published `2026-10-11T12:51:54Z`, stable and not a draft.
+- Remote main and the peeled tag matched the release commit before this documentation closeout. All three published assets were downloaded and their bytes and SHA-256 values matched the inspected local builds:
+
+| Asset | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `literature_monitor-0.6.6-py3-none-any.whl` | 287879 | `a34412cc694c091a4ff1464f339013e1ffba6bd08ee63877b7317f8f153b788f` |
+| `literature_monitor-0.6.6.tar.gz` | 270669 | `ac2ccc9326b43fa40d9a773089e4beb858acf4ce9468740dfc1e67c07d9eb2a6` |
+| `literature-monitor-connector-0.6.6-chrome-mv3.zip` | 10660526 | `49f0fff9eee64857c085bd10db0e91c23c57431d5a901b5f0d8d1ef11c8d7497` |
+
+Python artifacts are MIT; the separate Connector ZIP is AGPLv3 with corresponding source and build instructions. No package registry, Chrome Web Store or hosted deployment is included. GitHub reports zero Actions workflows and zero check runs/status contexts on the release commit; no CI success is claimed.
+
+The independent T5 and subsequent targeted/build/install evidence remain in §§45.7–45.8. No renewed live Chrome/CARSI login, networked OpenAlex or Zotero Library acceptance is claimed. All 78 protected files retain their release-start content and modification times. The user-modified list.md, untracked monitor.yaml, src/.obsidian/ and Workspace data were neither staged nor packaged.
+
+This documentation-only closeout follows the release commit on main. Embedded package/source documentation retains the verified release-preparation snapshot. The annotated tag and all three asset bytes remain fixed; this later record confirms publication without rebuilding or overwriting them.
