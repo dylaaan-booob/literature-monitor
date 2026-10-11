@@ -1,10 +1,10 @@
 # Literature Monitor Connector
 
-This directory defines the independent browser component for the v0.6.5 release,
+This directory defines the independent browser component for the v0.6.6 release,
 following the v0.6.3 batch/Connector contract in SPEC §42. It is derived from the official
 Zotero Connector source and is separate from the MIT Python
 `literature_monitor` package. The tracked build entry point generates the
-Chrome/MV3 artifact with version `0.6.5`.
+Chrome/MV3 artifact with version `0.6.6`.
 
 A1 establishes source provenance, licensing, reconstruction and Chrome/MV3
 build boundaries. A5 adds the independent Literature Monitor automatic-capture
@@ -51,7 +51,7 @@ From the repository root:
 
 The script reconstructs the pinned upstream source into
 `connector/.work/`, verifies and applies the tracked Literature Monitor
-delta, runs the upstream debug build with release version `0.6.5`, verifies
+delta, runs the upstream debug build with release version `0.6.6`, verifies
 a Manifest V3 Chrome artifact, and copies the result to:
 
 ```text
@@ -70,7 +70,7 @@ directories from being treated as disposable Connector build state.
 For local installation or verification, open `chrome://extensions/`, enable
 Developer Mode, choose **Load unpacked**, and select the generated `chrome-mv3`
 directory. Alternatively, extract the published
-[Connector ZIP](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.5)
+[Connector ZIP](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.6)
 and select its `chrome-mv3/` directory; it includes corresponding source and
 license/build instructions. This is a local install path, not a Chrome Web Store release.
 A7 recorded a successful toolbar-free automatic save in normal Chrome with
@@ -224,16 +224,20 @@ SPEC §44.11 and verified tag/downloaded asset digests in §44.12. The ZIP inclu
 `chrome-mv3/` and `corresponding-source/` with pinned upstream source, the reviewed
 delta, licenses and build instructions.
 
-## Unreleased v0.6.3 Access Service preparation
+## Historical v0.6.3 DOI-based preparation design (not enabled)
 
-The runtime observes the owned DOI tab's actual landing origin. It does not
-identify an Access Service from Publisher metadata or infer institutional access
-from a login redirect. No real federation route is currently verified or enabled;
-unknown services use ordinary bibliographic capture plus Open DOI for manual
-access. IdP session, SP session, authentication and full-text entitlement remain
-separate unknown observations. A challenge or failed/expired preparation stops
-that task, without allowing a late save callback to resume it.
+This earlier design concerned an owned DOI tab's actual landing origin, not the
+current CARSI Portal Preparation queue. No real federation route was verified
+or enabled by it. Unknown Services used ordinary bibliographic capture and
+Open DOI for manual access. Publisher metadata and login redirects were not authority to
+identify a Service or prove access; IdP session, SP session, authentication and
+full-text entitlement remained separate unknown observations. The design
+required a challenge or failed/expired preparation to stop its task, with no
+late save callback allowed to resume it.
 
-Reviewed future rules must preserve existing OpenAthens host associations and
-satisfy origin/return allowlists and finite preparation limits. Deterministic
-fixtures are not institution login evidence. See SPEC §42.12 and PROVENANCE.md.
+Its proposed future rules had to preserve existing OpenAthens host associations
+and satisfy origin/return allowlists and finite preparation limits. Deterministic fixtures
+were not institution login evidence. See the historical
+[SPEC §42.12](../SPEC.md#4212-a6-access-service-preparation-implementation-evidence)
+and [PROVENANCE.md](PROVENANCE.md). Current CARSI operation is documented above
+and in §44; this historical design is not an enabled access feature.

@@ -326,7 +326,7 @@ def fetch_carsi_directory(*, transport: httpx.BaseTransport | None = None) -> tu
         ) as client:
             with client.stream("GET", CARSI_DIRECTORY_URL, headers={
                 "Accept": "text/html",
-                "User-Agent": "literature-monitor/0.6.5 (public CARSI catalog export)",
+                "User-Agent": "literature-monitor/0.6.6 (public CARSI catalog export)",
             }) as response:
                 if response.is_redirect:
                     raise MappingPackError("CARSI directory redirected; refusing unexpected destination")

@@ -100,11 +100,6 @@ class PublisherConfig(BaseModel):
             return None
         return validate_access_service_id(value)
 
-    @property
-    def access_url(self) -> str | None:
-        """Compatibility for the v0.6.3 presentation adapter until A2."""
-        return self.publisher_url
-
 
 def validate_access_service_id(value: str) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"svc_[0-9a-f]{32}", value):

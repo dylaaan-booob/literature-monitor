@@ -85,14 +85,15 @@ def test_capability_and_version_are_required_and_loss_revokes_claimed_task(tmp_p
     assert capture.reserve_browser_task("import") is not None
 
 
-def test_claim_freezes_saved_valid_institution_login_without_access_url_navigation(tmp_path):
+@pytest.mark.parametrize("version", ["0.6.5", "0.6.6"])
+def test_claim_freezes_saved_valid_institution_login_without_access_url_navigation(tmp_path, version):
     config, _, _, _ = prepared(tmp_path)
     entity = "https://idp.example.edu/idp/shibboleth"
     config.write_text(config.read_text(encoding="utf-8") +
                       "\ninstitution:\n  idp_entity_id: " + entity + "\n", encoding="utf-8")
     prep = PreparationCoordinator(CaptureCoordinator(), execution_enabled=True)
     instance = "carsi-test-instance-002"
-    assert prep.heartbeat(instance, capability=EXECUTOR_CAPABILITY, version="0.6.5")
+    assert prep.heartbeat(instance, capability=EXECUTOR_CAPABILITY, version=version)
     assert prep.start(config).phase is PreparationPhase.RUNNING
     first = prep.claim(instance)
     assert first is not None

@@ -7,7 +7,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from literature_monitor.application.settings import load_settings, save_settings, SettingsSaveOutcome
-from literature_monitor.application.journal_import import preview_journal_import, apply_journal_import
 from literature_monitor.application.candidate_eligibility import filter_candidate_evidence, CandidateEligibility
 from literature_monitor.config import JournalConfig, PublisherConfig, render_journal_whitelist_text, render_settings_list_text, load_config
 from literature_monitor.crossref import plan_crossref_queries, discover_crossref_journals, CrossrefDiscoveryResult
@@ -70,29 +69,6 @@ def test_ordinary_save_preserves_machine_metadata_without_network(tmp_path, monk
     result = save_settings(config, replace(opened.draft, journals=journals))
     assert result.outcome is SettingsSaveOutcome.SAVED
     assert load_config(config).journals == journals
-
-
-@pytest.mark.parametrize('new_identity', [False, True])
-def test_import_apply_is_draft_only_and_save_enforces_resolution(tmp_path, new_identity, monkeypatch):
-    from literature_monitor.openalex import OpenAlexClient, OpenAlexRequestError
-    def unavailable(*args, **kwargs):
-        raise OpenAlexRequestError("requires metadata resolution: unavailable")
-    monkeypatch.setattr(OpenAlexClient, "_request_json", unavailable)
-    config, path, opened = configured(tmp_path)
-    before = config.read_bytes(), path.read_bytes()
-    text = f'Journal,ISSN-L,Group\nArbitrary hint,{X if new_identity else A},Methods\n'
-    plan = preview_journal_import(opened.draft, text)
-    assert plan.can_apply and plan.metadata_resolution_required is new_identity
-    result = apply_journal_import(opened.draft, text)
-    assert result.applied and (config.read_bytes(), path.read_bytes()) == before
-    assert result.draft.journals[0].name == 'Canonical A'
-    assert result.draft.journals[0].publisher_id == 'https://openalex.org/P1'
-    saved = save_settings(config, result.draft)
-    assert saved.outcome is (SettingsSaveOutcome.INVALID_DRAFT if new_identity else SettingsSaveOutcome.SAVED)
-    if new_identity:
-        assert (config.read_bytes(), path.read_bytes()) == before
-    else:
-        assert load_config(config).journals[0].group == 'Methods'
 
 
 @pytest.mark.parametrize('mutation', ['journal_name', 'journal_publisher_id'])

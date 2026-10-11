@@ -8,6 +8,15 @@ safely updates durable Paper and Author Markdown, and exports kept papers.
 
 ## Release and development status
 
+**v0.6.6 is unreleased development.** Its bounded code and documentation
+simplification is defined in [SPEC §45](SPEC.md#45-v066-codebase--documentation-simplification--development-contract).
+T1 through T4 have completed independent review. ChatGPT's independent T5
+offline integration audit passed **3040 Python tests (2 warnings), 163 Runtime
+tests and 25 CARSI Executor tests**; see [SPEC §45.7](SPEC.md#457-t5-final-integration-audit-evidence).
+Python metadata, Provider User-Agent strings and the Connector now use version
+`0.6.6`. Final distribution builds and publication verification are in progress.
+The current guide below includes the implemented v0.6.6 Import correction.
+
 **v0.6.5 CARSI Preparation is RELEASED** as the latest verified GitHub release:
 [GitHub Release v0.6.5](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.5).
 The wheel, sdist and separate Chrome/MV3 Connector ZIP were downloaded and matched
@@ -36,111 +45,41 @@ The user reports all manual real-browser acceptance passed; this is separate fro
 Codex-executed automated verification and is not independent live verification.
 The Python wheel/sdist remain MIT; the separate Chrome/MV3 Connector is AGPLv3.
 
-### v0.6.4 release history
+### Historical releases
 
-**v0.6.4 Journals & Access was RELEASED** with verified GitHub assets:
-[GitHub Release v0.6.4](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.4).
-The verified assets are the 0.6.4 Python wheel, sdist and separately AGPLv3-licensed
-Chrome/MV3 Connector ZIP. Python package, OpenAlex/Crossref User-Agent and Connector
-versions are `0.6.4`. See [SPEC §43.11](SPEC.md#4311-v064-release-verification-and-closeout-2026-10-10)
-for immutable tag/asset checksums and the retained acceptance limits. Historical
-[GitHub Release v0.6.3](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.3)
-and [GitHub Release v0.6.2](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.2)
-retain their original release assets and contracts.
+[v0.6.4 Journals & Access](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.4)
+introduced the shared Settings draft, Journal Groups, Access Mapping and full
+Markdown Import/Export. [SPEC §43.11](SPEC.md#4311-v064-release-verification-and-closeout-2026-10-10)
+preserves its fixed tag `c90651cdba98aa1a606a880ecae8b8891aed8bca` and asset
+checksums. [§43.10](SPEC.md#4310-a7-acceptance-evidence-and-a8-review-follow-up-2026-10-10-unreleased)
+retains the isolated-browser evidence and its NOT_VERIFIED limits.
 
-[SPEC §43](SPEC.md#43-v064-journals--access--development-contract) defines
-v0.6.4 Journal Groups, Publisher-to-Access-Service Mapping, complete `list.md`
-Markdown Import/Export, the shared Settings draft and explicit legacy upgrade.
-A0–A7 implementation and acceptance review completed. A8's two review findings
-were repaired and independently verified before the release commit. The annotated
-`v0.6.4` tag is fixed on commit `c90651cdba98aa1a606a880ecae8b8891aed8bca`;
-all three GitHub assets were downloaded and compared byte-for-byte to the reviewed
-local builds. A separate documentation closeout follows without moving the tag.
+[v0.6.3](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.3)
+introduced the current transient Kept Import contract.
+[v0.6.2](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.2)
+and v0.6.1 used older Settings and Zotero workflows. Their detailed instructions
+remain in the [v0.6.2 README](https://github.com/dylaaan-booob/literature-monitor/blob/v0.6.2/README.md)
+and [v0.6.1 README](https://github.com/dylaaan-booob/literature-monitor/blob/v0.6.1/README.md).
+My Library preflight, exact-DOI `in_zotero`/`zotero_key` reconciliation and
+Journal Preview/Apply belong to those historical contracts, not current operations.
 
-A7 used an isolated real-legacy `list.md` copy and headless Chrome 154 at
-1440×900 and 550×850, with offline Run/Workspace/Kept/Zotero regression tests.
-Source-to-saved-to-downloaded Markdown bytes matched. Some Chrome interactions
-were observed through console logs rather than strict assertions; real keyboard
-events (CDP timeout cause unresolved), physical touch, non-headless Chrome and
-a real Zotero Library run remain NOT_VERIFIED. The file named
-`narrow_overview.png` shows Mapping, not an Overview acceptance screenshot.
-See [SPEC §43.10](SPEC.md#4310-a7-acceptance-evidence-and-a8-review-follow-up-2026-10-10-unreleased)
-for the evidence boundaries. These gaps remain explicitly **NOT_VERIFIED**;
-publishing v0.6.4 does not make them live acceptance PASS. The historical
-usage sections below retain their original version-specific behavior.
-
-[SPEC §41](SPEC.md#41-v062-issn-l-venue-identity--journalspublishers-settings---development-contract)
-defines the venue identity and Settings contract;
-[SPEC §41.16](SPEC.md#4116-v062-release-and-documentation-closeout-2026-10-08)
-records the permanent release target and asset verification.
-The unchanged automatic capture contract remains in
-[SPEC §40](SPEC.md#40-v061-automatic-zotero-connector-capture-current-contract).
-[SPEC §40.16](SPEC.md#4016-v061-release-and-documentation-closeout-2026-10-07)
-preserves v0.6.1 publication history; §§40.14 and 40.15 retain its live acceptance
-and preparation evidence.
-
-A7 recorded a successful toolbar-free automatic save in normal Chrome with
-Zotero Desktop and an existing institutional session. Final authoritative
-exact-DOI reconciliation confirmed the bibliographic parent and changed the
-validation Paper to `in_zotero`; a PDF was observed without gating parent success.
-The optional pre-existing-parent live case and 17 upstream ItemSaver tests remain
-unverified, the latter because the required Puppeteer Chrome was unavailable.
-These recorded §40.14 acceptance boundaries describe the historical v0.6.2 release.
-
-The released v0.6.0 workflow uses the official Zotero Connector manually and
-read-only exact-DOI reconciliation. The released v0.6.1 workflow adds automatic
-Connector triggering under §40. Neither workflow requires a PDF attachment
-for `in_zotero`; publisher authentication remains manual in the normal browser.
-The retired Browser Companion/custom PDF acquisition path is historical only.
-
-The v0.6.1 deliverables are the Python wheel, Python sdist and a
-separate Chrome/MV3 Literature Monitor Connector ZIP with corresponding source.
-The Python package
-is MIT; the Connector has its own AGPLv3 license/provenance boundary and is
-excluded from wheel/sdist and Python imports. See [connector/README.md](connector/README.md)
-and [connector/PROVENANCE.md](connector/PROVENANCE.md) for build/install details
-and provenance. Extract the ZIP and load its `chrome-mv3/` directory locally in Chrome.
-
-[AGENTS.md](AGENTS.md#release-execution-and-verification-reuse) defines continuous
-release execution and validation reuse. Detailed historical release and live
-evidence remain in SPEC; historical validation does not establish success for
-the current release beyond its recorded scope.
-
-The legacy usage instructions below describe v0.6.2 under
-[SPEC §41](SPEC.md#41-v062-issn-l-venue-identity--journalspublishers-settings---development-contract).
-The [v0.6.1 README](https://github.com/dylaaan-booob/literature-monitor/blob/v0.6.1/README.md)
-retains the previous configuration and Settings interface.
-**A6_FINAL_REVIEW: PASSED; A7_RELEASE_PREPARATION: PREPARED;
-A7_FINAL_RELEASE_CANDIDATE_REVIEW: PASSED.** The final review's sole top-status
-finding was corrected and rechecked before publication.
-
-A6_FIX_1 closed all five code findings (F1–F5): URL host normalization,
-import identity, legacy Web import, damaged Journal-storage recovery and
-reintroducing saved Journals. **CODE_FINDINGS: CLOSED; BROWSER_ACCEPTANCE:
-PASSED (desktop Chrome and 550px responsive Chrome);
-A6_FINAL_REVIEW: PASSED.** On 2026-10-08, real macOS Chrome acceptance
-used an isolated `/settings` service and configuration, rendering 74 Journals,
-20 Publishers and 19 Open links. The desktop view (1470px content width)
-passed independent list scrolling and no-overflow checks; a 550px Chrome
-window passed single-column layout and normal page scrolling. Real-browser
-Preview/Apply/Save, URL and ISSN-L rejection, revision conflict, HTMX state
-preservation and Remove → Add → Save also passed, with writes confined to
-isolated test files. This responsive-window check is not a physical mobile
-touch test.
-
-An independent rerun of `tests/test_a6_fix1.py` passed 56 tests. The
-previous Codex full `uv run pytest` result was 2720 passed with two existing
-dependency deprecation warnings; the browser closeout did not rerun the
-full suite. Physical mobile testing and a new live OpenAlex/Crossref
-end-to-end Run remain unverified. See
 [SPEC §41.14](SPEC.md#4114-a6-integration-audit-and-product-acceptance-2026-10-08)
-for the historical BLOCKED findings and subsequent acceptance record.
-A7 candidate validation and original SHA-256 values remain in
-[SPEC §41.15](SPEC.md#4115-a7-release-preparation-2026-10-08).
-[SPEC §41.16](SPEC.md#4116-v062-release-and-documentation-closeout-2026-10-08)
-records the published artifacts and reused validation evidence.
+preserves the v0.6.2 review, isolated desktop/responsive Chrome acceptance and
+remaining live-test gaps; [§41.15](SPEC.md#4115-a7-release-preparation-2026-10-08)
+and [§41.16](SPEC.md#4116-v062-release-and-documentation-closeout-2026-10-08)
+retain preparation, test counts and publication evidence.
+[§40.14](SPEC.md#4014-a7-implementation-and-validation-evidence-2026-10-07)
+and [§40.16](SPEC.md#4016-v061-release-and-documentation-closeout-2026-10-07)
+preserve v0.6.1 live acceptance and release history. These records establish only
+their tested versions and scopes.
 
-## v0.6.3 workflow and acceptance
+See [Connector instructions](connector/README.md) and
+[provenance](connector/PROVENANCE.md) for the separate AGPLv3 component;
+it is excluded from the MIT Python wheel/sdist and runtime imports.
+[AGENTS.md](AGENTS.md#release-execution-and-verification-reuse) defines release
+execution and validation reuse.
+
+## Current Kept and Zotero workflow
 
 A0–A9 and the Reset Guard Lifecycle Fix implement [SPEC §42](SPEC.md#42-v063-keep-driven-batch-zotero-import--federated-access-preparation--development-contract).
 Local release-candidate checks, final artifacts and publication verification are
@@ -151,7 +90,7 @@ distinct from the executed automated checks; actual PDF completion still remains
 `unverified` in the application without an attributable upstream attachment
 receipt. The permanent release tag points to the verified v0.6.3 package inputs.
 
-The v0.6.3 UI has exactly **Inbox / Kept / Settings**. Run creates
+The current UI has exactly **Inbox / Kept / Settings**. Run creates
 `candidate` Papers; Keep/Reject persists immediately. Kept aggregates eligible
 Papers across Runs. Its single Import action processes the set serially through
 the separate Connector. Attributable parent acceptance marks `exported`; PDF
@@ -164,20 +103,23 @@ save still exclude overlapping dispatches. Native parent acceptance alone can
 mark `exported`; translator failure, native errors, absent confirmation and
 local Paper-write errors remain distinct transient batch results. Normal import
 does not enumerate Zotero My Library; inspect uncertain saves before another
-invocation to avoid duplicate parents. A0–A9 pre-simplification tests are
-preserved in `tests/history/` alongside replacement regressions.
+invocation to avoid duplicate parents. Superseded persistent-attempt tests remain
+available in Git history; active tests cover the current transient import contract.
 
 Settings accepts optional public institution/IdP identifiers, which establish
-neither a session nor full-text access. There are currently **zero enabled
-federation routes**; use Open DOI and manual institutional access. Workspace
-Reset in Settings is explicit **permanent deletion of the entire configured
+neither a session nor full-text access. The earlier §42 DOI-origin automatic
+federation routes remain disabled. §44 provides the separate, optional
+**Prepare CARSI Access** action. Preparation does not verify the actual DOI
+landing SP, login status, access rights or PDF availability. **Open DOI** and
+manual institutional access remain alternatives. Workspace Reset in Settings
+is explicit **permanent deletion of the entire configured
 Workspace, with no undo/recovery**. This includes `.obsidian`, custom files and
 old/damaged Papers. Configuration outside the Workspace remains; deletion
 failures may leave partial results. Reset does not undo Zotero saves or make
 import retry safe. A later explicit Run recreates the Workspace.
 See [SPEC §42.10](SPEC.md#4210-verification-and-release-gates) for required manual
 acceptance and [SPEC §42.15](SPEC.md#4215-a9-final-functional-closeout-2026-10-08)
-for current evidence. The remaining usage sections describe released v0.6.2.
+for the historical v0.6.3 evidence.
 
 ## Current retrieval architecture
 
@@ -225,72 +167,65 @@ From an installed distribution, use:
 literature-monitor gui --config monitor.yaml
 ```
 
-The GUI is local-only and binds to `127.0.0.1:8000`; v0.4.0 provides no LAN
-serving mode. Missing or invalid monitor/journal configuration does not block
-startup and Settings remains accessible. Save can repair a missing or damaged
-Journals section from an explicit valid draft, preserving readable Publishers
-and unrelated sections. Untrusted Journal metadata requires OpenAlex resolution;
-unsafe or unreadable files remain blocked. GUI Run always
-uses the persisted Monitor date policy and exposes no temporary date override.
+The GUI is local-only and binds to `127.0.0.1:8000`. Missing or invalid
+configuration does not block startup; Settings remains accessible. Ordinary Save
+rejects damaged Journal storage and legacy ISSN/EISSN storage rather than
+implicitly repairing or upgrading it. Unsafe or unreadable files remain blocked.
+GUI Run uses the persisted Monitor date policy and exposes no temporary date override.
 
-Settings → **Journals & Publishers** is one editor with one **Save** for the
-complete Monitor, Journals and Publishers draft. Journal name, ISSN-L and direct
-Publisher ID are read-only; edit Group, **Remove** a row, or **Add** a new Journal
-by ISSN-L. New rows are Pending until Save resolves canonical OpenAlex metadata.
-To change identity, Remove and Add. Create, rename, delete and order Groups in
-**Organize Groups**; deleting a Group moves its Journals to **Ungrouped**.
-Removing and reintroducing a saved ISSN-L through Add or Import restores its
-persisted canonical name and Publisher ID during offline Save, while retaining
-the draft's Group and Access URL edits.
+### Journals & Access
 
-Publisher name and OpenAlex ID are read-only. **Access URL** is an optional,
-visible, editable field: manually change it or clear it. **Open** is available
-for an accepted URL and uses a new tab with `noopener noreferrer`. Access is a
-manual institutional-login shortcut, not a login/status or entitlement check.
-The URL contract rejects non-HTTP(S), credentials, localhost and non-public IP
-literals after host Unicode/IDNA normalization, without DNS or reachability
-requests. Public IDN domains remain supported. Publisher IDs alone define identity; names, hostnames
-and corporate lineage do not merge Publishers.
+Settings has one shared Draft and one **Save** for Monitor, Institution,
+Journals, Publishers and Access Services. **Overview** reflects that Draft,
+including unsaved edits. Switching views writes nothing.
 
-Ordinary Save is offline, including Group, Access URL, keyword and date edits.
-Identity-changing Save resolves all required metadata before any persistence
-write. Resolution/identity failure writes neither settings file. Save compares
-both original content revisions; a concurrent disk edit conflicts. A journal
-write followed by a monitor-write failure is reported as a partial save.
-Provider metadata does not overwrite a manually entered or cleared Access URL.
-The old Web **Validate** button/route and separate Publisher projection are
-removed; CLI `validate` remains available.
+Use **Organize · Journal Groups** to create, rename and order Groups. Drag a
+Journal into a Group, or select Journals and use **Assign** with the destination
+selector; each row also has a Group selector. **Ungrouped** means no Group.
+Deleting a nonempty Group requires confirmation and moves its Journals to Ungrouped.
+Empty Groups exist only in the Draft; only Groups assigned to Journals persist.
 
-Desktop Journals and Publishers have separate bounded scroll areas, with Save,
-Bulk Import and Group controls outside them. At widths ≤760px, the lists stack
-in page flow. Automated HTMX checks cover preservation of draft values,
-revisions, disclosure state and list scroll. Real desktop Chrome and 550px
-responsive Chrome layout/interaction acceptance passed on 2026-10-08; physical
-mobile touch behavior remains untested.
+Journal name, ISSN-L and direct Publisher ID are machine-managed. Use **Add
+journal** with an ISSN-L; a new identity stays pending until Save verifies
+OpenAlex metadata. To change an identity, Remove and Add. Re-adding a saved
+identity retains its saved canonical metadata. Journal names and Publisher
+names do not establish identity.
 
-Bulk Import accepts UTF-8 CSV, TSV, pasted supported tables and Literature
-Monitor `list.md`. Prefer `Journal,ISSN-L,Group` (Group is optional). **Preview**
-shows changes; **Merge** keeps existing Journals and **Replace** previews
-removals. **Apply to draft** changes only the unsaved draft and retains its
-original revisions; Save is the sole persistence action. ISSN-L defines
-Merge/Replace identity. Rows with the same ISSN-L and compatible Groups merge
-despite different display hints; a genuine Group conflict blocks the whole
-Apply. Existing canonical metadata is retained, and new identities obtain
-canonical metadata from OpenAlex.
+Use **Organize · Access Mapping** to create or edit Services and explicitly
+**Assign** selected Publishers to a Service or **Unassigned**. Journal Groups
+and Publisher → Service mapping are independent. Publisher name and OpenAlex ID
+are machine-managed; **Publisher URL** is a user-maintained manual shortcut,
+not proof of the actual DOI landing platform, login or entitlement. Provider
+metadata does not overwrite a manually entered or cleared Publisher URL.
 
-Legacy `Journal,ISSN/EISSN[,Group]` input requires unique Source reconciliation
-and, where needed, independently confirmed ISSN-L, never name-based selection
-or automatic canonical selection by Crossref. Local Preview shows legacy
-identifiers, Groups and optional confirmed ISSN-L inputs. **Reconcile and Apply**
-uses OpenAlex evidence for all rows and changes the draft only if every row
-passes. Confirmation values are bound to the exact import source and rows;
-failed reconciliation retains correctable inputs and diagnostics. Existing
-legacy storage has separate confirmation inputs in its Settings migration flow: opening
-Settings writes nothing; Save verifies all rows, accepts optional confirmed
-ISSN-L targets, and preserves Groups. Migrate storage before adding/importing
-or organizing Journals; unresolved rows block the whole Save.
+An Access Service has a stable ID, editable name, **Access URL** and **Access
+Method**: **CARSI** (`carsi`) or **Manual Login** (`manual`). IDs determine
+relationships; names and URLs never infer them. Deleting a Service requires
+confirmation and leaves its Publishers Unassigned. Removing the last Journal
+associated with a Publisher also removes that Publisher's metadata, manual URL
+and mapping; Services remain. Review the cascade and use **Confirm deletions
+and Save** when requested.
 
-`list.md` is the portable local-first source of truth for both tables:
+URL checks reject non-HTTP(S), credentials, localhost and non-public IP literals
+after Unicode/IDNA normalization, without DNS or reachability requests. Public
+IDN domains remain supported. Opening a reviewed URL is manual access and does
+not save the Draft or establish authentication.
+
+Ordinary edits to saved identities, Groups, mapping, URLs, keywords and dates
+save offline. Adding a new Journal requires OpenAlex verification before any
+write; identity or Provider failure writes neither settings file. Save checks
+the original `list.md` and `monitor.yaml` revisions, so concurrent disk changes
+require a fresh Draft. A list write followed by a monitor-write failure is
+reported as a partial save. Legacy Access Service schema has a separate explicit
+**Preview one-time Access schema Upgrade** / **Confirm Upgrade** flow;
+ordinary Save is not an implicit
+upgrade. The CLI `validate` command remains available.
+
+### Markdown configuration
+
+`list.md` is the sole portable saved configuration for Journals, Publishers and
+Access Services. This syntax example leaves its Publisher Unassigned; it does
+not assert an Access Service relationship or a verified login:
 
 ```markdown
 ## Journals
@@ -301,15 +236,60 @@ or organizing Journals; unresolved rows block the whole Save.
 
 ## Publishers
 
-| Publisher | OpenAlex ID | Access URL |
-| --- | --- | --- |
-| Oxford University Press | https://openalex.org/P4310311648 | http://global.oup.com/?cc=gb |
+| Publisher | OpenAlex ID | Publisher URL | Access Service ID |
+| --- | --- | --- | --- |
+| Oxford University Press | https://openalex.org/P4310311648 | http://global.oup.com/?cc=gb | |
+
+## Access Services
+
+| Service ID | Service | Access URL | Access Method |
+| --- | --- | --- | --- |
 ```
 
-Names and Journal Publisher associations are machine-managed; Group and Access
-URL are human-managed. No print/electronic alias columns or Publisher fields
-are added to `monitor.yaml`. Only Journals drive discovery. Conferences and
-unrelated Markdown sections retain their preservation boundary.
+Service IDs are stable opaque identifiers (`svc_` followed by 32 lowercase
+hexadecimal characters). Keep the ID when renaming a Service. Access Method is
+`carsi` or `manual`; historical three-column Access Services tables default to
+`carsi`. New Journal and Publisher identities still require application
+verification before persistence.
+
+Group and Publisher URL are user-maintained. Notes, Conferences, unknown
+frontmatter and non-managed Markdown remain user content; ordinary managed
+Save preserves unrelated file content. Only Journals drive discovery.
+`monitor.yaml` independently owns Monitor and Institution settings.
+
+### Import, Export and Reload
+
+Open **Import complete Markdown configuration**, select a complete UTF-8
+`.md` file (up to 1 MiB), then choose **Preview Changes** and **Confirm Import**.
+This replaces the entire saved `list.md`, including Conferences, unknown
+sections and user-authored text. Review those whole-file changes; Import does
+not merge a partial Journal table and does not import `monitor.yaml`.
+
+New Journals and Publishers require canonical OpenAlex identity verification.
+A new Publisher may be Unassigned or explicitly reference a Service ID that
+was already saved before Preview and remains valid in the uploaded complete
+configuration. It cannot reference a Service created only in that upload.
+Renaming an existing Service does not change its identity; Preview uses its
+uploaded name and stable ID. Names, URLs and OpenAlex metadata never infer
+mapping. Preview shows the new Publisher's official name and ID, its explicit
+Service name and ID or Unassigned, and the required OpenAlex verification.
+
+Preview and **Cancel Import** write nothing. A changed selected source or
+changed target content/file identity invalidates the old confirmation; Preview
+again. With an unsaved shared Draft, **Save** first and Preview again, or choose
+**Discard unsaved Draft and Confirm Import** explicitly. Discard includes
+Monitor and Institution edits; Import itself writes only `list.md`.
+
+Confirm rechecks the signed Preview and revisions, verifies new identities and
+uses safe-path, compare-and-swap (CAS) and atomic-write safeguards. Provider or
+validation failure cannot persist unverified metadata. **Export Markdown**
+downloads the saved complete configuration, including user text, rather than
+the unsaved Draft. If the Draft is dirty, Save first or explicitly Discard for
+the export. **Reload from Disk** explicitly discards unsaved edits.
+
+**Export AI Mapping Pack** creates a work file for external AI editing. It is
+not importable configuration. Review the AI output and import only a complete
+`list.md` through the same Preview/Confirm flow.
 
 Current Run attribution writes configured ISSN-L values into the existing
 plural `journal_issns` field, deduplicated when one DOI matches several Journal
@@ -346,107 +326,31 @@ keeps its result summary and warning/error counts; full issues, diagnostics,
 coverage, and Provider-state usage appear in **Advanced & Diagnostics → Current
 run**. These details are process-local and are not restored after server restart.
 
-Kept Paper detail offers **Save to Zotero**, **Open DOI** and **Check Zotero** when the Paper is
-`kept` and has a valid normalized DOI. The old Web Zotero export panel, Load
-export, and textarea workflow remain removed; CLI `export-kept` remains
-available and unchanged.
+Kept offers **Import to Zotero** for eligible kept Papers with normalized DOIs.
+It saves serially through the separate Connector and marks `exported` only after
+attributable native parent acceptance. **Open DOI** opens a normal browser page
+without changing Paper state. CLI `export-kept` remains a separate read-only handoff.
 
 Paper Markdown remains the durable workflow state. The GUI does not add a
 workflow/execution database, persistent run history, SSE, WebSocket, batch
 queue, or another source of Paper decision state. Connector heartbeat and one
 active capture attempt are transient process-local state.
 
-### Zotero workflow (unchanged v0.6.1 capture protocol)
+### Connector prerequisites
 
-```text
-Settings → Journals & Publishers → Publisher Access URL → Open
-→ optionally open relevant journal/publisher sites and authenticate manually
+- Run **Zotero Desktop** and the local Web UI bridge at `http://127.0.0.1:8000`.
+- Download and extract the **v0.6.6 Connector ZIP** when published. In Chrome,
+  open `chrome://extensions/`, enable Developer Mode, choose **Load unpacked**,
+  and select `chrome-mv3/`; see [Connector instructions](connector/README.md).
+- Settings must show the Connector as `connected` before Import. The official
+  Zotero Connector can coexist for ordinary manual saves.
+- Complete institutional authentication manually. Inspect uncertain saves in
+  Zotero before another explicit Import; a retry can create duplicate parents.
+  PDF completion is separate from parent success and is not custom downloading.
 
-Kept Paper → Save to Zotero
-→ authoritative exact-DOI My Library preflight
-→ if a unique parent exists: reconcile directly
-→ only if explicitly absent: automatic Connector save in a dedicated DOI tab
-→ after a confirmed or uncertain save: one final exact-DOI reconciliation
-→ in_zotero only after a unique bibliographic parent is verified
-```
-
-**Open DOI** and **Check Zotero** remain the manual fallback and explicit
-reconciliation paths. Automatic capture supports one active Paper at a time;
-uncertain completion never automatically repeats a save.
-
-#### Prerequisites
-
-- **Zotero Desktop**, running with Local API access enabled.
-- For automatic capture, the **Literature Monitor Connector** in Chrome:
-  download and extract the published v0.6.2 ZIP, open
-  `chrome://extensions/`, enable Developer Mode, choose **Load unpacked**, and
-  select `chrome-mv3/`; see [Connector instructions](connector/README.md).
-- Run the local Web UI bridge at `http://127.0.0.1:8000`; Settings shows the
-  Connector readiness, which must be `connected` to start automatic capture.
-- The official Zotero Connector can coexist for ordinary manual saves.
-  Institutional authentication remains manual in the normal browser.
-
-#### Publisher access
-
-Use **Open** beside a Publisher Access URL in **Journals & Publishers**, then
-complete institutional login manually in the normal browser. Literature Monitor
-does not inspect cookies, identify your account or institution, determine
-entitlement, detect login success, or track session expiry. These fields belong
-to the shared Settings draft; opening a link does not save it or start a Run.
-
-The separate read-only Publisher projection belonged to released v0.6.1.
-The development branch replaces it with the durable Publisher table above;
-`/settings/publisher-access` is removed. Zotero capture and exact-DOI
-reconciliation remain unchanged under §40.
-
-#### Open DOI and return behavior
-
-**Open DOI** appears only for a `kept` Paper with a valid normalized DOI. The
-server builds the DOI target and opens the normal external DOI page in a new
-browser tab. Opening the DOI does not change Paper Markdown and starts no
-Literature Monitor browser automation.
-
-On the DOI/publisher page, use the official Zotero Connector manually. When you
-return to Literature Monitor, the page makes at most one automatic reconciliation
-attempt for that Open DOI action. There is no fixed wait, background polling,
-attachment-ready check in this manual return path. If the Zotero parent is not yet
-visible, the Paper remains `kept`; use **Check Zotero** later to retry explicitly.
-
-#### Check Zotero and `in_zotero`
-
-Automatic return reconciliation and **Check Zotero** use the same read-only
-Zotero Desktop operation. Success requires:
-
-- Zotero Desktop Local API is readable;
-- My Library can be completely read and contains exactly one bibliographic
-  parent whose normalized DOI exactly matches the Paper DOI;
-- any existing non-null `zotero_key` already agrees with that verified parent.
-
-On success, Literature Monitor records only:
-
-```yaml
-status: in_zotero
-zotero_key: <verified parent key>
-```
-
-A PDF attachment is not required, a Snapshot is not required, and attachment
-readiness is not checked. Here `in_zotero` means that the unique exact-DOI
-bibliographic parent linkage has been verified. Zero matches, duplicate matches,
-incomplete or unstable reads, and conflicting existing keys leave the Paper
-unchanged.
-
-#### v0.6.1 troubleshooting
-
-| Result or symptom | Next step |
-| --- | --- |
-| Save to Zotero / Open DOI / Check Zotero absent | The Paper must be `kept` and have a valid DOI. |
-| Connector unavailable | Load the Literature Monitor Connector in Chrome, start Zotero Desktop and use the bridge at `127.0.0.1:8000`; **Open DOI** remains available. |
-| Save unconfirmed | Check the dedicated task tab and Zotero, then use **Check Zotero**; capture is not automatically repeated. |
-| Zotero unavailable / Local API unreadable | Start Zotero Desktop and enable Local API access. |
-| No exact DOI match | Finish the manual Zotero Connector save, then use **Check Zotero**. |
-| Duplicate exact DOI parents | Resolve the duplicate bibliographic parents in My Library, then retry. |
-| Existing `zotero_key` conflicts | Repair the Paper/Zotero linkage deliberately; Literature Monitor does not silently replace it. |
-| Publisher Access URL empty | Enter a reviewed public URL in Settings, or continue with **Open DOI**. No login-status check is performed. |
+The former **Save to Zotero** / **Check Zotero** and My Library reconciliation
+instructions are historical v0.6.1/v0.6.2 behavior, linked above. Current Import
+uses transient batch results and `kept → exported` under §42.
 
 ### Historical v0.5.1 live verification
 
@@ -682,7 +586,7 @@ requires current live membership and matching revisions; it is not resume or
 synchronization state.
 
 The supported decision model is one monitor to one decision workspace. Paper
-UUID stability, `candidate` / `rejected` / `kept` / `in_zotero`
+UUID stability, `candidate` / `rejected` / `kept` / `exported`
 decisions, human notes, and other durable Paper state are local to that
 workspace. The same research work is not guaranteed to receive the same UUID in
 another workspace, and Reject/Keep decisions are not inherited across monitors.
@@ -769,11 +673,11 @@ delta / “What's New” state, scheduler or daemon durable state, notifications
 run history, or a workflow/execution database. The last-run snapshot is
 observational metadata; Provider state is a reconstructible revision-validated
 optimization, and every Run still establishes live membership.
-Under the unchanged v0.6.1 capture protocol, Python Zotero integration remains read-only exact-DOI parent
-reconciliation in My Library. The separate Literature Monitor Connector may
-save automatically only after authoritative preflight confirms the parent is
-absent. Custom PDF acquisition/staging, publisher-login automation and the
-retired Browser Companion remain outside the current workflow.
+Current Zotero Import uses the separate Connector's native parent-save
+confirmation and transient batch state under §42. It does not require My Library
+preflight or exact-DOI parent reconciliation. Custom PDF acquisition/staging,
+publisher-login automation and the retired Browser Companion remain outside
+the current workflow.
 
 ## Validate configuration
 
@@ -1128,7 +1032,7 @@ not automatically merge, delete, or rename historical duplicates.
 Open `<output-dir>/Inbox.base`, review candidate papers in the **Inbox** view,
 and change each Paper's `status` to `kept` or `rejected`. The Paper moves
 automatically between the status-derived **Inbox**, **Kept**, **Rejected**, and
-**In Zotero** views. Use `export-kept` for the Zotero handoff.
+**Exported** views. Use `export-kept` for the Zotero handoff.
 
 Paper Markdown remains the durable workflow state. `Inbox.base` contains only
 presentation configuration, so there is no Inbox synchronization command. It
@@ -1151,8 +1055,8 @@ uv run literature-monitor export-kept \
   --output-dir /path/to/obsidian-vault/literature-monitor
 ```
 
-Only Papers with `status: kept` are written to stdout. Papers marked
-`candidate`, `rejected`, or `in_zotero` are skipped. Each kept Paper produces
+Only Papers with `status: kept` are written to stdout. All other statuses
+are skipped. Each kept Paper produces
 one line containing its normalized DOI. Current-schema Papers require a valid
 DOI; DOI-less or unsupported old-schema files are reported as invalid rather
 than exported through another identifier. Malformed Paper files are reported on
@@ -1165,7 +1069,7 @@ uv run literature-monitor export-kept \
   > kept-for-zotero.txt
 ```
 
-The command does not call Zotero APIs or change Markdown state. After a
-successful downstream Zotero import, use Web **Check Zotero** to perform the
-same exact-DOI reconciliation and atomically record `in_zotero` with its
-verified `zotero_key`.
+The command does not call Zotero APIs or change Markdown state. Manual downstream
+use of this CLI output does not automatically reconcile Paper state. Web
+**Import to Zotero** uses the separate native acceptance flow described above
+to persist `kept → exported`.

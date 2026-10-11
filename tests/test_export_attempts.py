@@ -1,4 +1,4 @@
-"""Current transient import identity tests; old marker contract in tests/history."""
+"""Transient Import identity tests; old persistent Import tests remain in Git history."""
 from __future__ import annotations
 
 import pytest

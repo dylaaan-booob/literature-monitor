@@ -40,7 +40,7 @@ def populated_settings(tmp_path):
     config, path, _ = setup(tmp_path)
     publishers = tuple(PublisherConfig(
         name='Same publisher' if i < 2 else f'Publisher {i}', publisher_id=f'P{i + 1}',
-        access_url=f'https://publisher{i}.example/login' if i < 19 else None,
+        publisher_url=f'https://publisher{i}.example/login' if i < 19 else None,
     ) for i in range(20))
     journals = tuple(JournalConfig(name=f'Canonical Journal {i}', issn_l=sample_issn(i),
                                   publisher_id=publishers[i % 20].publisher_id, group='Methods')
@@ -200,7 +200,7 @@ def test_publisher_save_failure_partial_and_conflict_truthful_state(tmp_path, mo
         else:
             assert values.name == 'Attempted monitor'
             assert values.journal_revision_digest == data['journal_revision_digest'][0]
-            assert settings.load_settings(config).draft.publishers[0].access_url == 'https://custom.example/login'
+            assert settings.load_settings(config).draft.publishers[0].publisher_url == 'https://custom.example/login'
         assert 'Attempted draft' in result.text
 
 

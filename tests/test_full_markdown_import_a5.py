@@ -1,6 +1,7 @@
 """SPEC §43.5 full-file Markdown Import/Export/Reload, isolated from user files."""
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 import json
@@ -41,6 +42,20 @@ def candidate(path: Path, *, suffix: str = "Imported", mapped: bool = True) -> s
     document = render_settings_list_text(current, new_journals, new_publishers,
                                          access_services=new_services, path=path)
     return document + "\n## Notes From Import\n\nNew human content.\n"
+
+
+def new_publisher_document(path: Path, service_id: str | None, *, renamed: bool = False) -> str:
+    original = path.read_text()
+    journals, publishers, services = parse_settings_list_text(original, path=path)
+    publisher_id = "https://openalex.org/P123"
+    journal = JournalConfig(name="New Journal", issn_l="1541-0420", publisher_id=publisher_id)
+    publisher = PublisherConfig(name="New Publisher", publisher_id=publisher_id,
+                                publisher_url="https://newpublisher.example", access_service_id=service_id)
+    if renamed:
+        services = tuple(s.model_copy(update={"name": "Renamed Service"}) if s.id == service_id else s
+                         for s in services)
+    return render_settings_list_text(original, (*journals, journal), (*publishers, publisher),
+                                     access_services=services, path=path)
 
 
 def submission(client):
@@ -94,7 +109,7 @@ def test_full_markdown_round_trip_and_unchanged_monitor(tmp_path):
 
 @pytest.mark.parametrize("damage", ["incomplete", "legacy", "unsafe_url", "dangling_service",
                                    "wrong_journal_name", "wrong_publisher_name",
-                                   "duplicate_service_id", "duplicate_publisher_id"])
+                                   "duplicate_service_id", "duplicate_service_name", "duplicate_publisher_id"])
 def test_invalid_whole_file_is_blocked_without_write(tmp_path, damage):
     config, path, service, spare = prepared(tmp_path)
     current = candidate(path)
@@ -115,6 +130,8 @@ def test_invalid_whole_file_is_blocked_without_write(tmp_path, damage):
     elif damage == "duplicate_service_id":
         original = f"| {service.id} | Imported |"
         source = current.replace(original, original + "\n" + original)
+    elif damage == "duplicate_service_name":
+        source = current.replace(f"| {spare.id} | {spare.name} |", f"| {spare.id} |  IMPORTED  |")
     else:
         source = current.replace(f"| {P2} |", f"| {P1} |", 1)
     previous = stamp(path), stamp(config)
@@ -427,19 +444,31 @@ def test_new_journal_import_needs_verified_openalex_identity(tmp_path, monkeypat
         assert stamp(path) == before
 
 
-@pytest.mark.parametrize("verified", [False, True])
-def test_new_publisher_import_is_directly_verified_and_unassigned(tmp_path, monkeypatch, verified):
+@pytest.mark.parametrize("assignment, verification", [
+    ("unassigned", "verified"), ("unassigned", "wrong_name"),
+    ("saved", "verified"), ("renamed", "verified"),
+    ("saved", "wrong_name"), ("saved", "incomplete"),
+])
+def test_new_publisher_import_verifies_identity_and_explicit_service(tmp_path, monkeypatch, assignment, verification):
     import literature_monitor.application.full_markdown_import as importer
 
-    config, path, _, _ = prepared(tmp_path)
-    saved, publishers, services = parse_settings_list_text(path.read_text(), path=path)
-    publisher_id = "https://openalex.org/P123"
-    new_journal = JournalConfig(name="New Journal", issn_l="1541-0420", publisher_id=publisher_id)
-    new_publisher = PublisherConfig(name="New Publisher", publisher_id=publisher_id,
-                                     publisher_url="https://newpublisher.example", access_service_id=None)
-    source = render_settings_list_text(path.read_text(), (*saved, new_journal), (*publishers, new_publisher),
-                                       access_services=services, path=path)
+    config, path, service, _ = prepared(tmp_path)
+    service_id = None if assignment == "unassigned" else service.id
+    source = new_publisher_document(path, service_id, renamed=assignment == "renamed")
+    journals, publishers, services = parse_settings_list_text(source, path=path)
+    new_journal, new_publisher = journals[-1], publishers[-1]
+    service_label = "Unassigned" if service_id is None else f"{services[0].name} ({service_id})"
+    previous = stamp(path), stamp(config)
     plan = preview_full_markdown(path, source, filename="import.md")
+    publisher_changes = [change for change in plan.changes if new_publisher.publisher_id in change]
+    assert publisher_changes == [
+        f"Add Publisher: {new_publisher.name} ({new_publisher.publisher_id}); "
+        f"Service: {service_label}; OpenAlex verification required",
+    ]
+    if assignment == "renamed":
+        assert any(change.startswith("Access Service edit:") and service.id in change
+                   and "Renamed Service" in change for change in plan.changes)
+    monkeypatch.setattr(importer, "OpenAlexClient", lambda **kwargs: nullcontext(object()))
     monkeypatch.setattr(importer, "resolve_source_identities",
                         lambda client, ids: (SourceEvidenceResolution(
                             requested_issn=new_journal.issn_l,
@@ -448,18 +477,92 @@ def test_new_publisher_import_is_directly_verified_and_unassigned(tmp_path, monk
                                                     provider_issn_l=new_journal.issn_l,
                                                     publisher_id=new_journal.publisher_id),
                             status=SourceEvidenceStatus.RESOLVED),))
-    monkeypatch.setattr(importer, "resolve_publisher_metadata",
-                        lambda client, ids: (PublisherMetadata(
-                            publisher_id, "New Publisher" if verified else "Unexpected Publisher",
-                            "https://newpublisher.example"),))
-    previous = stamp(path)
-    if verified:
-        confirm_full_markdown(plan, client=object())
-        assert load_settings(config).draft.publishers[-1] == new_publisher
+    def publisher_lookup(client, ids):
+        assert ids == (new_publisher.publisher_id,)
+        if verification == "incomplete":
+            return ()
+        return (PublisherMetadata(new_publisher.publisher_id,
+                                  new_publisher.name if verification == "verified" else "Unexpected Publisher",
+                                  "https://provider.example/homepage"),)
+    monkeypatch.setattr(importer, "resolve_publisher_metadata", publisher_lookup)
+    with TestClient(create_app(config), base_url="http://localhost") as client:
+        selected = preview(client, submission(client), source)
+        assert "data-markdown-preview" in selected.text
+        assert publisher_changes[0] in selected.text
+        assert (stamp(path), stamp(config)) == previous
+        result = confirm(client, selected)
+        if verification == "verified":
+            assert result.headers.get("HX-Trigger") == "settingsSaved", result.text[:1600]
+            assert path.read_text() == source
+            state = load_settings(config).draft
+            assert state.publishers[-1] == new_publisher
+            assert state.journals[-1] == new_journal
+            assert state.access_services == services
+        else:
+            assert "HX-Trigger" not in result.headers
+            assert "unverified canonical OpenAlex name" in result.text
+            assert stamp(path) == previous[0]
+    assert stamp(config) == previous[1]
+
+
+@pytest.mark.parametrize("damage", ["new_service", "removed_service", "invalid_id", "dangling_service"])
+def test_new_publisher_rejects_unavailable_service_without_write(tmp_path, damage):
+    config, path, _, spare = prepared(tmp_path)
+    source = new_publisher_document(path, spare.id)
+    if damage == "new_service":
+        journals, publishers, services = parse_settings_list_text(source, path=path)
+        added = AccessService.create("New Service", "https://newservice.example")
+        publishers = (*publishers[:-1], publishers[-1].model_copy(update={"access_service_id": added.id}))
+        source = render_settings_list_text(source, journals, publishers,
+                                           access_services=(*services, added), path=path)
+        # 完整关系本身有效，拒绝原因只能是该 Service 尚未保存。
+        parse_settings_list_text(source, path=path)
+        message = "must reference a saved Access Service ID"
+    elif damage == "removed_service":
+        source = "\n".join(line for line in source.split("\n") if not line.startswith(f"| {spare.id} |"))
+        message = "unknown Access Service"
     else:
-        with pytest.raises(ConfigurationError, match="unverified canonical"):
-            confirm_full_markdown(plan, client=object())
-        assert stamp(path) == previous
+        invalid_id = "not-a-service-id" if damage == "invalid_id" else "svc_" + "a" * 32
+        source = source.replace(f"| {spare.id} |", f"| {invalid_id} |", 1)
+        message = "Access Service"
+    before = stamp(path), stamp(config)
+    with TestClient(create_app(config), base_url="http://localhost") as client:
+        result = preview(client, submission(client), source)
+        assert "data-markdown-preview" not in result.text
+        assert "Import Preview blocked" in result.text
+        assert message in result.text
+    assert (stamp(path), stamp(config)) == before
+
+
+@pytest.mark.parametrize("change", ["rename_service", "delete_service"])
+def test_new_publisher_mapping_rejects_confirm_after_saved_service_changes(tmp_path, monkeypatch, change):
+    import literature_monitor.application.full_markdown_import as importer
+
+    config, path, _, spare = prepared(tmp_path)
+    source = new_publisher_document(path, spare.id)
+    monitor_before = stamp(config)
+    def forbidden(*args, **kwargs):
+        pytest.fail("Stale Confirm must reject before Provider verification")
+    monkeypatch.setattr(importer, "resolve_source_identities", forbidden)
+    monkeypatch.setattr(importer, "resolve_publisher_metadata", forbidden)
+    with TestClient(create_app(config), base_url="http://localhost") as client:
+        selected = preview(client, submission(client), source)
+        assert "data-markdown-preview" in selected.text
+        original = path.read_text()
+        journals, publishers, services = parse_settings_list_text(original, path=path)
+        if change == "rename_service":
+            services = tuple(s.model_copy(update={"name": "Externally renamed"}) if s.id == spare.id else s
+                             for s in services)
+        else:
+            services = tuple(s for s in services if s.id != spare.id)
+        path.write_text(render_settings_list_text(original, journals, publishers,
+                                                 access_services=services, path=path), encoding="utf-8")
+        external = stamp(path)
+        rejected = confirm(client, selected)
+        assert "HX-Trigger" not in rejected.headers
+        assert "Import not written" in rejected.text
+        assert stamp(path) == external
+    assert stamp(config) == monitor_before
 
 
 def test_native_dom_markdown_upload_guard_and_cancel_preserves_other_edits(tmp_path):

@@ -9,9 +9,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from literature_monitor.application import settings
-from literature_monitor.application.journal_import import (
-    JournalImportMode, apply_journal_import, preview_journal_import,
-)
 from literature_monitor.config import JournalConfig, PublisherConfig, render_settings_list_text
 from literature_monitor.url_safety import normalize_public_http_url
 from literature_monitor.web.app import create_app
@@ -31,7 +28,7 @@ def test_f1_normalized_local_hosts_rejected_by_validator_and_config(url):
     with pytest.raises(ValueError):
         normalize_public_http_url(url)
     with pytest.raises(ValueError):
-        PublisherConfig(name='Publisher', publisher_id=P1, access_url=url)
+        PublisherConfig(name='Publisher', publisher_id=P1, publisher_url=url)
 
 
 @pytest.mark.parametrize('url', UNICODE_LOCAL_URLS)
@@ -65,7 +62,7 @@ def test_f1_browser_parser_normalization_and_public_idn(monkeypatch):
     for url, host in zip(urls[6:], hosts[6:]):
         assert host.startswith('xn--')
         assert normalize_public_http_url(url) == url
-        assert PublisherConfig(name='IDN', publisher_id=P1, access_url=url).access_url == url
+        assert PublisherConfig(name='IDN', publisher_id=P1, publisher_url=url).publisher_url == url
 
 
 def damaged_settings(tmp_path, mode='missing'):
@@ -189,37 +186,6 @@ def test_f4_web_repair_and_partial_save(tmp_path, monkeypatch):
     assert (config.read_bytes(), path.read_bytes()) == before
 
 
-@pytest.mark.parametrize('mode', list(JournalImportMode))
-@pytest.mark.parametrize('existing', [True, False])
-def test_f2_identity_dedup_ignores_hints_and_preserves_canonical_rows(tmp_path, mode, existing):
-    _, _, draft = setup(tmp_path)
-    if not existing: draft = replace(draft, journals=(), publishers=())
-    text = f'Journal,ISSN-L,Group\nHint one,{A},Stats\nHint two,{A},Stats\n'
-    result = apply_journal_import(draft, text, mode=mode)
-    assert result.applied and len(result.draft.journals) == 1
-    assert result.draft.journals[0].name == ('Canonical A' if existing else 'Hint one')
-    assert result.draft.journals[0].publisher_id == (P1 if existing else None)
-    assert any(entry.source_rows == (2, 3) for entry in result.plan.entries)
-    assert result.draft.monitor_revision == draft.monitor_revision and result.draft.journal_revision == draft.journal_revision
-
-
-@pytest.mark.parametrize('mode', list(JournalImportMode))
-def test_f2_real_group_conflict_still_blocks_and_same_name_distinct_ids_coexist(tmp_path, mode):
-    _, _, draft = setup(tmp_path)
-    conflict = f'Journal,ISSN-L,Group\nSame,{A},Stats\nOther,{A},Methods\n'
-    result = apply_journal_import(draft, conflict, mode=mode)
-    assert not result.applied and result.draft is draft
-    assert any(e.kind.value == 'CONFLICT' and e.source_rows == (2, 3) for e in result.plan.entries)
-    result = apply_journal_import(draft, f'Journal,ISSN-L\nSame,{A}\nSame,{B}\n', mode=mode)
-    assert result.applied and {j.issn_l for j in result.draft.journals} == {A, B}
-
-
-
-
-
-
-
-
 @pytest.mark.parametrize('entry', ['add'])
 @pytest.mark.parametrize('url', ['', 'https://edited.example/login'])
 def test_f5_remove_reintroduce_saved_identity_offline_web_save(tmp_path, monkeypatch, entry, url):
@@ -238,7 +204,7 @@ def test_f5_remove_reintroduce_saved_identity_offline_web_save(tmp_path, monkeyp
         assert values.journals[0].name == 'Canonical A' and values.journals[0].publisher_id == P1
     final = settings.load_settings(config).draft
     assert final.journals == (original.journals[0].model_copy(update={'group': 'Methods'}),)
-    assert final.publishers[0].access_url == (url or None)
+    assert final.publishers[0].publisher_url == (url or None)
 
 
 @pytest.mark.parametrize('pending,publisher', [(False, None), (False, P1), (True, P2)])
@@ -255,20 +221,24 @@ def test_f5_existing_metadata_tampering_still_rejected(tmp_path, pending, publis
     assert not calls and (config.read_bytes(), path.read_bytes()) == before
 
 
-def test_f5_direct_import_reintroduction_and_revision_conflict(tmp_path):
+def test_f5_pending_reintroduction_preserves_metadata_and_rejects_stale_draft(tmp_path):
     config, path, original = setup(tmp_path)
-    removed = replace(original, journals=())
-    applied = apply_journal_import(removed, f'Journal,ISSN-L,Group\nHint,{A},Methods\n')
-    assert applied.applied
+    pending = JournalConfig(name='Pending resolution', issn_l=A, group='Methods')
+    draft = replace(original, journals=(pending,), pending_journal_ids=(A,))
+    monitor_before = config.read_bytes()
     client, calls = provider()
-    with client: result = settings.save_settings(config, applied.draft, client=client)
+    with client: result = settings.save_settings(config, draft, client=client)
     assert result.outcome is settings.SettingsSaveOutcome.SAVED and not calls
-    assert result.state.draft.journals[0].name == original.journals[0].name
-    stale = apply_journal_import(replace(result.state.draft, journals=()), f'Journal,ISSN-L\nHint,{A}\n').draft
+    assert result.state.draft.journals == (original.journals[0].model_copy(update={'group': 'Methods'}),)
+    assert result.state.draft.publishers == original.publishers
+    assert not result.state.draft.pending_journal_ids
+    assert config.read_bytes() == monitor_before
+    stale = replace(result.state.draft, journals=(pending,), pending_journal_ids=(A,))
     path.write_text(path.read_text()+'# concurrent\n')
     before = config.read_bytes(), path.read_bytes()
     with client: result = settings.save_settings(config, stale, client=client)
     assert result.outcome is settings.SettingsSaveOutcome.REVISION_CONFLICT
+    assert not result.journal_written and not result.monitor_written and not calls
     assert (config.read_bytes(), path.read_bytes()) == before
 
 

@@ -113,9 +113,11 @@ def preview_full_markdown(path: Path, proposed: str, *, filename: str) -> FullMa
     for identity, current in next_p.items():
         old = previous_p.get(identity)
         if old is None:
-            if current.access_service_id is not None:
-                raise ConfigurationError(f"new Publisher {identity} must start Unassigned")
-            changes.append(f"Add Publisher: {current.name} ({identity}); OpenAlex verification required")
+            # 完整文件解析已校验导入后的关系；新 Publisher 只能显式引用原保存配置中的 Service。
+            if current.access_service_id is not None and current.access_service_id not in previous_s:
+                raise ConfigurationError(f"new Publisher {identity} must reference a saved Access Service ID or be Unassigned")
+            changes.append(f"Add Publisher: {current.name} ({identity}); "
+                           f"Service: {service_label(current.access_service_id, next_s)}; OpenAlex verification required")
         else:
             if old.name != current.name:
                 raise ConfigurationError(f"Publisher {identity}: machine-managed canonical name conflict")

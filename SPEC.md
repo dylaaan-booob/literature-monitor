@@ -8051,3 +8051,95 @@ The Python wheel/sdist are MIT; the separate Connector ZIP is AGPLv3 and include
 The functional checks and isolated installation evidence are in §44.11. Manual real-browser acceptance is **user-reported PASS**; Codex-independent live Chrome/CARSI/Zotero Library verification remains **NOT_VERIFIED**. Opened proves only an attributable official click and target opening. Every Preparation page remains open for the user, and institutional login/MFA remains user controlled. The existing two Python dependency deprecation warnings are non-blocking.
 
 This documentation-only closeout follows the release commit on `main`; the annotated tag and all three asset bytes remain fixed. Embedded package/source documentation retains the release-preparation snapshot; this later record confirms publication without rebuilding or overwriting the verified assets. All 78 protected files retain their release-start bytes and modification times. The dirty real `list.md`, untracked `monitor.yaml`, `src/.obsidian/`, Workspace/Paper/Author data and Zotero Library were neither staged nor changed by this release transaction.
+
+## 45. v0.6.6 Codebase & Documentation Simplification — Development Contract
+
+### 45.1 Status and Authority
+
+**v0.6.5 remains the latest RELEASED version. v0.6.6 is UNRELEASED.** This section authorizes only the bounded codebase/documentation simplification and full Markdown Import correction described below. It supersedes older provisions only on those explicit conflicts. All other §43 Journals & Access, shared Draft, schema, ownership, Import/Export, write-safety and explicit-upgrade contracts, and §44 CARSI Portal Preparation and AI Mapping Pack contracts, remain effective. §42's Kept/Connector/Workspace boundaries and §41's Journal identity safeguards remain in force.
+
+Preserve §§1–44 verbatim as historical contracts and release evidence. Development must preserve the user's real list.md, monitor.yaml, src/.obsidian/, Workspace/Paper/Author Markdown, Zotero Library and unrelated changes. This task sequence does not authorize a version change, commit, push, tag or release.
+
+### 45.2 Retired Journal Import
+
+CSV/TSV and pasted-table Journal Import, Merge/Replace and Preview/Apply-to-Draft are retired protocols, not current import modes. Remove the unused application/journal_import.py implementation and tests serving only that protocol. Historical test archives are retained through Git history rather than tests/history/ in the working tree.
+
+The supported configuration import remains complete UTF-8 Markdown → Preview Changes → Confirm Import → validated whole-file list.md replacement under §43.5. Shared parsers, Settings Draft, pending Journal identities, Provider verification and front-end file-selection behavior used by current Import remain. Keep effective Journal Migration, identity/conflict, user-content, revision and safe-write regression coverage. Removing the retired Import caller does not authorize redesigning Journal Migration reachability or adding a replacement compatibility layer.
+
+### 45.3 Full Markdown Import Validation Correction
+
+For complete Markdown Import only, replace §43.4's unconditional “new Publisher begins Unassigned” restriction with this rule: a new Publisher may be Unassigned, or explicitly reference an Access Service ID present in the original saved configuration read at Preview and still present and valid in the proposed complete configuration. A Service created only in the same upload is not an eligible target for that new Publisher. Existing Service identity survives a same-upload rename.
+
+Reuse the complete-file parser's schema, Service ID/duplicate and Journal/Publisher/Service relationship checks. This exception does not relax ordinary Settings Save or authorize automatic mapping. Publisher names, Service names, URLs, domains and OpenAlex metadata cannot infer a relationship.
+
+A new Publisher's Preview shows its official name and ID, explicit Service name and ID or Unassigned, and the pending OpenAlex verification. Use the proposed Service's current name for presentation and its stable ID for identity. Keep Service-edit notices and avoid duplicate entries for the same new relationship. Preserve Journal/Publisher/Service deletion and cascade notices and the whole-file replacement effect on Conferences, unknown sections and user text.
+
+New Publishers still require canonical OpenAlex Publisher ID and official-name verification; new Journals retain ISSN-L, Source and direct Publisher verification. Provider failure cannot write unverified machine metadata. Preview and Cancel write nothing. Unsaved shared Draft edits require Save followed by fresh Preview, or explicit Discard including Monitor/Institution edits; Import does not save monitor.yaml.
+
+Keep source-content and target-file identity binding, signed Web Preview/HMAC and CSRF, Confirm's regenerated Preview comparison, Monitor/list revisions, safe paths, symlink/inode checks, CAS, atomic replacement and truthful saved-state readback/uncertain-result reporting. Any intervening saved Service deletion, rename or other target-file change invalidates the old Confirm and requires Preview again. User content ownership, CARSI, Zotero Import and browser-task permissions are unchanged.
+
+### 45.4 Compatibility Boundary
+
+PublisherConfig.publisher_url remains the canonical field. Remove its unused read-only access_url property, while retaining access_url as a constructor/validation input alias with the same URL safety rules and canonical serialization. Keep AccessService.access_url, SettingsPublisherRow.access_url, SettingsAccessServiceRow.access_url and publisher_access_url Web form fields; these are distinct current interfaces.
+
+Retain legacy schema reading and the explicit Access schema Preview/Confirm Upgrade, without implicit ordinary-Save upgrade or altered identity/URL/write protections. Do not introduce a new compatibility layer, production interface solely for tests or migration entry point.
+
+### 45.5 Test Simplification
+
+Consolidate historical ordinary-Save tests that all terminate at the same legacy ISSN/EISSN storage guard. The retained guard proves INVALID_DRAFT, a clear explicit-migration/upgrade diagnostic, no Provider call and unchanged list.md/monitor.yaml. It must not claim execution of later Provider or Paper Migration branches.
+
+Retain independent Journal Migration proofs for ISSN-L confirmation, contradictory Source evidence/candidate differences, target collisions, Paper/Group compatibility and unsafe mappings. Preserve explicit schema-upgrade, Web legacy rejection, Provider/URL, damaged-storage, symlink, persistence and safe-write regressions and cross-file test helpers. Reuse existing coverage rather than mechanically reproducing it through obsolete APIs. Test names and assertions must describe reachable current product behavior.
+
+### 45.6 Evidence and Remaining Gates
+
+The T4 handoff confirms that **T1, T2 and T3 passed ChatGPT's independent review of the real repository**. The following are Codex-reported targeted offline results from those implementation tasks, not new T4 executions or independent ChatGPT test results:
+
+| Task | Reported targeted scope | Codex-reported result |
+| --- | --- | --- |
+| T1 | Publisher/Settings regressions, Journal Migration, full Markdown Import, Settings UI, Institution and Import simplification | 334 passed, 2 warnings |
+| T2 | Full Markdown Import, Access Service schema and AI Mapping Pack | 136 passed, 2 warnings |
+| T2 additional checks | Mapping UI and targeted stale/Web Import boundaries | 45 passed, 2 warnings |
+| T3 | Publisher/Settings regressions, Settings UI, Journal Migration, Access schema and Draft persistence | 259 passed, 2 warnings |
+| T3 additional checks | Institution, full Markdown Import and targeted OpenAlex Source checks | 135 passed, 2 warnings |
+
+These overlapping scoped counts are not additive and do not establish a current full-suite total. T1's follow-up corrected a test module description without rerunning pytest. The supplied handoff does not include exact commands/output for ChatGPT's independently executed targeted tests; no independent rerun count is asserted here. Independent review acceptance and independently executed test evidence remain separate.
+
+No v0.6.6 complete pytest run or renewed real Chrome/OpenAlex network validation is established by these tasks. T4 documentation editing is not runtime acceptance. T5 still owns the planned comprehensive offline regression, final scope/preservation review and assessment of remaining release gates. Previously recorded release counts and user-reported live acceptance remain historical evidence with their original scope.
+
+README is a Python distribution build input. Its changes invalidate reuse of earlier wheel/sdist checks for the final v0.6.6 package; perform and inspect final builds during separately authorized release preparation. T4 performs no package build or publication. Keep Python MIT and the separate AGPLv3 Connector's license, corresponding-source/provenance and release-asset boundaries unchanged.
+
+### 45.7 T5 Final Integration Audit Evidence
+
+T1 through T4 independent reviews and the T5 offline integration audit are complete, with no open production-code review findings. The supplied T5 handoff records the following checks independently executed by ChatGPT through AgentDock, updating the pending audit status recorded at T4 in §45.6. These are independent audit results, not tests rerun by Codex for this documentation closeout.
+
+| Check / supplied command | Independent T5 result |
+| --- | --- |
+| Full Python test suite | 3040 passed, 2 warnings |
+| Connector Runtime suite | 163/163 passed |
+| CARSI Executor suite | 25/25 passed |
+| `uv lock --check` | PASS |
+| `node --check src/literature_monitor/web/static/app.js` | PASS |
+| `bash -n connector/build.sh` | PASS |
+| `git diff --check` | PASS |
+
+Python tests ran in an isolated copy outside the repository, retaining the current T1 through T4 code and documentation and using the Git HEAD baseline list.md at `21def7e21f757f3b85aecc964432d514dd10c6c2`. The first full-suite attempt failed because the copy excluded list.md required by config.example.yaml. Restoring that baseline file only in the isolated copy resolved the setup error: 177 CLI cases passed, followed by the complete passing suite above. This was an isolation-fixture omission, not a production regression. The two warnings are the existing Starlette/httpx and anyio deprecation notices.
+
+The audit confirmed byte-identical SPEC sections 1 through 44, and an unchanged set and content digests for all 78 real protected files before and after testing. T1 through T4 comprise 19 expected changed files, separate from the user's modified list.md. The index remained empty; no commit, push, tag or release occurred. Real monitor.yaml, src/.obsidian/, Workspace/Paper/Author Markdown and Zotero Library remained outside test writes.
+
+**v0.6.6 remains UNRELEASED; v0.6.5 remains the latest RELEASED version.** Final version identity updates, wheel/sdist and separate Connector distribution builds and publication verification remain pending. This offline audit establishes no new real Chrome/CARSI login or networked OpenAlex validation. README remains a package build input, so final distribution checks must use the final documentation. This closeout changes documentation only and does not rerun the unchanged Python/Connector test inputs or build/publish artifacts.
+
+### 45.8 v0.6.6 Release Preparation and Validation Reuse
+
+The user authorized commit and publication after T5. Python project/lock metadata, OpenAlex/Crossref/AI Mapping Pack User-Agent strings and the separate Connector build identity are now 0.6.6. The CARSI handshake's explicit version set now also accepts 0.6.6 while preserving 0.6.4/0.6.5 and the required verified Executor capability. A new-version claim test first reproduced rejection, then passed after that bounded version update.
+
+T5's independent full-suite result in §45.7 remains the reused integration baseline: **3040 passed, 2 warnings**, Runtime **163/163** and CARSI Executor **25/25**. The subsequent changes are release identities, the explicit compatible-version addition, its parameterized regression and documentation; Connector overlay behavior and upstream pins are unchanged. No new complete-suite total is asserted.
+
+**Executed release checks:**
+
+- In a repository-external tracked-source snapshot with Git HEAD baseline list.md, `uv run --locked pytest tests/test_carsi_login_a4.py tests/test_preparation_coordinator_a3.py tests/test_preparation_integration_a6.py tests/test_connector_boundary.py tests/test_ai_mapping_pack_a1.py tests/test_openalex.py tests/test_crossref.py`: **528 passed, 2 existing deprecation warnings**.
+- `uv lock --check`, `node --check src/literature_monitor/web/static/app.js`, `bash -n connector/build.sh` and `git diff --check`: **PASS**.
+- `uv build --out-dir <external-assets>`: wheel and sdist **PASS**. Version 0.6.6, MIT metadata/license, embedded UTF-8 README and all **72 package files** match the final build snapshot. Neither artifact includes the retired Journal Import module, Connector code, protected configuration/Workspace or caches.
+- A fresh Python 3.12 environment installed the wheel with lockfile-exported runtime dependencies. `uv pip check`, installed `literature-monitor --help`, imports and HTTP requests for Settings, Kept and static JavaScript: **PASS**. The isolated configuration retained its original bytes.
+- `connector/build.sh` with repository-external work/output directories: **PASS**. The reconstructed MV3 build has version 0.6.6, the same permissions as the checksum-verified published 0.6.5 ZIP, unchanged upstream/five-submodule pins, declared patch delta, exact overlays, worker order and AGPL license. Its ZIP includes the built extension, corresponding patched source/submodules and Literature Monitor delta/build instructions, without Git metadata, node_modules or protected data.
+
+All 78 protected files retain their release-start bytes and modification times. Real list.md, monitor.yaml, src/.obsidian/, Workspace/Paper/Author data and Zotero Library remain excluded from staging and all assets. SPEC sections 1 through 44 and the earlier development/audit records remain unchanged. GitHub reports zero configured Actions workflows; this is not a CI PASS. No live Chrome/CARSI login or networked OpenAlex verification was repeated. The built assets retain their release-preparation documentation snapshot; publication identity and remote asset digests are recorded below after verification.

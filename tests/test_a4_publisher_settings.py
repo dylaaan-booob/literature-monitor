@@ -1,4 +1,4 @@
-"""A4 observable storage, metadata, Save and legacy Apply contracts."""
+"""A4 storage, metadata, Settings Save and explicit legacy migration guard."""
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,8 +13,6 @@ from literature_monitor.config import (
 from literature_monitor.openalex import OpenAlexClient, OpenAlexRecordError, resolve_publisher_metadata
 from literature_monitor.url_safety import normalize_public_http_url
 from literature_monitor.application.settings import load_settings, save_settings, SettingsSaveOutcome
-from literature_monitor.application.journal_migration import MigrationConfirmation, analyze_workspace_compatibility, analyze_journal_migration
-from literature_monitor.application.journal_import import apply_journal_import, preview_journal_import
 from literature_monitor.web.app import create_app
 from test_application_settings import write_valid_settings_files
 from test_web_run_settings import browser_settings_submission
@@ -26,7 +24,7 @@ P1, P2 = 'https://openalex.org/P1', 'https://openalex.org/P2'
 def setup(tmp_path, *, url='https://custom.example/login'):
     config, path = write_valid_settings_files(tmp_path)
     journals = (JournalConfig(name='Canonical A', issn_l=A, publisher_id=P1, group='Stats'),)
-    publishers = (PublisherConfig(name='Publisher A', publisher_id=P1, access_url=url),)
+    publishers = (PublisherConfig(name='Publisher A', publisher_id=P1, publisher_url=url),)
     path.write_text(render_settings_list_text(path.read_text(), journals, publishers, path=path))
     return config, path, load_settings(config).draft
 
@@ -61,7 +59,7 @@ def provider(*, sources=None, publishers=None, fail=None, during=None):
     'https://example.org/\x00', 'http://[broken]', 'https://example.org:65536', '\n'])
 def test_unsafe_urls_rejected(url):
     with pytest.raises(ValueError): normalize_public_http_url(url)
-    with pytest.raises(ValueError): PublisherConfig(name='Pub', publisher_id=P1, access_url=url)
+    with pytest.raises(ValueError): PublisherConfig(name='Pub', publisher_id=P1, publisher_url=url)
 
 
 @pytest.mark.parametrize('url', ['', '   ', None, 'http://example.org', 'https://8.8.8.8:443/a', 'https://[2606:4700::1111]/'])
@@ -69,10 +67,29 @@ def test_safe_or_blank_urls(url):
     assert normalize_public_http_url(url) == (url if url and url.strip() else None)
 
 
+@pytest.mark.parametrize('url', ['https://example.org/login', '', None])
+def test_legacy_access_url_input_alias_maps_to_canonical_field_and_serialization(url):
+    legacy = PublisherConfig(name='Publisher', publisher_id=P1, access_url=url)
+    canonical = PublisherConfig(name='Publisher', publisher_id=P1, publisher_url=url)
+    assert legacy == canonical
+    assert legacy.publisher_url == (url or None)
+    expected = {'publisher_id': P1, 'name': 'Publisher', 'publisher_url': url or None, 'access_service_id': None}
+    assert legacy.model_dump() == legacy.model_dump(by_alias=True) == expected
+    assert PublisherConfig.model_validate_json(legacy.model_dump_json()) == canonical
+
+
+@pytest.mark.parametrize('url', ['http://localhost/private', 'https://user:pwd@example.org'])
+def test_legacy_access_url_input_alias_rejects_unsafe_urls(url):
+    with pytest.raises(ValueError):
+        PublisherConfig(name='Publisher', publisher_id=P1, access_url=url)
+    with pytest.raises(ValueError):
+        PublisherConfig(name='Publisher', publisher_id=P1, publisher_url=url)
+
+
 def test_storage_roundtrip_duplicate_names_ids_and_consistency(tmp_path):
     original='# Heading\n\n## Journals\n\nold\n\n## Conferences\n\nkeep exact\n\n## Notes\n\nuser text\n'
     js=(JournalConfig(name='Same journal',issn_l=A,publisher_id=P1), JournalConfig(name='Same journal',issn_l=B,publisher_id=P2))
-    ps=(PublisherConfig(name='Same publisher',publisher_id=P1),PublisherConfig(name='Same publisher',publisher_id=P2,access_url='https://example.org'))
+    ps=(PublisherConfig(name='Same publisher',publisher_id=P1),PublisherConfig(name='Same publisher',publisher_id=P2,publisher_url='https://example.org'))
     target=render_settings_list_text(original,js,ps,path=tmp_path/'list.md')
     assert parse_publisher_whitelist_text(target,path=tmp_path/'list.md') == ps
     assert target.split('## Conferences')[1] == original.split('## Conferences')[1]
@@ -128,8 +145,8 @@ def test_ordinary_save_offline(tmp_path,change):
         return
     assert saved.outcome is SettingsSaveOutcome.SAVED
     if change=='remove': assert saved.state.draft.publishers == ()
-    elif change=='clear': assert saved.state.draft.publishers[0].access_url is None
-    elif change!='access': assert saved.state.draft.publishers[0].access_url=='https://custom.example/login'
+    elif change=='clear': assert saved.state.draft.publishers[0].publisher_url is None
+    elif change!='access': assert saved.state.draft.publishers[0].publisher_url=='https://custom.example/login'
 
 
 @pytest.mark.parametrize('direct', [P1,P2,None])
@@ -142,9 +159,9 @@ def test_new_identity_canonicalizes_and_preserves_existing_url(tmp_path,direct,h
     assert saved.outcome is SettingsSaveOutcome.SAVED, saved.issues
     j=saved.state.draft.journals[-1]
     assert (j.issn_l,j.name,j.publisher_id,j.group)==(B,'Canonical Source',direct,'Methods')
-    assert saved.state.draft.publishers[0].access_url is None
+    assert saved.state.draft.publishers[0].publisher_url is None
     assert calls == (['/sources','/publishers'] if direct==P2 else ['/sources'])
-    if direct==P2: assert saved.state.draft.publishers[-1].access_url == (homepage if homepage and 'localhost' not in homepage else None)
+    if direct==P2: assert saved.state.draft.publishers[-1].publisher_url == (homepage if homepage and 'localhost' not in homepage else None)
     assert 'source-homepage' not in path.read_text()
 
 
@@ -195,59 +212,17 @@ def legacy_setup(tmp_path, identifiers=A, *, output='workspace'):
     return config,path,load_settings(config).draft
 
 
-@pytest.mark.parametrize('confirmed', [False,True])
-def test_legacy_save_auto_and_explicit_outside_old_set(tmp_path,confirmed):
-    config,path,draft=legacy_setup(tmp_path)
-    before = config.read_bytes(), path.read_bytes()
-    if confirmed: draft=replace(draft,migration_confirmations=(MigrationConfirmation(1,B,'explicit user correction'),))
-    client,_=provider(sources=[source(aliases=(A,B),candidate=A)],publishers=[pub()])
-    with client: saved=save_settings(config,draft,client=client)
+def test_ordinary_save_requires_explicit_legacy_issn_migration_without_provider_or_writes(tmp_path, monkeypatch):
+    config, path, draft = legacy_setup(tmp_path)
+    before = [(p.read_bytes(), p.stat().st_ino, p.stat().st_mtime_ns) for p in (config, path)]
+    def forbidden(**kwargs):
+        pytest.fail('Legacy storage must be rejected before Provider access')
+    monkeypatch.setattr('literature_monitor.application.settings.OpenAlexClient', forbidden)
+    saved = save_settings(config, replace(draft, name='Attempted monitor edit'))
     assert saved.outcome is SettingsSaveOutcome.INVALID_DRAFT
-    assert (config.read_bytes(), path.read_bytes()) == before
-
-
-def test_legacy_explicit_target_disagrees_with_provider_candidate(tmp_path):
-    config,path,draft=legacy_setup(tmp_path)
-    before = config.read_bytes(), path.read_bytes()
-    client,_=provider(sources=[source(aliases=(A,B),candidate=B)],publishers=[pub()])
-    with client: saved=save_settings(config,replace(draft,journals=(JournalConfig(name='hint',issn_l=A,group='Stats'),)),client=client)
-    assert saved.outcome is SettingsSaveOutcome.INVALID_DRAFT
-    assert (config.read_bytes(), path.read_bytes()) == before
-
-
-@pytest.mark.parametrize('failure',['confirmation','missing','rate','timeout','malformed_paper','unsafe_workspace'])
-def test_legacy_blocks_whole_save(tmp_path,failure):
-    config,path,draft=legacy_setup(tmp_path); before=config.read_bytes(),path.read_bytes()
-    if failure=='malformed_paper':
-        papers=tmp_path/'workspace/Papers'; papers.mkdir(parents=True); (papers/'bad.md').write_text('not a Paper')
-    if failure=='unsafe_workspace': (tmp_path/'workspace').symlink_to(tmp_path/'absent',target_is_directory=True)
-    rows=[] if failure=='missing' else [source(aliases=(A,B),candidate=B if failure=='confirmation' else A)]
-    client,_=provider(sources=rows,publishers=[pub()],fail='/sources' if failure=='rate' else 'timeout' if failure=='timeout' else None)
-    with client: saved=save_settings(config,replace(draft,output_dir=Path('new-empty-workspace')),client=client)
-    assert saved.outcome is SettingsSaveOutcome.INVALID_DRAFT and (config.read_bytes(),path.read_bytes())==before
-
-
-def test_legacy_apply_local_preview_atomic_and_preserves_revisions(tmp_path):
-    config,path,draft=setup(tmp_path); before=config.read_bytes(),path.read_bytes()
-    text='Journal,ISSN/EISSN,Group\nHint,0090-5364,Methods\n'
-    assert not preview_journal_import(draft,text).can_apply
-    client,calls=provider(sources=[source(publisher=None)])
-    with client: result=apply_journal_import(draft,text,client=client)
-    assert result.applied and result.draft.journals[-1].issn_l==B
-    assert result.draft.monitor_revision==draft.monitor_revision and result.draft.journal_revision==draft.journal_revision
-    assert (config.read_bytes(),path.read_bytes())==before and calls==['/sources']
-    bad=text+'Other,1541-0420,Other\n'
-    client,_=provider(sources=[source(publisher=None)])
-    with client: result=apply_journal_import(draft,bad,client=client)
-    assert not result.applied and result.draft==draft and (config.read_bytes(),path.read_bytes())==before
-
-
-def test_explicit_import_apply_then_save(tmp_path):
-    config,path,draft=setup(tmp_path)
-    applied=apply_journal_import(draft,f'Journal,ISSN-L\nUntrusted hint,{B}\n')
-    client,_=provider(sources=[source()],publishers=[pub()])
-    with client: saved=save_settings(config,applied.draft,client=client)
-    assert saved.outcome is SettingsSaveOutcome.SAVED and saved.state.draft.journals[-1].name=='Canonical Source'
+    assert [issue.message for issue in saved.issues] == ['legacy ISSN/EISSN storage must be migrated explicitly']
+    assert not saved.journal_written and not saved.monitor_written
+    assert [(p.read_bytes(), p.stat().st_ino, p.stat().st_mtime_ns) for p in (config, path)] == before
 
 
 def test_web_roundtrip_preserves_publishers_and_rejects_hidden_metadata(tmp_path):
@@ -312,29 +287,6 @@ def test_missing_retained_publisher_submission_is_rejected_offline(tmp_path):
     assert saved.outcome is SettingsSaveOutcome.INVALID_DRAFT and calls==[]
 
 
-def test_changed_paper_mapping_cannot_be_bypassed_by_output_edit(tmp_path):
-    from test_application_journal_migration import paper
-    config,path,draft=legacy_setup(tmp_path,identifiers=A+' / '+X)
-    paper(tmp_path/'workspace',(X,))
-    before=config.read_bytes(),path.read_bytes()
-    client,_=provider(sources=[source(aliases=(A,X),candidate=A)],publishers=[pub()])
-    with client: saved=save_settings(config,replace(draft,output_dir=Path('empty-other')),client=client)
-    assert saved.outcome is SettingsSaveOutcome.INVALID_DRAFT and (config.read_bytes(),path.read_bytes())==before
-
-
-def test_legacy_apply_explicit_confirmation_and_collision(tmp_path):
-    config,path,draft=setup(tmp_path)
-    text=f'Journal,ISSN/EISSN\nOld hint,{X}\n'
-    confirmation=(MigrationConfirmation(1,B,'explicit user correction'),)
-    client,_=provider(sources=[source(aliases=(X,B),candidate=B)])
-    with client: result=apply_journal_import(draft,text,client=client,confirmations=confirmation)
-    assert result.applied and result.draft.journals[-1].issn_l==B
-    text+=f'Same name,{B}\n'
-    client,_=provider(sources=[source(aliases=(X,B),candidate=B)])
-    with client: result=apply_journal_import(draft,text,client=client,confirmations=confirmation)
-    assert not result.applied and result.draft==draft
-
-
 @pytest.mark.parametrize('url', ['https://example.org:', 'http://0x7f000001','http://127.1'])
 def test_malformed_or_alternate_literal_urls_rejected(url):
     with pytest.raises(ValueError): normalize_public_http_url(url)
@@ -358,13 +310,3 @@ def test_web_legacy_load_save_requires_no_paper_directory(tmp_path,monkeypatch):
         assert 'HX-Trigger' not in response.headers
         assert (config.read_bytes(),path.read_bytes())==before
     assert load_settings(config).draft.legacy_journals and not calls
-
-
-def test_explicit_legacy_confirmation_checks_contradictory_source_observation(tmp_path):
-    config,path,draft=legacy_setup(tmp_path)
-    before=config.read_bytes(),path.read_bytes()
-    # Both lookups carry S2 and B, but disagree on usable membership.
-    rows=[source(aliases=(A,B),candidate=A), source(aliases=(B,X),candidate=B)]
-    client,_=provider(sources=rows,publishers=[pub()])
-    with client: saved=save_settings(config,replace(draft,migration_confirmations=(MigrationConfirmation(1,B,'explicit correction'),)),client=client)
-    assert saved.outcome is SettingsSaveOutcome.INVALID_DRAFT and (config.read_bytes(),path.read_bytes())==before
