@@ -70,7 +70,7 @@
         <dt>Output workspace</dt><dd>{{ settings_attempted.output_dir }}</dd>
         <dt>Journal rows</dt><dd>{{ settings_attempted.journals|length }}</dd>
         {% for publisher in settings_attempted.publishers %}<dt>{{ publisher.name }} Publisher URL</dt><dd>{{ publisher.publisher_url or "Blank" }}</dd>{% endfor %}
-        {% for service in settings_attempted.access_services %}<dt>Access Service {{ service.id }}</dt><dd>{{ service.name }} — {{ service.access_url or "Blank URL" }}</dd>{% endfor %}
+        {% for service in settings_attempted.access_services %}<dt>Access Service {{ service.id }}</dt><dd>{{ service.name }} — {{ service.access_url or "Blank URL" }} — {{ "Manual Login" if service.access_method == "manual" else "CARSI" }}</dd>{% endfor %}
       </dl>
     </details>
   {% endif %}
@@ -393,6 +393,11 @@
       <section id="settings-access-mapping" class="access-mapping" aria-labelledby="settings-mapping-heading" data-access-mapping data-settings-view="mapping" hidden>
         <h2 id="settings-mapping-heading">Access Mapping — Organize</h2>
         <p class="muted">Services are manual access shortcuts, not login or entitlement evidence. Publishers retain machine-managed names and IDs. All changes use the single Settings Save.</p>
+        <p class="muted">Service name should exactly match the CARSI official <code>production</code> value for future Preparation. Renaming a Service keeps its stable ID and Publisher associations, but a name that differs from CARSI will fail exact matching.</p>
+        <div class="settings-file-actions" aria-label="AI Mapping Pack work file">
+          <button type="button" class="secondary" data-export-mapping-pack>Export AI Mapping Pack</button>
+          <p class="muted">The Pack includes the complete saved list.md. Review it for personal or sensitive text before giving it to an external AI. The Pack itself cannot be imported; import the AI's returned complete list.md using Import Markdown → Preview Changes → Confirm Import.</p>
+        </div>
         <p class="notice error" data-mapping-error role="alert" hidden></p>
         <div class="service-create">
           <label>New Service name <input data-new-service-name autocomplete="off"></label>
@@ -421,6 +426,18 @@
                 <div class="service-heading">
                   <label>Service name <input name="service_name" value="{{ service.name }}" autocomplete="off"></label>
                   <label>Access URL <input name="service_access_url" value="{{ service.access_url or '' }}" autocomplete="off" inputmode="url"></label>
+                  <label>Access Method
+                    <select name="service_access_method">
+                      <option value="carsi" {% if service.access_method == 'carsi' %}selected{% endif %}>CARSI</option>
+                      <option value="manual" {% if service.access_method == 'manual' %}selected{% endif %}>Manual Login</option>
+                    </select>
+                  </label>
+                  <span class="service-open">
+                    {% set saved_service_url = saved_service_urls.get(service.id) %}
+                    {% if saved_service_url and service.safe_access_url and saved_service_url == service.safe_access_url %}
+                      <a href="{{ saved_service_url }}" data-service-open data-access-url="{{ saved_service_url }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open saved Service URL</a>
+                    {% endif %}
+                  </span>
                   <button type="button" class="secondary" data-edit-service>Validate edits</button>
                   <button type="button" class="secondary" data-delete-service>Delete</button>
                 </div>
@@ -475,6 +492,9 @@
           <div class="service-heading">
             <label>Service name <input name="service_name" value="" autocomplete="off"></label>
             <label>Access URL <input name="service_access_url" value="" inputmode="url" autocomplete="off"></label>
+            <label>Access Method <select name="service_access_method">
+              <option value="carsi" selected>CARSI</option><option value="manual">Manual Login</option>
+            </select></label>
             <button type="button" class="secondary" data-edit-service>Validate edits</button>
             <button type="button" class="secondary" data-delete-service>Delete</button>
           </div>
@@ -523,9 +543,9 @@
       </section>
     {% endif %}
     {% if markdown_export_guard %}
-      <section class="notice warning" data-export-guard>
-        <p>Export reads the saved complete list.md only. Save your unsaved Draft first, or explicitly discard it for Export.</p>
-        <button type="button" data-export-discard>Discard Draft and Export Saved Markdown</button>
+      <section class="notice warning" data-export-guard data-export-kind="{{ markdown_export_kind }}">
+        <p>{{ "AI Mapping Pack" if markdown_export_kind == "pack" else "Export Markdown" }} reads the saved complete list.md only. Save your unsaved Draft first, or explicitly discard it for this export.</p>
+        <button type="button" data-export-discard>Discard Draft and Export {{ "AI Mapping Pack" if markdown_export_kind == "pack" else "Saved Markdown" }}</button>
         <button type="button" class="secondary" data-cancel-markdown-guard>Cancel</button>
       </section>
     {% endif %}
@@ -544,6 +564,7 @@
     <div class="form-actions">
       <button type="submit">Save</button>
       <button type="button" class="secondary" data-export-markdown>Export Markdown</button>
+      <p class="notice error" data-export-error role="alert" hidden></p>
       <button type="button" class="secondary" data-reload-markdown
               hx-post="/settings/reload" hx-include="#settings-form"
               hx-target="#settings-editor" hx-swap="outerHTML">Reload from Disk</button>

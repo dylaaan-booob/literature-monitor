@@ -124,9 +124,10 @@ def _journal_name(value: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
 
 
-def _section_key(
+def journal_for_paper(
     paper: WorkspacePaper, journals: Sequence[JournalConfig],
-) -> tuple[WorkspaceSectionKind, str]:
+) -> JournalConfig | None:
+    """Use the same ISSN-L attribution and historical exact-name fallback in all views."""
     if paper.journal_attribution_state is PaperJournalAttributionState.VALID:
         identities = set(paper.journal_issns)
         matches = [journal for journal in journals if journal.issn_l in identities]
@@ -134,9 +135,16 @@ def _section_key(
         matches = [journal for journal in journals if _journal_name(journal.name) == _journal_name(paper.journal)]
     else:
         matches = []
-    if len(matches) != 1:
+    return matches[0] if len(matches) == 1 else None
+
+
+def _section_key(
+    paper: WorkspacePaper, journals: Sequence[JournalConfig],
+) -> tuple[WorkspaceSectionKind, str]:
+    journal = journal_for_paper(paper, journals)
+    if journal is None:
         return WorkspaceSectionKind.UNMAPPED, "Unmapped journals"
-    group = matches[0].group
+    group = journal.group
     return ((WorkspaceSectionKind.GROUP, group) if group is not None else
             (WorkspaceSectionKind.UNGROUPED, "Ungrouped"))
 

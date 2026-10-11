@@ -8,3 +8,4 @@ patch src/common/connector.js
 overlay LITERATURE_MONITOR_PROVENANCE.txt
 overlay literature-monitor-runtime.js
 overlay literature-monitor-access.js
+overlay literature-monitor-carsi.js

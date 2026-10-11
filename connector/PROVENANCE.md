@@ -45,7 +45,7 @@ They are represented only by:
 
 The released v0.6.1 delta keeps the A1 Chrome/MV3 component-name
 and provenance changes and the A5 automatic-capture runtime. The tracked
-Literature Monitor build entry point supplies release version `0.6.4` to the pinned
+Literature Monitor build entry point supplies release version `0.6.5` to the pinned
 upstream build through its supported `-v` option; the upstream revision,
 submodule pins and upstream package metadata remain unchanged. Published v0.6.2
 source and artifact verification are recorded in SPEC §41.16. The A5 source delta is
@@ -64,6 +64,14 @@ The runtime itself remains an overlay file. It communicates only with
 command, and reuses the pinned upstream translator machinery. It does not
 introduce collection/tag routing, Group Library fallback, attachment-completion
 gating, credential automation or a Python import/runtime dependency.
+
+The v0.6.5 CARSI Preparation delta also copies `literature-monitor-carsi.js` as an
+AGPL-compatible Overlay and imports it before the existing runtime. It adds
+no Zotero parent-save or PDF hook and requests no new Manifest permissions.
+The page selectors are grounded in the user's normal-Chrome DevTools DOM
+observations. The module now executes bounded, authorized CARSI name and
+Visit clicks; its isolated tests are not live institutional acceptance.
+The existing native-save and Parent/PDF hooks remain unchanged.
 
 ## Intentional upstream updates
 

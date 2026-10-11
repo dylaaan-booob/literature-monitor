@@ -176,12 +176,21 @@ class CaptureCoordinator:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        # Browser ownership uses this lock together with attempts/completions
+        # and native-save grants. Never acquire a Batch or Workspace lock here.
+        self._browser_owner: str | None = None
+        self._browser_kind: str | None = None
         self._changed = threading.Event()
         self._operation_lock: WorkspaceOperationLock | None = None
         self._operation_context = None
         # Each escaped native grant requires its own matching upstream pipeline
         # completion. A later Import or parent acceptance cannot clear an old grant.
         self._native_save_grants: dict[SaveInvocation, Path] = {}
+        # Claim is not browser idle: Connector may still be returning to the app
+        # after delivering the terminal result. Only its exact idle receipt
+        # retires this slot. This does not change Import parent/PDF authority.
+        self._import_browser_unsettled: set[tuple[str, str, str]] = set()
+        self._import_browser_terminal: set[tuple[str, str, str]] = set()
         self._reset_guard_contexts: dict[Path, object] = {}
         self._last_heartbeat_monotonic: float | None = None
         self._last_heartbeat_at: datetime | None = None
@@ -191,6 +200,49 @@ class CaptureCoordinator:
         self._completion: CaptureCompletion | None = None
         self._delivered_completion: CaptureCompletion | None = None
         self._resolved_completion: CaptureCompletion | None = None
+
+    def reserve_browser_task(self, kind: str) -> str | None:
+        """Atomically exclude Import/Preparation and unsettled native saves."""
+        if kind not in {"import", "preparation"}:
+            raise ValueError("unsupported browser task")
+        with self._lock:
+            self._expire_locked(_monotonic(), _utc_now())
+            # Historical §42 permits a new explicit Import retry while an old
+            # native grant remains unsettled; the Connector serializes those
+            # captures. Preparation MUST wait for every such grant and task.
+            if (self._browser_owner is not None
+                    or kind == "preparation" and (
+                        self._native_save_grants or self._import_browser_unsettled)
+                    or self._operation_lock is not None or self._completion is not None
+                    or self._delivered_completion is not None or self._resolved_completion is not None
+                    or self._attempt is not None and self._attempt.stage is not CaptureStage.FINISHED):
+                return None
+            self._browser_owner = secrets.token_urlsafe(32)
+            self._browser_kind = kind
+            return self._browser_owner
+
+    def release_browser_task(self, kind: str, owner: str) -> bool:
+        """Only the matching owner can release; native grants still block reuse."""
+        with self._lock:
+            if self._browser_kind != kind or self._browser_owner != owner:
+                return False
+            self._browser_owner = None
+            self._browser_kind = None
+            return True
+
+    def report_import_browser_idle(self, request_id: str, invocation_id: str, doi_url: str) -> bool:
+        """Separate browser-idle proof after original Connector task cleanup.
+
+        This has no effect on native-save grants or Paper status, and an older
+        receipt cannot retire a later claimed invocation.
+        """
+        with self._lock:
+            identity = (request_id, invocation_id, doi_url)
+            if identity not in self._import_browser_unsettled or identity not in self._import_browser_terminal:
+                return False
+            self._import_browser_unsettled.remove(identity)
+            self._import_browser_terminal.remove(identity)
+            return True
 
     def heartbeat(
         self,
@@ -281,6 +333,8 @@ class CaptureCoordinator:
         if not isinstance(export_reservation, ExportReservation):
             return CaptureStartResult(CaptureStartOutcome.INVALID_DOI)
         with self._lock:
+            if self._browser_kind == "preparation":
+                return CaptureStartResult(CaptureStartOutcome.ALREADY_ACTIVE)
             now_monotonic, now = _monotonic(), _utc_now()
             self._expire_locked(now_monotonic, now)
             if self._attempt is not None and self._attempt.stage is not CaptureStage.FINISHED:
@@ -380,6 +434,9 @@ class CaptureCoordinator:
             attempt.stage = CaptureStage.CONNECTOR_ACTIVE
             attempt.claimed_at = now
             attempt.claimed_monotonic = now_monotonic
+            self._import_browser_unsettled.add((
+                attempt.request_id, attempt.invocation_id, attempt.doi_url,
+            ))
             self._changed.set()
             return CaptureCommand(attempt.request_id, attempt.doi_url, attempt.invocation_id, attempt.access_context)
 
@@ -604,6 +661,9 @@ class CaptureCoordinator:
         now: datetime,
     ) -> None:
         attempt.stage = CaptureStage.FINISHED
+        identity = (attempt.request_id, attempt.invocation_id, attempt.doi_url)
+        if identity in self._import_browser_unsettled:
+            self._import_browser_terminal.add(identity)
         attempt.finished_at = now
         attempt.terminal_outcome = outcome
         attempt.parent_outcome = {

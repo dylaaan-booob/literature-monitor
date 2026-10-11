@@ -22,6 +22,7 @@ from literature_monitor.safe_write import (
 
 MAX_MARKDOWN_BYTES = 1024 * 1024
 MANAGED = {"Journals", "Publishers", "Access Services"}
+AI_MAPPING_PACK_MARKER = "<!-- literature-monitor-file-type: ai-mapping-pack/v1 -->"
 
 
 class MarkdownImportCommittedWarning(RuntimeError):
@@ -66,6 +67,8 @@ def _other_content(contents: str) -> str:
 
 def preview_full_markdown(path: Path, proposed: str, *, filename: str) -> FullMarkdownPreview:
     path = path.absolute()
+    if proposed.lstrip("\ufeff \t\r\n").startswith(AI_MAPPING_PACK_MARKER):
+        raise ConfigurationError("AI Mapping Pack is a work file, not importable list.md; import the AI-produced complete list.md instead")
     if not filename.lower().endswith(".md") or Path(filename).name != filename:
         raise ConfigurationError("Import requires a complete .md file, not CSV/TSV or a filesystem path")
     if not proposed or len(proposed.encode("utf-8")) > MAX_MARKDOWN_BYTES or "\x00" in proposed:
@@ -89,6 +92,12 @@ def preview_full_markdown(path: Path, proposed: str, *, filename: str) -> FullMa
     next_p = {p.publisher_id: p for p in new_publishers}
     previous_s = {s.id: s for s in old_services}
     next_s = {s.id: s for s in new_services}
+    def service_label(service_id: str | None, services: dict) -> str:
+        if service_id is None:
+            return "Unassigned"
+        service = services[service_id]  # The full-file parser rejects dangling IDs.
+        return f"{service.name} ({service_id})"
+
     changes = []
     for identity, current in next_j.items():
         old = previous_j.get(identity)
@@ -113,10 +122,18 @@ def preview_full_markdown(path: Path, proposed: str, *, filename: str) -> FullMa
             if old.publisher_url != current.publisher_url:
                 changes.append(f"Publisher URL: {identity}: {old.publisher_url or '(blank)'} → {current.publisher_url or '(blank)'}")
             if old.access_service_id != current.access_service_id:
-                changes.append(f"Publisher default Service: {identity}: {old.access_service_id or 'Unassigned'} → {current.access_service_id or 'Unassigned'}")
+                changes.append(f"Publisher default Service: {current.name} ({identity}): "
+                               f"{service_label(old.access_service_id, previous_s)} → "
+                               f"{service_label(current.access_service_id, next_s)}")
+            elif (current.access_service_id is not None
+                  and previous_s[current.access_service_id].name != next_s[current.access_service_id].name):
+                changes.append(f"Publisher default Service renamed: {current.name} ({identity}): "
+                               f"{service_label(current.access_service_id, previous_s)} → "
+                               f"{service_label(current.access_service_id, next_s)}")
     for identity, old in previous_p.items():
         if identity not in next_p:
-            changes.append(f"Remove Publisher: {old.name} ({identity}); saved URL: {old.publisher_url or '(blank)'}; Service: {old.access_service_id or 'Unassigned'}")
+            changes.append(f"Remove Publisher: {old.name} ({identity}); saved URL: {old.publisher_url or '(blank)'}; "
+                           f"Service: {service_label(old.access_service_id, previous_s)}")
             if old.publisher_url or old.access_service_id:
                 changes.append(f"Publisher cascade / loss of manual metadata: {identity}")
     for identity, current in next_s.items():
@@ -125,14 +142,20 @@ def preview_full_markdown(path: Path, proposed: str, *, filename: str) -> FullMa
             changes.append(f"Add Access Service: {current.name} ({identity})")
         elif (old.name, old.access_url) != (current.name, current.access_url):
             changes.append(f"Access Service edit: {identity}: {old.name} / {old.access_url or '(blank)'} → {current.name} / {current.access_url or '(blank)'}")
+        if old is not None and old.access_method != current.access_method:
+            labels = {"carsi": "CARSI", "manual": "Manual Login"}
+            changes.append(f"Access Method: {current.name} ({identity}): "
+                           f"{labels[old.access_method]} → {labels[current.access_method]}")
     for identity, old in previous_s.items():
         if identity not in next_s:
             members = [p for p in old_publishers if p.access_service_id == identity]
             changes.append(f"Delete Access Service: {old.name} ({identity}); {len(members)} previous members")
             for publisher in members:
                 replacement = next_p.get(publisher.publisher_id)
-                destination = (replacement.access_service_id or "Unassigned") if replacement else "Publisher removed"
-                changes.append(f"Service deletion affects Publisher: {publisher.name} ({publisher.publisher_id}) → {destination}")
+                destination = (service_label(replacement.access_service_id, next_s)
+                               if replacement else "Publisher removed")
+                changes.append(f"Service deletion affects Publisher: {publisher.name} ({publisher.publisher_id}): "
+                               f"{service_label(identity, previous_s)} → {destination}")
     old_extra, new_extra = _other_content(disk.contents), _other_content(proposed)
     if old_extra != new_extra:
         changes.append(f"Replace Conferences / unknown sections / manual text ({len(old_extra)} → {len(new_extra)} characters); all previous non-managed content is discarded")

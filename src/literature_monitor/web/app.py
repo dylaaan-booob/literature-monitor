@@ -24,6 +24,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.datastructures import UploadFile
+from starlette.concurrency import run_in_threadpool
 
 from literature_monitor.application.decisions import (
     DecisionOutcome,
@@ -58,6 +59,7 @@ from literature_monitor.config import ConfigurationError, LoadedConfig, load_con
 from literature_monitor.application.full_markdown_import import (
     MAX_MARKDOWN_BYTES, MarkdownImportCommittedWarning, preview_full_markdown, confirm_full_markdown,
 )
+from literature_monitor.application.ai_mapping_pack import generate_ai_mapping_pack, MappingPackError
 from literature_monitor.application.access_service_migration import (
     AccessSchemaUpgradeCommittedWarning, AccessSchemaUpgradeStateUncertain,
     preview_access_schema_upgrade, confirm_access_schema_upgrade,
@@ -95,6 +97,10 @@ from literature_monitor.web.settings_form import (
 )
 from literature_monitor.web.zotero_capture import process_capture_completion
 from literature_monitor.application.batch_import import BatchImportService, BatchPhase
+from literature_monitor.web.preparation_coordinator import (
+    PreparationCoordinator, PreparationOutcome, PreparationPhase, PreparationSnapshot, VisitEvidence,
+    read_saved_preparation_services, saved_institution_login_url,
+)
 from literature_monitor.application.access import AccessObservation
 from literature_monitor.web.batch_presentation import build_batch_presentation
 
@@ -163,6 +169,140 @@ class _ConnectorHeartbeatBody(BaseModel):
 
     version: str = Field(min_length=1, max_length=CONNECTOR_VERSION_MAX_LENGTH)
     zotero_reachable: StrictBool
+
+
+class _ImportBrowserIdleBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str = Field(min_length=1, max_length=REQUEST_ID_MAX_LENGTH)
+    invocation_id: str = Field(min_length=1, max_length=REQUEST_ID_MAX_LENGTH)
+    doi_url: str = Field(min_length=1, max_length=8192)
+
+
+class _PreparationIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    instance_id: str = Field(min_length=16, max_length=128)
+    task_id: str = Field(min_length=16, max_length=128)
+    generation: StrictInt = Field(ge=1)
+    request_id: str = Field(min_length=16, max_length=128)
+    service_id: str = Field(pattern=r"^svc_[0-9a-f]{32}$")
+
+
+class _PreparationHeartbeat(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    instance_id: str = Field(min_length=16, max_length=128)
+    capability: str = Field(min_length=1, max_length=128)
+    version: str = Field(min_length=1, max_length=32)
+
+
+class _PreparationClaim(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    instance_id: str = Field(min_length=16, max_length=128)
+
+
+class _PreparationVisitEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    nonce: str = Field(min_length=32, max_length=128)
+    visit_action_observed: StrictBool
+    source_tab_id: StrictInt = Field(ge=0)
+    target_tab_id: StrictInt = Field(ge=0)
+    created_target_tab_id: StrictInt | None = Field(default=None, ge=0)
+    navigation_observed: StrictBool
+
+class _PreparationVisitAuthorization(_PreparationIdentity):
+    source_tab_id: StrictInt = Field(ge=0)
+
+
+class _PreparationResultBody(_PreparationIdentity):
+    outcome: PreparationOutcome
+    reason: str = Field(min_length=1, max_length=64)
+    evidence: _PreparationVisitEvidence | None = None
+
+
+class _PreparationStartBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    csrf_token: str
+
+
+class _PreparationCancelBody(_PreparationStartBody):
+    task_id: str = Field(min_length=16, max_length=128)
+    generation: StrictInt = Field(ge=1)
+
+
+class _PreparationWaitingBody(_PreparationIdentity):
+    waiting: StrictBool
+
+
+class _PreparationStartForm(BaseModel):
+    csrf_token: str | None = None
+
+
+class _PreparationCancelForm(_PreparationStartForm):
+    task_id: str = ""
+    generation: int = 0
+
+
+def _preparation_json(snapshot: PreparationSnapshot) -> dict[str, object]:
+    return {
+        "phase": snapshot.phase.value,
+        "task_id": snapshot.task_id,
+        "generation": snapshot.generation,
+        "services": [{"id": s.id, "name": s.name, "access_url": s.access_url, "access_method": s.access_method}
+                     for s in snapshot.services],
+        "manual_services": [{"id": s.id, "name": s.name, "access_url": s.access_url, "access_method": s.access_method}
+                            for s in snapshot.manual_services],
+        "current_service_id": snapshot.current_service_id,
+        "results": [{"service_id": r.service_id, "outcome": r.outcome.value, "reason": r.reason}
+                    for r in snapshot.results],
+        "message": snapshot.message,
+        "authorization_pending": snapshot.authorization_pending,
+        "waiting_for_user": snapshot.waiting_for_user,
+    }
+
+
+def _preparation_context(request: Request, config_path: Path) -> dict[str, object]:
+    coordinator = request.app.state.preparation_coordinator
+    snapshot = coordinator.snapshot()
+    issue = None
+    has_institution = True
+    services = snapshot.services
+    manual = snapshot.manual_services
+    next_services = services
+    if snapshot.phase is PreparationPhase.IDLE or (snapshot.task_id is None and snapshot.phase is PreparationPhase.BLOCKED):
+        try:
+            relevant = read_saved_preparation_services(config_path)
+            services = tuple(service for service in relevant if service.access_method == "carsi")
+            manual = tuple(service for service in relevant if service.access_method == "manual")
+            next_services = relevant
+        except (ConfigurationError, ContentChangedError, OSError):
+            issue = "Saved Access Mapping needs attention. Review Settings."
+    elif snapshot.phase in (PreparationPhase.COMPLETED, PreparationPhase.STOPPED, PreparationPhase.BLOCKED):
+        try:
+            # 保留本次结果与人工列表；按钮资格只反映下一次主动 Prepare 的当前输入。
+            next_services = read_saved_preparation_services(config_path)
+        except (ConfigurationError, ContentChangedError, OSError):
+            issue = "Saved Access Mapping needs attention. Review Settings."
+    if snapshot.phase is not PreparationPhase.RUNNING:
+        try:
+            has_institution = saved_institution_login_url(config_path) is not None
+        except (ConfigurationError, ContentChangedError, OSError):
+            issue = "Saved Institution settings need attention. Review Settings."
+            has_institution = False
+    by_id = {service.id: service for service in services}
+    return {
+        "snapshot": snapshot,
+        "services": services,
+        "manual_services": manual,
+        "current_service": by_id.get(snapshot.current_service_id),
+        "result_rows": [(by_id.get(item.service_id), item) for item in snapshot.results],
+        "ready": coordinator.ready(),
+        "can_start": (bool(next_services) and issue is None
+                      and (not any(service.access_method == "carsi" for service in next_services)
+                           or (coordinator.ready() and has_institution))
+                      and snapshot.phase is not PreparationPhase.RUNNING
+                      and not snapshot.authorization_pending),
+        "issue": issue,
+        "has_institution": has_institution,
+    }
 
 
 class _ImportStartForm(BaseModel):
@@ -328,6 +468,7 @@ def _workspace_context(
         "selected_position": selected_position,
         "selection_stepped": selection_stepped,
         "batch": build_batch_presentation(batch_snapshot, workspace),
+        "preparation": _preparation_context(request, config_path) if selected_view == "kept" else None,
         "import_token": import_token,
         "decision_result": decision_result,
         "decision_message": decision_message,
@@ -461,6 +602,7 @@ def _settings_context(
     markdown_proof: str = "",
     markdown_dirty: bool = False,
     markdown_export_guard: bool = False,
+    markdown_export_kind: str = "markdown",
     markdown_reload_guard: bool = False,
     access_upgrade_plan=None,
     access_upgrade_proof: str = "",
@@ -468,9 +610,15 @@ def _settings_context(
 ) -> dict[str, object]:
     disk = disk_state or load_settings(request.app.state.config_path)
     current_list = _read_snapshot(disk.journal_path, source=SettingsIssueSource.JOURNAL_DATA)
+    saved_service_urls: dict[str, str] = {}
     try:
         needs_access_upgrade = (current_list.contents is not None
                                 and detect_list_schema(current_list.contents, path=disk.journal_path) == "legacy")
+        if current_list.issue is None and current_list.contents is not None and not needs_access_upgrade:
+            _, _, saved_services = parse_settings_list_text(current_list.contents, path=disk.journal_path)
+            saved_service_urls = {
+                service.id: service.access_url for service in saved_services if service.access_url
+            }
     except ConfigurationError:
         needs_access_upgrade = False
     return {
@@ -493,6 +641,8 @@ def _settings_context(
         "markdown_proof": markdown_proof,
         "markdown_dirty": markdown_dirty,
         "markdown_export_guard": markdown_export_guard,
+        "markdown_export_kind": markdown_export_kind,
+        "saved_service_urls": saved_service_urls,
         "markdown_reload_guard": markdown_reload_guard,
         "access_upgrade_plan": access_upgrade_plan,
         "access_upgrade_proof": access_upgrade_proof,
@@ -518,6 +668,10 @@ def create_app(config_path: Path) -> FastAPI:
     app.state.run_coordinator = RunCoordinator(resolved_config_path)
     app.state.capture_coordinator = CaptureCoordinator()
     app.state.batch_import = BatchImportService(app.state.capture_coordinator)
+    # Only a verified Connector capability heartbeat can enable browser claims.
+    app.state.preparation_coordinator = PreparationCoordinator(
+        app.state.capture_coordinator, execution_enabled=True,
+    )
     app.state.import_token = secrets.token_urlsafe(32)
     app.state.reset_confirmation = None
     app.state.reset_lock = threading.Lock()
@@ -540,6 +694,76 @@ def create_app(config_path: Path) -> FastAPI:
         except ValueError:
             return JSONResponse({"accepted": False}, status_code=422)
         return JSONResponse({"readiness": readiness.value})
+
+    @app.post("/api/connector/preparation/heartbeat")
+    def preparation_heartbeat(body: _PreparationHeartbeat) -> JSONResponse:
+        ready = app.state.preparation_coordinator.heartbeat(
+            body.instance_id, capability=body.capability, version=body.version,
+        )
+        return JSONResponse({"ready": ready})
+
+    @app.post("/api/connector/import-browser-idle")
+    def import_browser_idle(body: _ImportBrowserIdleBody) -> JSONResponse:
+        accepted = app.state.capture_coordinator.report_import_browser_idle(**body.model_dump())
+        return JSONResponse({"accepted": accepted}, status_code=200 if accepted else 409)
+
+    @app.post("/api/connector/preparation/claim")
+    def preparation_claim(body: _PreparationClaim) -> JSONResponse:
+        command = app.state.preparation_coordinator.claim(body.instance_id)
+        return JSONResponse({"command": None if command is None else {
+            "kind": command.kind, "task_id": command.task_id,
+            "generation": command.generation, "request_id": command.request_id,
+            "service_id": command.service_id, "name": command.name,
+            "access_url": command.access_url, "login_url": command.login_url,
+            "last_service": command.last_service,
+        }})
+
+    @app.post("/api/connector/preparation/authorize")
+    def preparation_authorize(body: _PreparationIdentity) -> JSONResponse:
+        accepted = app.state.preparation_coordinator.authorize(**body.model_dump())
+        return JSONResponse({"accepted": accepted}, status_code=200 if accepted else 409)
+
+    @app.post("/api/connector/preparation/waiting")
+    def preparation_waiting(body: _PreparationWaitingBody) -> JSONResponse:
+        accepted = app.state.preparation_coordinator.report_waiting(**body.model_dump())
+        return JSONResponse({"accepted": accepted}, status_code=200 if accepted else 409)
+
+    @app.post("/api/connector/preparation/visit-authorize")
+    def preparation_visit_authorize(body: _PreparationVisitAuthorization) -> JSONResponse:
+        nonce = app.state.preparation_coordinator.authorize_visit(**body.model_dump())
+        return JSONResponse({"nonce": nonce}, status_code=200 if nonce else 409)
+
+    @app.post("/api/connector/preparation/result")
+    def preparation_result(body: _PreparationResultBody) -> JSONResponse:
+        values = body.model_dump()
+        proof = values.pop("evidence")
+        accepted = app.state.preparation_coordinator.result(
+            **values, evidence=VisitEvidence(**proof) if proof is not None else None,
+        )
+        return JSONResponse({"accepted": accepted}, status_code=200 if accepted else 409)
+
+
+    @app.post("/api/preparation/start")
+    def preparation_start(body: _PreparationStartBody) -> JSONResponse:
+        if not _csrf_valid(body.csrf_token, csrf_token):
+            return JSONResponse({"error": "Invalid CSRF token"}, status_code=403)
+        try:
+            state = app.state.preparation_coordinator.start(resolved_config_path)
+        except (ConfigurationError, OSError, ContentChangedError):
+            return JSONResponse({"error": "Saved list.md or monitor.yaml Institution configuration invalid; review Settings"}, status_code=400)
+        ready = state.phase in {PreparationPhase.RUNNING, PreparationPhase.COMPLETED}
+        return JSONResponse(_preparation_json(state), status_code=200 if ready else 409)
+
+    @app.get("/api/preparation/state")
+    def preparation_state() -> JSONResponse:
+        return JSONResponse(_preparation_json(app.state.preparation_coordinator.snapshot()))
+
+    @app.post("/api/preparation/cancel")
+    def preparation_cancel(body: _PreparationCancelBody) -> JSONResponse:
+        if not _csrf_valid(body.csrf_token, csrf_token):
+            return JSONResponse({"accepted": False}, status_code=403)
+        accepted = app.state.preparation_coordinator.cancel(body.task_id, body.generation)
+        return JSONResponse({"accepted": accepted}, status_code=200 if accepted else 409)
 
     @app.post("/api/connector/claim")
     def connector_claim(body: _ConnectorClaimBody) -> JSONResponse:
@@ -756,7 +980,8 @@ def create_app(config_path: Path) -> FastAPI:
     def markdown_reply(request: Request, values: SettingsFormValues, *, message: str,
                        plan=None, contents: str = "", filename: str = "",
                        proof: str = "", dirty: bool = False, issues=(),
-                       export_guard: bool = False, reload_guard: bool = False,
+                       export_guard: bool = False, export_kind: str = "markdown",
+                       reload_guard: bool = False,
                        upgrade_plan=None, upgrade_proof: str = "",
                        upgrade_dirty: bool = False) -> HTMLResponse:
         return templates.TemplateResponse(request, "fragments/settings_editor.html",
@@ -764,7 +989,8 @@ def create_app(config_path: Path) -> FastAPI:
                 issues=issues, message=message, markdown_plan=plan,
                 markdown_contents=contents, markdown_filename=filename,
                 markdown_proof=proof, markdown_dirty=dirty,
-                markdown_export_guard=export_guard, markdown_reload_guard=reload_guard,
+                markdown_export_guard=export_guard, markdown_export_kind=export_kind,
+                markdown_reload_guard=reload_guard,
                 access_upgrade_plan=upgrade_plan, access_upgrade_proof=upgrade_proof,
                 access_upgrade_dirty=upgrade_dirty))
 
@@ -957,6 +1183,29 @@ def create_app(config_path: Path) -> FastAPI:
         except (ConfigurationError, OSError) as error:
             return markdown_reply(request, values, message=f"Export blocked: {error}", issues=issues)
 
+    @app.post("/settings/export-ai-mapping-pack", response_class=HTMLResponse)
+    async def export_ai_mapping_pack(request: Request):
+        form = await request.form()
+        if not require_settings_csrf(form):
+            return HTMLResponse("Invalid or missing CSRF token.", status_code=403)
+        values, draft, issues, disk, dirty = submitted_settings(form)
+        if dirty and form.get("export_discard") != "yes":
+            return markdown_reply(
+                request, values, message="Unsaved Settings Draft: Save or explicitly Discard before AI Mapping Pack export.",
+                issues=issues, export_guard=True, export_kind="pack",
+            )
+        try:
+            pack = await run_in_threadpool(generate_ai_mapping_pack, disk.journal_path)
+            return Response(
+                content=pack.markdown.encode("utf-8"), media_type="text/markdown; charset=utf-8",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{pack.filename}"',
+                    "Cache-Control": "no-store",
+                },
+            )
+        except MappingPackError as error:
+            return markdown_reply(request, values, message=f"AI Mapping Pack export blocked: {error}", issues=issues)
+
     @app.post("/settings/reload", response_class=HTMLResponse)
     async def reload_markdown(request: Request) -> HTMLResponse:
         form = await request.form()
@@ -1097,6 +1346,38 @@ def create_app(config_path: Path) -> FastAPI:
             csrf_token=csrf_token, view=view, selected_paper_id=paper, decision_message=message)
         return templates.TemplateResponse(request, "fragments/workspace.html", context,
                                           status_code=status_code)
+
+    def render_preparation(request: Request, *, message: str | None = None) -> HTMLResponse:
+        return templates.TemplateResponse(request, "fragments/preparation.html", {
+            "csrf_token": csrf_token,
+            "preparation": _preparation_context(request, resolved_config_path),
+            "preparation_message": message,
+        })
+
+    @app.get("/fragments/preparation", response_class=HTMLResponse)
+    def preparation_fragment(request: Request) -> HTMLResponse:
+        return render_preparation(request)
+
+    @app.post("/preparation/start", response_class=HTMLResponse)
+    def preparation_start_form(request: Request,
+                               body: Annotated[_PreparationStartForm, Form()]) -> HTMLResponse:
+        if not _csrf_valid(body.csrf_token, csrf_token):
+            return HTMLResponse("Invalid or missing CSRF token.", status_code=403)
+        try:
+            state = app.state.preparation_coordinator.start(resolved_config_path)
+            message = (state.message if state.phase is PreparationPhase.BLOCKED else None)
+        except (ConfigurationError, OSError, ContentChangedError):
+            message = "Saved Access Mapping or Institution settings need attention. Review Settings."
+        return render_preparation(request, message=message)
+
+    @app.post("/preparation/cancel", response_class=HTMLResponse)
+    def preparation_cancel_form(request: Request,
+                                body: Annotated[_PreparationCancelForm, Form()]) -> HTMLResponse:
+        if not _csrf_valid(body.csrf_token, csrf_token):
+            return HTMLResponse("Invalid or missing CSRF token.", status_code=403)
+        accepted = app.state.preparation_coordinator.cancel(body.task_id, body.generation)
+        return render_preparation(request,
+                                  message=None if accepted else "This Preparation task is no longer active; refresh its status.")
 
     @app.post("/imports/start", response_class=HTMLResponse)
     def import_start(request: Request, body: Annotated[_ImportStartForm, Form()]) -> HTMLResponse:

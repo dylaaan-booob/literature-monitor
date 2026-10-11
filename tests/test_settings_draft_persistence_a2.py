@@ -237,7 +237,7 @@ def form_data(values):
                         ("publisher_access_url", p.publisher_url),
                         ("publisher_access_service_id", p.access_service_id)))
     for s in values.access_services:
-        entries.extend((("service_id", s.id), ("service_name", s.name), ("service_access_url", s.access_url)))
+        entries.extend((("service_id", s.id), ("service_name", s.name), ("service_access_url", s.access_url), ("service_access_method", s.access_method)))
     return FormData(entries)
 
 

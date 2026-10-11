@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import date
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 import yaml
@@ -118,10 +118,13 @@ class AccessService(BaseModel):
     id: str
     name: NonEmptyStr
     access_url: str | None = None
+    access_method: Literal["carsi", "manual"] = "carsi"
 
     @classmethod
-    def create(cls, name: str, access_url: str | None = None) -> AccessService:
-        return cls(id="svc_" + uuid.uuid4().hex, name=name, access_url=access_url)
+    def create(cls, name: str, access_url: str | None = None, *,
+               access_method: Literal["carsi", "manual"] = "carsi") -> AccessService:
+        return cls(id="svc_" + uuid.uuid4().hex, name=name, access_url=access_url,
+                   access_method=access_method)
 
     @field_validator("id")
     @classmethod
@@ -804,7 +807,8 @@ def detect_list_schema(contents: str, *, path: Path) -> str:
     if header == ("Publisher", "OpenAlex ID", "Access URL") and services is None:
         schema = "legacy"
     elif header == ("Publisher", "OpenAlex ID", "Publisher URL", "Access Service ID") and services is not None:
-        if services[0] != ("Service ID", "Service", "Access URL"):
+        if services[0] not in (("Service ID", "Service", "Access URL"),
+                              ("Service ID", "Service", "Access URL", "Access Method")):
             raise ConfigurationError(f"{path}: invalid Access Services header", field="access_services", path=path)
         schema = "current"
     else:
@@ -840,14 +844,18 @@ def parse_publisher_whitelist_text(contents: str, *, path: Path) -> tuple[Publis
 
 
 def parse_access_services_text(contents: str, *, path: Path) -> tuple[AccessService, ...]:
-    section = _managed_rows(contents, path, "Access Services",
-                            ("Service ID", "Service", "Access URL"))
+    section = _managed_rows(contents, path, "Access Services")
     if section is None:
         raise ConfigurationError(f"{path}: missing Access Services section", field="access_services", path=path)
+    if section[0] not in (("Service ID", "Service", "Access URL"),
+                           ("Service ID", "Service", "Access URL", "Access Method")):
+        raise ConfigurationError(f"{path}: invalid Access Services header", field="access_services", path=path)
     result: list[AccessService] = []
-    for number, (identity, name, url) in section[1]:
+    for number, cells in section[1]:
+        identity, name, url = cells[:3]
         try:
-            result.append(AccessService(id=identity, name=name, access_url=url or None))
+            result.append(AccessService(id=identity, name=name, access_url=url or None,
+                                        access_method=cells[3] if len(cells) == 4 else "carsi"))
         except ValueError as error:
             raise ConfigurationError(f"{path}:{number}: {error}", field="access_services", path=path) from error
     return validate_access_services(result)
@@ -909,7 +917,7 @@ def render_settings_list_text(existing_contents: str | None, journals: Sequence[
     publisher_rows.extend(f"| {p.name} | {p.publisher_id} | {p.publisher_url or ''} | {p.access_service_id or ''} |"
                           for p in publishers)
     target = replace_section(target, "## Publishers", publisher_rows)
-    service_rows = ["## Access Services", "", "| Service ID | Service | Access URL |", "| --- | --- | --- |"]
-    service_rows.extend(f"| {service.id} | {service.name} | {service.access_url or ''} |" for service in services)
+    service_rows = ["## Access Services", "", "| Service ID | Service | Access URL | Access Method |", "| --- | --- | --- | --- |"]
+    service_rows.extend(f"| {service.id} | {service.name} | {service.access_url or ''} | {service.access_method} |" for service in services)
     target = replace_section(target, "## Access Services", service_rows)
     return target

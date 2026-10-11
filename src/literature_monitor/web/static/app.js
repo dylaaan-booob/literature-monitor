@@ -5,6 +5,7 @@
   let settingsJournalScroll = null;
   let settingsPublisherScroll = null;
   let settingsDisclosures = [];
+  const disclosureStates = new Map();
 
   let draggedJournal = null;
   let selectedMarkdownFile = null;
@@ -34,6 +35,7 @@
     const services = Array.from(editor.querySelectorAll("[data-service-row]")).map((row) => ({
       id: value(row, "service_id"), name: value(row, "service_name"),
       url: value(row, "service_access_url"),
+      method: value(row, "service_access_method"),
     })).sort((a, b) => a.id.localeCompare(b.id));
     const groups = groupRows(editor).map((row) => row.dataset.groupName);
     const migration = Array.from(editor.querySelectorAll('[name="migration_issn_l"]'))
@@ -497,6 +499,7 @@
       row.querySelector('[name="service_id"]').value,
       row.querySelector('[name="service_name"]').value,
       row.querySelector('[name="service_access_url"]').value,
+      row.querySelector('[name="service_access_method"]').value,
       ...Array.from(row.querySelectorAll("[data-publisher-row]")).map((member) => member.querySelector('[name="publisher_id"]').value),
     ]);
   }
@@ -663,6 +666,13 @@
     if (link) link.hidden = target.value !== link.dataset.accessUrl;
   }
 
+  function syncServiceLink(target) {
+    if (!target.matches('[name="service_access_url"]')) return;
+    const link = target.closest("[data-service-row]")?.querySelector("[data-service-open]");
+    // A draft-only URL must never become a trusted saved Service link.
+    if (link) link.hidden = target.value !== link.dataset.accessUrl;
+  }
+
   function setImportReady(editor, ready) {
     const button = editor.querySelector("[data-import-preview]");
     if (button) button.disabled = !ready;
@@ -719,18 +729,37 @@
     });
   });
 
-  async function exportMarkdown(editor, discard) {
+  async function exportMarkdown(editor, discard, kind = "markdown") {
     const form = editor.querySelector("#settings-form");
     const payload = new FormData(form);
+    const editorState = () => JSON.stringify({
+      fields: Array.from(new FormData(form), ([key, value]) => [key, String(value)]),
+      draft: settingsSignature(editor),
+      dirty: settingsDirty,
+    });
+    const initialState = editorState();
+    const requireCurrentEditor = () => {
+      if (document.getElementById("settings-editor") !== editor) {
+        throw new Error("Settings editor was replaced during export; the older response was ignored.");
+      }
+      if (editorState() !== initialState) {
+        throw new Error("Settings changed during export; retry without discarding newer draft edits.");
+      }
+    };
+    const route = kind === "pack" ? "/settings/export-ai-mapping-pack" : "/settings/export";
+    const filename = kind === "pack" ? "literature-monitor-ai-mapping-pack.md" : "list.md";
     if (discard) payload.set("export_discard", "yes");
     try {
-      const response = await fetch("/settings/export", {method: "POST", body: payload});
+      const response = await fetch(route, {method: "POST", body: payload});
+      requireCurrentEditor();
       if (!response.ok) throw new Error("Export HTTP " + response.status);
       if (response.headers.get("Content-Disposition")?.includes("attachment")) {
-        const downloadUrl = URL.createObjectURL(await response.blob());
+        const blob = await response.blob();
+        requireCurrentEditor();
+        const downloadUrl = URL.createObjectURL(blob);
         const anchor = document.createElement("a");
         anchor.href = downloadUrl;
-        anchor.download = "list.md";
+        anchor.download = filename;
         document.body.append(anchor);
         anchor.click();
         anchor.remove();
@@ -738,10 +767,14 @@
         if (discard) {
           // Discard 是明确操作；导出完成后同步刷新 UI 与真实磁盘版本。
           const page = await fetch("/settings");
+          requireCurrentEditor();
           if (page.ok) {
-            const documentPage = new DOMParser().parseFromString(await page.text(), "text/html");
+            const markup = await page.text();
+            requireCurrentEditor();
+            const documentPage = new DOMParser().parseFromString(markup, "text/html");
             const replacement = documentPage.querySelector("#settings-editor");
             if (replacement) {
+              requireCurrentEditor();
               editor.replaceWith(replacement);
               window.htmx?.process(replacement);
               initializeJournalGroups(replacement);
@@ -754,8 +787,10 @@
         }
       } else {
         const markup = await response.text();
+        requireCurrentEditor();
         const replacement = new DOMParser().parseFromString(markup, "text/html").querySelector("#settings-editor");
         if (replacement) {
+          requireCurrentEditor();
           editor.replaceWith(replacement);
           window.htmx?.process(replacement);
           initializeJournalGroups(replacement);
@@ -763,12 +798,14 @@
           setSettingsView(replacement, settingsView);
           if (!replacement.querySelector("[data-markdown-preview]")) selectedMarkdownFile = null;
           setSettingsDirty(settingsDirty);
-        }
+        } else throw new Error("Export returned an unexpected response; the draft was preserved.");
       }
     } catch (failure) {
-      const notice = editor.querySelector("[data-import-file-error]");
+      const current = document.getElementById("settings-editor");
+      const notice = current?.querySelector("[data-export-error]");
       if (notice) {
-        notice.textContent = "Markdown Export failed: " + failure.message;
+        notice.textContent = (kind === "pack" ? "AI Mapping Pack" : "Markdown")
+          + " export: " + failure.message;
         notice.hidden = false;
       }
     }
@@ -807,6 +844,7 @@
     }
     if (isSettingsField(event.target) && event.target.hasAttribute("name")) {
       syncPublisherLink(event.target);
+      syncServiceLink(event.target);
       setSettingsDirty(true);
     }
   });
@@ -821,6 +859,7 @@
     }
     if (isSettingsField(event.target)) {
       syncPublisherLink(event.target);
+      syncServiceLink(event.target);
       const editor = event.target.closest("#settings-editor");
       if (event.target.matches("[data-select-journal]")) {
         updateJournalGroups(editor);
@@ -832,7 +871,7 @@
         movePublisher(editor, row, event.target.value);
         refreshPublisherMapping(editor);
         if (changed) setSettingsDirty(true);
-      } else if (event.target.matches('[name="service_name"], [name="service_access_url"]')) {
+      } else if (event.target.matches('[name="service_name"], [name="service_access_url"], [name="service_access_method"]')) {
         const row = event.target.closest("[data-service-row]");
         if (validateServiceNames(editor, row.querySelector('[name="service_name"]').value, row)
             && validServiceUrl(editor, row.querySelector('[name="service_access_url"]').value)) {
@@ -895,8 +934,12 @@
         target.closest("[data-export-guard], [data-reload-guard]").remove();
         return;
       }
-      if (target.closest("[data-export-markdown], [data-export-discard]")) {
-        exportMarkdown(editor, !!target.closest("[data-export-discard]"));
+      const exportButton = target.closest("[data-export-markdown], [data-export-mapping-pack], [data-export-discard]");
+      if (exportButton) {
+        const discard = exportButton.hasAttribute("data-export-discard");
+        const kind = discard ? exportButton.closest("[data-export-guard]")?.dataset.exportKind
+          : (exportButton.hasAttribute("data-export-mapping-pack") ? "pack" : "markdown");
+        exportMarkdown(editor, discard, kind);
         return;
       }
       if (target.closest("[data-create-service]")) {
@@ -1115,6 +1158,10 @@
   });
 
   document.body.addEventListener("htmx:beforeSwap", (event) => {
+    // Fragment 轮询只更新业务状态；同时记住展开和折叠，避免默认 open 覆盖用户选择。
+    event.detail.target.querySelectorAll("[data-disclosure-key]").forEach(panel => {
+      disclosureStates.set(panel.dataset.disclosureKey, panel.open);
+    });
     if (event.detail.target.id === "danger-zone") {
       if (event.detail.xhr.status === 400 || event.detail.xhr.status === 409) {
         event.detail.shouldSwap = true;
@@ -1159,6 +1206,11 @@
   document.body.addEventListener("htmx:sendError", showImportError);
 
   document.body.addEventListener("htmx:afterSwap", (event) => {
+    const swapped = document.getElementById(event.detail.target.id) || event.detail.target;
+    swapped.querySelectorAll("[data-disclosure-key]").forEach(panel => {
+      if (disclosureStates.has(panel.dataset.disclosureKey))
+        panel.open = disclosureStates.get(panel.dataset.disclosureKey);
+    });
     syncRunAnnouncement();
     syncWorkspaceSelection();
     sizeWorkspacePanes();

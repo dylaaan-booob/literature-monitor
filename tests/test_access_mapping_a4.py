@@ -74,6 +74,7 @@ def test_service_crud_and_mapping_changed_file_only(tmp_path):
         data["service_id"].append(new.id)
         data["service_name"].append(new.name)
         data["service_access_url"].append(new.access_url)
+        data["service_access_method"].append(new.access_method)
         data["publisher_access_service_id"] = [new.id, new.id]
         data["journal_group"] = ["A4 Group", "Other"]
         saved = submit(client, data)
@@ -127,7 +128,7 @@ def test_service_deletion_requires_signed_current_confirmation(tmp_path, kind):
         data = browser_settings_submission(client.get("/settings").text)
         removing = spare if kind == "empty" else service
         idx = data["service_id"].index(removing.id)
-        for key in ("service_id", "service_name", "service_access_url"):
+        for key in ("service_id", "service_name", "service_access_url", "service_access_method"):
             data[key].pop(idx)
         if kind != "empty":
             data["publisher_access_service_id"][0] = ""
@@ -247,7 +248,7 @@ def test_deletion_proof_rejects_changed_membership_and_partial_write_preserves_d
     original = stamp(config), stamp(path)
     with TestClient(create_app(config), base_url="http://localhost") as client:
         draft = browser_settings_submission(client.get("/settings").text)
-        for field in ("service_id", "service_name", "service_access_url"):
+        for field in ("service_id", "service_name", "service_access_url", "service_access_method"):
             draft[field].pop(0)
         draft["publisher_access_service_id"][0] = ""
         preview = submit(client, draft)

@@ -539,7 +539,7 @@ def test_reset_failure_htmx_swap_runtime(dedicated):
     source = Path("src/literature_monitor/web/static/app.js").read_text()
     script = f"const PAGE={json.dumps(SettingsDOM(page).root)}, SOURCE={json.dumps(source)};\n" + SETTINGS_NODE_DOM + r'''
 for (const status of [400, 409, 403, 500]) {
-  const detail = {target: {id: "danger-zone"}, xhr: {status}, shouldSwap: false, isError: true};
+  const detail = {target: new Element("section", {id: "danger-zone"}), xhr: {status}, shouldSwap: false, isError: true};
   bodyHandlers["htmx:beforeSwap"]({detail});
   assert.equal(detail.shouldSwap, status === 400 || status === 409);
   assert.equal(detail.isError, status !== 400 && status !== 409);

@@ -2,7 +2,7 @@ diff --git a/src/browserExt/background-worker.js b/src/browserExt/background-wor
 index 8af4320..24c5af4 100644
 --- a/src/browserExt/background-worker.js
 +++ b/src/browserExt/background-worker.js
-@@ -22,21 +22,23 @@
+@@ -22,21 +22,24 @@
  	
  	***** END LICENSE BLOCK *****
  */
@@ -18,6 +18,7 @@ index 8af4320..24c5af4 100644
 -		"background.js"
 +		"background.js",
 +		"literature-monitor-access.js",
++		"literature-monitor-carsi.js",
 +		"literature-monitor-runtime.js"
  	];
  

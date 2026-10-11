@@ -12,8 +12,8 @@
 	"use strict";
 
 	const BRIDGE_BASE = "http://127.0.0.1:8000";
-	const HEARTBEAT_INTERVAL_MS = 5000;
-	const CLAIM_INTERVAL_MS = 1000;
+	const HEARTBEAT_INTERVAL_MS = 10000;
+	const CLAIM_INTERVAL_MS = 3000;
 	const FETCH_TIMEOUT_MS = 3000;
 	const TRANSLATOR_POLL_INTERVAL_MS = 500;
 	const OBSERVATION_DEADLINE_MS = 75000;
@@ -134,6 +134,10 @@
 		_heartbeatInFlight: false,
 		_claimInFlight: false,
 		_activeTask: null,
+		_prepInstance: null,
+		_prepClaimInFlight: false,
+		_prepActive: null,
+		_prepContext: null,
 		_heartbeatTimer: null,
 		_claimTimer: null,
 		_runtimeMessageListener: null,
@@ -158,6 +162,12 @@
 				return;
 			}
 			this._started = true;
+			// Only this complete, Chrome/MV3 CARSI executor can advertise capability.
+			if (typeof LiteratureMonitorCARSI !== "undefined"
+					&& LiteratureMonitorCARSI.verifiedExecutor === true
+					&& typeof global.crypto?.randomUUID === "function") {
+				this._prepInstance = global.crypto.randomUUID();
+			}
 
 			if (!this._keepAliveOwned) {
 				Zotero.Connector_Browser.setKeepServiceWorkerAlive(true);
@@ -365,12 +375,37 @@
 				// Bridge availability is intentionally not Connector/Zotero authority.
 			}
 			finally {
+				if (this._prepInstance) {
+					try {
+						await this._postJSON("/api/connector/preparation/heartbeat", {
+							instance_id: this._prepInstance,
+							capability: "carsi-preparation/a4-verified",
+							version: browser.runtime.getManifest().version,
+						});
+					}
+					catch (_) { /* Preparation presence is separate from Zotero readiness. */ }
+				}
 				this._heartbeatInFlight = false;
+				// Cancel / restart revokes authority even while an old browser callback hangs.
+				const active = this._prepActive;
+				const executor = active?.executor;
+				if (executor && !active.checkingAuthority) {
+					active.checkingAuthority = true;
+					// Result 可能先完成并释放引用；迟到的授权回调只检查原 Executor。
+					void executor.authorized().then(allowed => {
+						if (!allowed && this._prepActive === active && executor.revoked) {
+							executor.cancel();
+							active.executor = null;
+							this._prepActive = null;
+							this._prepContext = null;
+						}
+					}).finally(() => {active.checkingAuthority = false;});
+				}
 			}
 		},
 
 		async _claimTick() {
-			if (this._claimInFlight || this._activeTask) {
+			if (this._claimInFlight || this._activeTask || this._prepActive) {
 				return;
 			}
 			this._claimInFlight = true;
@@ -431,6 +466,88 @@
 			}
 			finally {
 				this._claimInFlight = false;
+				if (this._prepInstance && !this._activeTask && !this._prepActive) {
+					void this._claimPreparation();
+				}
+			}
+		},
+
+		async _claimPreparation() {
+			if (!this._prepInstance || this._prepClaimInFlight
+					|| this._activeTask || this._prepActive) return;
+			this._prepClaimInFlight = true;
+			try {
+				const response = await this._postJSON("/api/connector/preparation/claim", {
+					instance_id: this._prepInstance,
+				});
+				const cmd = response.ok && response.body?.command;
+				if (!cmd || this._activeTask || this._prepActive
+						|| cmd.kind !== "carsi-preparation/v1"
+						|| !requestIDIsValid(cmd.task_id) || !requestIDIsValid(cmd.request_id)
+						|| !/^svc_[0-9a-f]{32}$/.test(cmd.service_id)
+						|| !Number.isSafeInteger(cmd.generation) || cmd.generation < 1
+						|| typeof cmd.last_service !== "boolean"
+						|| typeof cmd.name !== "string" || !cmd.name.trim()
+						|| cmd.name.length > 512) return;
+				const login = cmd.login_url;
+				if (login != null) {
+					const url = new URL(login);
+					if (url.origin !== "https://ds.carsi.edu.cn"
+							|| url.pathname !== "/Shibboleth.sso/Login"
+							|| url.searchParams.get("target") !== LiteratureMonitorCARSI.PORTAL_URL
+							|| !url.searchParams.get("entityID") || url.hash) return;
+				}
+				const command = {...cmd, instance_id: this._prepInstance};
+				const active = {command, executor: null};
+				this._prepActive = active;
+				if (!this._prepContext || this._prepContext.taskID !== cmd.task_id
+						|| this._prepContext.generation !== cmd.generation) {
+					this._prepContext = {taskID: cmd.task_id, generation: cmd.generation,
+						portalTabID: null, windowID: null};
+				}
+				void this._runPreparation(active);
+			}
+			catch (_) { /* A missing claim is never a browser-action grant. */ }
+			finally {this._prepClaimInFlight = false;}
+		},
+
+		async _runPreparation(active) {
+			const command = active.command;
+			const identity = {
+				instance_id: command.instance_id, task_id: command.task_id,
+				generation: command.generation, request_id: command.request_id,
+				service_id: command.service_id,
+			};
+			const live = () => this._prepActive === active && !this._activeTask;
+			const executor = new LiteratureMonitorCARSI.Executor(
+				browser, (path, body) => this._postJSON(path, body),
+				command, this._prepContext, live,
+			);
+			active.executor = executor;
+			try {
+				let result;
+				try {result = await executor.execute();}
+				catch (_) {result = {outcome: "Failed", reason: "connector_error"};}
+				if (!live()) return;
+				// 收回本 Service 的操作授权并释放监听器，不等待或关闭任何 Prepare 页面。
+				executor.cancel();
+				if (result) {
+					for (let attempt = 0; attempt < RESULT_ATTEMPTS && live(); attempt++) {
+						try {
+							const answer = await this._postJSON("/api/connector/preparation/result", {
+								...identity, ...result,
+							});
+							if (answer.ok && answer.body?.accepted === true) break;
+							if (answer.status === 409) break;
+						}
+						catch (_) { /* 服务器以期限内未收到回执作为人工处理结果。 */ }
+					}
+				}
+			}
+			finally {
+				executor.cancel();
+				active.executor = null;
+				if (this._prepActive === active) this._prepActive = null;
 			}
 		},
 
@@ -720,9 +837,19 @@
 					// no proof that the external native save has stopped.
 					task.pipelineEnded = true;
 					task.pipelineComplete = message.type === INTERNAL_PIPELINE_COMPLETE;
-					if (task.pipelineComplete) await this._reportNativeSaveSettled(task);
-					await this._returnToApp(task, task.resultAccepted === true && task.pipelineComplete);
-					if (this._activeTask === task) this._activeTask = null;
+					task.pipelineReceiptPending = true;
+					try {
+						if (task.pipelineComplete) await this._reportNativeSaveSettled(task);
+					}
+					finally {
+						task.pipelineReceiptPending = false;
+						// A terminal result may already be returning to the app.
+						// Queue late cleanup behind it, never run both in parallel.
+						if (task.resultAccepted !== null) {
+							this._queueTaskCleanup(task, task.resultAccepted === true && task.pipelineComplete);
+						}
+						this._maybeReleaseBrowserTask(task);
+					}
 				}
 				return false;
 			}
@@ -769,8 +896,15 @@
 				// The original upstream translateAndSave promise has resolved,
 				// including downstream attachment work. This is the only native
 				// completion proof that can retire the external Reset grant.
-				await this._reportNativeSaveSettled(task);
-				if (task.parentConfirmed) this._finishTask(task, OUTCOME_CONFIRMED);
+				task.pipelineReceiptPending = true;
+				try {
+					await this._reportNativeSaveSettled(task);
+				}
+				finally {
+					task.pipelineReceiptPending = false;
+					if (task.parentConfirmed) this._finishTask(task, OUTCOME_CONFIRMED);
+					this._maybeReleaseBrowserTask(task);
+				}
 			}
 			else if (message.type === INTERNAL_SAVE_FAILED) {
 				task.pipelineEnded = true;
@@ -832,13 +966,37 @@
 			void this._deliverResult(task)
 				.then(async acknowledged => {
 					task.resultAccepted = acknowledged;
-					await this._returnToApp(task, acknowledged && outcome === OUTCOME_CONFIRMED && task.pipelineComplete);
-					if (this._activeTask === task
-							&& (!task.dispatchAccepted || task.pipelineEnded
-								|| task.failureStage === "native_save")) {
-						this._activeTask = null;
-					}
-				});
+					this._queueTaskCleanup(task, acknowledged && outcome === OUTCOME_CONFIRMED && task.pipelineComplete);
+				})
+				.catch(() => { /* Unobserved result/cleanup failure retains browser ownership. */ });
+		},
+
+		_queueTaskCleanup(task, closeTaskTab) {
+			if (this._activeTask !== task || task.cleanupFailed) return;
+			// Only this chain performs browser cleanup for the task. A late
+			// pipeline callback appends work before the first cleanup resolves.
+			task.cleanupPending = (task.cleanupPending || 0) + 1;
+			const previous = task.cleanupChain || Promise.resolve();
+			task.cleanupChain = previous.then(() => this._returnToApp(task, closeTaskTab));
+			void task.cleanupChain.then(() => {
+				task.cleanupPending--;
+				this._maybeReleaseBrowserTask(task);
+			}).catch(() => {
+				task.cleanupFailed = true; // Cannot prove browser quiescence.
+				task.cleanupPending--;
+			});
+		},
+
+		_maybeReleaseBrowserTask(task) {
+			if (this._activeTask !== task || !task.terminalOutcome
+					|| task.resultAccepted === null || !task.cleanupChain
+					|| task.cleanupPending !== 0 || task.cleanupFailed
+					|| task.pipelineReceiptPending || task.browserIdleReporting
+					|| (task.dispatchAccepted && !task.pipelineEnded
+						&& task.failureStage !== "native_save")) return;
+			task.browserIdleReporting = true;
+			this._activeTask = null;
+			void this._reportImportBrowserIdle(task);
 		},
 
 		_isAppTab(tab) {
@@ -857,7 +1015,11 @@
 						await browser.tabs.remove(task.tabID);
 					}
 				}
-				catch (_) { /* Task tab changed or was already closed. */ }
+				catch (_) {
+					// A failed browser API operation can have ambiguous effects.
+					// Retain task ownership rather than certify browser-idle.
+					throw new Error("Import task-tab cleanup could not be verified");
+				}
 			}
 			if (!Number.isInteger(task.appTabID) || task.manualAccessPending) return;
 			try {
@@ -866,7 +1028,11 @@
 				await browser.windows.update(task.appWindowID, {focused: true});
 				await browser.tabs.update(task.appTabID, {active: true});
 			}
-			catch (_) { /* Original application tab may have been closed. */ }
+			catch (_) {
+				// Returning focus may have partially completed; do not release
+				// browser authority on an ambiguous cleanup operation.
+				throw new Error("Import application-tab cleanup could not be verified");
+			}
 		},
 
 		async _reportNativeSaveSettled(task) {
@@ -879,6 +1045,27 @@
 					if (response.status === 409) return false;
 				}
 				catch (_) { /* Do not fabricate completion on transport loss. */ }
+				if (attempt + 1 < RESULT_ATTEMPTS) await delay(RESULT_RETRY_DELAY_MS);
+			}
+			return false;
+		},
+
+		async _reportImportBrowserIdle(task) {
+			// Result delivery is not browser idle. A3 receives proof only
+			// after _activeTask is cleared and all cleanup has finished.
+			// This cannot retire native-save grants or mutate Paper state.
+			const identity = {
+				request_id: task.requestID, invocation_id: task.invocationID,
+				doi_url: task.doiURL,
+			};
+			for (let attempt = 0; attempt < RESULT_ATTEMPTS; attempt++) {
+				try {
+					const response = await this._postJSON(
+						"/api/connector/import-browser-idle", identity);
+					if (response.ok && response.body?.accepted === true) return true;
+					if (response.status === 409) return false;
+				}
+				catch (_) { /* Missing browser-idle proof must remain fail-closed. */ }
 				if (attempt + 1 < RESULT_ATTEMPTS) await delay(RESULT_RETRY_DELAY_MS);
 			}
 			return false;

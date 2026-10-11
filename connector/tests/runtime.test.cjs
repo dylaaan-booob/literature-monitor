@@ -11,6 +11,7 @@ const RUNTIME_SOURCE = fs.readFileSync(
 	"utf8",
 );
 const ACCESS_SOURCE = fs.readFileSync(path.join(ROOT, "overlay", "literature-monitor-access.js"), "utf8");
+const CARSI_SOURCE = fs.readFileSync(path.join(ROOT, "overlay", "literature-monitor-carsi.js"), "utf8");
 const HOOK_PATCH = fs.readFileSync(
 	path.join(ROOT, "patches", "0002-literature-monitor-automatic-capture-hooks.patch"),
 	"utf8",
@@ -155,6 +156,7 @@ function makeEnvironment({
 	windows = [{id: 1, type: "normal", incognito: false}],
 	createdIncognito,
 	windowError = null,
+	enablePreparation = false,
 } = {}) {
 	const clock = new FakeClock();
 	const init = new Deferred();
@@ -201,8 +203,16 @@ function makeEnvironment({
 		if (pathname === "/api/connector/heartbeat") {
 			return response(200, {readiness: "connected"});
 		}
-		if (pathname === "/api/connector/claim") {
+		if (pathname === "/api/connector/claim" || pathname === "/api/connector/preparation/claim") {
 			return response(200, {command: null});
+		}
+		if (pathname === "/api/connector/preparation/heartbeat") {
+			return response(200, {ready: true});
+		}
+		if (pathname === "/api/connector/preparation/result"
+				|| pathname === "/api/connector/preparation/settled"
+				|| pathname === "/api/connector/preparation/authorize") {
+			return response(200, {accepted: true});
 		}
 		if (["/api/connector/result", "/api/connector/dispatch", "/api/connector/access",
 			"/api/connector/native-save-settled"].includes(pathname)) {
@@ -358,6 +368,7 @@ function makeEnvironment({
 	const context = {
 		performance: {now: () => clock.now},
 		AbortController,
+		crypto: enablePreparation ? {randomUUID: () => "test-preparation-instance-001"} : undefined,
 		URL,
 		Promise,
 		console,
@@ -371,6 +382,7 @@ function makeEnvironment({
 	};
 	context.self = context;
 	vm.runInNewContext(ACCESS_SOURCE, context, {filename: "literature-monitor-access.js"});
+	vm.runInNewContext(CARSI_SOURCE, context, {filename: "literature-monitor-carsi.js"});
 	vm.runInNewContext(RUNTIME_SOURCE, context, {
 		filename: "literature-monitor-runtime.js",
 	});
@@ -494,8 +506,8 @@ test("runtime waits for upstream init and owns MV3 keep-alive exactly once", asy
 	assert.deepEqual(env.keepAliveCalls, [true]);
 	assert.equal(requestsFor(env, "/api/connector/heartbeat").length, 1);
 	assert.equal(requestsFor(env, "/api/connector/claim").length, 1);
-	assert(env.clock.intervalDelays.includes(5000));
-	assert(env.clock.intervalDelays.includes(1000));
+	assert(env.clock.intervalDelays.includes(10000));
+	assert(env.clock.intervalDelays.includes(3000));
 
 	env.runtime.start();
 	assert.deepEqual(env.keepAliveCalls, [true]);
@@ -624,7 +636,7 @@ test("heartbeat is immediate, uses manifest version, and repeats inside stale wi
 		zotero_reachable: true,
 	});
 
-	await env.clock.advance(5000);
+	await env.clock.advance(10000);
 	heartbeats = requestsFor(env, "/api/connector/heartbeat");
 	assert.equal(heartbeats.length, 2);
 });
@@ -1011,7 +1023,6 @@ test("runtime contains no collection routing, attachment readiness, or timer-bas
 	assert(RUNTIME_SOURCE.includes("INTERNAL_PIPELINE_COMPLETE"));
 	assert(RUNTIME_SOURCE.includes("task.parentConfirmed ? OUTCOME_CONFIRMED : OUTCOME_UNCONFIRMED"));
 });
-
 
 for (const [field, value] of [
 	["requestID", "previous-request"], ["invocationID", "previous-invocation"],
@@ -2209,24 +2220,188 @@ test("readiness: automatic upstream save targets only the selected current docum
 	assert.deepEqual(calls[0],[100,["translate",[0,"current-translator",{literatureMonitorAutomatic:true,literatureMonitorContext:context}]],{documentId:"current-document"}]);
 });
 
-(async () => {
-	let failed = 0;
-	for (const [name, fn] of tests) {
-		try {
-			await fn();
-			process.stdout.write(`ok - ${name}\n`);
-		}
-		catch (error) {
-			failed += 1;
-			process.stderr.write(`not ok - ${name}\n`);
-			process.stderr.write(`${error.stack || error}\n`);
-		}
-	}
-	process.stdout.write(`\n${tests.length - failed}/${tests.length} tests passed\n`);
-	if (failed) {
-		process.exitCode = 1;
-	}
-})();
+function preparationCommand(requestID, serviceID, last = false) {
+    return {instance_id: "test-preparation-instance-001", task_id: "task-preparation",
+        generation: 1, request_id: requestID, service_id: "svc_" + serviceID.repeat(32),
+        name: "Example", last_service: last};
+}
+
+test("Preparation revokes local authority before Result and releases resources without closing tabs or waiting", async () => {
+    const env = makeEnvironment({enablePreparation: true});
+    env.browser.webNavigation.onCreatedNavigationTarget = new FakeEvent();
+    const proto = env.context.LiteratureMonitorCARSI.Executor.prototype;
+    const oldExecute = proto.execute;
+    const post = env.runtime._postJSON.bind(env.runtime);
+    let executor, detailListener, outcome;
+    env.browser.windows.remove = async id => {throw Error("Preparation must not close window " + id);};
+    env.runtime._postJSON = (path, body) => {
+        if (path === "/api/connector/preparation/result") {
+            assert.equal(executor.revoked, true);
+            assert.equal(executor.detailListener, null);
+            assert(!env.browser.webNavigation.onCreatedNavigationTarget.listeners.includes(detailListener));
+            assert.equal([...env.clock.timers.values()].filter(timer => !timer.interval).length, 0);
+        }
+        return post(path, body);
+    };
+    proto.execute = async function() {
+        executor = this;
+        for (const url of ["https://ds.carsi.edu.cn/resource/resource.php",
+            "https://ds.carsi.edu.cn/resource/resourceDetail.php", "https://database.example/article"]) {
+            const tab = await this.browser.tabs.create({url, windowId: 1});
+            this.context.portalTabID ??= tab.id;
+        }
+        detailListener = () => {};
+        this.detailListener = detailListener;
+        this.browser.webNavigation.onCreatedNavigationTarget.addListener(detailListener);
+        return {outcome, reason: outcome === "Opened" ? "target_opened" : "connector_error"};
+    };
+    try {
+        await startRuntime(env);
+        for (outcome of ["Opened", "Needs attention", "Failed"]) {
+            const active = {command: preparationCommand("request-" + outcome, "a", true), executor: null};
+            env.runtime._prepActive = active;
+            env.runtime._prepContext = {portalTabID: null, windowID: 1};
+            await env.runtime._runPreparation(active);
+            assert.equal(env.runtime._prepActive, null);
+            assert.equal(active.executor, null);
+            assert.equal(bodiesFor(env, "/api/connector/preparation/result").at(-1).outcome, outcome);
+        }
+        assert.deepEqual(env.removedTabs, []);
+        assert.equal(env.createdTabs.length, 9);
+        for (const {tab} of env.createdTabs) assert(env.tabs.has(tab.id));
+        assert.equal(bodiesFor(env, "/api/connector/preparation/settled").length, 0);
+        assert.deepEqual(env.clock.intervalDelays, [10000, 3000]);
+        assert.equal([...env.clock.timers.values()].filter(timer => !timer.interval).length, 0);
+    }
+    finally {proto.execute = oldExecute;}
+});
+
+test("two Services retain all pages and the next Prepare creates a new Portal without closing old pages", async () => {
+    const env = makeEnvironment({enablePreparation: true});
+    const proto = env.context.LiteratureMonitorCARSI.Executor.prototype;
+    const oldExecute = proto.execute, oldCleanup = proto.cleanup;
+    let executions = 0;
+    proto.execute = async function() {
+        executions++;
+        if (this.context.portalTabID === null) {
+            const portal = await this.browser.tabs.create({url: "https://ds.carsi.edu.cn/resource/resource.php", windowId: 1});
+            this.context.portalTabID = portal.id;
+        }
+        for (const url of ["https://ds.carsi.edu.cn/resource/resourceDetail.php", "https://database.example/article"])
+            await this.browser.tabs.create({url, windowId: 1});
+        return {outcome: "Needs attention", reason: "manual_action_required"};
+    };
+    proto.cleanup = async () => {};
+    try {
+        await startRuntime(env);
+        const base = {kind: "carsi-preparation/v1", task_id: "task-two",
+            generation: 1, name: "Example", login_url: null};
+        env.enqueue("/api/connector/preparation/claim", response(200, {
+            command: {...base, ...preparationCommand("request-one", "a")},
+        }));
+        await env.runtime._claimPreparation();
+        await flush();
+        const original = env.runtime._prepContext;
+        env.enqueue("/api/connector/preparation/claim", response(200, {
+            command: {...base, ...preparationCommand("request-two", "b", true)},
+        }));
+        await env.runtime._claimPreparation();
+        await flush();
+        assert.equal(executions, 2);
+        assert.equal(bodiesFor(env, "/api/connector/preparation/result").length, 2);
+        assert.equal(bodiesFor(env, "/api/connector/preparation/settled").length, 0);
+        assert.equal(env.runtime._prepContext, original);
+        assert.equal(env.runtime._prepActive, null);
+        const previousIDs = env.createdTabs.map(({tab}) => tab.id);
+        assert.equal(previousIDs.length, 5);
+        env.enqueue("/api/connector/preparation/claim", response(200, {
+            command: {...base, ...preparationCommand("request-new-task", "a", true),
+                task_id: "task-next-preparation", generation: 2},
+        }));
+        await env.runtime._claimPreparation(); await flush();
+        assert.equal(executions, 3);
+        assert.notEqual(env.runtime._prepContext, original);
+        assert.notEqual(env.runtime._prepContext.portalTabID, original.portalTabID);
+        assert.deepEqual(env.removedTabs, []);
+        assert.equal(env.createdTabs.length, 8);
+        for (const id of previousIDs) assert(env.tabs.has(id), "previous Prepare pages remain open");
+        assert.equal(env.runtime._prepActive, null);
+    }
+    finally {proto.execute = oldExecute; proto.cleanup = oldCleanup;}
+});
+
+test("missing Result acknowledgement does not retain an everlasting Connector owner", async () => {
+    const env = makeEnvironment({enablePreparation: true});
+    const proto = env.context.LiteratureMonitorCARSI.Executor.prototype;
+    const oldExecute = proto.execute, oldCleanup = proto.cleanup;
+    proto.execute = async () => ({outcome: "Failed", reason: "connector_error"});
+    proto.cleanup = async () => {};
+    try {
+        await startRuntime(env);
+        env.enqueue("/api/connector/preparation/result", response(503, {}));
+        env.enqueue("/api/connector/preparation/result", response(503, {}));
+        const active = {command: preparationCommand("request-error", "a"), executor: null};
+        env.runtime._prepActive = active;
+        env.runtime._prepContext = {portalTabID: null, windowID: 1};
+        await env.runtime._runPreparation(active);
+        assert.equal(bodiesFor(env, "/api/connector/preparation/result").length, 2);
+        assert.equal(env.runtime._prepActive, null);
+    }
+    finally {proto.execute = oldExecute; proto.cleanup = oldCleanup;}
+});
+
+test("revocation heartbeat invalidates an old running executor and preserves Zotero work", async () => {
+    const env = makeEnvironment({enablePreparation: true});
+    const proto = env.context.LiteratureMonitorCARSI.Executor.prototype;
+    const oldExecute = proto.execute;
+    const gate = new Deferred();
+    proto.execute = () => gate.promise;
+    try {
+        await startRuntime(env);
+        const active = {command: preparationCommand("request-old", "a"), executor: null};
+        env.runtime._prepActive = active;
+        env.runtime._prepContext = {portalTabID: null, windowID: 1};
+        const running = env.runtime._runPreparation(active);
+        env.enqueue("/api/connector/preparation/authorize", response(409, {accepted: false}));
+        await env.runtime._heartbeatTick();
+        await flush();
+        assert.equal(env.runtime._prepActive, null);
+        assert.equal(active.executor, null);
+        assert.equal(bodiesFor(env, "/api/connector/preparation/settled").length, 0);
+        gate.resolve({outcome: "Opened", reason: "target_opened"});
+        await running;
+        assert.equal(bodiesFor(env, "/api/connector/preparation/result").length, 0);
+    }
+    finally {proto.execute = oldExecute;}
+});
+
+test("late Preparation authority reply after Result cannot access a released Executor", async () => {
+    const env = makeEnvironment({enablePreparation: true});
+    const proto = env.context.LiteratureMonitorCARSI.Executor.prototype;
+    const oldExecute = proto.execute, oldAuthorized = proto.authorized;
+    const executeGate = new Deferred(), authorizeGate = new Deferred();
+    proto.execute = () => executeGate.promise;
+    proto.authorized = () => authorizeGate.promise;
+    try {
+        await startRuntime(env);
+        const active = {command: preparationCommand("request-late-authority", "a"), executor: null};
+        env.runtime._prepActive = active;
+        env.runtime._prepContext = {portalTabID: null, windowID: 1};
+        const running = env.runtime._runPreparation(active);
+        await env.runtime._heartbeatTick();
+        assert.equal(active.checkingAuthority, true);
+        executeGate.resolve({outcome: "Needs attention", reason: "manual_action_required"});
+        await running;
+        assert.equal(active.executor, null);
+        assert.equal(bodiesFor(env, "/api/connector/preparation/result").length, 1);
+        authorizeGate.resolve(false);
+        await flush();
+        assert.equal(active.checkingAuthority, false);
+        assert.equal(env.runtime._prepActive, null);
+        assert.deepEqual(env.removedTabs, []);
+    }
+    finally {proto.execute = oldExecute; proto.authorized = oldAuthorized;}
+});
 
 test("A4: delayed dispatch permission after terminal task cannot initiate native save", async () => {
 	const env = makeEnvironment();
@@ -2268,3 +2443,22 @@ test("A4: native parent confirmation consumes permission; replay cannot save a s
 	await flush();
 	assert.equal(bodiesFor(env, "/api/connector/result")[0].outcome, "CONFIRMED");
 });
+
+(async () => {
+	let failed = 0;
+	for (const [name, fn] of tests) {
+		try {
+			await fn();
+			process.stdout.write(`ok - ${name}\n`);
+		}
+		catch (error) {
+			failed += 1;
+			process.stderr.write(`not ok - ${name}\n`);
+			process.stderr.write(`${error.stack || error}\n`);
+		}
+	}
+	process.stdout.write(`\n${tests.length - failed}/${tests.length} tests passed\n`);
+	if (failed) {
+		process.exitCode = 1;
+	}
+})();

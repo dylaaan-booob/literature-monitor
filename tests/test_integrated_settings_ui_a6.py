@@ -286,6 +286,7 @@ def test_switching_views_invalidates_actual_signed_service_deletion(tmp_path):
         fields["service_id"] = [spare.id]
         fields["service_name"] = [spare.name]
         fields["service_access_url"] = [spare.access_url or ""]
+        fields["service_access_method"] = [spare.access_method]
         fields["publisher_access_service_id"][0] = ""
         response = browser.post("/settings/save", data=fields)
         assert 'data-settings-deletion-preview' in response.text

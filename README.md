@@ -8,7 +8,34 @@ safely updates durable Paper and Author Markdown, and exports kept papers.
 
 ## Release and development status
 
-**v0.6.4 Journals & Access is RELEASED** as the latest verified GitHub release:
+**v0.6.5 CARSI Preparation is the current release candidate.** Publication checks
+are in progress; the implementation is complete and version fields are 0.6.5.
+[SPEC §44](SPEC.md#44-v065-institutional-access-preparation--development-contract)
+records the current contract and verification evidence.
+
+Kept offers optional **Prepare CARSI Access** for CARSI Services related to all
+current Kept Papers, deduplicated in saved configuration order. **Manual Login**
+Services have separate saved-URL access. Preparation searches verified official
+CARSI resource pages, clicks a uniquely matched Detail/Visit control, and reports
+**Opened / Needs attention / Failed**. Opened confirms a click and attributable
+target opening, without claiming authentication, entitlement or PDF availability.
+Users complete institutional login/MFA and close all retained browser pages.
+Cancel revokes further actions; **Refresh Status** updates the UI manually while
+preserving disclosure choices. Zotero Import remains a separate action sharing
+browser exclusion and its existing native Parent/PDF safeguards.
+
+Settings can export an **AI Mapping Pack** containing the complete saved list.md
+and fresh public CARSI catalog for external AI editing. Review it before sharing;
+it is a work file and cannot be imported. Apply a reviewed complete list.md only
+through the existing Markdown Import/Preview/Confirm workflow.
+
+The user reports all manual real-browser acceptance passed; this is separate from
+Codex-executed automated verification and is not independent live verification.
+The Python wheel/sdist remain MIT; the separate Chrome/MV3 Connector is AGPLv3.
+
+### v0.6.4 release history
+
+**v0.6.4 Journals & Access was RELEASED** with verified GitHub assets:
 [GitHub Release v0.6.4](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.4).
 The verified assets are the 0.6.4 Python wheel, sdist and separately AGPLv3-licensed
 Chrome/MV3 Connector ZIP. Python package, OpenAlex/Crossref User-Agent and Connector

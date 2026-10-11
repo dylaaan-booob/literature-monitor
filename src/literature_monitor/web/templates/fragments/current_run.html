@@ -12,7 +12,7 @@
     <p>{{ result.outcome.value }}</p>
     <p>Authors: {{ result.created_authors }} created · {{ result.existing_authors }} existing</p>
     {% if result.warnings or result.errors %}
-      <details>
+      <details data-disclosure-key="run-issues">
         <summary>Run issues</summary>
         <ul>
           {% for issue in result.warnings %}
@@ -32,7 +32,7 @@
             <li>{{ summary.kind.value }} · {{ summary.logical_groups }} logical group{{ "" if summary.logical_groups == 1 else "s" }}</li>
           {% endfor %}
         </ul>
-        <details>
+        <details data-disclosure-key="run-diagnostics">
           <summary>Run diagnostics</summary>
           <ul>
             {% for diagnostic in result.diagnostics %}

@@ -47,7 +47,7 @@
       A restarted app rejects old callbacks and does not resume an interrupted batch.</p>
   {% endif %}
   {% if batch.results %}
-    <details open><summary>Paper results</summary>
+    <details open data-disclosure-key="import-results"><summary>Paper results</summary>
       <ul class="batch-reasons">
         {% for entry in batch.results %}
           <li><strong>{{ entry.title }}</strong>: {{ {'exported':'Parent exported', 'no_effect':'Pre-dispatch failure', 'uncertain':'Parent unconfirmed', 'skipped':'Skipped', 'blocked':'Local write/ownership failure'}[entry.result.outcome] }}.
@@ -63,7 +63,7 @@
   {% endif %}
   {% if batch.snapshot.plan %}
     {% if batch.snapshot.plan.exclusions %}
-      <details {% if batch.statistics.skipped_blocked %}open{% endif %}><summary>Excluded Papers and documents</summary>
+      <details data-disclosure-key="import-exclusions" {% if batch.statistics.skipped_blocked %}open{% endif %}><summary>Excluded Papers and documents</summary>
         <ul class="batch-reasons">
           {% for issue in batch.snapshot.plan.exclusions %}<li>{{ issue.path.name }} ({{ issue.kind }}): {{ issue.reason }}</li>{% endfor %}
         </ul>

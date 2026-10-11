@@ -17,6 +17,10 @@
     {% include "fragments/batch_import.html" %}
   {% endif %}
 
+  {% if active_view == 'kept' %}
+    {% include "fragments/preparation.html" %}
+  {% endif %}
+
   {% if config_error %}
     <div class="notice warning">
       <strong>Configuration needs attention.</strong>

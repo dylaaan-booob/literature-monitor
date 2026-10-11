@@ -1,10 +1,10 @@
 # Literature Monitor Connector
 
-This directory defines the independent browser component for the v0.6.4 release,
+This directory defines the independent browser component for the v0.6.5 release candidate,
 following the v0.6.3 batch/Connector contract in SPEC §42. It is derived from the official
 Zotero Connector source and is separate from the MIT Python
 `literature_monitor` package. The tracked build entry point generates the
-Chrome/MV3 artifact with version `0.6.4`.
+Chrome/MV3 artifact with version `0.6.5`.
 
 A1 establishes source provenance, licensing, reconstruction and Chrome/MV3
 build boundaries. A5 adds the independent Literature Monitor automatic-capture
@@ -51,7 +51,7 @@ From the repository root:
 
 The script reconstructs the pinned upstream source into
 `connector/.work/`, verifies and applies the tracked Literature Monitor
-delta, runs the upstream debug build with release version `0.6.2`, verifies
+delta, runs the upstream debug build with release version `0.6.5`, verifies
 a Manifest V3 Chrome artifact, and copies the result to:
 
 ```text
@@ -70,7 +70,7 @@ directories from being treated as disposable Connector build state.
 For local installation or verification, open `chrome://extensions/`, enable
 Developer Mode, choose **Load unpacked**, and select the generated `chrome-mv3`
 directory. Alternatively, extract the published
-[Connector ZIP](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.2)
+[Connector ZIP](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.5)
 and select its `chrome-mv3/` directory; it includes corresponding source and
 license/build instructions. This is a local install path, not a Chrome Web Store release.
 A7 recorded a successful toolbar-free automatic save in normal Chrome with
@@ -99,6 +99,9 @@ From the repository root:
 This runs the deterministic Literature Monitor-specific Node harness against
 the real overlay runtime with mocked browser, Zotero and localhost bridge
 boundaries. It requires no browser profile, live Zotero instance or network.
+The v0.6.5 A4 tests additionally exercise the observed CARSI list/detail
+selectors and attributable target opening with isolated DOM/browser fixtures. They
+cannot substitute for live institutional Chrome acceptance.
 
 ## Automatic capture boundary
 
@@ -162,6 +165,63 @@ the exact pinned-source findings and remaining live gates.
 
 No Connector-derived source belongs under `src/literature_monitor`, and the
 Python wheel/sdist must not contain this component or its generated artifacts.
+
+## Unreleased v0.6.5 A4 verification boundary
+
+`literature-monitor-carsi.js` starts with the official resource list at
+`https://ds.carsi.edu.cn/resource/resource.php` in a task-associated normal,
+non-incognito Chrome tab. It verifies the owning window, completed tab load,
+active top-level official document and resource-list/search/filter controls.
+An already operable resource view proceeds directly; configuring an Institution
+IdP is still required for automated execution.
+
+Only an associated CARSI-domain non-resource page can trigger the configured
+Shibboleth entry, at most once per Service's Portal observation. The entry encodes
+the saved `Institution.idp_entity_id` as `entityID` and `/wxds` as the target;
+it never navigates directly to the IdP identifier. Users handle external
+institution login, passwords, MFA and challenges themselves. An exact
+`https://ds.carsi.edu.cn/wxds` return navigates the associated tab back to the
+resource list; execution continues only after official-page verification.
+Waiting is reported after that conditional login entry, not inferred from an
+arbitrary external redirect. There is no human Continue/Resume control or API.
+Unverifiable pages use the existing bounded wait, authority-revocation and
+Needs attention paths; this is not authentication detection or generic recovery.
+Login waiting and Service deadlines are separate from the ten-second Visit
+opening observation (SPEC §44.5–44.6).
+
+For each Service, the Executor enables/rechecks `onlyMySchool`, overwrites the
+search input and clicks the official search button. The query uses the saved
+name, or its trimmed suffix after the last `&` when present; the full saved name
+remains the exact selection identity. It observes result-list snapshots for at
+most 15 seconds and requires a changed, subsequently stable list. Only one card
+whose `.flex .t1` direct text matches the full name can be selected; nested badges
+do not form part of that name. It does not paginate the list. Duplicate matches,
+unchanged/empty results or unverified controls require manual attention rather
+than an inferred resource-not-found result. The selected link must be an official
+`resourceDetail.php` link, the new Detail tab must be attributed to the source
+Portal, and its unique official `访问资源` control must be verified before clicking.
+
+The normal-Chrome runtime uses independent Preparation claim/authorize/result
+endpoints and browser arbitration. Opened requires a confirmed official Visit
+click, attributable target opening within ten seconds and a single-use server
+nonce; it does not check final external navigation or assert authentication or
+entitlement. Accepted Results advance immediately without Preparation Settled.
+
+**Preparation never automatically closes any tab or window.** Portal, resource
+Detail, database Visit and institution-login pages stay open after every outcome,
+Cancel, timeout and Service transition, and users close them manually. The same
+Portal serves subsequent Services in one task; a new Prepare creates its own
+Portal context without clearing earlier pages. There is no delayed tab cleanup,
+URL/title-based closure rule or browser-close wait. Local cleanup only releases
+listeners/timers and Executor references; cancellation revokes future operations
+and retains the existing ten-second recovery isolation. Zotero Import tab cleanup
+and native Parent Save settlement remain independent and unchanged.
+The page selectors came from user-inspected Chrome DevTools evidence. Current
+automated evidence is recorded in SPEC §44.10. The user reports that manual
+real-browser acceptance has all passed; **Codex has not independently verified
+that live acceptance**. v0.6.5 is implemented in the uncommitted working tree,
+with final submission audit and isolated release checks complete (SPEC §44.11),
+and remains **unreleased** pending publication verification.
 
 ## Unreleased v0.6.3 Access Service preparation
 

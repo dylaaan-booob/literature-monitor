@@ -3,7 +3,7 @@ set -euo pipefail
 
 CONNECTOR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPOSITORY_ROOT="$(cd "$CONNECTOR_ROOT/.." && pwd -P)"
-CONNECTOR_VERSION="0.6.4"
+CONNECTOR_VERSION="0.6.5"
 DEFAULT_WORK_ROOT="$CONNECTOR_ROOT/.work"
 DEFAULT_OUTPUT_DIR="$CONNECTOR_ROOT/build/chrome-mv3"
 WORK_ROOT_IS_EXTERNAL=0
@@ -209,11 +209,15 @@ test -f "$OUTPUT_DIR/literature-monitor-runtime.js" \
     || fail "artifact is missing the Literature Monitor runtime overlay"
 test -f "$OUTPUT_DIR/literature-monitor-access.js" \
     || fail "artifact is missing the Literature Monitor access overlay"
+test -f "$OUTPUT_DIR/literature-monitor-carsi.js" \
+    || fail "artifact is missing the CARSI navigation-evidence overlay"
 node - "$OUTPUT_DIR/background-worker.js" <<'NODE'
 const source = require('fs').readFileSync(process.argv[2], 'utf8');
 const access = source.indexOf('"literature-monitor-access.js"');
+const carsi = source.indexOf('"literature-monitor-carsi.js"');
 const runtime = source.indexOf('"literature-monitor-runtime.js"');
-if (access < 0 || runtime < access) throw new Error('access overlay must load before runtime');
+if (access < 0 || carsi < access || runtime < carsi)
+    throw new Error('access and CARSI overlays must load before runtime');
 NODE
 grep -Fq '"literature-monitor-runtime.js"' "$OUTPUT_DIR/background-worker.js" \
     || fail "MV3 service worker is not wired to the Literature Monitor runtime"
@@ -224,8 +228,9 @@ BRIDGE_URLS="$(
     grep -Eo 'https?://[^"[:space:]]+' "$OUTPUT_DIR/literature-monitor-runtime.js" \
         | LC_ALL=C sort -u
 )"
-[[ "$BRIDGE_URLS" == "http://127.0.0.1:8000" ]] \
-    || fail "Literature Monitor runtime contains an unexpected network authority"
+# The CARSI origin is used to validate the claimed login URL; fetch still uses BRIDGE_BASE.
+[[ "$BRIDGE_URLS" == $'http://127.0.0.1:8000\nhttps://ds.carsi.edu.cn' ]] \
+    || fail "Literature Monitor runtime contains an unexpected URL authority"
 cmp -s "$CONNECTOR_ROOT/COPYING" "$OUTPUT_DIR/COPYING" \
     || fail "artifact COPYING differs from the pinned upstream license copy"
 

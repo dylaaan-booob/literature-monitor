@@ -464,7 +464,8 @@ select {
   margin: .75rem 0;
 }
 .publisher-tools { grid-template-columns: minmax(10rem, 1fr) auto auto 1fr; }
-.service-heading { grid-template-columns: repeat(2, minmax(0, 1fr)) auto auto; }
+.service-heading { grid-template-columns: repeat(2, minmax(0, 1fr)) repeat(3, auto); }
+.service-open { align-self: center; }
 .access-mapping label { display: grid; gap: .3rem; }
 .publisher-select input { width: auto; }
 .mapping-container {

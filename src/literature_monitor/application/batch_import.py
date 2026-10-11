@@ -118,10 +118,20 @@ class BatchImportService:
         with self._mutex:
             if self._worker is not None and self._worker.is_alive():
                 return self._snapshot
+            owner = self.coordinator.reserve_browser_task("import")
+            if owner is None:
+                self._snapshot = BatchSnapshot(BatchPhase.BLOCKED, None, None, (),
+                                               "Browser task busy or native save unresolved")
+                return self._snapshot
             ready = threading.Event()
             self._snapshot = BatchSnapshot(BatchPhase.RUNNING, None, None, (), "Scanning all Workspace Kept Papers")
-            self._worker = threading.Thread(target=self._execute, args=(workspace, ready, validate_target), daemon=True)
-            self._worker.start()
+            self._worker = threading.Thread(target=self._execute,
+                                            args=(workspace, ready, validate_target, owner), daemon=True)
+            try:
+                self._worker.start()
+            except Exception:
+                self.coordinator.release_browser_task("import", owner)
+                raise
         ready.wait()
         return self.snapshot()
 
@@ -130,7 +140,8 @@ class BatchImportService:
             self._snapshot = BatchSnapshot(phase, plan, current, tuple(results), message)
 
     def _execute(self, workspace: Path, ready: threading.Event,
-                 validate_target: Callable[[WorkspaceOperationLock], None] | None) -> None:
+                 validate_target: Callable[[WorkspaceOperationLock], None] | None,
+                 browser_owner: str) -> None:
         plan = None
         results: list[BatchPaperResult] = []
         phase = BatchPhase.COMPLETED
@@ -201,4 +212,6 @@ class BatchImportService:
                                for p in plan.papers if p.paper_id not in finished)
         finally:
             self._publish(phase, plan, None, results, message)
+            # The independent native-save grant remains held until pipeline proof.
+            self.coordinator.release_browser_task("import", browser_owner)
             ready.set()
