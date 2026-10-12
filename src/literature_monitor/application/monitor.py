@@ -173,7 +173,6 @@ class RunResult:
     canonical_paper_count: int
     created_papers: int
     matched_existing_papers: int
-    updated_papers: int
     created_authors: int
     existing_authors: int
     warnings: tuple[MonitorIssue, ...]
@@ -843,7 +842,6 @@ def _materialize_canonical_result(
             canonical_paper_count=len(core.papers),
             created_papers=0,
             matched_existing_papers=0,
-            updated_papers=0,
             created_authors=0,
             existing_authors=0,
             warnings=core.warnings,
@@ -878,7 +876,6 @@ def _materialize_canonical_result(
         canonical_paper_count=len(core.papers),
         created_papers=len(materialization.created_papers),
         matched_existing_papers=len(materialization.existing_papers),
-        updated_papers=len(materialization.updated_papers),
         created_authors=len(materialization.created_authors),
         existing_authors=len(materialization.existing_authors),
         warnings=warnings,

@@ -37,7 +37,6 @@ def make_run_result(
         canonical_paper_count=0,
         created_papers=0,
         matched_existing_papers=0,
-        updated_papers=0,
         created_authors=0,
         existing_authors=0,
         warnings=(),

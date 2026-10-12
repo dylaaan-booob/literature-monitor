@@ -526,6 +526,8 @@ def test_production_representation_equivalence_preserves_markdown_names_and_abst
     assert first.outcome is monitor.RunOutcome.COMPLETED
     paper, = (case.output / 'Papers').glob('*.md')
     original = paper.read_text()
+    author_file, = (case.output / 'Authors').glob('*.md')
+    author_before = author_file.read_bytes()
     assert raw_abstract in original and 'Ada Lovelace' in original
     additional = cr().model_copy(update={
         'abstract': 'We find 3 effects.',
@@ -540,7 +542,8 @@ def test_production_representation_equivalence_preserves_markdown_names_and_abst
     assert raw_abstract in updated and 'Ada Lovelace' in updated
     assert 'Lovelace, A.' not in updated
     author_file, = (case.output / 'Authors').glob('*.md')
-    assert 'Ada Lovelace' in author_file.read_text() and 'O1' in author_file.read_text()
+    assert paper.read_text() == original and author_file.read_bytes() == author_before
+    assert 'O1' not in author_file.read_text()
 
 
 @pytest.mark.parametrize("kind", ["journal-article", "other"])

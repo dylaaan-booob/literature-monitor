@@ -1,4 +1,4 @@
-"""Parsing and merging helpers for durable Markdown workflow state."""
+"""Parsing helpers for durable Markdown workflow state."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from pydantic import ValidationError
 from literature_monitor.config import normalize_journal_issn
 from literature_monitor.identifiers import normalize_doi
 from literature_monitor.models import (
-    CanonicalPaper,
     ExternalIds,
     ExportAttempt,
     ExportAttemptState,
@@ -106,19 +105,6 @@ class PaperMarkdownState:
 
 
 @dataclass(frozen=True)
-class MergedPaperState:
-    title: str
-    journal: str
-    publication_date: date | None
-    abstract: str | None
-    author_keywords: tuple[str, ...]
-    external_ids: ExternalIds
-    sources: tuple[MetadataSource, ...]
-    warnings: tuple[str, ...]
-    journal_issns_update: tuple[str, ...] | None = None
-
-
-@dataclass(frozen=True)
 class _Heading:
     index: int
     level: int
@@ -162,15 +148,11 @@ def normalize_orcid(value: str | None) -> str | None:
     return normalized if digits[-1] == expected else None
 
 
-def normalize_source_key(provider: str, record_id: str) -> tuple[str, str]:
-    normalized_provider = provider.strip().casefold()
-    normalized_record_id = record_id.strip()
-    if not normalized_provider or not normalized_record_id:
-        raise ValueError("source provider and record_id must be non-empty")
-    return normalized_provider, normalized_record_id
-
-
-def _parse_document(contents: str) -> tuple[dict[str, Any], str]:
+def _parse_document(
+    contents: str,
+    *,
+    loader: type[yaml.SafeLoader] = yaml.SafeLoader,
+) -> tuple[dict[str, Any], str]:
     lines = contents.splitlines(keepends=True)
     if not lines or lines[0].rstrip("\r\n") != "---":
         raise ValueError("missing opening YAML frontmatter delimiter")
@@ -185,12 +167,105 @@ def _parse_document(contents: str) -> tuple[dict[str, Any], str]:
     if closing is None:
         raise ValueError("missing closing YAML frontmatter delimiter")
     try:
-        frontmatter = yaml.safe_load("".join(lines[1:closing]))
+        frontmatter = yaml.load("".join(lines[1:closing]), Loader=loader)
     except yaml.YAMLError as error:
         raise ValueError(f"invalid YAML frontmatter: {error}") from error
     if not isinstance(frontmatter, dict):
         raise ValueError("YAML frontmatter must be a mapping")
     return frontmatter, "".join(lines[closing + 1 :])
+
+
+class _IdentityLoader(yaml.SafeLoader):
+    """Reject overwritten YAML keys when establishing durable identity."""
+
+    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Any, Any]:
+        self.flatten_mapping(node)
+        keys = set()
+        for key_node, _value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            try:
+                duplicate = key in keys
+                keys.add(key)
+            except TypeError as error:
+                raise yaml.constructor.ConstructorError(
+                    None, None, "unhashable YAML key", key_node.start_mark,
+                ) from error
+            if duplicate:
+                raise yaml.constructor.ConstructorError(
+                    None, None, "duplicate YAML key", key_node.start_mark,
+                )
+        return super().construct_mapping(node, deep=deep)
+
+
+@dataclass(frozen=True)
+class PaperIdentity:
+    path: Path
+    paper_id: UUID | None
+    dois: frozenset[str]
+    problems: tuple[str, ...]
+    index_complete: bool
+
+
+def parse_paper_identity(path: Path, contents: str) -> PaperIdentity | None:
+    """Read only identity for Capture-Only matching; see SPEC §46.
+
+    Full Paper validation remains independent and governs manual/export writes.
+    Complete means every possible DOI in this candidate could be enumerated,
+    not that its identity is unambiguous or its schema is supported.
+    """
+    try:
+        frontmatter, _body = _parse_document(contents, loader=_IdentityLoader)
+    except ValueError as error:
+        return PaperIdentity(path, None, frozenset(), (str(error),), False)
+    if frontmatter.get("type") != "paper":
+        if isinstance(frontmatter.get("type"), str) and not any(
+            key in frontmatter for key in ("doi", "external_ids", "id")
+        ):
+            return None
+        return PaperIdentity(
+            path, None, frozenset(), ("cannot determine Paper type/identity",), False,
+        )
+
+    problems: list[str] = []
+    try:
+        paper_id = UUID(str(frontmatter.get("id")))
+    except (TypeError, ValueError, AttributeError):
+        paper_id = None
+        problems.append("id must be a valid UUID")
+    complete = True
+    raw_ids = frontmatter.get("external_ids")
+    if raw_ids is not None and not isinstance(raw_ids, dict):
+        problems.append("external_ids must be a mapping to establish DOI identity")
+        complete = False
+        raw_ids = {}
+    values = [("doi", frontmatter.get("doi"))]
+    values.extend(
+        ("external_ids.doi", value) for key, value in (raw_ids or {}).items()
+        if isinstance(key, str) and key.strip().casefold() == "doi"
+    )
+    dois: set[str] = set()
+    for field, raw in values:
+        if raw is None:
+            continue
+        try:
+            doi = normalize_doi(raw) if isinstance(raw, str) else None
+        except ValueError:
+            doi = None
+        if doi is None or not re.fullmatch(r"10\.\d{4,9}/[^\s]+", doi):
+            problems.append(f"{field} is not a valid DOI")
+            complete = False
+        else:
+            dois.add(doi)
+    if not dois:
+        problems.append("cannot establish Paper DOI identity")
+        complete = False
+    elif len(dois) > 1:
+        problems.append("conflicting durable DOI identifiers")
+    if "versions" in frontmatter or "preferred_version" in frontmatter:
+        problems.append("unsupported pre-v0.5.2 Paper version schema")
+    if "zotero_key" in frontmatter or frontmatter.get("status") == "in_zotero":
+        problems.append("Incompatible legacy Paper schema (in_zotero/zotero_key); no automatic migration")
+    return PaperIdentity(path, paper_id, frozenset(dois), tuple(problems), complete)
 
 
 def serialize_document(frontmatter: dict[str, Any], body: str) -> str:
@@ -349,76 +424,6 @@ def analyze_body(body: str) -> BodyLayout:
         abstract=abstract,
         abstract_end_marker=abstract_end_marker,
     )
-
-
-def _legacy_abstract_boundary_is_ambiguous(layout: BodyLayout) -> bool:
-    if "abstract" not in layout.sections or layout.abstract_end_marker is not None:
-        return False
-    abstract_start = layout.sections["abstract"][0]
-    safe_boundaries = [
-        start
-        for name, (start, _end) in layout.sections.items()
-        if name != "abstract" and start > abstract_start
-    ]
-    if layout.notes_index is not None and layout.notes_index > abstract_start:
-        safe_boundaries.append(layout.notes_index)
-    safe_end = min(safe_boundaries, default=None)
-    return any(
-        heading.level == 2
-        and abstract_start < heading.index
-        and (safe_end is None or heading.index < safe_end)
-        for heading in layout.headings
-    )
-
-
-def rewrite_managed_body(
-    body: str,
-    *,
-    title: str,
-    abstract: str | None,
-    sources_summary: str,
-) -> str:
-    layout = analyze_body(body)
-    lines = body.splitlines(keepends=True)
-    blocks = {
-        "abstract": render_abstract_section(abstract),
-        "sources": f"## Sources\n\n{sources_summary}\n\n",
-    }
-    replacements: dict[int, tuple[int, str]] = {}
-    for name, (start, end) in layout.sections.items():
-        if name == "abstract" and _legacy_abstract_boundary_is_ambiguous(layout):
-            raise ValueError("ambiguous legacy managed Abstract boundary")
-        replacements[start] = (end, blocks[name])
-    missing = [name for name in _MANAGED_SECTIONS if name not in layout.sections]
-    insertion = layout.notes_index if missing and layout.notes_index is not None else None
-    output: list[str] = []
-    index = 0
-    while index < len(lines):
-        if insertion == index:
-            output.extend(blocks[name] for name in missing)
-        replacement = replacements.get(index)
-        if replacement is not None:
-            end, value = replacement
-            output.append(value)
-            index = end
-            continue
-        if layout.h1_index == index:
-            output.append(f"# {title}\n")
-        else:
-            output.append(lines[index])
-        index += 1
-
-    rendered = "".join(output)
-    if layout.h1_index is None:
-        rendered = rendered.lstrip("\r\n")
-        rendered = f"# {title}\n\n{rendered}"
-    if missing and insertion is None:
-        if rendered and not rendered.endswith("\n"):
-            rendered += "\n"
-        if rendered and not rendered.endswith("\n\n"):
-            rendered += "\n"
-        rendered += "".join(blocks[name] for name in missing).rstrip() + "\n"
-    return rendered
 
 
 def _parse_datetime(value: Any) -> datetime:
@@ -724,99 +729,4 @@ def parse_author_state(path: Path, contents: str) -> AuthorMarkdownState | None:
         name=name.strip(),
         openalex_key=normalize_openalex_author_id(openalex_id),
         orcid_key=normalize_orcid(orcid),
-    )
-
-
-def merge_sources(
-    existing: tuple[MetadataSource, ...],
-    incoming: tuple[MetadataSource, ...],
-) -> tuple[MetadataSource, ...]:
-    merged: dict[tuple[str, str], MetadataSource] = {}
-    for source in (*existing, *incoming):
-        key = normalize_source_key(source.provider, source.record_id)
-        current = merged.get(key)
-        if current is None or source.retrieved_at > current.retrieved_at:
-            merged[key] = source
-    return tuple(merged[key] for key in sorted(merged))
-
-
-def _external_mapping(value: ExternalIds) -> dict[str, str | None]:
-    return {
-        namespace.strip().casefold(): identifier
-        for namespace, identifier in value.model_dump(exclude_none=False).items()
-    }
-
-
-def _merge_external_ids(
-    existing: ExternalIds,
-    incoming: ExternalIds,
-) -> tuple[ExternalIds, tuple[str, ...]]:
-    merged = _external_mapping(existing)
-    warnings: list[str] = []
-    for namespace, identifier in _external_mapping(incoming).items():
-        current = merged.get(namespace)
-        if current is None and identifier is not None:
-            merged[namespace] = identifier
-            continue
-        if current is None or identifier is None:
-            continue
-        old_comparison = normalize_doi(current) if namespace == "doi" else current.strip()
-        new_comparison = (
-            normalize_doi(identifier) if namespace == "doi" else identifier.strip()
-        )
-        if old_comparison != new_comparison:
-            warnings.append(f"external ID {namespace} conflicts with durable value")
-    return ExternalIds.model_validate(merged), tuple(warnings)
-
-
-def _changed(left: Any, right: Any) -> bool:
-    if isinstance(left, str) and isinstance(right, str):
-        return normalize_text(left) != normalize_text(right)
-    return left != right
-
-
-def merge_paper_state(
-    state: PaperMarkdownState,
-    paper: CanonicalPaper,
-) -> MergedPaperState:
-    """Merge one canonical view into a validated durable Paper state."""
-
-    durable_doi = normalize_doi(state.external_ids.doi if state.external_ids else None)
-    incoming_doi = normalize_doi(paper.external_ids.doi)
-    if durable_doi != incoming_doi:
-        raise ValueError("incoming DOI conflicts with durable Paper")
-    external_ids, external_warnings = _merge_external_ids(
-        state.external_ids or ExternalIds(), paper.external_ids
-    )
-    external_ids = external_ids.model_copy(update={"doi": incoming_doi})
-    warnings = list(external_warnings)
-    title = paper.metadata.title
-    journal = paper.metadata.journal
-    abstract = state.abstract
-    if paper.metadata.abstract is not None:
-        if paper.metadata.abstract != "" or abstract is None:
-            abstract = paper.metadata.abstract
-        elif abstract != "":
-            warnings.append("empty incoming abstract did not replace durable abstract")
-    keywords = tuple(paper.metadata.author_keywords) or state.author_keywords
-    publication_date = paper.metadata.publication_date or state.publication_date
-    for field, old, new in (
-        ("title", state.title, title),
-        ("journal", state.journal, journal),
-        ("abstract", state.abstract, abstract),
-        ("author keywords", state.author_keywords, keywords),
-        ("publication date", state.publication_date, publication_date),
-    ):
-        if old is not None and _changed(old, new):
-            warnings.append(f"{field} changed with incoming canonical metadata")
-    return MergedPaperState(
-        title=title,
-        journal=journal,
-        publication_date=publication_date,
-        abstract=abstract,
-        author_keywords=keywords,
-        external_ids=external_ids,
-        sources=merge_sources(state.sources, paper.sources),
-        warnings=tuple(warnings),
-        journal_issns_update=paper.journal_issns or None,
     )

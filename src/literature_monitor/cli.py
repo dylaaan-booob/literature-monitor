@@ -158,7 +158,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     materialize_parser = subparsers.add_parser(
         "materialize",
-        help="create or incrementally update Obsidian Paper and Author Markdown files",
+        help="capture new DOI Papers and necessary Authors; skip already saved Papers",
     )
     _add_discovery_arguments(materialize_parser)
     materialize_parser.add_argument(
@@ -422,8 +422,8 @@ def _log_materialization_summary(
     logger.info(
         "Materialization completed: %d OpenAlex records, %d Crossref "
         "discovery records, %d Crossref DOI supplement records, %d evidence "
-        "clusters, %d retained clusters, %d canonical papers, %d paper files "
-        "created, %d paper files matched, %d paper files updated, %d author "
+        "clusters, %d retained clusters, %d canonical papers, %d "
+        "New Papers, %d Already Saved, %d author "
         "files created, %d author files existing, %d materialization issues, "
         "%d consolidation issues, %d canonicalization issues, %d provider issues",
         stats.openalex_records,
@@ -434,7 +434,6 @@ def _log_materialization_summary(
         result.canonical_paper_count,
         result.created_papers,
         result.matched_existing_papers,
-        result.updated_papers,
         result.created_authors,
         result.existing_authors,
         stats.materialization_issues,

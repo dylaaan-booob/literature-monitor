@@ -1015,7 +1015,6 @@ def cli_run_result(
         canonical_paper_count=1,
         created_papers=1,
         matched_existing_papers=0,
-        updated_papers=0,
         created_authors=1,
         existing_authors=0,
         warnings=warnings,
@@ -1214,7 +1213,7 @@ def test_run_cli_maps_structured_outcome_to_exit_code(
     if outcome is RunOutcome.INVALID_CONFIGURATION:
         assert "Materialization completed" not in captured.err
     else:
-        assert "1 canonical papers, 1 paper files created" in captured.err
+        assert "1 canonical papers, 1 New Papers" in captured.err
 
 
 def test_run_cli_logs_compact_structured_coverage_summary(

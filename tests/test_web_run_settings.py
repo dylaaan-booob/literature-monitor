@@ -379,7 +379,6 @@ def make_run_result() -> RunResult:
         canonical_paper_count=8,
         created_papers=3,
         matched_existing_papers=4,
-        updated_papers=2,
         created_authors=5,
         existing_authors=6,
         warnings=(warning,),
@@ -1129,9 +1128,9 @@ def test_finished_primary_run_keeps_summary_and_counts_without_technical_details
     assert "2026-09-01" in response.text
     assert "2026-09-22" in response.text
     assert "8 canonical" in response.text
-    assert "3 created" in response.text
-    assert "4 matched" in response.text
-    assert "2 updated" in response.text
+    assert "3 New Papers" in response.text
+    assert "4 Already Saved" in response.text
+    assert " updated" not in response.text
     assert "1 warning" in response.text
     assert "1 error" in response.text
     for technical_detail in (

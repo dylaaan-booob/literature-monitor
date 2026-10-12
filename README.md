@@ -4,23 +4,22 @@ This repository contains the journal-monitoring workflow specified in
 `SPEC.md`. The workflow uses OpenAlex for primary discovery and Crossref for
 secondary discovery and bibliographic evidence, consolidates provider evidence
 before local keyword filtering, canonicalizes retained DOI-bound papers,
-safely updates durable Paper and Author Markdown, and exports kept papers.
+captures new DOI Papers and necessary Author Markdown, skips already saved
+Papers without rewriting them, and exports kept papers.
 
 ## Release and development status
 
-**v0.6.6 Codebase & Documentation Simplification is RELEASED** as the latest
-verified [GitHub Release](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.6).
-T1 through T4 have completed independent review. ChatGPT's independent T5
-offline integration audit passed **3040 Python tests (2 warnings), 163 Runtime
-tests and 25 CARSI Executor tests**; see [SPEC §45.7](SPEC.md#457-t5-final-integration-audit-evidence).
-Version finalization passed **528 targeted Python tests**, including the 0.6.6
-CARSI handshake. The wheel, sdist and separate Connector ZIP passed content
-checks. A fresh wheel installation passed CLI and HTTP smoke checks; all three
-downloads matched the inspected builds.
-[SPEC §45.8](SPEC.md#458-v066-release-preparation-and-validation-reuse) records
-build evidence; [§45.9](SPEC.md#459-v066-publication-verification-and-closeout)
-records the fixed tag and asset SHA-256 values. Embedded artifact documentation
-retains the verified release-preparation snapshot.
+**v0.6.7 Capture-Only Run is in release preparation.** CLI Run, Web Run
+and diagnostic `materialize` create new DOI Papers and skip reliably saved
+Papers without changing existing Paper or Author files; see
+[SPEC §46](SPEC.md#46-v067-capture-only-run--development-contract).
+Final offline regression passed **3070 Python tests (2 existing warnings)**,
+including all three entrypoints and byte-preservation checks; see
+[SPEC §46.6](SPEC.md#466-implementation-verification--2026-10-12).
+Package, Provider and Connector release identities are `0.6.7`.
+The latest verified published release remains
+[v0.6.6](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.6)
+until publication verification completes.
 
 Kept offers optional **Prepare CARSI Access** for CARSI Services related to all
 current Kept Papers, deduplicated in saved configuration order. **Manual Login**
@@ -343,7 +342,7 @@ active capture attempt are transient process-local state.
 ### Connector prerequisites
 
 - Run **Zotero Desktop** and the local Web UI bridge at `http://127.0.0.1:8000`.
-- Download and extract the published **v0.6.6 Connector ZIP**. In Chrome,
+- Download and extract the published **v0.6.7 Connector ZIP**. In Chrome,
   open `chrome://extensions/`, enable Developer Mode, choose **Load unpacked**,
   and select `chrome-mv3/`; see [Connector instructions](connector/README.md).
 - Settings must show the Connector as `connected` before Import. The official
@@ -1009,27 +1008,31 @@ without persistent revision reuse. It neither reads nor writes Provider state,
 modifies `.literature-monitor/last-run.json`, nor touches old `provider-cache.json`.
 Only normal production `run` writes Provider state and last-run metadata.
 
-Incremental materialization matches existing current-schema Papers only through
-normalized DOI. UUID is the durable workspace reference recovered after that
-match; title, authors, source keys and other identifiers do not provide fallback
-work identity. Matched Papers retain their UUID and path. Pure no-DOI input is
-skipped. Sources remain provider provenance and accumulate across reruns.
-Current-schema reruns apply incoming canonical metadata, retain existing values
-when optional incoming data is missing, and report changes/conflicts as warnings.
-Pre-v0.5.2 Paper schemas are unsupported, without migration or legacy repair;
-identity-readable unsupported files block unsafe duplicate creation.
+Capture-Only materialization matches existing Papers by normalized DOI and
+preserves their workspace UUID and path. Title, authors, Sources and other
+external identifiers never provide fallback work identity. A new valid DOI
+creates one Paper from this run's Canonical Metadata and the necessary Authors;
+provider consolidation still happens within the current run.
 
-Updates preserve workflow status, discovery time, Zotero key, unknown
-frontmatter, Notes, and unmanaged body sections. Managed frontmatter and the
-title, Abstract, and Sources sections are rewritten atomically only
-when their rendered bytes change. Existing opaque Author files remain reusable
-at their deterministic paths and are never overwritten; parseable Author notes
-may receive missing stable identifiers without being renamed.
+Already Saved means a unique, trustworthy DOI/UUID match. These Papers are skipped
+without comparing or rewriting any metadata, Sources, journal attribution,
+workflow fields, custom frontmatter or body content. Missing metadata is not
+repaired and ordinary metadata differences do not generate warnings. Existing
+Author notes are reused safely without supplementing identifiers or other fields.
+Opaque Author notes remain reusable at their existing deterministic paths.
+Existing customized `Inbox.base` bytes are preserved.
 
-Malformed but identity-readable Papers still block duplicate creation. Unsafe
-or ambiguous matches are reported as errors and left unchanged, while
-recoverable metadata conflicts are warnings. Incremental materialization does
-not automatically merge, delete, or rename historical duplicates.
+Malformed non-identity metadata does not prevent a reliable DOI match. Duplicate
+DOIs/UUIDs, conflicting DOI identifiers and unsupported legacy schemas remain
+errors and are never counted as Already Saved. Unreadable or unidentifiable
+Paper candidates make the identity index incomplete: no new Paper or Author is
+created and uncertain matches are not counted. Localized identity conflicts
+with fully enumerable DOIs leave unrelated capture usable. No migration, repair,
+automatic merge, deletion or renaming of existing notes is performed.
+
+CLI and Web report **New Papers** and **Already Saved**, without an Updated
+Papers metric. A clean repeat run with zero new Papers completes normally.
+See SPEC §46 for the current contract; earlier metadata-update rules are historical.
 
 ### Review candidates in Obsidian
 

@@ -1,16 +1,14 @@
 # Literature Monitor Connector
 
-This directory defines the independent browser component for the v0.6.6 release,
+This directory defines the independent browser component for the v0.6.7 release,
 following the v0.6.3 batch/Connector contract in SPEC §42. It is derived from the official
 Zotero Connector source and is separate from the MIT Python
 `literature_monitor` package. The tracked build entry point generates the
-Chrome/MV3 artifact with version `0.6.6`.
+Chrome/MV3 artifact with version `0.6.7`.
 
-v0.6.6 is **released**. [SPEC §45.8](../SPEC.md#458-v066-release-preparation-and-validation-reuse)
-records the reconstructed build and version checks;
-[§45.9](../SPEC.md#459-v066-publication-verification-and-closeout) records the
-published ZIP and downloaded digest verification. The v0.6.5 CARSI behavior and
-upstream pins are unchanged; the current Python server accepts the 0.6.6 handshake.
+v0.6.7 is in release preparation. [SPEC §46](../SPEC.md#46-v067-capture-only-run--development-contract)
+defines Capture-Only Run and records its verification. Connector behavior and
+upstream pins are unchanged; the Python server accepts the 0.6.7 handshake.
 
 A1 establishes source provenance, licensing, reconstruction and Chrome/MV3
 build boundaries. A5 adds the independent Literature Monitor automatic-capture
@@ -57,7 +55,7 @@ From the repository root:
 
 The script reconstructs the pinned upstream source into
 `connector/.work/`, verifies and applies the tracked Literature Monitor
-delta, runs the upstream debug build with release version `0.6.6`, verifies
+delta, runs the upstream debug build with release version `0.6.7`, verifies
 a Manifest V3 Chrome artifact, and copies the result to:
 
 ```text
@@ -76,7 +74,7 @@ directories from being treated as disposable Connector build state.
 For local installation or verification, open `chrome://extensions/`, enable
 Developer Mode, choose **Load unpacked**, and select the generated `chrome-mv3`
 directory. Alternatively, extract the published
-[Connector ZIP](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.6)
+[Connector ZIP](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.7)
 and select its `chrome-mv3/` directory; it includes corresponding source and
 license/build instructions. This is a local install path, not a Chrome Web Store release.
 A7 recorded a successful toolbar-free automatic save in normal Chrome with

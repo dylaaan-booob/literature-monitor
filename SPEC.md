@@ -8164,3 +8164,93 @@ Python artifacts are MIT; the separate Connector ZIP is AGPLv3 with correspondin
 The independent T5 and subsequent targeted/build/install evidence remain in §§45.7–45.8. No renewed live Chrome/CARSI login, networked OpenAlex or Zotero Library acceptance is claimed. All 78 protected files retain their release-start content and modification times. The user-modified list.md, untracked monitor.yaml, src/.obsidian/ and Workspace data were neither staged nor packaged.
 
 This documentation-only closeout follows the release commit on main. Embedded package/source documentation retains the verified release-preparation snapshot. The annotated tag and all three asset bytes remain fixed; this later record confirms publication without rebuilding or overwriting them.
+
+---
+
+## 46. v0.6.7 Capture-Only Run — Development Contract
+
+### 46.1 Authority and bounded supersede
+
+**v0.6.7 is in release preparation; v0.6.6 remains the latest verified RELEASED version (§45.9) until §46.8 records publication.** Package, Provider and Connector release identities are `0.6.7` under the subsequent explicit release authorization in §46.7. This section governs Capture-Only Materialization shared by CLI Run, Web Run and explicit diagnostic CLI `materialize`.
+
+§46 supersedes older requirements only where they authorize cross-run Paper bibliographic updates, existing Author enrichment, persistent Sources accumulation, replacement/repair of durable `journal_issns`, metadata-change warnings or Updated Papers statistics. This includes conflicting wording in §§10.2, 14, 15.2, 17, 23.5, 34.7 and 37.5 and historical implementation clauses describing incremental Markdown updates. Those clauses remain records of their earlier contracts, not authority for current Run writes. All historical version-specific text and release evidence remain unchanged.
+
+DOI-first identity, within-run OpenAlex/Crossref evidence consolidation and canonicalization, whitelist-first retrieval, Provider failure isolation/state, Coverage, Latest Run Snapshot, Workspace locks and progress contracts remain effective. Keep/Reject, Copy DOI, native Zotero Import and Parent/PDF results, Settings, CARSI Preparation and Workspace Reset retain their independent contracts. Capture-Only neither relaxes their full Paper validation nor grants any new write authority.
+
+### 46.2 Capture identity and fail-closed indexing
+
+Normalized valid DOI is the only canonical work identity. UUID is the durable Workspace reference and a conflict guard, never a fallback that can override a different DOI. Title, author names, Sources, non-DOI external identifiers and `journal_issns` have no work-matching authority. Different DOI representations that normalize equally match; different DOIs remain separate even with identical titles/authors.
+
+Materialization first scans all `Papers/*.md` candidates and builds transient DOI/UUID indexes. Its read-only identity parser is independent of full metadata/body validation. A reliable saved match requires a valid unique UUID, exactly one valid normalized DOI across all populated DOI representations, a supported schema and no durable or incoming identity conflict. Duplicate durable DOI/UUID, multiple incoming instances of the same DOI/UUID, UUID/DOI disagreement and inconsistent top-level/nested DOI values block the affected records and are not Already Saved. Fully enumerable localized conflicts do not block unrelated new DOI captures.
+
+Unreadable files, non-regular/symlink candidates, unsafe YAML (including overwritten duplicate keys), missing/unidentifiable Paper type, unknown DOI or invalid/uninspectable DOI representations cannot be treated as absent. When the scan cannot establish a complete DOI index, report the candidate and an incomplete-index error, create no new Paper or Author, and count no uncertain match as Already Saved. Explicitly typed non-Paper notes without Paper identity fields may be ignored. No persistent identity index or repair registry is added.
+
+Invalid UUID with fully enumerable DOI remains a localized identity error: preserve the note, block its DOI from new capture and do not count it as Already Saved. Unsupported pre-v0.5.2 or legacy `in_zotero`/`zotero_key` schemas remain unsupported and unchanged; their readable identity still prevents unsafe duplicate creation. There is no historical-schema migration, automatic repair, deletion, rename or merge.
+
+A unique trustworthy identity remains matchable when non-identity fields are invalid or incomplete, including title, journal, dates, Sources, author links, keywords, workflow values or body structure. Capture skips these notes without repair; their full-state readers and action writers continue to apply existing strict validation.
+
+### 46.3 First capture and immutable existing notes
+
+For a new valid DOI, create one Paper from the current Canonical Metadata, retaining the existing UUID/path naming rules, Author links, workflow initialization and optional initial journal attribution. Provider evidence consolidation and canonicalization still operate within this invocation before materialization; there is no cross-run merge with saved Markdown metadata.
+
+A reliably saved DOI is skipped immediately, regardless of Candidate/Kept/Rejected/Exported status or missing metadata. Do not compare, rewrite or supplement any existing Paper bytes: title/H1, abstract, journal, publication date, authors, keywords, external IDs, Sources, `journal_issns`, UUID/path, `discovered_at`, workflow status, unknown/custom frontmatter, Notes and other user content all remain unchanged. Ordinary differences between incoming and stored metadata emit no warning; within-run Provider conflicts and actual identity/I/O errors retain diagnostics.
+
+Resolve Authors only for new Papers. Existing Author Markdown may be safely reused using the existing stable-ID compatibility and deterministic-path rules, including opaque human-owned notes at those paths. Do not enrich ORCID, OpenAlex ID or any other existing field, rename or rewrite an Author. Ambiguous/conflicting stable IDs, incompatible occupied notes and unsafe targets block the dependent Paper without blocking unrelated captures. A concurrent occupied target is checked under the same reuse rules and never overwritten.
+
+Retain the shared Workspace operation lock, directory/path-substitution guards and atomic create-only writes. Report creation committed before sync failure truthfully. A Paper creation failure may leave successfully created Authors; preserve them, report the partial result and allow a later explicit run to reuse them safely. Do not roll back by deleting notes. A Paper path becoming occupied is an error, not proof of Already Saved. Existing `Inbox.base` remains byte-identical; initialize it only when absent under the existing safe-create behavior.
+
+### 46.4 Results, progress and persistent state
+
+`MaterializationResult` retains `created_papers`, `existing_papers`, created/existing Authors and issues; `RunResult` retains `created_papers` and `matched_existing_papers`. Both remove `updated_papers` entirely, without a constant-zero compatibility field or an update-mode switch. Existing counters mean reliable saved DOI matches only; blocked/uncertain records are excluded. Author reuse counters describe Authors resolved for new Papers, not every Author referenced by skipped Papers.
+
+CLI and Web completion summaries present **New Papers** and **Already Saved** with applicable warnings/errors. Zero new Papers with only reliable skips and no other problems is normal completion. Provider/materialization errors retain the existing outcome and exit-code policy.
+
+Keep the existing progress stage/event identifiers and five-stage order. Present the final stage as Capturing papers and creation activities as Preparing new papers / Writing new papers. Skipped and blocked inputs still complete their processing work units; Paper write counters include new Paper attempts only, including diagnosed failures. No artificial writes or activity are needed for a zero-new run.
+
+Provider-state schema/persistence, Coverage and Latest Run Snapshot schema/persistence are unchanged. Production Run continues its normal cache/diagnostic persistence even when no Paper is new; explicit diagnostic `materialize` still has no Provider-state or Latest Run Snapshot write authority. No Archived/Enriched/Frozen state, watermark, last-seen, Monitor membership or other persistent lifecycle field is introduced. DOI Enrichment, translators/arXiv fallback, browser/PDF/Zotero changes and unrelated UI redesign are outside this version.
+
+### 46.5 Acceptance and rollback
+
+Automated acceptance uses isolated Workspace/configuration fixtures, never the real user's list.md, monitor.yaml, src/.obsidian/, Workspace notes or Zotero Library. It covers exact existing-file byte preservation across all four statuses and changed incoming metadata, new Paper/Author creation, immutable Author reuse, normalized DOI identity, partial non-identity corruption, localized conflicts, incomplete indexing, occupied paths, partial success/retry, lock/directory substitution and truthful counters/progress. CLI Run, Web Run and CLI materialize must execute the real shared materializer; Web acceptance includes actual routes, Coordinator execution and rendered completion fragments.
+
+Retain regressions for Provider consolidation/Canonicalization, partial retrieval and cache failures, Coverage/Latest Run Snapshot, manual decisions, Copy DOI, Workspace projection and native Zotero boundaries. Removed update-only tests do not justify retaining dead production merge/write code. Report actual commands/results and distinguish offline Provider fixtures from live network/browser/Library acceptance.
+
+No Paper/Author migration is needed. Reverting this implementation changes code and documentation only; do not restore, rewrite or delete user data as part of rollback. Newly created Paper schema remains unchanged. This implementation task does not authorize a version bump, commit, push, tag or Release.
+
+### 46.6 Implementation verification — 2026-10-12
+
+Implementation is complete in the working tree against `be2b941`; **v0.6.7 remains UNRELEASED**. The shared materializer has no existing Paper/Author replace path, no cross-run metadata merge and no `updated_papers` result field. Identity parsing remains independent of strict action/export validation. Actual Author reuse rereads identity after candidate selection, including concurrent occupation; its dedicated regression reproduced unsafe reuse before the correction and passes after it.
+
+Executed offline checks:
+
+- Initial Capture-Only regressions before production changes: **5 failed**, reproducing metadata changes for all four statuses and unsafe new capture with an unreadable Paper candidate.
+- `uv run --locked pytest tests/test_materialize.py tests/test_application_monitor.py tests/test_application_candidate_eligibility.py tests/test_application_state_migration.py tests/test_cli.py tests/test_web_run_settings.py tests/test_run_coordinator.py --tb=short`: **635 passed, 2 existing dependency deprecation warnings, 4.55s**, before the final Author reuse correction and added unsafe-candidate/incoming-conflict cases. The later full suite covers these final inputs.
+- `uv run --locked pytest tests/test_materialize.py --tb=short`: **122 passed, 0.58s**, after the Author identity reread correction and before the final additional identity cases.
+- `uv run --locked pytest --tb=short`: **3070 passed, 2 existing dependency deprecation warnings, 26.80s**, with all final production/test changes. Includes CLI Run, actual Web Run Coordinator/POST/fragment rendering and CLI materialize executing real creation then zero-new safe skipping, plus decisions, Workspace, Copy DOI/native Zotero safeguards, retrieval/state/Coverage/Snapshot/progress and safe-write regressions.
+- `uv lock --check`: **PASS**, 27 packages resolved; no dependency or lockfile change. `git diff --check`: **PASS**.
+- All **78 protected files** retain their initial SHA-256 content and nanosecond modification times. Existing SPEC text through §45 is byte-for-byte unchanged; §46 is appended. The real user's modified list.md, untracked monitor.yaml, src/.obsidian/ and Workspace were not used as test output.
+
+Provider integration used isolated offline fixtures. Actual application routes/materialization were exercised; no renewed live Provider network, normal-Chrome/CARSI authentication or real Zotero Library mutation is claimed. Connector source/pins, package version and persistence schemas are unchanged. No build/distribution, commit, push, tag or GitHub Release was performed. Rollback is the code/documentation-only procedure in §46.5.
+
+### 46.7 v0.6.7 release preparation and validation reuse
+
+The user subsequently authorized version `0.6.7`, commit and publication on 2026-10-12. This extends the implementation-only authorization recorded in §§46.5–46.6. Current Python project/lock metadata, Provider and AI Mapping Pack User-Agents and independent Connector build identity are `0.6.7`. CARSI Preparation accepts this version alongside the existing `0.6.4`/`0.6.5`/`0.6.6` versions, still requiring the verified Executor capability. No dependency, Paper schema, Provider-state schema, upstream pin, Connector behavior or permission change is introduced.
+
+The final 3070-test offline suite in §46.6 is reused for the unchanged Capture-Only implementation. Version finalization is checked separately in an isolated tracked-source snapshot with HEAD's baseline list.md, excluding real user configuration/Workspace data. Final build, installation, asset and remote publication evidence will be recorded in §46.8. Rollback remains code/documentation-only under §46.5; publication does not authorize modifying existing user notes.
+
+Executed release-preparation checks:
+
+- `uv run --locked pytest tests/test_carsi_login_a4.py tests/test_preparation_coordinator_a3.py tests/test_preparation_integration_a6.py tests/test_connector_boundary.py tests/test_ai_mapping_pack_a1.py tests/test_openalex.py tests/test_crossref.py --tb=short` in the isolated snapshot: **529 passed, 2 existing dependency warnings, 9.04s**. This verifies the new `0.6.7` handshake while retaining older compatible versions.
+- `uv lock --check`, `node --check src/literature_monitor/web/static/app.js`, `bash -n connector/build.sh`, `git diff --check`: **PASS**. Lockfile dependency identities are unchanged.
+- `uv build --out-dir <external-assets>`: **PASS**. Wheel and sdist are `0.6.7`, MIT, contain the exact 72 application files and README build input, and exclude Connector code, real configuration, Workspace and cache files.
+- Fresh CPython 3.12.14 virtual environment, runtime dependencies exported from the locked snapshot, wheel installation and `uv pip check`: **PASS**. Installed CLI help, actual Settings/Kept/static HTTP routes and verified `0.6.7` Preparation heartbeat passed; isolated configuration bytes remained unchanged. Installed shared materialization created a new Paper/Author, then skipped a changed incoming record with all existing files byte-identical.
+- `connector/build.sh` with external work/output paths: **PASS**. Reconstructed fixed upstream and five submodules, declared patch delta, exact overlays, MV3 worker ordering and AGPL license checks passed. Manifest is `0.6.7`; permissions, content scripts and web-accessible resources match the downloaded v0.6.6 ZIP. The separate 2,320-entry ZIP contains extension files, corresponding patched source/pinned submodules, licenses and build instructions, excluding Git metadata and node_modules.
+- All **78 protected files** retain baseline SHA-256 and nanosecond modification times. Prior SPEC §§1–45 remain unchanged. No renewed live Provider/Chrome/CARSI/Zotero acceptance was performed; Connector behavior/pins are unchanged, so prior scoped runtime/live evidence is retained without claiming a new live run.
+
+Prepared asset SHA-256 values:
+
+| Asset | SHA-256 |
+| --- | --- |
+| `literature-monitor-connector-0.6.7-chrome-mv3.zip` | `02b51233aaf5407d1588e591ae055cf678953443a9368979f8d61858e173dbe6` |
+| `literature_monitor-0.6.7-py3-none-any.whl` | `cfdc0e37f4fc1d2c2aa7cb3a50074c652730fb4183914d86f904e524f4818d8e` |
+| `literature_monitor-0.6.7.tar.gz` | `99c94c821c89b4ea16102b88401fff9a2ae4c1fef0996edb337a7fea767e6db9` |

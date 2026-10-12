@@ -23,7 +23,7 @@ _STAGE_LABELS = {
     ProgressStage.DISCOVERING_PAPERS: "Discovering papers",
     ProgressStage.COMBINING_METADATA: "Combining metadata",
     ProgressStage.MATCHING_LITERATURE: "Matching literature",
-    ProgressStage.UPDATING_WORKSPACE: "Updating workspace",
+    ProgressStage.UPDATING_WORKSPACE: "Capturing papers",
 }
 
 _SOURCE_LABELS = {

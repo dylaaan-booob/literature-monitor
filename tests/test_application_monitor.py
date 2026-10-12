@@ -119,6 +119,61 @@ def canonical_paper() -> CanonicalPaper:
     )
 
 
+@pytest.mark.parametrize("entrypoint", ["cli-run", "cli-materialize", "web"])
+def test_real_entrypoints_capture_then_skip_without_rewriting_notes(tmp_path, monkeypatch, capsys, entrypoint):
+    from fastapi.testclient import TestClient
+    from literature_monitor.cli import main
+    from literature_monitor.web.app import create_app
+    from literature_monitor.web.run_coordinator import CoordinatorStatus
+
+    config_path = write_monitor(tmp_path)
+    original = install_core_mocks(monkeypatch)
+    workspace = tmp_path / "workspace"
+    app = create_app(config_path) if entrypoint == "web" else None
+
+    def execute():
+        if app is None:
+            command = "run" if entrypoint == "cli-run" else "materialize"
+            args = [command, "--config", str(config_path)]
+            if command == "materialize":
+                args.extend(["--output-dir", str(workspace)])
+            assert main(args) == 0
+            text = capsys.readouterr().err
+            assert "paper files updated" not in text
+            return text
+        with TestClient(app, base_url="http://localhost") as client:
+            response = client.post("/run", data={"csrf_token": app.state.csrf_token})
+            assert response.status_code == 200
+            app.state.run_coordinator._worker.join(5)
+            snapshot = app.state.run_coordinator.snapshot()
+            assert snapshot.status is CoordinatorStatus.FINISHED and snapshot.unexpected_error is None
+            assert snapshot.result.outcome is RunOutcome.COMPLETED
+            text = client.get("/fragments/run").text
+            assert " updated" not in text
+            return text
+
+    first = execute()
+    assert "1 New Papers" in first and "0 Already Saved" in first
+    paper_path, = (workspace / "Papers").glob("*.md")
+    paper_path.write_bytes(paper_path.read_bytes().replace(
+        b"status: candidate", b"status: kept\ncustom: retained") + b"\n## Notes\nHuman note.\n")
+    before = {p: p.read_bytes() for p in workspace.rglob("*.md")}
+    inbox = (workspace / "Inbox.base").read_bytes()
+    incoming = original.model_copy(update={
+        "metadata": original.metadata.model_copy(update={"title": "Later title", "abstract": "Later abstract"}),
+        "authors": (Author(name="Later Author", openalex_id="A99"),),
+    })
+    monkeypatch.setattr(monitor, "canonicalize_records", lambda evidence: CanonicalizationResult(papers=(incoming,), issues=()))
+    second = execute()
+    assert "0 New Papers" in second and "1 Already Saved" in second
+    assert {p: p.read_bytes() for p in workspace.rglob("*.md")} == before
+    assert (workspace / "Inbox.base").read_bytes() == inbox
+    if entrypoint == "cli-materialize":
+        assert not (workspace / ".literature-monitor").exists()
+    else:
+        assert read_last_run_snapshot(workspace).status is LastRunReadStatus.AVAILABLE
+
+
 @pytest.mark.parametrize("entrypoint", ["cli", "web"])
 def test_run_config_switch_at_preflight_never_writes_unlocked_workspace(tmp_path, monkeypatch, entrypoint):
     from literature_monitor.web.run_coordinator import RunCoordinator, CoordinatorStatus
@@ -380,7 +435,6 @@ def materialization_result(
     return MaterializationResult(
         created_papers=(output_dir / "Papers" / "new.md",),
         existing_papers=(output_dir / "Papers" / "existing.md",),
-        updated_papers=(output_dir / "Papers" / "updated.md",),
         created_authors=(output_dir / "Authors" / "new.md",),
         existing_authors=(output_dir / "Authors" / "existing.md",),
         issues=issues,
@@ -571,7 +625,6 @@ def test_materialize_consumes_the_same_canonical_result(
     assert result.canonical_paper_count == 1
     assert result.created_papers == 1
     assert result.matched_existing_papers == 1
-    assert result.updated_papers == 1
     assert result.created_authors == 1
     assert result.existing_authors == 1
     assert result.coverage == coverage
@@ -641,7 +694,6 @@ def test_run_monitor_uses_core_materialization_and_progress_contract(
     assert result.canonical_paper_count == 1
     assert result.created_papers == 1
     assert result.matched_existing_papers == 1
-    assert result.updated_papers == 1
     assert result.created_authors == 1
     assert result.existing_authors == 1
 

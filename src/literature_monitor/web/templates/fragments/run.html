@@ -107,7 +107,7 @@
         {% if result.resolved_date_range %}
           <span>{{ result.resolved_date_range.from_date.isoformat() }} → {{ result.resolved_date_range.to_date.isoformat() }}</span>
         {% endif %}
-        <span>Papers: {{ result.canonical_paper_count }} canonical · {{ result.created_papers }} created · {{ result.matched_existing_papers }} matched · {{ result.updated_papers }} updated</span>
+        <span>Papers: {{ result.canonical_paper_count }} canonical · {{ result.created_papers }} New Papers · {{ result.matched_existing_papers }} Already Saved</span>
         {% if result.warnings %}
           <span>{{ result.warnings|length }} warning{{ "" if result.warnings|length == 1 else "s" }}</span>
         {% endif %}
