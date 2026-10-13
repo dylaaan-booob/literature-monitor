@@ -3,5 +3,6 @@ name: Statistical ML
 venue_whitelist: list.md
 keyword_expression: 'statist* AND "high dimensional"~0'
 output_dir: ./workspace
-window_days: 14
+from_month: '2026-10'
+to_month: '2026-10'
 log_level: INFO

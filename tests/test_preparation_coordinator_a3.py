@@ -556,3 +556,34 @@ def test_web_bridge_csrf_default_safe_and_stale_result_denial(tmp_path):
                            json={"csrf_token": token, "task_id": "f" * 32, "generation": current["generation"]}).status_code == 409
     assert (stamp(path), stamp(config)) == before
     assert not list(tmp_path.glob("*.sqlite"))
+
+
+@pytest.mark.parametrize('supported', [False, True])
+def test_attribute_consent_is_frozen_and_old_connector_remains_manual(tmp_path, supported):
+    import yaml
+    config, _, _, _ = prepared(tmp_path)
+    raw = yaml.safe_load(config.read_text())
+    raw['institution'] = {'idp_entity_id': 'https://idp.example/idp/shibboleth',
+                          'automatic_attribute_release_consent': True}
+    config.write_text(yaml.safe_dump(raw))
+    _, prep = enabled(config)
+    if supported:
+        prep.heartbeat(INSTANCE, **CAPABILITY, consent_capability=preparation_module.CONSENT_CAPABILITY)
+    started = prep.start(config)
+    raw['institution']['automatic_attribute_release_consent'] = False
+    config.write_text(yaml.safe_dump(raw))
+    claimed = prep.claim(INSTANCE)
+    assert claimed.automatic_attribute_release_consent is supported
+    assert ('Reload the updated Connector' in started.message) is (not supported)
+    assert prep.authorize(**identity(claimed))
+    prep.cancel(started.task_id, started.generation)
+    assert not prep.authorize(**identity(claimed))
+
+
+def test_attribute_consent_capability_is_optional_on_bridge_heartbeat(tmp_path):
+    config, _, _, _ = prepared(tmp_path)
+    app = create_app(config)
+    with TestClient(app, base_url='http://localhost') as client:
+        for extra in ({}, {'consent_capability': preparation_module.CONSENT_CAPABILITY}):
+            response = client.post('/api/connector/preparation/heartbeat', json={'instance_id': INSTANCE, **CAPABILITY, **extra})
+            assert response.status_code == 200 and response.json()['ready']

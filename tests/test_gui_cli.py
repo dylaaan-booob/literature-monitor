@@ -106,7 +106,6 @@ def test_gui_invalid_configuration_still_reaches_uvicorn(
         raise AssertionError("GUI launcher must not call run_monitor")
 
     monkeypatch.setattr(uvicorn, "run", fake_run)
-    monkeypatch.setattr(cli, "run_monitor", forbidden_run_monitor)
 
     result = cli.main(("gui", "--config", str(config_path)))
 

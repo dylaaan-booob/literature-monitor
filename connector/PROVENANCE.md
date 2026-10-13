@@ -260,3 +260,60 @@ for same-URL reload, isolated access to pinned PageSaving and stale-document
 injection rejection. These probes establish API feasibility, not actual
 Cloudflare passage, translator detection or Zotero parent/Paper completion.
 See SPEC §42.16 for executable regression/build evidence and live gaps.
+
+## Paper Enrichment development delta
+
+SPEC §§47–48 add `0003-literature-monitor-paper-enrichment.patch`, modifying
+`src/common/inject/inject.jsx`, `src/common/inject/pageSaving.js` and
+`src/browserExt/offscreen/offscreenTranslate.js`. These remain inside this AGPL
+component. It registers a distinct read-only message and runs the existing
+Translate Framework in the MV3 sandbox with saving disabled. The per-instance
+loaded-translator guard bypasses remote save branches and is restored after
+translation. No upstream/submodule pin, permission, Python dependency or native
+Import/attachment pipeline is changed. The overlay adds transient command/result
+transport and shares browser exclusion with Import and Preparation.
+
+The unified message `literatureMonitorEnrich` returns the same Item's original
+Abstract/date and parsed date components. Date parsing uses the pinned AGPL
+`Zotero.Date.strToDate()` inside offscreen; no parser code enters the MIT Python
+package. The server validates components and supplies compatibility `01` values
+only for missing month/day. Shared browser ownership and accepted-Preview tab
+cleanup remain unchanged. See SPEC §48 for byte-preserving atomic writes and
+partial-result behavior.
+
+SPEC §50 extends the existing read-only Item projection with the original
+`creators` array and updates the heartbeat capability to `paper-enrichment/v2`.
+Author role/name conversion and local Markdown writes stay in the MIT server.
+No native Zotero save, new permission, parser copy or upstream pin change is
+introduced. The Connector still executes one browser-only translation.
+
+
+Shibboleth Attribute Release Consent (SPEC §53) adds optional
+shibboleth-consent/v1 capability and one command Boolean. The CARSI overlay
+uses existing HTTPS/scripting/webNavigation permissions, existing login waiting
+and current task authorization. It binds isolated-world native clicks to the
+configured HTTPS IdP origin and current Portal document, once per document.
+No credential, attribute payload, Cookie, authentication request construction,
+login-state storage, native save or upstream/submodule pin change is introduced.
+The MIT server owns the default-off Settings preference; IdP consent itself is
+stored only by the school through its native form. Existing §48 date-padding
+notes above are historical and were superseded by SPEC §§51–52.
+
+## Connector lifecycle cleanup development delta
+
+`0004-literature-monitor-connector-lifecycle-cleanup.patch` applies after the
+Paper Enrichment patch on the same pinned upstream revision. It modifies
+`src/browserExt/background.js`, `src/browserExt/background/offscreenManager.js`
+and `src/browserExt/offscreen/offscreenTranslate.js` within this AGPL component.
+It corrects string/numeric tab-ID comparison, includes loading tabs in liveness
+queries, reports actual offscreen removals without the JSON diagnostic typo,
+and sweeps orphaned tab-info and injection caches. Candidate IDs are snapshotted
+before querying live tabs to preserve entries created during the query.
+
+The internal offscreen messages add `translateCleanupCandidates` and pass
+`[liveTabIds, candidateTabIds]` to `translateCleanup`; Bridge interfaces remain
+unchanged. Immediate tab-close listeners and periodic intervals are retained.
+The delta removes cache references only: it adds no cancellation, tab/document
+closure, persistence, telemetry or changes to native parent/attachment saving
+and read-only Enrichment. It repairs source-level lifecycle defects without
+claiming a measured memory leak or memory saving.

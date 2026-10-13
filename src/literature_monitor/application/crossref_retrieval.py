@@ -1,7 +1,7 @@
 """Crossref execution-local retrieval and pending state (§30.3); no filesystem access."""
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Sequence, Callable
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 
 from literature_monitor.application.provider_state import CrossrefRecordState
@@ -20,6 +20,8 @@ from literature_monitor.crossref import (
     CrossrefError,
     CrossrefHydration,
     CrossrefManifestMember,
+    CrossrefManifestUnit,
+    CrossrefJournalQuery,
     CrossrefWorkRecord,
     EnrichmentIssue,
     EnrichmentIssueSeverity,
@@ -35,6 +37,21 @@ from literature_monitor.crossref import (
 from literature_monitor.models import ProviderRecordRef, ProviderWorkEvidence
 from literature_monitor.openalex import OpenAlexWorkRecord, ResolvedSource
 from literature_monitor.progress import ProgressCallback
+
+
+@dataclass(frozen=True)
+class CrossrefManifestResult:
+    plans: tuple[CrossrefJournalQuery, ...]
+    units: tuple[CrossrefManifestUnit, ...]
+    members: tuple[CrossrefManifestMember, ...]
+
+    @property
+    def journal_issns(self) -> dict[str, tuple[str, ...]]:
+        return {
+            member.doi: tuple(plan.journal.issn_l for plan in self.plans
+                              if set(member.issns).intersection(plan.query_aliases))
+            for member in self.members
+        }
 
 
 @dataclass(frozen=True)
@@ -63,6 +80,9 @@ class CrossrefSupplementResult:
     refreshed_dois: tuple[str, ...]
     new_dois: tuple[str, ...]
     pending_changes: tuple[CrossrefRecordState, ...]
+    skipped_aliases: tuple[tuple[str, str], ...] = ()
+    aliases: tuple[tuple[str, str], ...] = ()
+    unresolved_dois: tuple[str, ...] = ()
 
     @property
     def coverage(self) -> tuple[CoverageUnit, ...]:
@@ -109,6 +129,23 @@ class CrossrefRetrieval:
         self._used: dict[str, None] = {}
         self._singletons: dict[str, CrossrefDOIOutcome | CrossrefError] = {}
         self._discovered_dois: set[str] = set()
+        self._types: dict[str, CrossrefManifestMember] = {}
+
+    def _observe_types(self, members: Sequence[CrossrefManifestMember]) -> None:
+        merged, _ = _merge_manifest_members((*self._types.values(), *members))
+        self._types = {member.doi: member for member in merged}
+
+    @property
+    def excluded_dois(self) -> set[str]:
+        return {doi for doi, member in self._types.items()
+                if member.work_type == "journal-issue" and not member.type_conflict}
+
+    @property
+    def metadata_counts(self) -> tuple[int, int]:
+        # A later skip/exclusion does not erase a metadata attempt already performed.
+        results = tuple(self._resolved.values())
+        return sum(value.record is not None for value in results), sum(value.record is None for value in results)
+
 
     def _usage(self, records: Sequence[CrossrefWorkRecord]):
         dois = tuple(dict.fromkeys(record.doi for record in records))
@@ -173,67 +210,69 @@ class CrossrefRetrieval:
                     self._resolved[doi] = CrossrefHydration(doi, result.record,
                                                           (*result.issues, f"record cannot be persisted: {error}"))
 
-    def discover(
+    def discover_manifest(
         self, journals: Sequence[JournalConfig], from_date: date, to_date: date, *,
         resolved_sources: Sequence[ResolvedSource] = (),
-    ) -> CrossrefRetrievalResult:
+    ) -> CrossrefManifestResult:
         plans = plan_crossref_queries(journals, resolved_sources)
-        ordered_issns = tuple(dict.fromkeys(issn for plan in plans for issn in plan.query_aliases))
-        manifests = retrieve_crossref_manifests(self.client, ordered_issns, from_date, to_date,
-                                               progress_callback=self.progress_callback)
-        members = tuple(member for unit in manifests for member in unit.members)
-        merged, _ = _merge_manifest_members(members)
-        ambiguous = {member.doi for member in merged if member.indexed_at is None}
-        self._resolve(merged)
-        by_issn = {unit.issn: unit for unit in manifests}
+        ordered = tuple(dict.fromkeys(issn for plan in plans for issn in plan.query_aliases))
+        units = retrieve_crossref_manifests(self.client, ordered, from_date, to_date,
+                                           progress_callback=self.progress_callback)
+        members, _ = _merge_manifest_members(tuple(member for unit in units for member in unit.members))
+        self._observe_types(members)
+        return CrossrefManifestResult(plans, units, members)
+
+    def hydrate_manifest(
+        self, manifest: CrossrefManifestResult, dois: Sequence[str],
+    ) -> CrossrefRetrievalResult:
+        selected = set(dois) - self.excluded_dois
+        self._resolve(tuple(member for member in manifest.members if member.doi in selected))
+        # A failed Full Hydration is still a discovered DOI; do not repeat it as a supplement.
+        self._discovered_dois.update(doi for doi, journals in manifest.journal_issns.items() if journals)
+        by_issn = {unit.issn: unit for unit in manifest.units}
         units, flat = [], {}
-        venue_supported_dois = set()
-        for plan in plans:
-            journal = plan.journal
+        for plan in manifest.plans:
             for issn in plan.query_aliases:
-                manifest = by_issn[issn]
-                severity = (EnrichmentIssueSeverity.ERROR if not manifest.complete and not manifest.members
-                            else EnrichmentIssueSeverity.WARNING)
-                issues = [CrossrefDiscoveryIssue(severity, "manifest", journal.name,
-                                                issn, message) for message in manifest.issues]
-                if any(member.doi in ambiguous and member.indexed_at is not None for member in manifest.members):
-                    issues.append(CrossrefDiscoveryIssue(EnrichmentIssueSeverity.WARNING, "manifest", journal.name,
-                                                         issn, "conflicting live indexed revisions across manifest units"))
-                records, failed = [], any(member.doi in ambiguous for member in manifest.members)
-                for member in manifest.members:
+                raw = by_issn[issn]
+                severity = EnrichmentIssueSeverity.WARNING if raw.members else EnrichmentIssueSeverity.ERROR
+                issues = [CrossrefDiscoveryIssue(severity, "manifest", plan.journal.name, issn, message)
+                          for message in raw.issues]
+                records = []
+                for member in raw.members:
+                    if member.doi not in selected:
+                        continue
                     result = self._resolved[member.doi]
                     record = result.record
+                    self._observe_types((CrossrefManifestMember(member.doi, member.issns,
+                        member.indexed_at, record.work_type if record else None),))
                     for message in result.issues:
-                        severity = EnrichmentIssueSeverity.WARNING if record is not None else EnrichmentIssueSeverity.ERROR
-                        issues.append(CrossrefDiscoveryIssue(severity, "full_hydration",
-                                                              journal.name, issn, message, doi=member.doi))
-                    if record is None:
-                        failed = True
-                        continue
-                    if not crossref_record_matches_journal(record, journal, query_aliases=plan.query_aliases):
-                        failed = True
-                        issues.append(CrossrefDiscoveryIssue(EnrichmentIssueSeverity.WARNING, "venue_validation",
-                            journal.name, issn, "full record lacks usable verified venue identifiers", doi=member.doi))
-                    else:
-                        venue_supported_dois.add(record.doi)
-                    records.append(record)
-                    flat.setdefault(record.doi, record)
-                complete = manifest.complete and not failed
-                status = CoverageStatus.COMPLETE if complete else (CoverageStatus.PARTIAL if records else CoverageStatus.FAILED)
+                        issues.append(CrossrefDiscoveryIssue(
+                            EnrichmentIssueSeverity.WARNING if record else EnrichmentIssueSeverity.ERROR,
+                            "full_hydration", plan.journal.name, issn, message, doi=member.doi))
+                    if record is not None:
+                        if record.issns and not crossref_record_matches_journal(record, plan.journal, query_aliases=plan.query_aliases):
+                            issues.append(CrossrefDiscoveryIssue(EnrichmentIssueSeverity.WARNING,
+                                "venue_validation", plan.journal.name, issn,
+                                "full record lacks usable verified venue identifiers", doi=member.doi))
+                        records.append(record)
+                        flat.setdefault(record.doi, record)
+                status = CoverageStatus.COMPLETE if raw.complete else (
+                    CoverageStatus.PARTIAL if raw.members else CoverageStatus.FAILED)
                 coverage = CoverageUnit("crossref", CoverageComponent.CROSSREF_DISCOVERY, status,
-                                        journal=journal.issn_l, issn=issn)
-                units.append(CrossrefDiscoveryUnitResult(journal, issn, coverage, tuple(records), tuple(issues)))
+                                        journal=plan.journal.issn_l, issn=issn)
+                units.append(CrossrefDiscoveryUnitResult(plan.journal, issn, coverage, tuple(records), tuple(issues)))
         discovery = CrossrefDiscoveryResult(tuple(flat.values()),
-                                            (*tuple(i for plan in plans for i in plan.diagnostics),
-                                             *tuple(i for u in units for i in u.issues)),
-                                            tuple(u.coverage for u in units), tuple(units))
-        # Only final usable discovery output closes an OpenAlex DOI gap.
-        self._discovered_dois.update(venue_supported_dois)
+            (*tuple(issue for plan in manifest.plans for issue in plan.diagnostics),
+             *tuple(issue for unit in units for issue in unit.issues)),
+            tuple(unit.coverage for unit in units), tuple(units))
         return CrossrefRetrievalResult(discovery, *self._usage(discovery.records))
 
     def _probe(self, dois: Sequence[str]):
         members, diagnostics = {}, {}
         ordered = tuple(dict.fromkeys(dois))
+        members.update({doi: replace(self._types[doi], indexed_at=self._revisions[doi])
+                        for doi in ordered if doi in self._resolved})
+        ordered = tuple(doi for doi in ordered if doi not in members)
         for offset in range(0, len(ordered), _CROSSREF_MANIFEST_BATCH_SIZE):
             group = ordered[offset:offset + _CROSSREF_MANIFEST_BATCH_SIZE]
             try:
@@ -271,9 +310,11 @@ class CrossrefRetrieval:
     def _singleton_record(self, doi, outcome):
         record, warnings = normalize_crossref_work(outcome.payload, doi, self.timestamp)
         validate_normalized_crossref_record(record)
-        return CrossrefManifestMember(doi, record.issns, record.indexed_at), CrossrefHydration(doi, record, warnings)
+        return CrossrefManifestMember(doi, record.issns, record.indexed_at, record.work_type), CrossrefHydration(doi, record, warnings)
 
-    def supplement(self, openalex_records: Sequence[OpenAlexWorkRecord]) -> CrossrefSupplementResult:
+    def supplement(self, openalex_records: Sequence[OpenAlexWorkRecord], *,
+                   should_process: Callable[[str], bool] = lambda doi: True,
+                   hydrate: bool = True) -> CrossrefSupplementResult:
         """Requested DOI identities and anchors come solely from current live OpenAlex records."""
         anchors: dict[str, list[ProviderRecordRef]] = {}
         for record in openalex_records:
@@ -286,6 +327,7 @@ class CrossrefRetrieval:
                 if ref not in refs:
                     refs.append(ref)
         probes, diagnostics = self._probe(tuple(anchors))
+        self._observe_types(tuple(probes.values()))
         targets, supplied, unavailable = {}, {}, set()
         aliases = {}
         for doi in anchors:
@@ -306,9 +348,19 @@ class CrossrefRetrieval:
                     targets[doi] = doi
             except (CrossrefError, ValueError) as error:
                 diagnostics.setdefault(doi, []).append(str(error))
-        prime_ids = tuple(dict.fromkeys(prime for prime in aliases.values() if prime not in probes))
+        skipped = tuple((requested, target) for requested, target in targets.items()
+                        if not should_process(target))
+        for prime in aliases.values():
+            if prime in self._resolved:
+                # Prefer the actual hydrated revision when it is newer than the Manifest.
+                probes[prime] = replace(self._types[prime], indexed_at=self._revisions[prime])
+            elif prime in self._discovered_dois:
+                probes[prime] = self._types[prime]
+        prime_ids = tuple(dict.fromkeys(prime for prime in aliases.values()
+                                      if prime not in probes and prime not in self.excluded_dois and should_process(prime)))
         prime_probes, prime_diagnostics = self._probe(prime_ids)
         probes.update(prime_probes)
+        self._observe_types(tuple(prime_probes.values()))
         for prime in prime_ids:
             if prime in probes:
                 continue
@@ -321,10 +373,15 @@ class CrossrefRetrieval:
                 probes[prime], supplied[prime] = self._singleton_record(prime, outcome)
             except (CrossrefError, ValueError) as error:
                 prime_diagnostics.setdefault(prime, []).append(str(error))
-        self._resolve(tuple(probes[target] for target in dict.fromkeys(targets.values()) if target in probes), supplied)
-        units, flat = [], {}
+        self._observe_types(tuple(probes.values()))
+        self._resolve(tuple(probes[target] for target in dict.fromkeys(targets.values())
+                            if target in probes and should_process(target) and target not in self.excluded_dois
+                            and (hydrate or target in supplied or target in self._resolved)), supplied)
+        units, flat, unresolved = [], {}, []
         for doi, refs in anchors.items():
             target = targets.get(doi)
+            if (doi, target) in skipped or target in self.excluded_dois:
+                continue
             result = self._resolved.get(target) if target in probes else None
             record = result.record if result else None
             messages = [*diagnostics.get(doi, ()), *prime_diagnostics.get(target, ())]
@@ -333,10 +390,14 @@ class CrossrefRetrieval:
             if record is not None:
                 flat.setdefault(record.doi, record)
                 status = CoverageStatus.COMPLETE
+            elif not hydrate and target in probes:
+                status = CoverageStatus.COMPLETE
             elif doi in unavailable:
                 status = CoverageStatus.UNAVAILABLE
             else:
                 status = CoverageStatus.FAILED
+                if target not in probes:
+                    unresolved.append(doi)
                 if not messages:
                     messages.append("required current Crossref supplement evidence is unavailable")
             severity = EnrichmentIssueSeverity.ERROR if status is CoverageStatus.FAILED else EnrichmentIssueSeverity.WARNING
@@ -345,4 +406,7 @@ class CrossrefRetrieval:
             units.append(CrossrefSupplementUnit(doi, tuple(refs), record,
                 CoverageUnit("crossref", CoverageComponent.CROSSREF_SUPPLEMENT, status, doi=doi), issues))
         records = tuple(flat.values())
-        return CrossrefSupplementResult(tuple(units), records, *self._usage(records))
+        for record in records:
+            self._observe_types((CrossrefManifestMember(record.doi, record.issns,
+                                                        record.indexed_at, record.work_type),))
+        return CrossrefSupplementResult(tuple(units), records, *self._usage(records), skipped, tuple(aliases.items()), tuple(unresolved))

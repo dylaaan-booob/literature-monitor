@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import urlencode, urlsplit
 
 import httpx
-from pydantic import Field, ValidationError, field_validator
+from pydantic import ValidationError, field_validator
 
 from literature_monitor.config import JournalConfig, normalize_journal_issn, normalize_publisher_id
 from literature_monitor.url_safety import normalize_public_http_url
@@ -108,13 +108,6 @@ class OpenAlexWorkRecord(DomainModel):
     authors: tuple[Author, ...] = ()
     source_id: NonEmptyStr
     provenance: MetadataSource
-    is_published: bool | None = Field(default=None, exclude=True)
-
-    @field_validator("is_published", mode="before")
-    @classmethod
-    def normalize_publication_flag(cls, value: object) -> bool | None:
-        return value if type(value) is bool else None
-
     @field_validator("metadata", mode="before")
     @classmethod
     def accept_complete_metadata(cls, value: object) -> object:
@@ -271,19 +264,6 @@ class OpenAlexClient:
             activity=activity,
         )
 
-    def iter_work_pages(
-        self,
-        source_id: str,
-        from_date: date,
-        to_date: date,
-        *,
-        progress_callback: ProgressCallback | None = None,
-        activity: ActivityUpdate | None = None,
-    ) -> Iterator[dict[str, Any]]:
-        yield from self._iter_work_pages(
-            (source_id,), from_date, to_date, fields=WORK_FIELDS,
-            progress_callback=progress_callback, activity=activity,
-        )
 
     def get_sources_by_issns(
         self, issns: Sequence[str], *, progress_callback: ProgressCallback | None = None,
@@ -433,7 +413,7 @@ class OpenAlexClient:
         url = f"{self.base_url}{path}?{urlencode(params)}"
         headers = {
             "Accept": "application/json",
-            "User-Agent": "literature-monitor/0.6.7",
+            "User-Agent": "literature-monitor/0.6.8",
         }
         if self.api_key is not None:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -552,14 +532,6 @@ def _nonempty_string(value: Any, field: str) -> str:
     return value.strip()
 
 
-def _parse_string_tuple(value: Any, field: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or any(
-        not isinstance(item, str) or not item.strip() for item in value
-    ):
-        raise OpenAlexRecordError(f"invalid {field}")
-    return tuple(item.strip().upper() for item in value)
-
-
 def _optional_host_organization(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -591,50 +563,6 @@ def _optional_homepage(value: Any) -> tuple[str | None, str | None]:
     except ValueError:
         return None, None
     return (url, urlsplit(url).hostname.lower().rstrip(".")) if url else (None, None)
-
-
-def _stable_optional(values: Sequence[str | None]) -> str | None:
-    distinct: list[str] = []
-    for value in values:
-        if value is not None and value not in distinct:
-            distinct.append(value)
-    return distinct[0] if len(distinct) == 1 else None
-
-
-def _resolve_journal_source(
-    client: OpenAlexClient, journal: JournalConfig, *,
-    progress_callback: ProgressCallback | None = None, operation: str | None = None,
-) -> tuple[ResolvedSource | None, tuple[DiscoveryIssue, ...], CoverageStatus | None]:
-    try:
-        evidence = _parse_identity_source(client.get_source_by_issn(
-            journal.issn_l, progress_callback=progress_callback,
-        ), journal.issn_l)
-        outcome = SourceEvidenceResolution(journal.issn_l, evidence, SourceEvidenceStatus.RESOLVED)
-    except OpenAlexError as error:
-        outcome = SourceEvidenceResolution(
-            journal.issn_l, None,
-            SourceEvidenceStatus.NOT_FOUND if isinstance(error, OpenAlexNotFoundError)
-            else SourceEvidenceStatus.INVALID_SOURCE if isinstance(error, OpenAlexRecordError)
-            else SourceEvidenceStatus.REQUEST_FAILED, str(error),
-        )
-    unit = _configured_source_unit(journal, outcome)
-    return unit.source, unit.issues, unit.status
-
-
-def resolve_journal_source(
-    client: OpenAlexClient,
-    journal: JournalConfig,
-    *,
-    progress_callback: ProgressCallback | None = None,
-    operation: str | None = None,
-) -> tuple[ResolvedSource | None, tuple[DiscoveryIssue, ...]]:
-    source, issues, _ = _resolve_journal_source(
-        client,
-        journal,
-        progress_callback=progress_callback,
-        operation=operation,
-    )
-    return source, issues
 
 
 def _parse_publication_date(value: Any) -> date | None:
@@ -735,7 +663,7 @@ def _normalize_work(
         author_payload = author_payload if isinstance(author_payload, dict) else {}
         display_name = author_payload.get("display_name")
         raw_name = authorship.get("raw_author_name")
-        name = display_name if isinstance(display_name, str) and display_name.strip() else raw_name
+        name = raw_name if isinstance(raw_name, str) and raw_name.strip() else display_name
         if not isinstance(name, str) or not name.strip():
             continue
         try:
@@ -765,190 +693,8 @@ def _normalize_work(
                 record_id=work_id,
                 retrieved_at=retrieved_at,
             ),
-            is_published=(
-                payload["primary_location"].get("is_published")
-                if isinstance(payload.get("primary_location"), dict) else None
-            ),
         ),
         (),
-    )
-
-
-def discover_openalex_journal(
-    client: OpenAlexClient,
-    journal: JournalConfig,
-    from_date: date,
-    to_date: date,
-    *,
-    retrieved_at: datetime,
-    progress_callback: ProgressCallback | None = None,
-    unit_index: int = 0,
-) -> OpenAlexDiscoveryUnitResult:
-    """Execute one full configured journal, with a caller-owned phase timestamp."""
-
-    if from_date > to_date:
-        raise ValueError("from_date must not be after to_date")
-    timestamp = retrieved_at or datetime.now(timezone.utc)
-    if timestamp.utcoffset() is None:
-        raise ValueError("retrieved_at must include a timezone")
-    timestamp = timestamp.astimezone(timezone.utc)
-
-    issues: list[DiscoveryIssue] = []
-    unit_records: list[OpenAlexWorkRecord] = []
-    coverage: list[CoverageUnit] = []
-    source, resolution_issues, resolution_status = _resolve_journal_source(
-        client,
-        journal,
-        progress_callback=progress_callback,
-        operation=f"source_resolution:{unit_index}",
-    )
-    issues.extend(resolution_issues)
-    if source is None:
-        coverage.append(
-            CoverageUnit(
-                provider="openalex",
-                component=CoverageComponent.OPENALEX_DISCOVERY,
-                status=resolution_status or CoverageStatus.FAILED,
-                journal=journal.issn_l,
-            )
-        )
-        return OpenAlexDiscoveryUnitResult(
-            journal=journal,
-            coverage=coverage[-1],
-            source=None,
-            records=(),
-            issues=tuple(issues),
-        )
-    activity = ActivityUpdate(
-        kind=ActivityKind.WORKING,
-        source="openalex",
-        operation=f"works_discovery:{unit_index}",
-        label="Discovering OpenAlex works",
-        detail=journal.name,
-        current=0,
-        total=None,
-        unit="work",
-    )
-    completed_pages = 0
-    dropped_record = False
-    try:
-        if progress_callback is None:
-            pages = client.iter_work_pages(source.openalex_id, from_date, to_date)
-        else:
-            pages = client.iter_work_pages(
-                source.openalex_id,
-                from_date,
-                to_date,
-                progress_callback=progress_callback,
-                activity=activity,
-            )
-        for page in pages:
-            completed_pages += 1
-            for payload in page["results"]:
-                record_id = payload.get("id") if isinstance(payload, dict) else None
-                try:
-                    record, warnings = _normalize_work(payload, source, timestamp)
-                except (OpenAlexError, ValidationError) as error:
-                    dropped_record = True
-                    issues.append(
-                        DiscoveryIssue(
-                            severity=IssueSeverity.ERROR,
-                            stage="record_normalization",
-                            journal=journal.name,
-                            record_id=record_id if isinstance(record_id, str) else None,
-                            message=str(error),
-                        )
-                    )
-                    continue
-                if record is not None:
-                    unit_records.append(record)
-                for warning in warnings:
-                    issues.append(
-                        DiscoveryIssue(
-                            severity=IssueSeverity.WARNING,
-                            stage="record_normalization",
-                            journal=journal.name,
-                            record_id=_canonical_openalex_id(record_id, "W"),
-                            message=warning,
-                        )
-                    )
-    except OpenAlexError as error:
-        issues.append(
-            DiscoveryIssue(
-                severity=IssueSeverity.ERROR,
-                stage="work_retrieval",
-                journal=journal.name,
-                message=str(error),
-            )
-        )
-        coverage.append(
-            CoverageUnit(
-                provider="openalex",
-                component=CoverageComponent.OPENALEX_DISCOVERY,
-                status=(
-                    CoverageStatus.PARTIAL
-                    if completed_pages
-                    else CoverageStatus.FAILED
-                ),
-                journal=journal.issn_l,
-            )
-        )
-    else:
-        coverage.append(
-            CoverageUnit(
-                provider="openalex",
-                component=CoverageComponent.OPENALEX_DISCOVERY,
-                status=(
-                    CoverageStatus.PARTIAL
-                    if dropped_record
-                    else CoverageStatus.COMPLETE
-                ),
-                journal=journal.issn_l,
-            )
-        )
-
-    unit_records.sort(key=lambda record: (
-        record.metadata.publication_date or date.max,
-        record.external_ids.openalex or "",
-    ))
-    return OpenAlexDiscoveryUnitResult(
-        journal=journal,
-        coverage=coverage[-1],
-        source=source,
-        records=tuple(unit_records),
-        issues=tuple(issues),
-    )
-
-
-def discover_journals(
-    client: OpenAlexClient,
-    journals: Sequence[JournalConfig],
-    from_date: date,
-    to_date: date,
-    *,
-    retrieved_at: datetime | None = None,
-    progress_callback: ProgressCallback | None = None,
-) -> DiscoveryResult:
-    if from_date > to_date:
-        raise ValueError("from_date must not be after to_date")
-    timestamp = retrieved_at or datetime.now(timezone.utc)
-    if timestamp.utcoffset() is None:
-        raise ValueError("retrieved_at must include a timezone")
-    timestamp = timestamp.astimezone(timezone.utc)
-
-    units = tuple(
-        discover_openalex_journal(
-            client, journal, from_date, to_date, retrieved_at=timestamp,
-            progress_callback=progress_callback, unit_index=index,
-        )
-        for index, journal in enumerate(journals)
-    )
-    return DiscoveryResult(
-        sources=tuple(unit.source for unit in units if unit.source is not None),
-        records=tuple(record for unit in units for record in unit.records),
-        issues=tuple(issue for unit in units for issue in unit.issues),
-        coverage=tuple(unit.coverage for unit in units),
-        units=units,
     )
 
 
@@ -1346,16 +1092,6 @@ def discover_resolved_sources(
         tuple(issue for unit in units for issue in unit.issues),
         tuple(unit.coverage for unit in units), tuple(units),
     )
-
-
-def discover_journals_batched(
-    client: OpenAlexClient, journals: Sequence[JournalConfig], from_date: date, to_date: date, *,
-    retrieved_at: datetime | None = None, progress_callback: ProgressCallback | None = None,
-) -> DiscoveryResult:
-    """Diagnostic convenience entrypoint: resolve once, then retrieve Works."""
-    resolutions = resolve_journal_sources_batched(client, journals, progress_callback=progress_callback)
-    return discover_resolved_sources(client, resolutions, from_date, to_date,
-                                     retrieved_at=retrieved_at, progress_callback=progress_callback)
 
 
 @dataclass(frozen=True)

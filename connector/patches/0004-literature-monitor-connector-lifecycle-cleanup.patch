@@ -1,0 +1,89 @@
+--- a/src/browserExt/background.js
++++ b/src/browserExt/background.js
+@@ -63,11 +63,13 @@
+ 			}
+ 			this._tabInfo = _tabInfo = await Zotero.Utilities.Connector.createMV3PersistentObject('tabInfo', {ignoreKeys: ['selectCallback']});
+ 			setInterval(async () => {
+-				let tabs = await browser.tabs.query({});
+-				for (let tab of tabs) {
+-					// Remove cached tabInfo for tabs that are no longer open every 15 minutes
+-					if (!(tab.id in _tabInfo)) {
+-						_clearInfoForTab(tab.id)
++				// Snapshot before querying so newly created tabs cannot lose their caches.
++				const cachedTabIds = new Set([...Object.keys(_tabInfo), ...Object.keys(_tabInjections)]);
++				const tabs = await browser.tabs.query({});
++				const liveTabIds = new Set(tabs.map(tab => String(tab.id)));
++				for (let tabId of cachedTabIds) {
++					if (!liveTabIds.has(tabId)) {
++						_clearInfoForTab(tabId);
+ 					}
+ 				}
+ 			}, 15 * 60e3);
+--- a/src/browserExt/background/offscreenManager.js
++++ b/src/browserExt/background/offscreenManager.js
+@@ -91,12 +91,14 @@
+ 	async cleanup() {
+ 		const offscreenPage = await this.getOffscreenPage();
+ 		if (!offscreenPage) return false;
+-		let tabs = await browser.tabs.query({status: "complete", windowType: "normal"});
+-		let cleanedUpTabIds = await this.sendMessage('translateCleanup', tabs.map(tab => tab.id));
++		const candidateTabIds = await this.sendMessage('translateCleanupCandidates', []);
++		const tabs = await browser.tabs.query({});
++		const cleanedUpTabIds = await this.sendMessage('translateCleanup', [tabs.map(tab => tab.id), candidateTabIds]);
+ 		if (cleanedUpTabIds.length > 0) {
+ 			Zotero.logError(new Error(`OffscreenManager: manually cleaned up translates that were kept `
+-				+ `alive after onTabRemoved ${JSON.stringif(cleanedUpTabIds)}`));
++				+ `alive after onTabRemoved ${JSON.stringify(cleanedUpTabIds)}`));
+ 		}
++		return cleanedUpTabIds;
+ 	},
+ 	
+ 	async getOffscreenPage() {
+--- a/src/browserExt/offscreen/offscreenTranslate.js
++++ b/src/browserExt/offscreen/offscreenTranslate.js
+@@ -148,7 +148,8 @@
+ 		});
+ 		
+ 		this.addMessageListener('tabClosed', (tabId) => this.onTabClosed(tabId));
+-		this.addMessageListener('translateCleanup', (tabIds) => this.onTranslateCleanup(tabIds));
++		this.addMessageListener('translateCleanupCandidates', () => Object.keys(this.translateInstances));
++		this.addMessageListener('translateCleanup', ([tabIds, candidateTabIds]) => this.onTranslateCleanup(tabIds, candidateTabIds));
+ 
+ 		if (Zotero.isDebug) {
+ 			// Handler for non-web Translator Tester test runs.
+@@ -206,20 +207,22 @@
+ 	},
+ 
+ 	/**
+-	 * 
+-	 * @param tabIds {Array} - Array of tabIds that are alive, the rest should be cleaned up
++	 * Only consider instances present before the live-tab query began.
+ 	 */
+-	onTranslateCleanup(tabIds) {
+-		let deadTranslates = new Set(Object.keys(this.translateInstances))
+-		for (let tabId of tabIds) {
+-			deadTranslates.delete(tabId);
+-		}
+-		if (!deadTranslates.size) return [];
+-		for (let tabId of deadTranslates) {
+-			delete this.translateInstances[tabId];
+-		}
+-		Zotero.debug(`OffscreenTranslate: Cleaning up translates not removed by onTabClosed ${JSON.stringify(Array.from(deadTranslates.keys()))}`, 1);
+-		return Object.keys(deadTranslates);
++	onTranslateCleanup(tabIds, candidateTabIds) {
++		const liveTabIds = new Set(tabIds.map(String));
++		const cleanedUpTabIds = [];
++		for (let candidate of candidateTabIds) {
++			const tabId = String(candidate);
++			if (!liveTabIds.has(tabId) && this.translateInstances[tabId]) {
++				delete this.translateInstances[tabId];
++				cleanedUpTabIds.push(tabId);
++			}
++		}
++		if (cleanedUpTabIds.length) {
++			Zotero.debug(`OffscreenTranslate: Cleaning up translates not removed by onTabClosed ${JSON.stringify(cleanedUpTabIds)}`, 1);
++		}
++		return cleanedUpTabIds;
+ 	}
+ };
+ 

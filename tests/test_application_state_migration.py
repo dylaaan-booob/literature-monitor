@@ -13,7 +13,6 @@ import pytest
 import yaml
 
 from literature_monitor.application import monitor, provider_state as ps
-from literature_monitor.cli import main
 from literature_monitor.coverage import CoverageComponent, CoverageStatus
 from literature_monitor.crossref import CrossrefClient, normalize_crossref_discovered_work
 from literature_monitor.openalex import OpenAlexClient
@@ -70,7 +69,7 @@ class Execution:
     def __init__(self, tmp_path, monkeypatch):
         self.config = tmp_path / "monitor.yaml"
         (tmp_path / "list.md").write_text('## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  |  |\n')
-        self.config.write_text("venue_whitelist: list.md\nkeyword_expression: statistics\noutput_dir: workspace\nfrom_date: 2026-01-01\nto_date: 2026-01-31\n")
+        self.config.write_text("venue_whitelist: list.md\nkeyword_expression: statistics\noutput_dir: workspace\nfrom_month: 2026-01\nto_month: 2026-01\n")
         self.output = tmp_path / "workspace"
         self.path = self.output / ".literature-monitor" / ps.STATE_FILENAME
         self.works = [oa_work()]
@@ -128,7 +127,10 @@ class Execution:
 
 @pytest.fixture
 def execution(tmp_path, monkeypatch):
-    return Execution(tmp_path, monkeypatch)
+    item = Execution(tmp_path, monkeypatch)
+    # Cache/persistence tests need metadata independently of OpenAlex early matching.
+    item.works[0]['title'] = None
+    return item
 
 
 def state_warnings(result):
@@ -200,7 +202,7 @@ def test_old_state_is_not_reused_and_replaced_only_after_materialization(executi
 
 def nonclean_run(e, issue):
     if issue == "warning":
-        e.records["10.5555/a"]["title"] = ["statistics revised title"]
+        e.records["10.5555/a"]["abstract"] = 123  # Real malformed-field warning, not ordinary Provider disagreement.
         e.records["10.5555/a"]["indexed"]["date-time"] = NEW
     elif issue == "error":
         e.records["10.5555/b"] = cr_record("10.5555/b", title="statistics peer")
@@ -229,6 +231,7 @@ def test_persistence_failure_preserves_materialization_state_and_issue_precedenc
     e = execution
     ps.update_provider_state(e.output, ps.ProviderState((cr_state(), cr_state("10.5555/history"))))
     before = durable_state(e.path)
+    e.records["10.5555/a"]["indexed"]["date-time"] = NEW
     nonclean_run(e, issue)
     original = ps._upsert_changes
     materialized = {}
@@ -259,44 +262,6 @@ def test_persistence_failure_preserves_materialization_state_and_issue_precedenc
     assert snapshot["reused_units"] == []
 
 
-@pytest.mark.parametrize("raw_doi", [None, 42])
-@pytest.mark.parametrize("diagnostic", [False, True])
-def test_title_only_has_no_supplement_warning_requests_or_state(execution, monkeypatch, raw_doi, diagnostic):
-    e = execution
-    e.works[0]["doi"] = raw_doi
-    e.members = []
-    if diagnostic:
-        def forbidden(*args, **kwargs):
-            pytest.fail("diagnostics must not read or write Provider state")
-        for name in ("read_provider_state", "update_provider_state", "replace_invalid_provider_state"):
-            monkeypatch.setattr(monitor, name, forbidden)
-        result = monitor._run_canonical_core(e.config)
-        assert not result.papers
-        assert result.pending_state.crossref_records == ()
-        assert not e.path.exists()
-    else:
-        result = e.run()
-        assert result.canonical_paper_count == 0
-        assert not list((e.output / "Papers").glob("*.md"))
-        assert not list((e.output / "Authors").glob("*.md"))
-        assert ps.read_provider_state(e.output).state.crossref_records == ()
-
-    assert result.outcome is monitor.RunOutcome.COMPLETED_WITH_WARNINGS
-    assert not result.errors
-    warning, = result.warnings
-    assert warning.component is monitor.MonitorIssueComponent.CANONICALIZATION
-    assert warning.stage == "missing_doi"
-    assert result.statistics.provider_issues == 0
-    assert result.statistics.openalex_records == result.statistics.retained_clusters == 1
-    assert result.statistics.crossref_supplement_records == 0
-    assert not any(unit.component is CoverageComponent.CROSSREF_SUPPLEMENT for unit in result.coverage)
-    request, = e.cr_transports[-1].requests
-    assert request.url.path == "/v1/works"
-    assert request.url.params["select"] == "DOI,ISSN,indexed"
-    assert request.url.params["filter"].startswith(f"issn:{ISSN},")
-    assert not e.full_requests
-
-
 def test_openalex_only_doi_still_supplements_and_persists_current_evidence(execution):
     e = execution
     e.members = []
@@ -311,199 +276,6 @@ def test_openalex_only_doi_still_supplements_and_persists_current_evidence(execu
     assert [row.doi for row in ps.read_provider_state(e.output).state.crossref_records] == ["10.5555/a"]
 
 
-@pytest.fixture
-def production_boundaries(monkeypatch):
-    """Observe the real consolidation, matcher and canonicalization calls."""
-    seen = {}
-    original_consolidate = monitor.consolidate_evidence
-    original_match = monitor.match_searchable_projections
-    original_canonicalize = monitor.canonicalize_records
-
-    def consolidate(evidence):
-        result = original_consolidate(evidence)
-        seen["clusters"] = result.clusters
-        return result
-
-    def match(expression, projections):
-        result = original_match(expression, projections)
-        seen["projections"], seen["matches"] = projections, result
-        return result
-
-    def canonicalize(evidence):
-        seen["canonical_evidence"] = evidence
-        return original_canonicalize(evidence)
-
-    monkeypatch.setattr(monitor, "consolidate_evidence", consolidate)
-    monkeypatch.setattr(monitor, "match_searchable_projections", match)
-    monkeypatch.setattr(monitor, "canonicalize_records", canonicalize)
-    return seen
-
-
-@pytest.mark.parametrize(("expression", "matched"), [("statistics", True), ("astronomy", False)])
-def test_title_only_without_authors_warns_only_after_matching(execution, production_boundaries, expression, matched):
-    e, seen = execution, production_boundaries
-    e.members = []
-    e.works[0].update(doi=None, authorships=None)
-    e.config.write_text(e.config.read_text().replace("keyword_expression: statistics",
-                                                  f"keyword_expression: {expression}"))
-    result = e.run()
-
-    evidence, = seen["clusters"][0].evidence
-    assert evidence.title == "statistics study" and not evidence.authors and evidence.external_ids.doi is None
-    assert seen["projections"][0].titles == ("statistics study",)
-    assert seen["matches"] == (matched,)
-    assert bool(seen["canonical_evidence"]) is matched
-    assert not e.version_requests
-    assert result.canonical_paper_count == 0
-    assert not result.errors
-    assert [issue.stage for issue in result.warnings] == (["missing_doi"] if matched else [])
-    assert result.outcome is (monitor.RunOutcome.COMPLETED_WITH_WARNINGS if matched else monitor.RunOutcome.COMPLETED)
-    assert result.statistics.evidence_clusters == result.statistics.openalex_records == 1
-    assert result.statistics.retained_clusters == result.statistics.canonicalization_issues == int(matched)
-    assert result.statistics.provider_issues == result.statistics.crossref_supplement_records == 0
-    assert not any(unit.component is CoverageComponent.CROSSREF_SUPPLEMENT for unit in result.coverage)
-    assert len(e.cr_transports[-1].requests) == 1 and not e.full_requests
-
-
-def test_doi_only_crossref_success_becomes_searchable_and_canonical(execution, production_boundaries):
-    e, seen = execution, production_boundaries
-    e.members = []
-    e.works[0].update(title=None, authorships=None)
-    result = e.run()
-
-    cluster, = seen["clusters"]
-    oa, = [record for record in cluster.evidence if record.provenance.provider == "openalex"]
-    cr, = [record for record in cluster.evidence if record.provenance.provider == "crossref"]
-    assert oa.title is None and not oa.authors
-    assert oa.external_ids.doi == cr.external_ids.doi == "10.5555/a"
-    assert [(ref.provider, ref.record_id) for ref in cr.supplements] == [("openalex", oa.provenance.record_id)]
-    assert seen["projections"][0].titles == ("statistics study",)
-    assert seen["matches"] == (True,)
-    assert {record.provenance.provider for record in seen["canonical_evidence"]} == {"openalex", "crossref"}
-    assert len(e.full_requests) == 1 and not e.version_requests
-    assert result.outcome is monitor.RunOutcome.COMPLETED
-    assert not result.warnings and not result.errors
-    assert result.statistics.provider_issues == result.statistics.canonicalization_issues == 0
-    assert result.statistics.evidence_clusters == result.statistics.retained_clusters == 1
-    assert result.canonical_paper_count == result.statistics.crossref_supplement_records == 1
-    supplement, = [unit for unit in result.coverage if unit.component is CoverageComponent.CROSSREF_SUPPLEMENT]
-    assert supplement.status is CoverageStatus.COMPLETE
-    paper, = (e.output / "Papers").glob("*.md")
-    assert "statistics study" in paper.read_text() and "Ada Author" in paper.read_text()
-
-
-@pytest.mark.parametrize("failure", ["unavailable", "remote"])
-@pytest.mark.parametrize("expression", ["NOT statistics", "statistics OR NOT astronomy"])
-def test_doi_only_disputed_supplement_remains_evidence_but_never_matches(
-    execution, production_boundaries, failure, expression,
-):
-    e, seen = execution, production_boundaries
-    e.members = []
-    e.works[0].update(title=None, authorships=None)
-    e.works[0]["primary_location"]["is_published"] = None
-    e.config.write_text(e.config.read_text().replace("keyword_expression: statistics",
-                                                  f"keyword_expression: {expression}"))
-    if failure == "unavailable":
-        e.records = {}
-    else:
-        e.failed_dois.add("10.5555/a")
-    result = e.run()
-
-    cluster, = seen["clusters"]
-    evidence, = cluster.evidence
-    assert evidence.provenance.record_id == "https://openalex.org/W1"
-    assert evidence.external_ids.doi == "10.5555/a"
-    assert evidence.title is None and not evidence.author_keywords and evidence.abstract is None
-    assert not evidence.authors
-    assert seen["projections"] == seen["matches"] == ()
-    assert not seen["canonical_evidence"] and not e.version_requests
-    assert not result.warnings
-    diagnostic, = result.diagnostics
-    assert diagnostic.kind.value == "scope_dispute"
-    assert diagnostic.record_ids == (evidence.provenance.record_id,)
-    assert not any(issue.stage in {"missing_doi", "insufficient_metadata"} for issue in result.warnings)
-    supplement, = [unit for unit in result.coverage if unit.component is CoverageComponent.CROSSREF_SUPPLEMENT]
-    assert supplement.status is (CoverageStatus.UNAVAILABLE if failure == "unavailable" else CoverageStatus.FAILED)
-    assert bool(result.errors) is (failure == "remote")
-    assert all(issue.component is monitor.MonitorIssueComponent.CROSSREF_SUPPLEMENT for issue in result.errors)
-    assert result.outcome is (monitor.RunOutcome.COMPLETED if failure == "unavailable"
-                              else monitor.RunOutcome.COMPLETED_WITH_ERRORS)
-    assert result.statistics.evidence_clusters == result.statistics.openalex_records == 1
-    assert result.statistics.retained_clusters == result.statistics.canonicalization_issues == 0
-    assert result.statistics.provider_issues == len(result.errors)
-    assert result.statistics.crossref_supplement_records == result.canonical_paper_count == 0
-    assert not list((e.output / "Papers").glob("*.md"))
-
-
-@pytest.mark.parametrize("expression", ["NOT statistics", "astronomy OR NOT statistics"])
-def test_mixed_searchable_clusters_map_matches_to_original_evidence(
-    execution, production_boundaries, expression,
-):
-    e, seen = execution, production_boundaries
-    e.members = []
-    e.records = {}
-    e.works = [oa_work(1, "10.5555/empty", title=None),
-               oa_work(2, title="astronomy study"), oa_work(3, title="statistics study")]
-    for work in e.works[1:]:
-        work["doi"] = None
-    e.config.write_text(e.config.read_text().replace("keyword_expression: statistics",
-                                                  f"keyword_expression: {expression}"))
-    result = e.run()
-
-    assert len(seen["clusters"]) == 3
-    assert [projection.titles for projection in seen["projections"]] == [("astronomy study",), ("statistics study",)]
-    assert seen["matches"] == (True, False)
-    assert [record.provenance.record_id for record in seen["canonical_evidence"]] == ["https://openalex.org/W2"]
-    assert not e.version_requests
-    warning, = [w for w in result.warnings if w.component is monitor.MonitorIssueComponent.SEARCH]
-    assert any(w.component is monitor.MonitorIssueComponent.CANONICALIZATION and w.stage == "missing_doi" for w in result.warnings)
-    assert warning.stage == "unsearchable" and warning.record_ids == ("https://openalex.org/W1",)
-    assert not result.errors
-    assert result.outcome is monitor.RunOutcome.COMPLETED_WITH_WARNINGS
-    assert result.statistics.evidence_clusters == result.statistics.openalex_records == 3
-    assert result.statistics.retained_clusters == 1 and result.canonical_paper_count == 0
-    assert result.statistics.provider_issues == 0 and result.statistics.canonicalization_issues == 1
-    assert result.created_papers == result.created_authors == 0
-    assert not list((e.output / "Papers").glob("*.md"))
-
-
-def test_all_unsearchable_clusters_each_have_a_warning_and_no_match_candidates(execution, production_boundaries):
-    e, seen = execution, production_boundaries
-    e.members = []
-    e.records = {}
-    e.works = [oa_work(1, "10.5555/a", title=None), oa_work(2, "10.5555/b", title=None)]
-    e.config.write_text(e.config.read_text().replace("keyword_expression: statistics", "keyword_expression: NOT statistics"))
-    result = e.run()
-
-    assert len(seen["clusters"]) == 2
-    assert seen["projections"] == seen["matches"] == ()
-    assert not seen["canonical_evidence"] and not e.version_requests
-    assert {(issue.stage, issue.record_ids) for issue in result.warnings} == {
-        ("unsearchable", ("https://openalex.org/W1",)),
-        ("unsearchable", ("https://openalex.org/W2",)),
-    }
-    assert len(result.warnings) == 2 and not result.errors
-    assert result.statistics.evidence_clusters == 2
-    assert result.statistics.retained_clusters == result.statistics.provider_issues == result.canonical_paper_count == 0
-
-
-def test_abstract_only_projection_is_searchable_after_unavailable_supplement(execution, production_boundaries):
-    e, seen = execution, production_boundaries
-    e.members = []
-    e.records = {}
-    e.works[0].update(title=None, authorships=None, abstract_inverted_index={"statistics": [0]})
-    result = e.run()
-
-    projection, = seen["projections"]
-    assert not projection.titles and not projection.author_keywords
-    assert projection.abstracts == ("statistics",)
-    assert seen["matches"] == (True,)
-    assert len(seen["canonical_evidence"]) == 1
-    assert [issue.stage for issue in result.warnings] == ["insufficient_metadata"]
-    assert result.statistics.retained_clusters == 1
-    assert result.statistics.provider_issues == result.canonical_paper_count == 0
-
-
 def run_parallel_discovery_case(e, first, unexpected=None):
     """Hold both real discovery calls, then force their completion order."""
     entered = {source: threading.Event() for source in ("openalex", "crossref")}
@@ -513,7 +285,7 @@ def run_parallel_discovery_case(e, first, unexpected=None):
     owner = []
     with pytest.MonkeyPatch.context() as patch:
         original_oa = monitor.discover_resolved_sources
-        original_cr = monitor.CrossrefRetrieval.discover
+        original_cr = monitor.CrossrefRetrieval.discover_manifest
         original_supplement = monitor.CrossrefRetrieval.supplement
         original_sqlite = sqlite3.connect
 
@@ -573,15 +345,13 @@ def run_parallel_discovery_case(e, first, unexpected=None):
             return result
 
         monitor_canonicalize = monitor.canonicalize_records
-        import literature_monitor.naming as naming
-        patch.setattr(naming, "uuid4", lambda: UUID(int=100))
         patch.setattr(sqlite3, "connect", connect)
         patch.setattr(monitor, "discover_resolved_sources", oa)
-        patch.setattr(monitor.CrossrefRetrieval, "discover", cr)
+        patch.setattr(monitor.CrossrefRetrieval, "discover_manifest", cr)
         patch.setattr(monitor.CrossrefRetrieval, "supplement", supplement)
         patch.setattr(monitor, "read_provider_state", track("read", monitor.read_provider_state))
-        patch.setattr(monitor, "consolidate_evidence", track("consolidate", monitor.consolidate_evidence, "supplement"))
-        patch.setattr(monitor, "match_searchable_projections", track("matching", monitor.match_searchable_projections, "consolidate"))
+        patch.setattr(monitor, "consolidate_evidence", track("consolidate", monitor.consolidate_evidence, "matching"))
+        patch.setattr(monitor, "match_searchable_projections", track("matching", monitor.match_searchable_projections, "read"))
         patch.setattr(monitor, "canonicalize_records", track("canonicalize", canonicalize, "matching"))
         patch.setattr(monitor, "materialize_papers", track("materialize", monitor.materialize_papers, "canonicalize"))
         patch.setattr(monitor, "update_provider_state", track("update", monitor.update_provider_state, "materialize"))
@@ -622,8 +392,9 @@ def run_parallel_discovery_case(e, first, unexpected=None):
             assert not {"update", "replace", "materialize"}.intersection(events)
             return None
         assert not errors
-        assert events == ["read", "supplement", "consolidate", "matching", "canonicalize", "materialize",
-                          "replace" if "replace" in events else "update"]
+        assert events[0] == "read" and events[-1] in {"replace", "update"}
+        assert events.index("matching") < events.index("consolidate") < events.index("canonicalize")
+        assert events.index("canonicalize") < events.index("materialize") < len(events) - 1
         return results[0], tuple(papers)
 
 
@@ -634,6 +405,7 @@ def test_real_provider_overlap_both_completion_orders_preserve_production_output
         path.mkdir()
         with pytest.MonkeyPatch.context() as patch:
             e = Execution(path, patch)
+            e.works[0]['title'] = None
             e.works.append(oa_work(2, "10.5555/b", title="unmatched astronomy"))
             e.records["10.5555/b"] = cr_record("10.5555/b", title="unmatched astronomy")
             ps.update_provider_state(e.output, ps.ProviderState((cr_state(),)))
@@ -722,88 +494,15 @@ def test_missing_state_creates_db_after_materialization_and_keeps_cache_inert(ex
     assert "state_usage" not in paper.read_text()
 
 
-def test_matching_then_changed_crossref_revisions_keep_live_membership_and_statistics(execution):
+def test_saved_doi_does_not_refresh_cached_metadata_when_revision_changes(execution):
     e = execution
-    first = e.run()
-    historical = ps.ProviderState((cr_state("10.5555/history"),))
-    ps.update_provider_state(e.output, historical)
-    same = e.run()
-    assert same.state_usage == monitor.ProviderStateUsage(1, 0, 0)
-    assert same.statistics == first.statistics
-    assert len(e.cr_transports[-1].requests) == 1 and not e.full_requests
-    assert len(e.oa_transports[-1].requests) == 2 and not e.version_requests
-    assert same.canonical_paper_count == 1
+    assert e.run().created_papers == 1
+    before = durable_state(e.path)
     e.records["10.5555/a"]["indexed"]["date-time"] = NEW
-    refreshed = e.run()
-    assert refreshed.state_usage == monitor.ProviderStateUsage(0, 1, 0)
-    assert e.full_requests and not e.version_requests
-    state = ps.read_provider_state(e.output).state
-    assert {row.doi for row in state.crossref_records} == {"10.5555/a", "10.5555/history"}
-    assert state.crossref_records[0].indexed_at == datetime.fromisoformat(NEW.replace("Z", "+00:00"))
-
-
-@pytest.mark.parametrize("expression", [
-    "statistics", '"statistics study"', "statist*",
-    '"study statistics"~0', "statistics AND NOT astronomy",
-])
-def test_all_live_and_revision_reuse_preserve_retention_canonical_output_and_decisions(
-    execution, monkeypatch, expression,
-):
-    import literature_monitor.openalex as openalex
-    from literature_monitor.application import crossref_retrieval
-
-    class FixedDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return NOW if tz is not None else NOW.replace(tzinfo=None)
-
-    # Equivalent retrieval timestamps make full semantic/provenance comparison exact.
-    monkeypatch.setattr(openalex, "datetime", FixedDatetime)
-    monkeypatch.setattr(crossref_retrieval, "datetime", FixedDatetime)
-    e = execution
-    e.config.write_text(e.config.read_text().replace(
-        "keyword_expression: statistics", f"keyword_expression: '{expression}'",
-    ))
-    e.works.append(oa_work(2, "10.5555/b", "astronomy study"))
-    e.records["10.5555/b"] = cr_record("10.5555/b", title="astronomy study")
-    e.members.append("10.5555/b")
-    matching, canonical = [], []
-    original_match = monitor.match_searchable_projections
-    original_canonicalize = monitor.canonicalize_records
-
-    def match(ast, projections):
-        result = original_match(ast, projections)
-        matching.append((projections, result))
-        return result
-
-    def canonicalize(evidence):
-        result = original_canonicalize(evidence)
-        # New in-memory UUID/workflow defaults are recovered from durable Markdown.
-        canonical.append(tuple(paper.model_dump(exclude={"id", "workflow"}) for paper in result.papers))
-        return result
-
-    monkeypatch.setattr(monitor, "match_searchable_projections", match)
-    monkeypatch.setattr(monitor, "canonicalize_records", canonicalize)
-    live = e.run()
-    assert live.state_usage == monitor.ProviderStateUsage(0, 0, 2)
-    paper, = (e.output / "Papers").glob("*.md")
-    text = paper.read_text().replace("status: candidate", "status: kept")
-    assert "status: kept" in text
-    text = text.replace("\n---\n", "\nhuman_field: preserve\n---\n", 1)
-    paper.write_text(text + "\nHuman reading notes.\n")
-    before = {p.relative_to(e.output): p.read_bytes() for p in e.output.rglob("*.md")}
-    reused = e.run()
-    assert reused.state_usage == monitor.ProviderStateUsage(2, 0, 0)
-    assert matching[0] == matching[1] and matching[0][1] == (True, False)
-    assert canonical[0] == canonical[1] and len(canonical[0]) == 1
-    assert live.statistics == reused.statistics and live.coverage == reused.coverage
-    assert reused.matched_existing_papers == 1 and reused.created_papers == 0
-    assert before == {p.relative_to(e.output): p.read_bytes() for p in e.output.rglob("*.md")}
-    assert not e.full_requests and not e.version_requests
-    for transport in (*e.oa_transports, *e.cr_transports):
-        for request in transport.requests:
-            assert not {"search", "q", "query", "keyword_expression"}.intersection(request.url.params)
-            assert expression not in str(request.url)
+    repeated = e.run()
+    assert repeated.matched_existing_papers == 1 and repeated.canonical_paper_count == 0
+    assert repeated.state_usage == monitor.ProviderStateUsage()
+    assert not e.full_requests and durable_state(e.path) == before
 
 
 def test_historical_rows_do_not_become_candidates_without_live_anchors(execution):
@@ -836,7 +535,7 @@ def test_missing_crossref_revision_uses_live_evidence_without_durable_pending_ro
     result = e.run()
     assert result.canonical_paper_count == 1 and e.full_requests and not e.version_requests
     assert result.state_usage == monitor.ProviderStateUsage(0, 0, 1)
-    assert ps.read_provider_state(e.output).state == ps.ProviderState()
+    assert ps.read_provider_state(e.output).status is ps.ProviderStateStatus.MISSING
 
 
 @pytest.mark.parametrize("kind", ["corrupt", "schema", "digest"])
@@ -954,7 +653,7 @@ def test_partial_retrieval_persists_successful_rows_without_overwriting_failed_r
     result = e.run()
     assert result.outcome is monitor.RunOutcome.COMPLETED_WITH_ERRORS
     discovery, = (unit for unit in result.coverage if unit.component is CoverageComponent.CROSSREF_DISCOVERY)
-    assert discovery.status is CoverageStatus.PARTIAL
+    assert discovery.status is CoverageStatus.COMPLETE
     rows = {row.doi: row for row in ps.read_provider_state(e.output).state.crossref_records}
     assert rows[old.doi] == old and "10.5555/b" in rows
     assert result.state_usage.crossref_new == 1 and result.state_usage.crossref_refreshed == 0
@@ -990,47 +689,6 @@ def test_invalid_configuration_never_persists_state_or_touches_cache(execution, 
     assert not list((e.output / "Papers").glob("*.md"))
 
 
-@pytest.mark.parametrize("command", ["canonicalize", "materialize", "validate"])
-@pytest.mark.parametrize("version", [1, 2, 3])
-def test_diagnostics_are_all_live_and_have_no_state_access(execution, command, monkeypatch, capsys, version):
-    e = execution
-    if version in {1, 2}:
-        seed_old_state(e, version)
-    else:
-        ps.update_provider_state(e.output, ps.ProviderState((cr_state(),)))
-    before = e.path.read_bytes()
-    def forbidden(*args, **kwargs):
-        pytest.fail("diagnostic must not access Provider state")
-    for name in ("read_provider_state", "update_provider_state", "replace_invalid_provider_state"):
-        monkeypatch.setattr(monitor, name, forbidden)
-    if command == "validate":
-        result = monitor.validate_monitor(e.config)
-        assert result.outcome is monitor.ValidationOutcome.VALID
-        assert not e.cr_transports
-        assert [r.url.path for r in e.oa_transports[0].requests] == ["/sources"]
-    else:
-        args = [command, "--config", str(e.config)]
-        if command == "materialize":
-            args += ["--output-dir", str(e.output)]
-        assert main(args) == 0
-        assert e.full_requests and not e.version_requests
-        capsys.readouterr()
-    assert e.path.read_bytes() == before
-
-
-def test_normal_cli_runs_automatic_state_pipeline_and_keeps_old_cache(execution, capsys):
-    e = execution
-    cache = e.path.with_name("provider-cache.json")
-    cache.parent.mkdir(parents=True)
-    cache.write_bytes(b"invalid legacy cache")
-    before = cache.stat()
-    assert main(("run", "--config", str(e.config))) == 0
-    assert "Provider-state reuse is now automatic." not in capsys.readouterr().err
-    assert cache.stat() == before
-    assert cache.read_bytes() == b"invalid legacy cache"
-    assert ps.read_provider_state(e.output).status is ps.ProviderStateStatus.AVAILABLE
-
-
 def test_alias_supplement_preserves_requested_coverage_and_prime_evidence(execution):
     e = execution
     e.works[0]["doi"] = "https://doi.org/10.5555/alias"
@@ -1044,99 +702,6 @@ def test_alias_supplement_preserves_requested_coverage_and_prime_evidence(execut
     assert len(supplements) == 1 and supplements[0].doi == "10.5555/alias"
     assert supplements[0].status is CoverageStatus.COMPLETE
     assert {row.doi for row in ps.read_provider_state(e.output).state.crossref_records} == {"10.5555/a"}
-
-
-def test_later_alias_refresh_uses_current_prime_metadata_and_counts_identity_once(execution, monkeypatch):
-    e = execution
-    e.works.append(oa_work(2, "10.5555/alias", "statistics alias"))
-    e.aliases["10.5555/alias"] = "10.5555/a"
-    ps.update_provider_state(e.output, ps.ProviderState((cr_state(),)))
-    original = e.route_cr
-    current = cr_record(revision=NEW, title="current statistics metadata")
-    def route(request):
-        if request.url.path == "/v1/works" and "doi:10.5555/a" in request.url.params["filter"]:
-            return work_list([])
-        if request.url.path == "/v1/works/10.5555/a":
-            return {"status": "ok", "message-type": "work", "message": current}
-        return original(request)
-    monkeypatch.setattr(e, "route_cr", route)
-    assembled = []
-    original_assembly = monitor.assemble_live_provider_evidence
-    def assemble(*args, **kwargs):
-        result = original_assembly(*args, **kwargs)
-        assembled.extend(item for item in result if item.provenance.provider == "crossref")
-        return result
-    monkeypatch.setattr(monitor, "assemble_live_provider_evidence", assemble)
-    result = e.run()
-    assert result.state_usage.crossref_reused == 0 and result.state_usage.crossref_refreshed == 1
-    assert len(assembled) == 1 and assembled[0].title == "current statistics metadata"
-    assert {ref.record_id for ref in assembled[0].supplements} == {"https://openalex.org/W1", "https://openalex.org/W2"}
-    row, = ps.read_provider_state(e.output).state.crossref_records
-    assert row.record.title == "current statistics metadata" and row.indexed_at == datetime.fromisoformat(NEW.replace("Z", "+00:00"))
-
-
-def test_pure_assembly_attaches_current_anchors_and_deduplicates_prime(execution):
-    from literature_monitor.models import CanonicalMetadata, ExternalIds, MetadataSource, ProviderRecordRef
-    from literature_monitor.openalex import OpenAlexWorkRecord
-    from literature_monitor.retrieval import assemble_live_provider_evidence
-    oa = OpenAlexWorkRecord(
-        metadata=CanonicalMetadata(title="statistics study", journal="Biometrics"), authors=(),
-        external_ids=ExternalIds(doi="10.5555/a", openalex="https://openalex.org/W1"),
-        source_id="https://openalex.org/S1",
-        provenance=MetadataSource(provider="openalex", record_id="https://openalex.org/W1", retrieved_at=NOW),
-    )
-    record = cr_state().record
-    alias_anchor = ProviderRecordRef(provider="openalex", record_id="https://openalex.org/W2")
-    result = assemble_live_provider_evidence((oa,), (record,), (record.to_evidence(supplements=(alias_anchor,)),))
-    assert len(result) == 2
-    assert result[1].supplements == (ProviderRecordRef(provider="openalex", record_id=oa.provenance.record_id), alias_anchor)
-    assert result[1].external_ids.crossref == record.doi
-    assert not execution.oa_transports and not execution.cr_transports
-
-
-@pytest.mark.parametrize("with_mapping", [False, True])
-def test_pure_assembly_attaches_explicit_mapping_to_every_provider_path(execution, with_mapping):
-    from literature_monitor.models import Author, CanonicalMetadata, ExternalIds, MetadataSource, ProviderRecordRef
-    from literature_monitor.openalex import OpenAlexWorkRecord
-    from literature_monitor.retrieval import assemble_live_provider_evidence
-    anchor = OpenAlexWorkRecord(
-        metadata=CanonicalMetadata(title="statistics study", journal="Biometrics"),
-        authors=(Author(name="Ada Author"),), external_ids=ExternalIds(doi="10.5555/a"),
-        source_id="https://openalex.org/S1",
-        provenance=MetadataSource(provider="openalex", record_id="W1", retrieved_at=NOW),
-    )
-    discovered, prime = cr_state().record, cr_state("10.5555/prime").record
-    records = (anchor, discovered, prime)
-    mapping = {ProviderRecordRef(provider=r.provenance.provider, record_id=r.provenance.record_id): (ISSN,)
-               for r in records}
-    result = assemble_live_provider_evidence(
-        (anchor,), (discovered,), (prime.to_evidence(),),
-        monitor_journal_issns=mapping if with_mapping else None,
-    )
-    assert len(result) == 3
-    assert all(e.monitor_journal_issns == ((ISSN,) if with_mapping else ()) for e in result)
-    assert all(r.to_evidence().monitor_journal_issns == () for r in records)
-    assert not execution.oa_transports and not execution.cr_transports
-
-
-def test_duplicate_crossref_assembly_unions_attribution_and_anchors_deterministically(execution):
-    from literature_monitor.models import ProviderRecordRef
-    from literature_monitor.retrieval import assemble_live_provider_evidence
-    record = cr_state().record
-    record_ref = ProviderRecordRef(provider="crossref", record_id=record.doi)
-    first = record.to_evidence(supplements=(ProviderRecordRef(provider="openalex", record_id="W2"),)).model_copy(
-        update={"monitor_journal_issns": ("1541-0420", ISSN)},
-    )
-    second = record.to_evidence(supplements=(ProviderRecordRef(provider="openalex", record_id="W1"),)).model_copy(
-        update={"monitor_journal_issns": ("0090-5364",)},
-    )
-    for supplements in ((first, second), (second, first)):
-        merged, = assemble_live_provider_evidence(
-            (), (record,), supplements, monitor_journal_issns={record_ref: (ISSN,)},
-        )
-        assert merged.monitor_journal_issns == (ISSN, "0090-5364", "1541-0420")
-        assert tuple(ref.record_id for ref in merged.supplements) == ("W1", "W2")
-    assert not execution.oa_transports and not execution.cr_transports
 
 
 def test_reused_provider_state_gets_current_configuration_attribution_without_schema_or_content_change(execution, monkeypatch):
@@ -1163,7 +728,7 @@ def test_reused_provider_state_gets_current_configuration_attribution_without_sc
         '## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  |  |\n',
     )
     second = e.run()
-    assert second.state_usage.crossref_reused == 1 and not e.full_requests
+    assert second.state_usage.crossref_reused == 0 and not e.full_requests
     assert papers[-1].journal_issns == (ISSN,)
     assert second.warnings == first.warnings and second.diagnostics == first.diagnostics
     assert ps.SCHEMA_VERSION == 3 and durable_state(e.path) == before

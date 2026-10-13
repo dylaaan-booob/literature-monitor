@@ -19,9 +19,10 @@
     if (!editor) return "";
     const value = (row, name) => row.querySelector('[name="' + name + '"]')?.value || "";
     const ordinary = ["name", "keyword_expression", "output_dir", "log_level",
-      "from_date", "to_date", "window_days", "institution_name",
+      "from_month", "to_month", "institution_name",
       "institution_idp_entity_id", "legacy_journals", "monitor_revision_digest", "journal_revision_digest"]
       .map((name) => value(editor, name));
+    ordinary.push(editor.querySelector('[name="automatic_attribute_release_consent"]')?.checked === true);
     const journal = journalRows(editor).map((row) => ({
       order: value(row, "journal_order"), name: value(row, "journal_name"),
       issn: value(row, "journal_issns"), publisher: value(row, "journal_publisher_id"),
@@ -910,6 +911,10 @@
   });
 
   document.addEventListener("click", (event) => {
+    if (event.target.closest("[data-enrichment-action]")) {
+      void handleEnrichmentClick(event);
+      return;
+    }
     const target = event.target;
     if (!(target instanceof Element)) {
       return;
@@ -1206,6 +1211,7 @@
   document.body.addEventListener("htmx:sendError", showImportError);
 
   document.body.addEventListener("htmx:afterSwap", (event) => {
+    syncEnrichmentPanel();
     const swapped = document.getElementById(event.detail.target.id) || event.detail.target;
     swapped.querySelectorAll("[data-disclosure-key]").forEach(panel => {
       if (disclosureStates.has(panel.dataset.disclosureKey))
@@ -1258,4 +1264,132 @@
   syncRunAnnouncement();
   syncWorkspaceSelection();
   sizeWorkspacePanes();
+  let enrichmentOperation = null;
+  let enrichmentTimer = null;
+
+  function abandonEnrichment(operation) {
+    if (!operation?.requestID) return;
+    void fetch(`${operation.url}/cancel`, {
+      method: "POST", headers: {"Content-Type": "application/json"}, keepalive: true,
+      body: JSON.stringify({csrf_token: operation.csrf, request_id: operation.requestID}),
+    }).catch(() => {});
+  }
+
+  function renderEnrichment(operation, state) {
+    if (enrichmentOperation !== operation || !operation.panel.isConnected) return;
+    const panel = operation.panel;
+    panel.querySelector("[data-enrichment-message]").textContent = state.error || state.message ||
+      (!state.connector_online ? "Literature Monitor Connector is offline" :
+        !state.supported ? "Update the Literature Monitor Connector to enrich Papers" : "");
+    const preview = panel.querySelector("[data-enrichment-preview]");
+    preview.hidden = state.phase !== "Preview";
+    const abstract = panel.querySelector("[data-enrichment-abstract]");
+    abstract.textContent = state.abstract || "";
+    abstract.hidden = !state.abstract;
+    panel.querySelector("[data-enrichment-abstract-label]").hidden = !state.abstract;
+    const date = panel.querySelector("[data-enrichment-date]");
+    date.textContent = state.publication_date ? `Publication date: ${state.date_raw} → ${state.publication_date}` : "";
+    date.hidden = !state.publication_date;
+    const authors = panel.querySelector("[data-enrichment-authors]");
+    authors.textContent = state.authors?.length ? `Authors: ${state.authors.join("; ")}` : "";
+    authors.hidden = !state.authors?.length;
+    if (state.missing_authors !== undefined) operation.missingAuthors = state.missing_authors;
+    if (state.missing_abstract !== undefined) operation.missingAbstract = state.missing_abstract;
+    if (state.missing_date !== undefined) operation.missingDate = state.missing_date;
+    panel.querySelector('[data-enrichment-action="start"]').hidden = ["Retrieving", "Preview", "Saving"].includes(state.phase)
+      || !(operation.missingAbstract || operation.missingDate || operation.missingAuthors);
+    panel.querySelector('[data-enrichment-action="start"]').disabled = operation.pending || !state.connector_online || !state.supported;
+    panel.querySelector('[data-enrichment-action="save"]').hidden = state.phase !== "Preview";
+    panel.querySelector('[data-enrichment-action="save"]').disabled = operation.pending;
+    panel.querySelector('[data-enrichment-action="cancel"]').hidden = !["Retrieving", "Preview"].includes(state.phase);
+    operation.phase = state.phase;
+    operation.online = state.connector_online;
+    operation.supported = state.supported;
+  }
+
+  async function pollEnrichment() {
+    const operation = enrichmentOperation;
+    if (!operation || operation.pending || !operation.panel.isConnected) return;
+    const requestID = operation.requestID;
+    const phase = operation.phase;
+    try {
+      const response = await fetch(`${operation.url}/state${operation.requestID ? `?request_id=${encodeURIComponent(operation.requestID)}` : ""}`);
+      if (!response.ok) throw new Error("Cannot read Paper enrichment state");
+      const state = await response.json();
+      if (operation.pending || operation.requestID !== requestID || operation.phase !== phase) return;
+      if (!operation.requestID) { state.phase = "Idle"; state.abstract = null; state.publication_date = null; state.authors = null; state.message = ""; }
+      renderEnrichment(operation, state);
+    } catch (error) {
+      if (enrichmentOperation === operation) operation.panel.querySelector("[data-enrichment-message]").textContent = error.message;
+    }
+  }
+
+  function syncEnrichmentPanel() {
+    const panel = document.querySelector("[data-paper-enrichment]");
+    if ((!panel && !enrichmentOperation) || panel === enrichmentOperation?.panel) return;
+    const old = enrichmentOperation;
+    if (old && panel?.dataset.enrichmentPaperId === old.paperID) {
+      old.panel = panel;
+      void pollEnrichment();
+      return;
+    }
+    abandonEnrichment(old);
+    clearInterval(enrichmentTimer);
+    enrichmentOperation = panel ? {panel, paperID: panel.dataset.enrichmentPaperId, csrf: panel.dataset.csrf,
+      url: `/api/papers/${panel.dataset.enrichmentPaperId}/enrichment`, requestID: null, pending: false,
+      missingAbstract: panel.dataset.missingAbstract === "true", missingDate: panel.dataset.missingDate === "true", missingAuthors: panel.dataset.missingAuthors === "true"} : null;
+    if (panel) { void pollEnrichment(); enrichmentTimer = setInterval(pollEnrichment, 1000); }
+  }
+
+  async function handleEnrichmentClick(event) {
+    const button = event.target.closest("[data-enrichment-action]");
+    const operation = enrichmentOperation;
+    if (!button || !operation || operation.pending) return;
+    const action = button.dataset.enrichmentAction;
+    operation.pending = true;
+    operation.panel.querySelectorAll("button").forEach(item => { item.disabled = true; });
+    try {
+      const response = await fetch(`${operation.url}/${action}`, {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({csrf_token: operation.csrf, request_id: operation.requestID}),
+      });
+      const state = await response.json();
+      if (!response.ok) throw new Error(state.error || "Enrichment operation was rejected");
+      if (enrichmentOperation !== operation || !operation.panel.isConnected) {
+        if (action === "start") abandonEnrichment({...operation, requestID: state.request_id});
+        return;
+      }
+      operation.pending = false;
+      if (action === "cancel") {
+        operation.requestID = null;
+        await pollEnrichment();
+      } else {
+        operation.requestID = state.request_id;
+        renderEnrichment(operation, state);
+        if (state.phase === "Completed") {
+          const detail = operation.panel.closest("#paper-detail");
+          const label = Array.from(detail.querySelectorAll("dt")).find(item => item.textContent === "Abstract");
+          if (label?.nextElementSibling && state.saved?.abstract !== undefined) label.nextElementSibling.textContent = state.saved.abstract;
+          const authors = detail.querySelector("[data-paper-authors]");
+          if (authors && state.saved?.authors) authors.textContent = state.saved.authors.join(", ");
+          const date = detail.querySelector("[data-paper-publication-date]");
+          if (date && state.saved?.publication_date) date.textContent = state.saved.publication_date;
+          if (state.message === "Enrichment saved") {
+            window.htmx?.ajax("GET", `/fragments/workspace?view=${detail.dataset.activeView}&paper=${operation.paperID}`,
+              {target: "#workspace-root", swap: "outerHTML"});
+          }
+        }
+      }
+    } catch (error) {
+      if (enrichmentOperation === operation) operation.panel.querySelector("[data-enrichment-message]").textContent = error.message;
+    } finally {
+      operation.pending = false;
+      if (enrichmentOperation === operation) {
+        operation.panel.querySelectorAll("button").forEach(item => { item.disabled = false; });
+        operation.panel.querySelector('[data-enrichment-action="start"]').disabled = !operation.online || !operation.supported;
+      }
+    }
+  }
+  window.addEventListener("pagehide", () => abandonEnrichment(enrichmentOperation));
+  syncEnrichmentPanel();
 })();

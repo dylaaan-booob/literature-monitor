@@ -151,20 +151,14 @@
     </div>
 
     <fieldset>
-      <legend>Date policy</legend>
-      <p class="muted">Use a rolling window, fixed from/to dates, or one bound plus a window. Runtime validation is authoritative.</p>
+      <legend>Publication months</legend>
+      <p class="muted">Select one month or a continuous range. Save before running.</p>
       <div class="form-grid date-grid">
-        <label>
-          From
-          <input type="date" name="from_date" value="{{ settings_form.from_date }}">
+        <label>Start month
+          <input type="month" name="from_month" value="{{ settings_form.from_month }}" required>
         </label>
-        <label>
-          To
-          <input type="date" name="to_date" value="{{ settings_form.to_date }}">
-        </label>
-        <label>
-          Window days
-          <input type="number" name="window_days" value="{{ settings_form.window_days }}">
+        <label>End month
+          <input type="month" name="to_month" value="{{ settings_form.to_month }}" required>
         </label>
       </div>
     </fieldset>
@@ -180,6 +174,11 @@
           <input name="institution_idp_entity_id" value="{{ settings_form.institution_idp_entity_id }}" maxlength="512" autocomplete="off" spellcheck="false" aria-describedby="institution-help" placeholder="Public HTTPS entity ID or URN">
         </label>
       </div>
+      <label>
+        <input type="checkbox" name="automatic_attribute_release_consent" value="1" aria-describedby="attribute-consent-help"{% if settings_form.automatic_attribute_release_consent %} checked{% endif %}>
+        Automatic Attribute Release Consent
+      </label>
+      <p class="muted" id="attribute-consent-help">During CARSI Preparation, automatically select Global Consent on recognized pages of this HTTPS IdP. This may release personal attributes such as your name, email and institution identifiers to subsequent services, not just this database; the school determines the actual attributes. Turning this off does not revoke consent already stored by your school. Save applies to the next Preparation; Cancel stops the current task. Other origins and URN identifiers remain manual.</p>
       <p class="muted" id="institution-help">Leave these blank if unknown. Use public identifiers only, never account details, passwords, tokens or session data. An IdP entity ID identifies your institution's identity provider; it is not a login link.</p>
       <p class="muted">Configured institution ≠ authenticated session ≠ full-text entitlement. These settings do not prove IdP or service login, access to a Paper, or a saved Zotero PDF.</p>
       <p class="muted">Automatic federated access is unavailable until a service route is verified. Use the Paper's service page or your manual Publisher Access URL; existing OpenAthens host associations remain independent.</p>

@@ -48,8 +48,8 @@ def test_stage_order_and_indices_are_stable() -> None:
     assert PROGRESS_STAGES == (
         ProgressStage.CHECKING_MONITOR,
         ProgressStage.DISCOVERING_PAPERS,
-        ProgressStage.COMBINING_METADATA,
         ProgressStage.MATCHING_LITERATURE,
+        ProgressStage.COMBINING_METADATA,
         ProgressStage.UPDATING_WORKSPACE,
     )
 

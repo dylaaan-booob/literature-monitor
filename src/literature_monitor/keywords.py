@@ -37,11 +37,6 @@ class Proximity:
 
 
 @dataclass(frozen=True)
-class Not:
-    operand: KeywordExpression
-
-
-@dataclass(frozen=True)
 class And:
     left: KeywordExpression
     right: KeywordExpression
@@ -53,7 +48,7 @@ class Or:
     right: KeywordExpression
 
 
-KeywordExpression: TypeAlias = Term | Phrase | Prefix | Proximity | Not | And | Or
+KeywordExpression: TypeAlias = Term | Phrase | Prefix | Proximity | And | Or
 
 
 class _TokenKind(Enum):
@@ -63,7 +58,6 @@ class _TokenKind(Enum):
     PROXIMITY = auto()
     AND = auto()
     OR = auto()
-    NOT = auto()
     LPAREN = auto()
     RPAREN = auto()
     END = auto()
@@ -80,7 +74,6 @@ class _Token:
 _OPERATORS = {
     "and": _TokenKind.AND,
     "or": _TokenKind.OR,
-    "not": _TokenKind.NOT,
 }
 
 _WHITESPACE_PATTERN = re.compile(r"\s+")
@@ -213,6 +206,8 @@ def _tokenize(text: str) -> tuple[_Token, ...]:
         if "*" in value:
             tokens.append(_prefix_token(value, start))
             continue
+        if value.casefold() == "not":
+            raise KeywordSyntaxError("NOT operator is no longer supported; edit the keyword expression", start)
         kind = _OPERATORS.get(value.casefold(), _TokenKind.WORD)
         tokens.append(_Token(kind, value, start))
 
@@ -253,17 +248,11 @@ class _Parser:
         return expression
 
     def parse_and(self) -> KeywordExpression:
-        expression = self.parse_unary()
+        expression = self.parse_primary()
         while self.current.kind is _TokenKind.AND:
             self.advance()
-            expression = And(expression, self.parse_unary())
+            expression = And(expression, self.parse_primary())
         return expression
-
-    def parse_unary(self) -> KeywordExpression:
-        if self.current.kind is _TokenKind.NOT:
-            self.advance()
-            return Not(self.parse_unary())
-        return self.parse_primary()
 
     def parse_primary(self) -> KeywordExpression:
         token = self.current

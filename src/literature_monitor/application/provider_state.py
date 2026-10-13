@@ -314,6 +314,8 @@ def _publish_fresh(output_dir: Path, state: ProviderState, *, replace: bool) -> 
 
 def update_provider_state(output_dir: Path, changes: ProviderState) -> None:
     """One transaction/upsert set; missing DB creation is published atomically."""
+    if not changes.crossref_records:
+        return
     directory = metadata_directory(output_dir, create=False)
     if directory is None or not _regular_file(directory / STATE_FILENAME):
         _publish_fresh(output_dir, changes, replace=False)

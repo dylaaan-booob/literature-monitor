@@ -1,0 +1,98 @@
+--- a/src/common/inject/inject.jsx
++++ b/src/common/inject/inject.jsx
+@@ -118,6 +118,9 @@
+ 		Zotero.Messaging.addMessageListener("translate", function(data) {
+ 			if (data.shift() !== instanceID) return;
+ 			return Zotero.PageSaving.onTranslate(...data);
++		});
++		Zotero.Messaging.addMessageListener("literatureMonitorEnrich", function(data) {
++			return Zotero.PageSaving.enrich(...data);
+ 		});
+ 		// add a listener to save as webpage when translators unavailable
+ 		Zotero.Messaging.addMessageListener("saveAsWebpage", function(data) {
+--- a/src/common/inject/pageSaving.js
++++ b/src/common/inject/pageSaving.js
+@@ -719,3 +719,21 @@
+ }
+ 
+ Zotero.PageSaving = PageSaving;
++
++
++// Separate read-only entrypoint: never initialize a save session or call onTranslate.
++Zotero.PageSaving.enrich = async function(context) {
++	if (!Zotero.isManifestV3 || window.top !== window) throw new Error("Chrome MV3 top document required");
++	if (!context || Date.now() >= context.expiresAt) throw new Error("Enrichment request expired");
++	const translator = this.translators.find(t => t.translatorID === context.translatorID);
++	if (!translator || ["multiple", "webpage", "attachment", "note"].includes(translator.itemType)) {
++		throw new Error("Single literature Translator required");
++	}
++	const translate = await this._initTranslate(translator.itemType);
++	if (Date.now() >= context.expiresAt) throw new Error("Enrichment request expired");
++	const items = await translate.sendMessage("Translate.literatureMonitorEnrich", [
++		translator.serialize(Zotero.Translator.TRANSLATOR_PASSING_PROPERTIES)
++	]);
++	if (Date.now() >= context.expiresAt) throw new Error("Enrichment request expired");
++	return {items};
++};
+--- a/src/browserExt/offscreen/offscreenTranslate.js
++++ b/src/browserExt/offscreen/offscreenTranslate.js
+@@ -71,6 +71,11 @@
+ 			});
+ 		}
+ 		
++		this.addMessageListener('Translate.literatureMonitorEnrich', async (translate, [translator]) => {
++			const items = await literatureMonitorTranslateReadOnly(translate, translator);
++			return items.map(item => ({item_type: item.itemType, doi: item.DOI, abstract: item.abstractNote,
++				creators: item.creators, date: item.date, date_parts: literatureMonitorDateParts(item.date)}));
++		});
+ 		// No-op (but the addMessageListener() initializes a translate if needed)
+ 		this.addMessageListener('Translate.new', () => 0);
+ 		// Not part of translate API, but we need to be able to return this to translate
+@@ -223,4 +228,45 @@
+ Zotero.Translate.ItemSaver.prototype.saveItems = async function (jsonItems) {
+ 	this.items = (this.items || []).concat(jsonItems);
+ 	return jsonItems
+-}
+\ No newline at end of file
++}
++
++// Guard the actual sandbox instance, after translator loading, before RPC dispatch.
++async function literatureMonitorTranslateReadOnly(translate, metadata) {
++	const translator = new Zotero.Translator(metadata);
++	if (metadata.runMode !== Zotero.Translator.RUN_MODE_IN_BROWSER || translator.runMode !== Zotero.Translator.RUN_MODE_IN_BROWSER) {
++		throw new Error("Paper enrichment requires a browser Translator");
++	}
++	const loaded = translate._translateTranslatorLoaded;
++	translate._translateTranslatorLoaded = function() {
++		if (this.translator[0].runMode !== Zotero.Translator.RUN_MODE_IN_BROWSER) {
++			throw new Error("Remote translation is forbidden for Paper enrichment");
++		}
++		return Zotero.Translate.Base.prototype._translateTranslatorLoaded.call(this);
++	};
++	try {
++		await translate.setTranslator(translator);
++		translate.setHandler('select', () => { throw new Error("Multiple Items are not supported"); });
++		return await translate.translate({libraryID: false, saveAttachments: false});
++	} finally {
++		translate._translateTranslatorLoaded = loaded;
++	}
++}
++
++// Keep absent components absent. Only the Python writer supplies compatibility 01s.
++function literatureMonitorDateParts(value) {
++	if (typeof value !== "string" || !value.trim()) return null;
++	try {
++		const parsed = Zotero.Date.strToDate(value);
++		if (!/^\d{1,4}$/.test(String(parsed.year)) || parsed.part?.trim()) return null;
++		if (parsed.order.includes("m") && !Number.isInteger(parsed.month)) return null;
++		if (parsed.order.includes("d") && (!Number.isInteger(parsed.day) || parsed.day < 1)) return null;
++		// strToDate swaps oversized numeric months; never repair an explicit year-first date.
++		const numeric = value.trim().match(/^\d{4}[-/.](\d{1,2})(?:[-/.](\d{1,2}))?$/);
++		if (numeric && (Number(numeric[1]) !== parsed.month + 1
++			|| (numeric[2] !== undefined && Number(numeric[2]) !== parsed.day))) return null;
++		const parts = {year: Number(parsed.year)};
++		if (Number.isInteger(parsed.month)) parts.month = parsed.month + 1;
++		if (Number.isInteger(parsed.day)) parts.day = parsed.day;
++		return parts;
++	} catch (_) { return null; }
++}

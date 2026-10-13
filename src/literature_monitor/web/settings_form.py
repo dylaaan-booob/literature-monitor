@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date
 from itertools import zip_longest
 from pathlib import Path
 
@@ -19,7 +18,7 @@ from literature_monitor.application.settings import (
     SettingsIssueSource,
 )
 from literature_monitor.config import AccessService, InstitutionConfig, JournalConfig, LegacyJournal, LogLevel, PublisherConfig
-from literature_monitor.date_range import DateRangeSpec
+from literature_monitor.date_range import DateRangeSpec, DateRangeError, validate_date_range_spec
 from literature_monitor.url_safety import normalize_public_http_url
 
 
@@ -71,9 +70,8 @@ class SettingsFormValues:
     name: str
     keyword_expression: str
     journals: tuple[SettingsJournalRow, ...]
-    from_date: str
-    to_date: str
-    window_days: str
+    from_month: str
+    to_month: str
     output_dir: str
     log_level: str
     monitor_revision_exists: str
@@ -87,6 +85,7 @@ class SettingsFormValues:
     groups: tuple[str, ...] = ()  # Presentation only; empty Groups are not durable.
     institution_name: str = ""
     institution_idp_entity_id: str = ""
+    automatic_attribute_release_consent: bool = False
     institution_issues: tuple[SettingsIssue, ...] = ()
 
     @property
@@ -133,21 +132,8 @@ def settings_form_from_draft(draft: MonitorDraft) -> SettingsFormValues:
         access_services=tuple(SettingsAccessServiceRow(s.id, s.name, s.access_url or "", s.access_method) for s in draft.access_services),
         legacy_journals=json.dumps([j.model_dump() for j in draft.legacy_journals]) if draft.legacy_journals else "",
         groups=tuple(dict.fromkeys(row.group for row in rows if row.group)),
-        from_date=(
-            draft.date_spec.from_date.isoformat()
-            if draft.date_spec.from_date is not None
-            else ""
-        ),
-        to_date=(
-            draft.date_spec.to_date.isoformat()
-            if draft.date_spec.to_date is not None
-            else ""
-        ),
-        window_days=(
-            str(draft.date_spec.window_days)
-            if draft.date_spec.window_days is not None
-            else ""
-        ),
+        from_month=draft.date_spec.from_month,
+        to_month=draft.date_spec.to_month,
         output_dir=str(draft.output_dir),
         log_level=log_level,
         monitor_revision_exists=monitor_exists,
@@ -156,6 +142,7 @@ def settings_form_from_draft(draft: MonitorDraft) -> SettingsFormValues:
         journal_revision_digest=journal_digest,
         institution_name=draft.institution.name or "" if draft.institution else "",
         institution_idp_entity_id=draft.institution.idp_entity_id or "" if draft.institution else "",
+        automatic_attribute_release_consent=draft.institution.automatic_attribute_release_consent if draft.institution else False,
     )
 
 
@@ -186,11 +173,11 @@ def settings_form_from_submission(form: FormData) -> SettingsFormValues:
 
     group_names = tuple(str(value) for value in form.getlist("settings_group"))
     group_names += tuple(row.group for row in rows)
-    institution_fields = {"institution_name", "institution_idp_entity_id"}
+    institution_fields = {"institution_name", "institution_idp_entity_id", "automatic_attribute_release_consent"}
     # Enumerate the existing editor/import contract so credential aliases cannot be ignored.
     supported_fields = institution_fields | {
         "csrf_token", "name", "keyword_expression", "output_dir", "log_level",
-        "from_date", "to_date", "window_days",
+        "from_month", "to_month",
         "monitor_revision_exists", "monitor_revision_digest", "journal_revision_exists", "journal_revision_digest",
         "journal_name", "journal_issns", "journal_publisher_id", "journal_pending", "journal_group", "journal_order", "settings_group",
         "publisher_name", "publisher_id", "publisher_access_url", "publisher_access_service_id", "publisher_order",
@@ -217,7 +204,7 @@ def settings_form_from_submission(form: FormData) -> SettingsFormValues:
         invalid_publisher_order = len({int(value) for value in publisher_order}) != len(publisher_order)
     institution_issues = (
         (_form_issue("institution", "Unsupported Settings field or duplicate institution identifier. Credentials, sessions and login routes are not settings."),)
-        if forbidden or duplicate else ()
+        if forbidden or duplicate or form.get("automatic_attribute_release_consent", "") not in {"", "1"} else ()
     )
     if incomplete_rows:
         institution_issues += (_form_issue(
@@ -249,9 +236,8 @@ def settings_form_from_submission(form: FormData) -> SettingsFormValues:
         legacy_journals=str(form.get("legacy_journals", "")),
         migration_targets=tuple(str(v) for v in form.getlist("migration_issn_l")),
         groups=tuple(dict.fromkeys(group for group in group_names if group.strip())),
-        from_date=str(form.get("from_date", "")),
-        to_date=str(form.get("to_date", "")),
-        window_days=str(form.get("window_days", "")),
+        from_month=str(form.get("from_month", "")),
+        to_month=str(form.get("to_month", "")),
         output_dir=str(form.get("output_dir", "")),
         log_level=str(form.get("log_level", "")),
         monitor_revision_exists=str(form.get("monitor_revision_exists", "")),
@@ -260,6 +246,7 @@ def settings_form_from_submission(form: FormData) -> SettingsFormValues:
         journal_revision_digest=str(form.get("journal_revision_digest", "")),
         institution_name=str(form.get("institution_name", "")),
         institution_idp_entity_id=str(form.get("institution_idp_entity_id", "")),
+        automatic_attribute_release_consent=form.get("automatic_attribute_release_consent") == "1",
         institution_issues=institution_issues,
     )
 
@@ -287,19 +274,6 @@ def _parse_revision(
     return ContentRevision(exists=exists, digest=digest), None
 
 
-def _parse_optional_date(
-    value: str,
-    *,
-    field: str,
-) -> tuple[date | None, SettingsIssue | None]:
-    if not value:
-        return None, None
-    try:
-        return date.fromisoformat(value), None
-    except ValueError:
-        return None, _form_issue(field, "Enter a valid ISO date (YYYY-MM-DD).")
-
-
 def settings_draft_from_form(
     values: SettingsFormValues,
 ) -> tuple[MonitorDraft | None, tuple[SettingsIssue, ...]]:
@@ -308,24 +282,17 @@ def settings_draft_from_form(
     issues: list[SettingsIssue] = list(values.institution_issues)
     institution = None
     try:
-        public = InstitutionConfig(name=values.institution_name, idp_entity_id=values.institution_idp_entity_id)
-        institution = public if public.name or public.idp_entity_id else None
+        public = InstitutionConfig(name=values.institution_name, idp_entity_id=values.institution_idp_entity_id,
+                                   automatic_attribute_release_consent=values.automatic_attribute_release_consent)
+        institution = public if public.name or public.idp_entity_id or public.automatic_attribute_release_consent else None
     except ValidationError as error:
         detail = error.errors()[0]
         issues.append(_form_issue("institution." + str(detail["loc"][0]), detail["msg"]))
-    from_date, issue = _parse_optional_date(values.from_date, field="from_date")
-    if issue is not None:
-        issues.append(issue)
-    to_date, issue = _parse_optional_date(values.to_date, field="to_date")
-    if issue is not None:
-        issues.append(issue)
-
-    window_days: int | None = None
-    if values.window_days:
-        try:
-            window_days = int(values.window_days)
-        except ValueError:
-            issues.append(_form_issue("window_days", "Window days must be an integer."))
+    date_spec = DateRangeSpec(values.from_month, values.to_month)
+    try:
+        validate_date_range_spec(date_spec)
+    except DateRangeError as error:
+        issues.append(_form_issue(error.field, str(error)))
 
     monitor_revision, issue = _parse_revision(
         values.monitor_revision_exists,
@@ -388,11 +355,7 @@ def settings_draft_from_form(
             access_services=tuple(access_services),
             legacy_journals=legacy,
             migration_confirmations=confirmations,
-            date_spec=DateRangeSpec(
-                from_date=from_date,
-                to_date=to_date,
-                window_days=window_days,
-            ),
+            date_spec=date_spec,
             output_dir=Path(values.output_dir.strip()),
             log_level=values.log_level,
             monitor_revision=monitor_revision,

@@ -66,7 +66,7 @@ def test_settings_method_roundtrip_draft_export_and_confirmed_full_import(tmp_pa
         assert stamp(path) == original
         form["service_access_method"][0] = "manual"
         # An invalid unrelated field renders the entire unsaved Draft, including method.
-        invalid = {**form, "window_days": ["invalid"]}
+        invalid = {**form, "from_month": ["invalid"]}
         rejected = client.post("/settings/save", data=invalid)
         assert browser_settings_submission(rejected.text)["service_access_method"][0] == "manual"
         assert stamp(path) == original

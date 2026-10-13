@@ -136,6 +136,8 @@ class CaptureSnapshot:
     last_heartbeat_at: datetime | None
     attempt: CaptureAttemptSnapshot | None
     completion_pending: bool
+    connector_online: bool = False
+    enrichment_capable: bool = False
 
 
 @dataclass(frozen=True)
@@ -180,6 +182,7 @@ class CaptureCoordinator:
         # and native-save grants. Never acquire a Batch or Workspace lock here.
         self._browser_owner: str | None = None
         self._browser_kind: str | None = None
+        self._browser_deadline: float | None = None
         self._changed = threading.Event()
         self._operation_lock: WorkspaceOperationLock | None = None
         self._operation_context = None
@@ -196,14 +199,15 @@ class CaptureCoordinator:
         self._last_heartbeat_at: datetime | None = None
         self._connector_version: str | None = None
         self._zotero_reachable = False
+        self._enrichment_capable = False
         self._attempt: _Attempt | None = None
         self._completion: CaptureCompletion | None = None
         self._delivered_completion: CaptureCompletion | None = None
         self._resolved_completion: CaptureCompletion | None = None
 
-    def reserve_browser_task(self, kind: str) -> str | None:
+    def reserve_browser_task(self, kind: str, *, deadline: float | None = None) -> str | None:
         """Atomically exclude Import/Preparation and unsettled native saves."""
-        if kind not in {"import", "preparation"}:
+        if kind not in {"import", "preparation", "enrichment"}:
             raise ValueError("unsupported browser task")
         with self._lock:
             self._expire_locked(_monotonic(), _utc_now())
@@ -211,7 +215,7 @@ class CaptureCoordinator:
             # native grant remains unsettled; the Connector serializes those
             # captures. Preparation MUST wait for every such grant and task.
             if (self._browser_owner is not None
-                    or kind == "preparation" and (
+                    or kind in {"preparation", "enrichment"} and (
                         self._native_save_grants or self._import_browser_unsettled)
                     or self._operation_lock is not None or self._completion is not None
                     or self._delivered_completion is not None or self._resolved_completion is not None
@@ -219,7 +223,16 @@ class CaptureCoordinator:
                 return None
             self._browser_owner = secrets.token_urlsafe(32)
             self._browser_kind = kind
+            self._browser_deadline = deadline
             return self._browser_owner
+
+    def extend_browser_task(self, kind: str, owner: str, deadline: float) -> bool:
+        with self._lock:
+            self._expire_locked(_monotonic(), _utc_now())
+            if self._browser_kind != kind or self._browser_owner != owner:
+                return False
+            self._browser_deadline = deadline
+            return True
 
     def release_browser_task(self, kind: str, owner: str) -> bool:
         """Only the matching owner can release; native grants still block reuse."""
@@ -228,6 +241,7 @@ class CaptureCoordinator:
                 return False
             self._browser_owner = None
             self._browser_kind = None
+            self._browser_deadline = None
             return True
 
     def report_import_browser_idle(self, request_id: str, invocation_id: str, doi_url: str) -> bool:
@@ -249,6 +263,7 @@ class CaptureCoordinator:
         *,
         connector_version: str,
         zotero_reachable: bool,
+        enrichment_capable: bool = False,
     ) -> ConnectorReadiness:
         """Record bounded process-local Connector presence."""
 
@@ -266,6 +281,7 @@ class CaptureCoordinator:
             self._last_heartbeat_at = now
             self._connector_version = version
             self._zotero_reachable = zotero_reachable
+            self._enrichment_capable = enrichment_capable
             return self._readiness_locked(now_monotonic)
 
     @property
@@ -621,6 +637,8 @@ class CaptureCoordinator:
                 last_heartbeat_at=self._last_heartbeat_at,
                 attempt=attempt_snapshot,
                 completion_pending=self._completion is not None,
+                connector_online=self._last_heartbeat_monotonic is not None and now_monotonic - self._last_heartbeat_monotonic <= HEARTBEAT_STALE_SECONDS,
+                enrichment_capable=self._enrichment_capable,
             )
 
     def _readiness_locked(self, now_monotonic: float) -> ConnectorReadiness:
@@ -634,6 +652,10 @@ class CaptureCoordinator:
         return ConnectorReadiness.CONNECTED
 
     def _expire_locked(self, now_monotonic: float, now: datetime) -> None:
+        # Read-only work has no escaped native-save grant; an expired lease may
+        # release ownership even after the UI and Connector have disappeared.
+        if self._browser_deadline is not None and now_monotonic >= self._browser_deadline:
+            self._browser_owner = self._browser_kind = self._browser_deadline = None
         attempt = self._attempt
         if attempt is None or attempt.stage is CaptureStage.FINISHED:
             return

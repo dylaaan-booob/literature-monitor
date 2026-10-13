@@ -40,7 +40,8 @@ def write_config(tmp_path: Path, whitelist: str = "venues.md", **values: str) ->
     path.write_text(
         f"venue_whitelist: {whitelist}\n"
         f"keyword_expression: '{expression}'\n"
-        f"log_level: {log_level}\n",
+        f"log_level: {log_level}\n"
+        "from_month: 2026-01\nto_month: 2026-01\n",
         encoding="utf-8",
     )
     return path
@@ -52,6 +53,9 @@ def write_monitor_config(
     filename: str = "monitor.yaml",
 ) -> Path:
     path = tmp_path / filename
+    for field in ("from_month", "to_month"):
+        if field + ":" not in contents:
+            contents += f"\n{field}: 2026-01\n"
     path.write_text(contents, encoding="utf-8")
     return path
 
@@ -96,7 +100,7 @@ def test_minimal_monitor_uses_config_defaults(tmp_path: Path) -> None:
     assert config.keyword_expression == "causal"
     assert config.keyword_ast == Term("causal")
     assert config.output_dir == (tmp_path / "workspace").resolve()
-    assert config.date_spec == DateRangeSpec(window_days=14)
+    assert config.date_spec == DateRangeSpec("2026-01", "2026-01")
     assert config.log_level.value == "INFO"
     assert [journal.name for journal in config.journals] == [
         "Biometrics",
@@ -205,9 +209,8 @@ def test_keyword_expression_is_required_and_nonempty(
         "name",
         "venue_whitelist",
         "output_dir",
-        "from_date",
-        "to_date",
-        "window_days",
+        "from_month",
+        "to_month",
         "log_level",
     ],
 )
@@ -240,97 +243,10 @@ def test_unknown_monitor_field_is_rejected_before_defaults(tmp_path: Path) -> No
         load_config(config_path)
 
 
-@pytest.mark.parametrize(
-    ("date_fields", "expected"),
-    [
-        ("", DateRangeSpec(window_days=14)),
-        ("window_days: 14\n", DateRangeSpec(window_days=14)),
-        (
-            "from_date: 2026-09-01\nto_date: 2026-09-21\n",
-            DateRangeSpec(
-                from_date=date(2026, 9, 1),
-                to_date=date(2026, 9, 21),
-            ),
-        ),
-        (
-            "from_date: 2026-09-01\nwindow_days: 21\n",
-            DateRangeSpec(
-                from_date=date(2026, 9, 1),
-                window_days=21,
-            ),
-        ),
-        (
-            "to_date: 2026-09-21\nwindow_days: 14\n",
-            DateRangeSpec(
-                to_date=date(2026, 9, 21),
-                window_days=14,
-            ),
-        ),
-    ],
-)
-def test_config_accepts_all_legal_date_policy_forms(
-    tmp_path: Path,
-    date_fields: str,
-    expected: DateRangeSpec,
-) -> None:
-    write_whitelist(tmp_path, filename="list.md")
-    config_path = write_monitor_config(
-        tmp_path,
-        f"keyword_expression: causal\n{date_fields}",
-    )
-
-    assert load_config(config_path).date_spec == expected
 
 
-@pytest.mark.parametrize(
-    ("date_fields", "field"),
-    [
-        ("from_date: 2026-09-01\n", "from_date"),
-        ("to_date: 2026-09-21\n", "to_date"),
-        (
-            "from_date: 2026-09-01\nto_date: 2026-09-21\nwindow_days: 21\n",
-            "date_range",
-        ),
-        ("window_days: 0\n", "window_days"),
-        ("window_days: -1\n", "window_days"),
-        (
-            "from_date: 2026-09-22\nto_date: 2026-09-21\n",
-            "from_date",
-        ),
-    ],
-)
-def test_config_rejects_all_illegal_date_policy_forms(
-    tmp_path: Path,
-    date_fields: str,
-    field: str,
-) -> None:
-    write_whitelist(tmp_path, filename="list.md")
-    config_path = write_monitor_config(
-        tmp_path,
-        f"keyword_expression: causal\n{date_fields}",
-    )
-
-    with pytest.raises(ConfigurationError) as captured:
-        load_config(config_path)
-
-    assert str(config_path.resolve()) in str(captured.value)
-    assert f"field '{field}'" in str(captured.value)
 
 
-def test_invalid_date_value_keeps_config_path_and_field_context(tmp_path: Path) -> None:
-    write_whitelist(tmp_path, filename="list.md")
-    config_path = write_monitor_config(
-        tmp_path,
-        "keyword_expression: causal\n"
-        "from_date: not-a-date\n"
-        "window_days: 14\n",
-    )
-
-    with pytest.raises(ConfigurationError) as captured:
-        load_config(config_path)
-
-    assert str(config_path.resolve()) in str(captured.value)
-    assert "field 'from_date'" in str(captured.value)
 
 
 @pytest.mark.parametrize(
@@ -393,26 +309,6 @@ def test_missing_default_whitelist_reports_resolved_path(tmp_path: Path) -> None
 
     assert "field 'venue_whitelist'" in str(captured.value)
     assert str((tmp_path / "list.md").resolve()) in str(captured.value)
-
-
-def test_repository_list_smoke_parses_and_excludes_conference_names() -> None:
-    repository_root = Path(__file__).resolve().parents[1]
-    list_path = repository_root / "list.md"
-    journals = parse_journal_whitelist(list_path)
-
-    contents = list_path.read_text(encoding="utf-8")
-    conference_section = contents.split("## Conferences", maxsplit=1)[1]
-    conference_names = {
-        cells[0].strip()
-        for line in conference_section.splitlines()
-        if line.startswith("|")
-        if len(cells := line.strip("|").split("|")) == 2
-        and cells[0].strip() not in {"Abbreviation", "---"}
-    }
-
-    assert journals
-    assert all(journal.issn_l for journal in journals)
-    assert {journal.name for journal in journals}.isdisjoint(conference_names)
 
 
 def test_grouped_whitelist_parses_groups_and_empty_cells(tmp_path: Path) -> None:
@@ -569,3 +465,12 @@ def test_target_structure_reports_location(tmp_path, bad):
     with pytest.raises(ConfigurationError) as caught:
         parse_journal_whitelist(path)
     assert str(path) in str(caught.value)
+
+
+@pytest.mark.parametrize('policy', ['window_days: 14\n','from_date: 2026-01-01\nto_date: 2026-01-31\n',''])
+def test_runtime_requires_explicit_months_without_legacy_conversion(tmp_path,policy):
+    path=tmp_path/'monitor.yaml'
+    path.write_text('keyword_expression: statistics\n'+policy)
+    with pytest.raises(ConfigurationError) as error:
+        load_config(path)
+    assert 'month' in str(error.value)

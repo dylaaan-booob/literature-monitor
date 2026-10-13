@@ -49,3 +49,33 @@ background tab cache and uses `tabs.sendMessage` with the selected document ID
 and current top-frame translator. Manual saves and native Zotero saving remain
 unchanged. Current-document readiness, response/DOM challenge observation and
 pre-trigger navigation recovery live in the overlay; see SPEC §42.16.
+
+`0003-literature-monitor-paper-enrichment.patch` adds a separate read-only
+content-script message and MV3 offscreen handler (SPEC §§47–48). It uses the pinned
+Translate Framework with `libraryID:false` and `saveAttachments:false`, guards
+the actual loaded translator against Desktop/Server execution, and never
+enters PageSaving's native-save path. Upstream pins and permissions are unchanged.
+
+The same read-only handler transports Abstract and publication date. It calls
+upstream `Zotero.Date.strToDate()` and preserves absent components, rejecting
+unparsed remainder and explicit numeric-month correction. The Python server
+alone applies missing-component `01` defaults and calendar validation.
+
+SPEC §50 extends the same Item projection with original `creators`; it adds no
+translator adapter or saving path. Creator interpretation and explicit local
+Author/Paper writes remain outside the AGPL Connector.
+
+`0004-literature-monitor-connector-lifecycle-cleanup.patch` follows `0003` and
+fixes only `background.js`, `background/offscreenManager.js` and
+`offscreen/offscreenTranslate.js`. Cleanup compares normalized tab IDs against
+all live tabs, including loading pages. Both periodic paths snapshot candidate
+IDs before querying tabs, so records created during the query survive that pass.
+The background sweep covers tab info and injection caches; offscreen cleanup
+returns the IDs actually removed and uses working JSON diagnostics. Existing
+tab-close listeners, fifteen-minute intervals, native saving and attachment
+processing remain unchanged. No cleanup closes a tab or the offscreen document.
+
+After `./connector/build.sh`, run
+`node --test connector/tests/lifecycle-cleanup.test.cjs` from the repository root.
+This deterministic VM regression reads the applied source in `.work/upstream`;
+it needs no Chrome profile or Zotero Library and does not measure memory use.

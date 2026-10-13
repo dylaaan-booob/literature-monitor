@@ -1,11 +1,24 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Status:** Active; **v0.6.3 is RELEASED**. Python package, Provider User-Agent and Connector release identities are `0.6.3`. The permanent release commit is `24a4f81c07543205f6bd16c6fef8e67808d698c8`, the annotated `v0.6.3` tag peels to that commit, and all three GitHub Release assets have verified SHA-256 digests (§42.19). v0.6.2 and v0.6.1 retain their historical release evidence in §§41.16 and 40.16.
+**Current status:** Active. **v0.6.8 is UNRELEASED and in release preparation** (§54).
+The latest published stable release is
+[v0.6.7](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.7),
+published on 2026-10-12; its peeled tag is `1519f0f6204da427a13eccec340d09dfa42641b0`.
+Current package, Provider and Connector build identities are `0.6.8`.
 
-**Stage:** v0.6.3 A0–A9, Reset Guard Lifecycle Fix, final packaging, permanent tag, main push and GitHub Release publication are complete and verified (§42.19). Independent development review and real Chrome/Zotero/Reset acceptance were reported complete by the user; the distinction between user-reported live results and executed release checks remains explicit. Earlier v0.6.2 release and acceptance records remain historical (§41.16). Documentation closeout follows the immutable release tag without modifying its assets.
-**Scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
+**Current contract:** §§46–54 govern current Run, Enrichment, date precision,
+optional consent and core-regression cleanup. §§41–45 and unaffected §§37–40
+retain their stated identity, storage, native-save and safety boundaries.
+Later sections supersede earlier provisions only on their explicit conflicts.
 
-**Current contract:** §42 governs the v0.6.3 Paper workflow, batch Connector import, access preparation, UI and Workspace Reset. §41 governs unaffected ISSN-L Journal identity, retrieval and Settings; §37 governs unaffected DOI-first identity and Provider semantics. Unchanged §39/§40 Connector security boundaries continue to apply. Earlier version-specific contracts and release records retain their historical scope.
+### Historical v0.6.3 baseline
+
+**Historical status:** **v0.6.3 is RELEASED**. Python package, Provider User-Agent and Connector release identities are `0.6.3`. The permanent release commit is `24a4f81c07543205f6bd16c6fef8e67808d698c8`, the annotated `v0.6.3` tag peels to that commit, and all three GitHub Release assets have verified SHA-256 digests (§42.19). v0.6.2 and v0.6.1 retain their historical release evidence in §§41.16 and 40.16.
+
+**Historical stage:** v0.6.3 A0–A9, Reset Guard Lifecycle Fix, final packaging, permanent tag, main push and GitHub Release publication are complete and verified (§42.19). Independent development review and real Chrome/Zotero/Reset acceptance were reported complete by the user; the distinction between user-reported live results and executed release checks remains explicit. Earlier v0.6.2 release and acceptance records remain historical (§41.16). Documentation closeout follows the immutable release tag without modifying its assets.
+**Historical scope:** Journal monitoring with CLI, durable Markdown workspace, Obsidian presentation, and a local Python Web UI adapter; conferences remain excluded
+
+**Historical v0.6.3 contract:** §42 governs the v0.6.3 Paper workflow, batch Connector import, access preparation, UI and Workspace Reset. §41 governs unaffected ISSN-L Journal identity, retrieval and Settings; §37 governs unaffected DOI-first identity and Provider semantics. Unchanged §39/§40 Connector security boundaries continue to apply. Earlier version-specific contracts and release records retain their historical scope.
 
 ---
 
@@ -8254,3 +8267,802 @@ Prepared asset SHA-256 values:
 | `literature-monitor-connector-0.6.7-chrome-mv3.zip` | `02b51233aaf5407d1588e591ae055cf678953443a9368979f8d61858e173dbe6` |
 | `literature_monitor-0.6.7-py3-none-any.whl` | `cfdc0e37f4fc1d2c2aa7cb3a50074c652730fb4183914d86f904e524f4818d8e` |
 | `literature_monitor-0.6.7.tar.gz` | `99c94c821c89b4ea16102b88401fff9a2ae4c1fef0996edb337a7fea767e6db9` |
+
+## 47. Paper-level Abstract Enrichment — Development Contract
+
+### 47.1 Authority and scope
+
+This explicitly authorized feature adds an independent manual Abstract write action on the v0.6.7 Capture-Only baseline. §46 continues to prohibit all Run/materialize updates to existing Paper/Author bytes. Only the user's explicit **Save Abstract** may fill a missing Paper `## Abstract` under this section. All four Paper statuses are eligible; status is never changed. Existing nonempty Abstracts cannot be overwritten. Empty/whitespace content, the existing missing marker and an absent Abstract section are missing.
+
+This action requires the Literature Monitor Connector's fresh `abstract-enrichment/v1` capability heartbeat, not Zotero Desktop. Connector online presence and Desktop readiness are distinct; native Import retains its Desktop requirement. No package/version bump, publication, new dependency, configuration field, database, persistent lifecycle field or historical-record migration is included.
+
+### 47.2 Read-only translation and exclusion
+
+An explicit Enrich Abstract operation owns the existing browser-task reservation. Import, CARSI Preparation and Enrichment cannot execute concurrently; unsettled native-save grants block Enrichment just as they block Preparation. Busy is reported without a queue. A read-only operation's bounded reservation expires even when its browser/UI disappears; it grants no Zotero save authority.
+
+The Connector opens a dedicated normal non-incognito Chrome tab through the DOI URL and reuses current-document inspection and the official Zotero Web Translator/Translate Framework. A distinct content-script message enters the MV3 offscreen translator directly, never `onTranslate`, `translateAndSave`, native ItemSaver saving, Server item creation or attachment saving. Execute with `libraryID:false`, `saveAttachments:false`, and an actual loaded-translator browser-mode guard. Reject Desktop/Server modes; no webpage-save fallback, custom Publisher adapter or automatic retranslation is allowed. Translation may perform ordinary bibliographic HTTP requests; there is no PDF/attachment downloading or management action.
+
+The ordinary deadline is 75 seconds. An observed authentication form or Challenge allows a single 600-second human wait, without credential automation or bypass. Bind execution/results to the operation, selected top document and Translator; navigation during translation, Cancel, timeout, disconnect or lost authority invalidates results. Cleanup removes timers/listeners/references. After the server confirms a valid candidate in Preview, close only the dedicated Enrichment tab if its top document and normal-window identity still match. Do not wait for Save Abstract. Failures, Cancel, authentication waits, rejected/lost receipts and user navigation/window changes retain the page. A late read-only translation cannot create a candidate or write a Paper after revocation.
+
+### 47.3 Candidate and Web interfaces
+
+Transient states are Idle → Retrieving → Preview → Saving → Completed / Failed. There is one process-local operation/candidate and no restoration after exit or restart. Browser ownership ends after retrieval cleanup; Preview does not own the browser. Cancel/Detail exit discards the candidate. No source, timestamp, quality score or history is recorded.
+
+UI endpoints are `/api/papers/{paper_id}/abstract-enrichment/{start,state,save,cancel}`; state is GET and actions are CSRF-protected POST. Bridge endpoints are `/api/connector/abstract-enrichment/{claim,authorize,result}`, subject to the existing local Bridge access boundary. Unpredictable request/invocation IDs plus target DOI associate one command/result; stale identities cannot authorize work. Results carry the complete Item count and minimal type/DOI/`abstractNote` projection. Accept exactly one literature Item with a matching normalized DOI and nonempty string Abstract; missing/conflicting DOI, multiple Items or missing Abstract fail without writing.
+
+Preview renders escaped text with preserved line breaks. Save sends only the operation identity and uses the server's candidate, never client-replaced text. The original Translator `abstractNote` is retained without quality/truncation detection or repair. No Abstract length upper/lower bounds are introduced; nonempty is the sole content requirement. The old Bridge `MAX_RESPONSE_LENGTH = 8192` check is removed. Candidate content travels in the complete POST body and acknowledgments remain small; an accepted result also returns its phase so receipt acceptance alone cannot authorize closing a failed result.
+
+### 47.4 Exact Markdown write and rollback
+
+Start captures the strict Paper UUID/DOI, original bytes and Workspace/Papers/file identities. Save locates and validates the Paper again under existing safety rules, requires the same original contents/identities and a still-missing Abstract, and uses the existing Workspace lock and identity-bound compare/replace. External changes fail without merge, repair, monitoring or retry. A committed write followed by sync failure is reported as saved with a sync failure.
+
+Splice only the Abstract section; never reserialize frontmatter. Preserve Frontmatter, Sources, Notes, workflow status, unknown fields, all other sections and every byte outside the insertion/replacement. An absent Abstract is inserted before Sources, otherwise before Notes or at the body's end. Retain the existing managed end marker for nested H2 content; duplicate/ambiguous section boundaries fail closed. No Author file or provider state is changed.
+
+Rollback changes code/documentation only. Never automatically revert or delete an Abstract the user has saved. Connector code/patches remain AGPL-compatible, separate from the MIT Python package; upstream revisions and permissions remain pinned.
+
+### 47.5 Development verification
+
+Automated regressions cover all statuses, exact non-Abstract byte preservation, missing/existing sections, nested H2, CRLF, identity/path/concurrent-content changes, candidate/Cancel zero writes, repeat Save, Desktop-independent capability, invalid Item results, cancellation/late results, task exclusion and actual read-only patch entrypoints with zero save calls. Existing Capture-Only Run, Keep/Reject, Import and Preparation regressions remain required. Build the separate Connector in external generated directories and inspect reconstruction/license boundaries.
+
+
+### 47.6 Implementation verification — 2026-10-12
+
+Implemented the explicit Abstract-only action without changing release identities or upstream pins. Development checks used isolated fixtures, not the user's Workspace/configuration as output.
+
+- `uv run --locked pytest --tb=short`: **3113 passed**, 2 existing dependency deprecation warnings, 28.09s. Includes Capture-Only Run, decisions, native Import, CARSI Preparation and 43 new Python cases; the executable UI harness also checks escaped Preview text, explicit Save/Cancel, view exit, readiness and stale-poll rejection.
+- `./connector/test.sh`: **172 runtime + 25 CARSI + 12 read-only entrypoint tests passed**. The read-only tests execute the actual patch functions and assert zero native saving; runtime tests cover Desktop offline, current-document targeting, mutual exclusion, cancellation/navigation, timeout and human Challenge wait. The remote-mode case uses the pinned framework's Desktop/Server constants (2/4).
+- `uv lock --check`: **PASS**, 27 packages resolved. `node --check` for Web JavaScript and runtime, `bash -n` for Connector scripts, and `git diff --check`: **PASS**.
+- External `connector/build.sh`: **PASS**. Fixed upstream/submodules, all three patches and declared delta reconstruct successfully; Chrome MV3 is version `0.6.7`. Reverse patch checks verify generated source matches the new tracked delta; current overlays, provenance, manifest and AGPL COPYING match the artifact. No permission or upstream pin changes.
+- All **78 protected files** retained initial SHA-256 content and nanosecond modification times. Earlier SPEC text through §46 remains unchanged. No commit, push or publication was performed.
+
+These results establish automated/source/build behavior; normal-Chrome Publisher translation was not executed by the developer. No independent live-platform success is claimed.
+
+
+### 47.7 Successful retrieval tab cleanup — 2026-10-12
+
+The user reports real normal-Chrome Abstract retrieval and Save work successfully. This is user-reported live evidence, not a developer-operated run. The user subsequently requested automatic closing of the DOI task tab after successful retrieval; this supersedes §47's initial retain-on-success behavior only.
+
+Result acknowledgments now return the accepted phase atomically. Only a valid Preview acknowledgment authorizes closing the original dedicated task tab, after rechecking its normal-window and current-document identity. Save/Cancel remains independent; failure, lost/rejected acknowledgment, user navigation or window movement retains the page. No other tab is closed.
+
+`uv run --locked pytest tests/test_abstract_enrichment.py tests/test_web_connector_bridge.py --tb=short`: **51 passed**, 2 existing warnings. `./connector/test.sh`: **179 runtime + 25 CARSI + 12 read-only tests passed**, including success-close, receipt ordering, invalid/missing receipts, unrelated tabs, changed document/window and lost acknowledgment. Runtime syntax and `git diff --check` passed. The prior upstream build is reused because only the post-build runtime overlay changed; the overlay was refreshed in the artifact and the existing Chrome-loaded directory, and all 310 build files match. Chrome's generated ruleset cache is retained. No version, upstream patch/pin, Paper-write behavior, commit or publication change.
+
+## 48. Unified Paper Enrichment — Development Contract
+
+### 48.1 Authority and interaction
+
+This section extends §47's explicit manual write authority to missing `publication_date` as well as missing `## Abstract`. It supersedes §47's Abstract-only eligibility, capability, route and result requirements for this action. All unaffected §47 read-only translation, identity, cancellation and write safeguards remain. §46 Run/materialize immutability, Provider date selection and native Zotero Import authority remain unchanged. No version, dependency, permissions, configuration, persistence schema, migration or upstream pin changes are authorized.
+
+Paper Detail shows **Enrich** for any status when either field is missing; it hides Enrich only when both are complete. One translation attempts both fields, with existing values excluded from candidates. **Preview → Save / Cancel** remains explicit; one Save writes every valid candidate in that operation. Partial completion is allowed and leaves Enrich available for the remaining field. Preview and Cancel perform no Paper writes. No new Date task, queue, batch mode, Abstract quality branch, source/precision/history field or manual acceptance phase is added.
+
+### 48.2 Shared read-only transport
+
+Web endpoints are `/api/papers/{paper_id}/enrichment/{start,state,save,cancel}` (GET state; CSRF-protected POST for actions). Connector endpoints are POST `/api/connector/enrichment/{claim,authorize,result}` under the existing Bridge restrictions. Heartbeat capability is `paper-enrichment/v1`; older Connectors are explicitly unsupported until updated. Enrichment requires Connector presence without Desktop readiness; Import retains its Desktop requirement.
+
+The renamed `literatureMonitorEnrich` content-script/offscreen entrypoint executes the same pinned official Translate Framework, with browser-mode enforcement, `libraryID:false` and `saveAttachments:false`. It never enters native saving or creates a save session. One Item must have the target normalized DOI and a bibliographic type; identity failure rejects the whole operation. Original `abstractNote`, raw `date` and parsed components travel in the result POST. The server independently checks identity, field availability and calendar validity, selecting only fields missing at Start. At least one usable missing field is required for Preview. Preview displays the original Abstract without HTML execution, plus raw and completed date when present. Save accepts only the operation identifier and CSRF token, never replacement field values. There is no Abstract length limit.
+
+Import, Preparation and Enrichment retain shared browser exclusion and no queuing. Existing 75-second execution and 600-second authentication wait deadlines remain. Cancel, disconnect, timeout and document changes revoke authority; late results cannot restore it. After cleanup and an accepted server Preview receipt, only the still-matching dedicated task document/window is closed. Failure, Cancel and user navigation retain the page. Preview owns no browser reservation. Leaving Detail/restart discards transient candidates; no background write or recovery occurs.
+
+### 48.3 Date parsing and compatibility defaults
+
+The AGPL MV3 offscreen handler reuses the pinned `Zotero.Date.strToDate()`; Python receives year/month/day components, not copied parser code. A year is required. Unparsed remainder, ranges, seasons, multiple values and invalid explicit components produce no date candidate. In particular, numeric year-first input cannot benefit from Zotero's automatic oversized-month swap. A date parser failure cannot discard a usable Abstract. The server requires integer components, fills only absent month/day with `01`, and validates the complete calendar date, including leap years.
+
+| Translator date | Saved publication_date |
+| --- | --- |
+| `2024` | `2024-01-01` |
+| `2024-05` / `May 2024` | `2024-05-01` |
+| `2024-05-17` / `17 May 2024` | `2024-05-17` |
+
+The inserted `01` is a compatibility convention for the existing complete-date model, **not confirmation of the actual publication month/day**. Subsequent sorting uses that completed date. No precision field is persisted. The Translator's date is used without an additional print/online selection policy. This manual compatibility exception does not authorize Run or Providers to invent dates. Known Abstract truncation, HTML/TeX markup and uncertain output quality remain unassessed, unrepaired Translator limitations.
+
+### 48.4 One narrow atomic write
+
+Start records UUID, normalized DOI, original contents, Workspace/directory/file identity and each field's missing state. Save rereads and validates that target, contents and missing states; external changes fail without merge or retry. Abstract section edits and the date scalar edit are prepared together in memory, strictly parsed, then committed through one existing identity-bound compare-and-replace under the Workspace lock. If final filesystem synchronization fails after commit, the UI reports the committed write accurately.
+
+The Abstract boundary/marker rules from §47 remain. For Date, replace only an unambiguous null `publication_date` scalar or insert a missing field before the frontmatter closing delimiter. Do not dump/reformat YAML. Duplicate keys, unsafe mapping/scalar structure, or affected aliases/anchors reject the write before either candidate is committed. Unchanged fields, comments, Frontmatter, Status, Sources, Notes and all content outside the intended replacements retain their original bytes, including CRLF. No existing value is overwritten.
+
+The Python package stays MIT; all Zotero-derived source/parser execution stays in the separately licensed AGPL Connector. Rollback removes code/documentation changes only and never reverts user-saved enrichment data. This task includes no commit or publication and never uses protected real Workspace data as development output.
+
+### 48.5 Implementation verification — 2026-10-12
+
+Implemented in the existing dirty working tree, without commit, publication or version changes. Current entrypoints/modules, routes, capability and UI use unified Paper Enrichment; historical §47 text is retained as a record and superseded only as specified above.
+
+Executed development checks:
+
+- `uv run --locked pytest tests/test_paper_enrichment.py --tb=short`: **89 passed**, covering all statuses, Abstract-only/Date-only/both missing, full/partial/no usable candidates, non-overwrite, second enrichment, one compare-and-replace, exact byte preservation, YAML scalar insertion/null spelling/comments/CRLF, unsafe aliases, identity/content/path conflicts, cancellation, stale results, old Connector, Desktop-offline routes and browser exclusion.
+- `uv run --locked pytest --tb=short`: **3160 passed, 2 existing dependency deprecation warnings, 27.92s**. Includes Capture-Only Run, Import, CARSI Preparation, Keep/Reject, safe writes and the unified route/UI regressions.
+- `./connector/test.sh`: **229 passed** (179 runtime, 25 CARSI, 25 read-only enrichment). Executes the actual patched entrypoint/offscreen handler with forbidden native-save probes, browser/remote-mode checks, date projection/failure isolation, task exclusion and accepted-Preview tab cleanup. `node --test tests/paper_enrichment_ui.test.cjs`: **6 passed**, including escaped Abstract text, raw/completed date preview, explicit Save, partial retry, Cancel/Detail exit, readiness and stale polls.
+- `uv lock --check`: **PASS**, 27 packages. `node --check` for Web app/runtime and rebuilt offscreen/pageSaving, `bash -n connector/build.sh connector/test.sh`, and `git diff --check`: **PASS**. No dependency or upstream pin changes.
+- `connector/build.sh` with external work/output directories: **PASS**. Reconstructed pinned upstream plus submodules, applied declared deltas, built MV3 and passed source/license checks. Artifact version stays `0.6.7`; the complete manifest, including permissions, is identical to the previously installed artifact. AGPL COPYING/provenance and exact overlays verified; no Python source enters the extension.
+- Executed the rebuilt artifact's actual pinned Zotero Date implementation and patched offscreen date helper, then fed their real components into Python's candidate validation: **32/32 passed**. Cases include year/month/full/English dates, leap years, invalid zero/oversized parts, numeric-month swapping, seasons, ranges, multiple dates and unparsed time/remainder.
+- Verified Chrome Default's existing extension points to `connector/build/chrome-mv3`, retained an external previous-build backup, and replaced files in that original directory. All **310 artifact files** are byte-identical to the external build. Chrome's generated `_metadata` cache file retains both content and modification time. Chrome itself was not reloaded or operated.
+- All **78 protected real files** retain their Start SHA-256 content and nanosecond modification times. Existing SPEC through §47 remains byte-for-byte unchanged. User `list.md`, `monitor.yaml`, Obsidian/Workspace and Zotero data were not development output.
+
+Evidence is automated, isolated and offline; it does not claim new real-publisher, login or Zotero acceptance. No additional manual acceptance step is introduced. The user can apply the installed build by reloading the existing extension and restarting the Web process. Source rollback follows §48.4; the previous extension build may be restored without removing Chrome cache, and saved Paper data must remain untouched.
+
+## 49. UI-led Journal Run Unified Simplification — Development Contract
+
+### 49.1 Authority and delivery boundary
+
+This user-authorized development change supersedes conflicting current contracts
+for day/window configuration, Publication Stage/three-state eligibility,
+whole-record canonical metadata preference, required Authors, CLI Run/diagnostics,
+and Crossref Discovery Coverage tied to Full Hydration. Historical sections and
+release evidence remain records. §46 capture-only writes and independent §48
+Paper Enrichment remain effective. No version bump, commit, push, tag or Release
+is authorized by this task.
+
+The user owns manual frontend and full-workflow acceptance. Verification is limited
+to directly affected automatic tests; no full-suite run, generic checks, launch
+smoke, browser acceptance, live Provider calls or real Workspace Reset is required.
+
+### 49.2 Publication months and UI
+
+`monitor.yaml` requires explicit `from_month` and `to_month`, each `YYYY-MM`.
+Equal months select a single natural month; otherwise the continuous inclusive
+range resolves from the start month's first day through the end month's last day.
+Settings uses two month controls, defaults an unconfigured editable draft to the
+current local month, and saves fixed values. The selected saved months are shown
+before Run and the Run uses its captured configuration rather than later edits.
+
+`from_date`, `to_date` and `window_days` are retired configuration fields. The user
+explicitly authorized directly replacing the local old configuration with the new
+month configuration, using October 2026 as the previously selected current-month
+default. Other local monitor settings are preserved. No old-date conversion,
+legacy-specific Save exception or migration is implemented; ordinary schema
+validation rejects old fields. Historical Last Run v1/v2 snapshots retain their
+original day-level ranges and remain readable.
+
+Only `literature-monitor gui --config …` remains as a command-line entrypoint.
+Run, diagnostics, validation, materialization and export CLI subcommands and their
+exclusive progress adapter are removed. GUI actions use the shared application
+and materialization paths.
+
+### 49.3 Discovery and identity-first selection
+
+Run holds the existing Workspace operation lock, reads a transient DOI/UUID
+identity index from Paper Markdown, and performs OpenAlex Discovery and Crossref
+Manifest retrieval concurrently. Each Provider uses its own native Publication
+Date filter. Provider dates, sparse date precision and late database arrival do
+not create extra eligibility gates, backfill or watermark state.
+
+A valid normalized DOI and trusted configured Journal attribution are required.
+OpenAlex Primary Source IDs and reconciled Crossref ISSN-L/aliases are independent
+paths. Names cannot assign Journal identity. Provider failures preserve usable
+peer evidence. Publication Stage, `is_published` and three-state eligibility are
+removed. The sole active type exclusion is explicit non-conflicting Crossref
+`journal-issue`, applied consistently to the final DOI across discovery and
+supplement paths; missing/conflicting types are never guessed into that exclusion.
+
+Transient identity lookup distinguishes reliable saved, new, and unresolved DOI
+identities. Reliable saved identities skip cache use, Full Hydration, Supplement,
+Matching and Canonicalization regardless of workflow status. Localized conflicts
+block affected DOIs; incomplete indexing prevents unreliable skips and creations.
+An authoritative requested/Prime DOI redirect is rechecked against Workspace
+identity before prime metadata work. Requests and resolved metadata are shared
+within the invocation; a prime already resolved by current discovery is not
+probed again merely because an alias points to it.
+
+Early saved identities are rechecked before reporting completion. Changed or
+uncertain identities are errors, not Already Saved or automatic retry targets.
+Final materialization retains its independent identity scan, occupied-target,
+path-substitution, operation-lock and atomic create-only protections. Existing
+Paper/Author bytes, Notes, Sources, workflow and Enrichment state stay unchanged.
+Authors are scanned only when an actually new Paper needs Author resolution.
+
+### 49.4 New-Paper metadata and cache
+
+Matching occurs after required metadata retrieval and uses actual Provider
+Evidence, including Crossref-only Abstract hits. Different DOIs are never merged
+by names, titles, relations or similarity; only attributable Prime DOI resolution
+changes the requested identity before DOI consolidation.
+
+Crossref valid Title, nonempty ordered Authors and valid Abstract take priority
+independently, with OpenAlex fallback for each missing field. OpenAlex author
+names prefer `raw_author_name`, then profile `display_name`. Stable Author IDs
+supplement chosen ordered names only under existing compatibility checks.
+Journal display text requires trusted venue context and prefers usable Crossref
+metadata, then OpenAlex Source metadata. Trusted Manifest attribution remains
+usable if the Full record omits ISSNs; conflicting full-record ISSNs cannot expand
+configured attribution or supply a foreign Journal display name. Complete dates retain print → online →
+published → issued precedence and OpenAlex fallback; Run does not invent missing
+date components or use canonical dates for a second discovery filter.
+
+DOI, Title and Journal suffice for Capture. Authors, Abstract and date can be
+absent. New Paper Markdown uses `authors: []` for no Authors; full-state readers,
+Workspace projection and workflow actions support it without placeholder notes.
+Older code may reject such Papers; code rollback does not restore Reset data.
+
+Crossref Manifests include DOI, ISSN, Indexed and Type. Traversal completeness,
+revision validity and Full Metadata results are separate transient observations.
+Missing/conflicting Indexed values cannot trigger date recursion or authorize old
+cache reuse. Real page/count/DOI/venue failures still recover or report incomplete
+coverage. A complete Manifest remains complete when Full Hydration fails.
+SQLite schema v3 is retained. Valid empty changes skip write transactions and do
+not create an empty cache DB; invalid-state handling retains its existing rules.
+No persistent DOI index, month cache, lifecycle, metadata history or watermark is added.
+
+### 49.5 Results, Reset and test cleanup
+
+New Papers counts actual committed Paper creations. Already Saved counts reliable
+unique final DOI identities found through trusted current discovery before keyword
+matching, including final materializer matches without double counting. Blocked
+or uncertain identities are not saved counts. Canonical count remains internal,
+not the main completion UI. Crossref Discovery Coverage reports Manifest traversal;
+Current run separately reports metadata successes/failures. Zero-new runs still
+report Outcome and persist Last Run Snapshot v2; v1/v2 history is not rewritten.
+
+Existing Settings `RESET` disposal remains optional and explicit, preserving its
+target binding, lock and native-save protections. This task does not execute Reset
+or introduce migration, automatic deletion, recovery or additional Reset rules.
+
+Retired CLI-format/progress, day-window and three-state tests are removed. Useful
+Run behavior is exercised through the real application/Web path, with existing
+materialization/identity, Source-alias, cache persistence and snapshot coverage
+retained. Field-priority, empty-Authors and independent Coverage assertions replace
+old expectations. Repeat-run refresh/extra-probe expectations are replaced with
+skip/dedup behavior. Shared Settings fixtures use explicit months. No unrelated
+test cleanup or new defensive test matrix is introduced.
+
+### 49.6 Automated implementation evidence — 2026-10-12
+
+All Provider and Workspace tests below use isolated fixtures. No real Provider,
+Chrome, Zotero or Workspace deletion is exercised.
+
+- Final date/configuration/Settings selection: `uv run pytest tests/test_date_range.py tests/test_config.py tests/test_application_settings.py tests/test_web_run_settings.py::test_invalid_form_syntax_is_normal_settings_state_without_validation_call tests/test_openalex.py::test_partial_author_information_preserves_provider_order_and_safe_fields --tb=short -o addopts='' -q`: **116 passed**, two existing dependency deprecation warnings. This follows the user's removal of legacy-specific Save repair.
+- Run/retrieval/state tests: **143 cases passed in affected batches and the directly corrected sparse-ISSN case rerun**. These exercised the real pipeline and Web routes, including all four saved workflow statuses, optional Authors with a real Keep request, alias/Prime DOI resolution and dedup, field selection, provider failures, complete Manifest plus failed metadata, saved-state preservation and request counts. Existing materialization and GUI-launcher unit tests passed in the affected-test batch; no application launch smoke was performed.
+- Canonicalization tests retain snapshot/within-Provider conflict and identity checks while asserting Crossref field priority and compatible Author IDs. Existing Source normalization/ownership and Settings draft tests were retained; assertions requiring nonempty Authors or extra Prime revision probes were corrected and rerun directly. Passing unaffected cases were reused rather than repeating the complete batches.
+
+The quantitative fixture is one configured Journal over January 2026, one matching
+DOI, identical mocked OpenAlex evidence, and a Crossref Manifest/Full record without
+Indexed. The before implementation is the source copied from baseline `1519f0f`
+before this task; only the equivalent config input changes from January day bounds
+to January month bounds. Counts are observed HTTP requests and real function calls,
+not estimates or claims about live API latency.
+
+| Invocation | Before Crossref requests | After Crossref requests | Before / after full metadata requests | Before / after canonicalization calls | Before / after Author scans |
+| --- | ---: | ---: | --- | --- | --- |
+| First capture | 93 | 2 | 1 / 1 | 1 / 1 | 1 / 1 |
+| Same DOI already saved | 93 | 1 | 1 / 0 | 1 / 0 | 1 / 0 |
+
+Before, missing Indexed caused 92 manifest requests per invocation and a warning
+outcome. After, each invocation uses one complete Manifest request; first capture
+adds one Full request, and repeat Run reports zero New Papers/one Already Saved
+without unnecessary metadata, canonicalization or Author work. The new behavior
+is retained by `test_missing_indexed_does_not_split_and_repeat_reduces_requests`.
+
+## 50. Paper Enrichment Authors — Development Contract
+
+### 50.1 Bounded extension and authority
+
+This section extends §§47–48's manual Enrichment authority to missing Authors, using §49's existing support for `authors: []`. Abstract, publication date or Authors missing is sufficient to offer Enrich in any status. Existing values are never overwritten. One read-only translation independently supplies valid missing fields, with partial Preview/Save and further Enrich available while any field remains missing. Title/Journal enrichment, changes to Run metadata eligibility, guessed identities, batch enrichment and additional task systems are excluded. No version, upstream pin, dependency, permission or persistence schema change is introduced.
+
+All existing routes, CSRF/Bridge restrictions, DOI/one-Item validation, browser exclusion, deadlines, cancellation, stale-result handling and accepted-Preview task-tab cleanup remain. The heartbeat capability is now `paper-enrichment/v2`; older Connectors require an update. The Connector adds the original Item `creators` array to its result projection without entering native save/session/attachment paths. Enrichment requires no Zotero Desktop.
+
+### 50.2 Candidates and local Author identity
+
+The server selects only `creatorType: "author"`, preserves order and ignores other roles. Personal names join the supplied firstName/lastName; `fieldMode: 1` uses the entire lastName as a single name. No ORCID/OpenAlex ID is inferred from nonstandard Creator properties or fetched through new requests. Invalid author entries, no usable author roles or names unsafe for wikilinks yield no Authors candidate; valid Abstract/date candidates remain independently usable.
+
+Preview displays escaped candidate names in order. It and Cancel create no Author files. Save submits only operation identity/CSRF and consumes the server-held candidate. Start records Authors missing state alongside existing Paper content/identity. Save revalidates that snapshot and the empty author list; external Paper changes fail without merge or automatic retry.
+
+Name-only Authors use existing `unidentified-{paper_uuid}-{ordinal}` paths, Author rendering and safe exclusive creation. Only valid notes at those deterministic paths with compatible names and no stable identity are reusable. Existing files are never overwritten, unrelated same-name Authors are not merged, and opaque/conflicting/symlink/non-regular paths reject Save.
+
+### 50.3 Write ordering and failure reporting
+
+Build all candidate Paper changes in memory and strictly parse them before creating Authors. Splice only the empty YAML `authors` sequence, preserving comments and bytes outside that value; affected aliases/anchors or unsafe YAML reject the write. Merge valid Abstract/date edits and preserve their existing rules. Under the existing Workspace lock, reread the original Paper, bind the Authors directory, safely create/recheck required Author notes, then perform one identity-bound Paper compare-and-replace. Revalidate the Authors directory and the read files before the final Paper replacement.
+
+Author creation and Paper replacement are not a multi-file atomic transaction. Per the user's chosen policy, if Authors have been created and a later operation fails, retain them and explicitly report that Paper was not saved plus the created paths. A new explicit retry can reuse matching notes. Author creation synchronization failures cannot be reported as Paper completion. A committed Paper followed by filesystem synchronization failure is accurately reported as Completed with a warning. Repeated Save cannot write again. No automatic Author deletion/rollback framework is added.
+
+§46/§49 Run remains Capture-Only. Existing Author notes, Status, human Frontmatter/Notes/Sources, unknown content and all bytes outside intended Paper replacements remain unchanged. MIT Python and AGPL Connector boundaries remain. Rollback retracts code/docs/builds only, never user-saved Author/Paper data. Preserve historical sections through §49. This task includes no commit/publication, real Workspace mutation or additional manual acceptance step.
+
+### 50.4 Automated implementation evidence — 2026-10-12
+
+Implemented in the existing dirty working tree without changing §49's capture/model work. Executed checks:
+
+- `uv run --locked pytest tests/test_paper_enrichment.py tests/test_materialize.py tests/test_application_decisions.py tests/test_safe_write.py tests/test_web_connector_bridge.py tests/test_connector_preparation_arbitration_a3.py tests/test_batch_import.py --tb=short`: **410 passed, 2 existing dependency deprecation warnings, 2.75s**. Includes 180 Enrichment tests, all statuses/seven missing-field combinations with LF and CRLF, Creator roles/personal/institutional names, no ID guessing, partial retries, byte preservation, path/name/identity conflicts, opaque/symlink/directory targets, Author/Directory changes, retained-file failure reporting/reuse, distinct Author/Paper synchronization failures, Preview/Cancel zero creation, old Connector rejection, Desktop-offline routes, repeat Save and existing materialization/decisions/safe-write/Import/Preparation regressions.
+- `./connector/test.sh`: **230 passed** (179 runtime, 25 CARSI, 26 read-only enrichment). The actual patched offscreen handler forwards the original Creators array while forbidden native-save probes remain at zero. Browser-only mode, task exclusion, cancellation/stale results and accepted-Preview tab closure regressions remain covered.
+- `node --test tests/paper_enrichment_ui.test.cjs`: **9 passed**. Covers escaped ordered Authors preview, operation-identifier-only Save, partial completion, readiness, stale polls, cancellation/exit and retained-Author error display. The same harness is also exercised by Python tests.
+- `node --check` on Web JS, runtime and rebuilt offscreen/pageSaving: **PASS**. Scoped `git diff --check` on affected tracked files excluding README: **PASS**. Global `git diff --check` reports three pre-existing end-of-file blank lines in README, application/monitor.py and tests/test_application_settings.py; unrelated files were left unchanged. README's pre-task bytes were reconstructed by reversing this task's exact substitutions and matched the recorded baseline SHA-256, confirming its existing EOF warning was retained.
+- External `connector/build.sh`: **PASS**. Fixed upstream/submodules, declared patch delta and AGPL artifact checks succeeded. Manifest version stays `0.6.7`; the complete manifest/permissions match the installed previous build. Exact overlay/provenance bytes, AGPL COPYING, v2 capability and actual Creators projection were verified. An external previous-build backup is retained. All **310 rebuilt files** match the updated original Chrome-loaded directory; the generated `_metadata` cache file retains content and modification time. Chrome itself was not operated or reloaded.
+- Existing SPEC through §49 is byte-identical to the task baseline. All **241 baseline files outside the 17-file task scope**, including real Workspace/configuration/Obsidian data and unrelated dirty implementation/tests, retain SHA-256 and nanosecond modification times.
+
+Checks are affected automated regressions and external build/install comparisons. No full-suite run, real-browser/login/Zotero acceptance, additional manual acceptance step, real Workspace write, commit or publication is claimed. Rollback follows §50.3 and preserves saved Author/Paper data; the external prior Connector build can restore extension code while retaining Chrome cache.
+
+
+## 51. Paper Detail and Publication Date Precision — Development Contract
+
+### 51.1 Scope and presentation
+
+This section supersedes §48's missing-component `01` padding and conflicting
+presentation requirements. §§1–50 remain historical records; §49 Journal Run's
+Canonical date model, Publication Date discovery window and capture-only behavior
+are unchanged. §50 Authors Enrichment, Connector navigation/translation/timeouts,
+Preview/Cancel/Save, retained-file reporting and native Import safeguards remain.
+
+Paper Detail shows Title, Journal, Publication Date, Authors, DOI and Abstract,
+with existing Enrich and Decision actions. Every workflow status uses the same
+normalized `https://doi.org/` link with safe external navigation attributes;
+there is no separate Open DOI button. External IDs, Sources and Author Keywords
+are hidden from ordinary presentation. Paper List hides Discovered At.
+
+Existing External IDs, Sources, discovered_at, nonempty Author Keywords and user
+Markdown remain stored unchanged. Newly created Papers omit empty author_keywords.
+The default Inbox.base hides Author Keywords and Discovered At columns; its
+create-only installation never replaces an existing custom file. Sorting remains
+`discovered_at DESC → publication_date DESC → title ASC`.
+
+### 51.2 Precision-preserving date contract
+
+Paper Markdown and Workspace presentation use strictly validated ISO strings
+`YYYY`, `YYYY-MM`, `YYYY-MM-DD` or null. Years must be 0001–9999, months 01–12,
+and full dates must exist in the calendar. Bare integer years, absent years,
+datetimes and malformed or invalid dates are rejected without guessing. Historical
+YAML full-date values normalize to equivalent ISO strings; null remains supported.
+No database, precision field or schema migration is introduced.
+
+Translator date_parts retain their supplied precision through Preview, Save,
+Reader, Workspace, Web and the existing Kept Export format. Newly saved dates are
+quoted YAML strings. ISO strings determine publication-date ordering, with absent
+dates last within equal discovery timestamps; no missing components are created
+for comparison or display. Partial dates are valid existing metadata, so Enrich
+neither requests a replacement nor overwrites them. Previously saved `01` values
+remain unchanged because their original precision cannot be recovered.
+
+Date Save still replaces only a missing/null scalar under existing compare-and-
+replace and file/directory identity checks. Other field bytes, Sources, Notes,
+unknown content and existing Author files are preserved. There is no bulk Workspace
+rewrite, Publisher adapter, Provider metadata redesign or CLI restoration.
+
+### 51.3 Focused test cleanup and delivery
+
+Remove retired acquisition artifact/import/dependency/string probes, the real
+repository list smoke, historical GUI phase/source-layout assertions, and obsolete
+Inbox field prohibitions. Keep application/Web behavior, safe writes and current
+GUI launcher tests. Remove the duplicate Python wrapper around the independently
+runnable Enrichment JavaScript tests. The older Abstract/date-only matrix is
+covered by the Authors field matrix, whose redundant status × fields × newline
+cross-product is reduced to representative cases retaining all field combinations,
+all statuses and LF/CRLF. Update date-padding and internal-field display assertions.
+These removed tests have no exclusive fixture or script resources to remove.
+
+Validation is limited to affected automated behavior tests. No full suite, smoke,
+generic checks, browser operation or Agent acceptance is part of this task; manual
+acceptance belongs to the user. No real Workspace mutation, commit, publication or
+version change is authorized by this implementation.
+
+
+### 51.4 Affected automated evidence — 2026-10-12
+
+All tests use temporary Workspace fixtures or an in-process Web client. **82
+unique Python cases and 2 JavaScript cases passed** across the scoped selections
+below; repeated cases are counted once. Two existing FastAPI/Starlette dependency
+deprecation warnings were emitted. No browser or manual acceptance was performed.
+
+- `uv run pytest tests/test_paper_enrichment.py -k 'publication_date_candidate or date_scalar_splice or ambiguous_yaml_date or web_date_precision or invalid_paper_date or historical_yaml_date or authors_partial_save or authors_enrichment_field_matrix' --tb=short -o addopts='' -q`: initially **49 passed / 3 failed / 78 deselected**. The three new tests selected a Kept Paper through the default Inbox view. Setting `view=kept` corrected the fixture; all three passed in the next command. No production correction was needed for that failure.
+- `uv run pytest tests/test_paper_enrichment.py::test_web_date_precision_preview_cancel_save_and_read tests/test_web_app.py::test_paper_list_renders_projected_metadata tests/test_web_app.py::test_paper_detail_is_uuid_addressed_and_renders_existing_projection tests/test_web_app.py::test_doi_link_is_normalized_and_safe_in_every_status tests/test_inbox.py::test_views_use_required_columns_and_sort_precedence tests/test_application_workspace.py::test_partial_publication_dates_sort_as_iso_strings_with_missing_last tests/test_application_workspace.py::test_workflow_views_use_discovered_date_then_publication_date_then_title tests/test_materialize.py::test_missing_abstract_and_empty_summaries_are_explicit tests/test_kept_export.py::test_each_paper_problem_is_an_issue_and_prevents_export --tb=short -o addopts='' -q`: **24 passed**.
+- `uv run pytest tests/test_paper_enrichment.py::test_partial_enrichment_then_retry_only_remaining_fields tests/test_web_run_settings.py::test_settings_route_delegates_save_once tests/test_web_run_settings.py::test_save_reaches_application_with_runtime_empty_path_semantics --tb=short -o addopts='' -q`: **8 passed**.
+- `uv run pytest tests/test_paper_enrichment.py::test_invalid_paper_date_is_rejected_without_writes tests/test_materialize.py::test_materializes_complete_paper_and_minimal_author_notes --tb=short -o addopts='' -q`: **10 passed**, including the strengthened invalid-date test through the real Save writer with unchanged file bytes.
+- `uv run pytest tests/test_web_app.py::test_doi_link_is_normalized_and_safe_in_every_status --tb=short -o addopts='' -q`: **12 passed** after removing unrelated retired-form/string and normalization-call-count assertions from that test. URL encoding and safe-navigation behavior remain covered.
+- `node --test --test-name-pattern='UI previews' tests/paper_enrichment_ui.test.cjs`: **2 passed**. Preview and post-Save rendering preserve a month-only date and allow remaining fields to be enriched separately.
+
+Coverage includes strict invalid-date rejection, quoted year/month/day writes,
+Preview/Cancel/Save round trips, byte preservation, existing partial-date retention,
+historical full YAML dates/null, Workspace sorting, Web fragments, DOI-first and
+retained manual Kept Export formats, compact Inbox columns, and omitted empty /
+preserved nonempty Author Keywords. No full suite, smoke, generic checks, Connector
+build/install, real Workspace reset, commit or publication was run.
+
+## 52. Early Journal Run Matching and Partial Publication Dates — Development Contract
+
+### 52.1 Authority and scope
+
+This section supersedes §49's matching-after-full-metadata and cross-Provider
+Abstract-priority clauses, §51's retained Canonical full-date type boundary, and
+older NOT support. Other §46/§49 identity, native publication-month discovery and
+Capture-Only rules remain. Existing §§1–51 are historical records.
+
+The implementation builds on the current dirty working tree. It does not repair
+any existing Workspace Paper, including the five identified historical dates,
+and adds no repair script, migration, Provider, database, setting or schema version.
+Enrich execution, Authors, Connector, Zotero, CARSI and Paper Detail behavior are
+unchanged. Provider State remains SQLite v3; Last Run remains Snapshot v2.
+
+### 52.2 Early matching and on-demand metadata
+
+Both Providers discover independently in parallel. DOI normalization, trusted
+Journal attribution, explicit non-conflicting journal-issue exclusion and reliable
+Workspace Saved Skip precede matching. Reliable saved DOIs are counted before
+keywords and rechecked at completion as before.
+
+Trusted OpenAlex Title/Abstract are searched first using the existing local FTS5
+semantics. A positive match is retained. Complete valid OpenAlex Title/Abstract
+that fail matching exclude that DOI without searching Crossref, including its
+cache, for a possible alternative hit. This intentionally accepts missed Papers
+whose Crossref text would have matched. Missing fields are not complete negatives.
+
+If OpenAlex lacks a search field and its available text did not match, Crossref
+full metadata is obtained on demand and fills only the missing search fields.
+Crossref-only DOI candidates use Crossref Title/Abstract. Metadata retrieval
+failure remains a real failure, not a trusted negative. A retained OpenAlex match
+requires extra metadata only when Capture lacks Title or Journal; optional
+Authors, Abstract and date do not cause hydration. Only retained, safely resolved
+identities reach final evidence consolidation/canonicalization. Later metadata
+or aliases cannot revive a rejected final DOI.
+
+NOT is removed from the AST and FTS5 evaluator. A case-insensitive standalone,
+unquoted NOT operator raises an explicit configuration error before Provider work
+or Workspace writes. Saved configuration is not rewritten. Quoted "not" remains
+text; AND, OR, parentheses, Phrase, Prefix and Proximity keep their semantics.
+
+Progress is Checking → Discovery → Matching → Combining Metadata → Capturing.
+Matching includes required fallback metadata; Combining Metadata includes the
+remaining identity confirmation and final field selection. Stages never move back.
+
+### 52.3 Identity, field selection and accounting
+
+Crossref Supplement can perform thin identity/type confirmation without full
+hydration. Existing DOI Probe, bounded Singleton and attributable Prime Redirect
+rules remain. Current Manifest and hydrated Prime evidence are reused; the actual
+hydrated revision takes precedence over an older Manifest observation. Singleton
+full metadata already obtained for identity is reused, never fetched again.
+Final aliases are rechecked against saved/conflicted Workspace identities. Failed
+identity resolution blocks the affected creation; independent trusted Provider
+attribution remains valid. Alias/Prime results share invocation-local metadata,
+and multiple aliases cannot create duplicate Papers.
+
+Actual Crossref metadata retains Title and ordered Authors priority, with
+compatible stable Author IDs only; longer author lists are not appended. If valid
+abstracts from multiple Providers were actually obtained, choose the longer
+cleaned text, with Crossref winning equal lengths. Single-Provider selected text
+retains its existing spelling. No comparison-only request or matching rerun is
+added. Ordinary cross-Provider metadata differences do not generate warnings;
+same-Provider conflicting evidence, identifiers, identity and actual failures do.
+
+Manifest Coverage is independent of metadata selection/success. A successful thin
+confirmation reports Supplement Complete without inventing metadata success.
+Policy skips are not metadata failures. Metadata counters describe actual full
+metadata results, including results obtained before a later exclusion; pure thin
+probes are not counted. Cache usage counts unique records actually used. Valid
+metadata used to decide a fallback negative may still be cached; no pending
+changes means no meaningless cache transaction. Evidence/retained cluster counts
+describe the final consolidation input after selection. Zero-new runs still save
+Outcome, Coverage and Last Run. Existing Papers, Authors and Notes are never
+rewritten by Run.
+
+### 52.4 Canonical date precision
+
+CanonicalMetadata.publication_date now contains a validated ISO string or null.
+The shared strict validator is located in models and used by Reader and Enrich;
+historical/full Python date inputs normalize to strings. Integer years, datetime,
+invalid calendar dates and malformed precision remain rejected. Provider evidence
+date structures and the v3 cache payload are unchanged.
+
+Date selection preserves all existing complete-date behavior first: complete
+print → online → published → issued, deterministic earliest same-source choice,
+then the existing complete Provider fallback, including OpenAlex. Only when no
+complete date exists are Crossref partial dates considered in the same source
+order. Within that source, higher precision wins, followed by the earliest value.
+No components are combined across evidence; retrieval/indexed/discovery times
+never supply publication components. Partial differences create no new warning.
+
+New Paper dates serialize as explicitly quoted YYYY, YYYY-MM or YYYY-MM-DD, or
+null. In particular PyYAML's default plain YYYY-MM spelling is overridden for
+this field. Existing Reader, sorting, Web and export pass the string through;
+missing components are never manufactured. Ordinary Run does not backfill or
+overwrite existing dates. The date repair uses only metadata obtained under the
+early-matching policy and does not cause optional-field requests.
+
+### 52.5 Affected automated evidence — 2026-10-12
+
+Only scoped automated tests and temporary Provider/Workspace fixtures were used.
+No full suite, smoke, generic checks, browser operation, Agent acceptance, real
+Workspace repair/reset, version change, commit or publication was performed.
+Manual acceptance belongs to the user.
+
+- Keyword/parser/FTS5 and production Run selection initially reported 137 passed
+  and 3 obsolete request/failure expectations. Those expectations were updated:
+  skipped metadata is not a failed request; a known Manifest prime needs no extra
+  probe. The real Full Hydration failure test now deliberately requires fallback.
+- The focused Canonical date/model/field selection reported 50 passed and two
+  failures: one exposed unquoted YYYY-MM materialization and was fixed; the other
+  new fixture lacked required Title/Journal and was corrected. The affected
+  date round trips and deterministic partial selection then passed in the
+  34-case selection below.
+- Production matching and Canonical selection initially reported 62 passed and
+  6 obsolete cross-Provider warning assertions; corrected author/abstract behavior
+  passed in subsequent scoped selections. Genuine same-Provider conflicts remain.
+- Scoped state/cache/concurrency/preflight/progress selection reported 16 passed
+  and one outdated matching-after-consolidation test-order assumption. The helper
+  now verifies relevant ordering/thread ownership rather than the old exact list;
+  both forced Provider completion orders and independent Provider failure cases
+  passed in the subsequent 9-case selection.
+- The following final scoped batches passed (two existing FastAPI/Starlette
+  dependency deprecation warnings appeared when Web test modules were imported).
+
+Executed passing commands:
+
+```sh
+# Early matching, identity and retrieval safety: 34 passed, 56 deselected
+uv run pytest tests/test_canonicalize.py::test_run_date_precision_round_trip tests/test_canonicalize.py::test_partial_date_source_precedes_precision_and_equal_precision_is_earliest tests/test_application_monitor.py::test_early_matching_and_missing_field_fallback tests/test_application_monitor.py::test_openalex_only_match_uses_identity_probe_without_full_hydration tests/test_application_monitor.py::test_not_configuration_stops_before_provider_or_workspace_work tests/test_application_crossref_retrieval.py -k 'round_trip or partial_date_source or early_matching or openalex_only_match or not_configuration or alias or prime or supplement or conflicting_duplicate_manifest or manifest_type_conflict' --tb=short -o addopts='' -q
+# Provider overlap/failure plus existing presentation/date paths: 9 passed
+uv run pytest tests/test_application_state_migration.py::test_real_provider_overlap_both_completion_orders_preserve_production_outputs tests/test_application_state_migration.py::test_structured_provider_failure_does_not_cancel_sibling tests/test_paper_enrichment.py::test_web_date_precision_preview_cancel_save_and_read tests/test_application_workspace.py::test_partial_publication_dates_sort_as_iso_strings_with_missing_last tests/test_kept_export.py::test_each_paper_problem_is_an_issue_and_prevents_export tests/test_materialize.py::test_materializes_complete_paper_and_minimal_author_notes --tb=short -o addopts='' -q
+# Alias exclusion, shared results and identity failure: 3 passed
+uv run pytest tests/test_application_monitor.py::test_alias_cannot_resurrect_a_rejected_prime tests/test_application_monitor.py::test_matched_alias_shares_earlier_prime_metadata tests/test_application_monitor.py::test_failed_identity_request_blocks_capture_without_fake_metadata_failure --tb=short -o addopts='' -q
+# Final counter behavior, NOT, progress, abstract selection/conflicts: 54 passed
+uv run pytest tests/test_application_monitor.py::test_alias_cannot_resurrect_a_rejected_prime tests/test_application_monitor.py::test_not_configuration_stops_before_provider_or_workspace_work tests/test_web_run_settings.py::test_running_run_fragment_renders_human_stage_and_htmx_polling tests/test_application_settings.py::test_invalid_keyword_draft_is_structured_failure tests/test_canonicalize.py::test_established_identity_real_abstract_differences_remain_issues tests/test_canonicalize.py::test_cross_provider_abstract_uses_longer_cleaned_text_without_warning --tb=short -o addopts='' -q
+```
+
+Test cleanup removes NOT-success/complement tests and replaces obsolete warning,
+request-count and exact internal-order expectations. The cache/state fixture now
+deliberately lacks an OpenAlex Title so those tests still exercise real metadata
+retrieval/persistence instead of becoming accidental early-skip tests. No unrelated
+test cleanup or independent performance framework was introduced.
+
+The before/after comparison used one isolated January Journal with 85 shared DOI
+discoveries: 5 OpenAlex Title matches and 80 complete OpenAlex Title/Abstract
+negatives. No errors occurred. The exact same fixture was run before and after:
+
+| Run | Crossref requests before → after | Full Metadata requests before → after | Hydrated DOIs before → after | Metadata results before → after | New / Already Saved |
+|---|---|---|---|---|---|
+| First | 6 → 1 | 5 → 0 | 85 → 0 | 85 → 0 | 5 / 0 in both |
+| Repeat | 1 → 1 | 0 → 0 | 0 → 0 | 80 cached → 0 | 0 / 5 in both |
+
+The comparison fixture command is recorded below. It uses in-process simulated
+Providers and a temporary directory removed automatically, not a timing benchmark
+or real Provider/Workspace acceptance.
+
+```sh
+uv run python - <<'PY'
+import sys, tempfile, json
+from pathlib import Path
+from pytest import MonkeyPatch
+sys.path.insert(0, 'tests')
+from test_application_state_migration import Execution, oa_work, cr_record
+with tempfile.TemporaryDirectory(prefix='lm-early-match-') as root, MonkeyPatch.context() as patch:
+    e = Execution(Path(root), patch)
+    e.works = []
+    e.records = {}
+    for n in range(85):
+        doi = f'10.5555/proof-{n}'
+        title = 'statistics study' if n < 5 else 'unrelated biology'
+        work = oa_work(n + 1, doi, title)
+        work['abstract_inverted_index'] = {'unrelated': [0], 'biology': [1]}
+        e.works.append(work)
+        e.records[doi] = cr_record(doi, title=title)
+    e.members = list(e.records)
+    for phase in ('first', 'repeat'):
+        result = e.run()
+        requests = e.cr_transports[-1].requests
+        full = e.full_requests
+        print(json.dumps(dict(phase=phase, created=result.created_papers, saved=result.matched_existing_papers,
+            crossref_requests=len(requests), full_requests=len(full),
+            hydrated_dois=sum(len(r.url.params.get('filter', '').split(',')) for r in full),
+            metadata_success=result.statistics.metadata_success, metadata_failed=result.statistics.metadata_failed,
+            errors=[i.message for i in result.errors])))
+PY
+```
+
+
+## 53. Optional Shibboleth Attribute Release Consent — Development Contract
+
+### 53.1 Authority and Settings
+
+This section narrowly supersedes §44.5/§44.6's prohibition on external IdP scripts
+for one opt-in Shibboleth consent action. It does not change school credential
+entry/login buttons, MFA/CAPTCHA, native Zotero Import, Preparation outcomes,
+login deadlines, tab preservation or browser-task exclusion. §§1–52 remain history.
+
+Institution persists the strict Boolean automatic_attribute_release_consent,
+default false, through existing Settings drafts and Save. Save affects the next
+explicit Preparation; its institution and preference are frozen at task start.
+The checkbox participates in dirty-state tracking and successful form submission.
+Legacy configurations default off; no migration or schema version is introduced.
+
+The UI explains that Global Consent can release personal attributes to subsequent
+services beyond this database, with actual attributes governed by the school.
+Disabling the preference does not revoke consent already stored by the IdP.
+See [Shibboleth ConsentConfiguration](https://shibboleth.atlassian.net/wiki/spaces/IDP30/pages/2496561380/ConsentConfiguration).
+Only the preference is stored locally, never credentials, Cookies, attribute
+values, consent results, authentication state or navigation history.
+
+### 53.2 Bounded execution
+
+The existing Preparation command adds a default-false Boolean. An optional
+shibboleth-consent/v1 heartbeat capability supplements the unchanged a4-verified
+base capability. Older Connectors continue ordinary Preparation with manual
+consent; enabling the preference without the optional capability displays an
+update/reload notice. No extension version or Manifest permission change is needed.
+
+Use only the existing Portal login-wait loop and the task-owned, normal,
+non-incognito Portal tab/window. Derive the allowed origin from the frozen HTTPS
+IdP entityID in the validated CARSI login URL. URNs, different origins, unavailable
+frames and unknown documents remain manual. Request the top frame explicitly and
+bind script injection to its current active documentId in ISOLATED world.
+
+Require exactly one visible, enabled input#_shib_idp_globalConsent radio/checkbox
+and one visible, enabled input[name="_eventId_proceed"] submit button, sharing
+one native form. Require POST to the same IdP origin, including submitter action,
+method and target overrides; another browsing-context target is not authorized.
+Select Global Consent through its native click when needed, confirm it is checked
+and revalidate the controls/form before clicking Proceed. Construct no HTTP,
+SAML or credential request and read no personal attribute or hidden-field values.
+
+Check current server task authorization before inspection and again before the
+final document-bound action. A document is consumed before attempting native
+clicks. Executor memory plus an isolated-world per-document marker prevent repeat
+submission across loops, failed/lost receipts, Service changes or a later task on
+the unchanged document. The marker stores only an attempted-action Boolean and
+vanishes with the document; it is not an authentication or consent-result cache.
+Errors preserve the page for manual operation and do not trigger a second submit.
+
+Cancel, expiration or revoked ownership prevents further dispatch. Service/Task
+completion cleans local records and listeners without closing any page. Execution
+exists only during active Portal login waiting: it neither extends Preparation nor
+operates on external Visit targets after Opened. A native Proceed click does not
+prove login or access, and its completion does not depend on inspecting a redirect.
+Existing Opened / Needs attention / Failed semantics remain unchanged.
+
+### 53.3 Delivery and validation boundary
+
+Use only affected Settings, native-form, task/document authorization and existing
+Preparation tests. VM/DOM tests are deterministic automation evidence, not real
+Chrome/IdP verification; the user performs the latter after reloading Chrome.
+No full project suite, smoke, real login or Agent manual acceptance is required.
+
+Chrome's current unpacked-extension path was read from its local configuration:
+/Users/adrian/Desktop/literature-monitor/connector/build/chrome-mv3. Build the pinned
+AGPL Connector externally, then replace that directory's build files in place,
+keeping its path and Chrome-generated _metadata. Do not operate Chrome or mutate
+real monitor.yaml, list.md, Workspace, Papers, Authors or Zotero state. Preserve
+a previous-build copy outside the repository for code rollback; rollback does not
+revoke consent independently stored by the school. No commit/publication is included.
+
+### 53.4 Implementation evidence — 2026-10-12
+
+- Settings/legacy/default/strict Boolean and frozen-command selections:
+  `uv run pytest tests/test_institution_settings.py -k 'attribute_consent or blank_and_legacy or load_edit_validate_save_reload' tests/test_preparation_coordinator_a3.py -k 'attribute_consent or blank_and_legacy or load_edit_validate_save_reload' --tb=short -o addopts='' -q`: **13 passed, 99 deselected**.
+- Executed checkbox dirty-state behavior, existing CSRF/draft/save flow and
+  Preparation lifecycle/authorization:
+  `uv run pytest tests/test_institution_settings.py::test_attribute_consent_checkbox_participates_in_settings_draft tests/test_institution_settings.py::test_web_csrf_form_roundtrip_preview_and_single_save tests/test_preparation_coordinator_a3.py --tb=short -o addopts='' -q`: **25 passed**.
+  Temporary notes and list bytes remain unchanged. Two existing dependency
+  deprecation warnings appeared in Python batches.
+- `node --test connector/tests/carsi-preparation.test.cjs`: **40 passed**,
+  covering native consent selection/submission, unknown/ambiguous/disabled/hidden
+  controls, foreign form/action, failed selection/click, once-per-document,
+  lost navigation receipt, default-off, foreign/URN origin, cancellation,
+  expired authority and document replacement. The subsequently added
+  cancellation-during-authorization case ran alone with
+  `node --test --test-name-pattern='consent executor refuses cancelDuringAuthorization' connector/tests/carsi-preparation.test.cjs`: **1 passed**.
+- The existing Runtime custom runner initially ignored Node's test-name filter
+  and ran its existing file: **179/179 passed**. It now accepts an optional name
+  pattern argument, leaving its default behavior unchanged. The actual scoped
+  command `node connector/tests/runtime.test.cjs 'Preparation|two Services|revocation heartbeat'`
+  then reported **6/6 passed**, including the new optional-capability heartbeat
+  assertion and existing revocation/cleanup/browser-arbitration behavior.
+- External `connector/build.sh` completed successfully with its existing pinned
+  upstream/submodule, source-delta and AGPL artifact checks. Existing upstream npm
+  dependency deprecation notices were emitted; dependencies were not upgraded.
+  All three current overlays/provenance inputs matched the built artifact.
+- Chrome's configured unpacked path was retained. **310 artifact files** were
+  copied over `connector/build/chrome-mv3` and compared byte-for-byte with the
+  successful build. The complete Manifest JSON (including version **0.6.7**,
+  permissions and content scripts) is unchanged. Chrome's generated _metadata
+  remains untouched. The external reconstruction/output directory was removed.
+
+The previous Connector artifact and build log are retained at:
+/Users/adrian/.codex/backups/literature-monitor/shibboleth-consent-Imkz6U
+The chrome-mv3 subdirectory is the code rollback copy. Replacing extension code
+does not undo native consent already granted at the school IdP.
+
+No browser was operated or reloaded. Real Chrome/IdP submission remains for the
+user to verify. No full project suite, smoke, real Workspace/configuration write,
+Zotero interaction, commit, version bump or publication was performed.
+
+## 54. v0.6.8 Core Regression Cleanup and Release Preparation
+
+### 54.1 Scope and retained behavior
+
+The user authorized production-code cleanup, a core-regression test suite and
+v0.6.8 release preparation, without commit, push or publication. Existing feature
+changes, Connector patches 0003/0004 and real user configuration/Workspace remain
+protected. No dependency, upstream pin, Paper schema or Provider-state schema
+change is introduced.
+
+The retired eager retrieval/evidence-assembly module, serial Provider discovery
+wrappers and old enrichment adapter are removed. Current Run uses batched Source
+resolution, Manifest discovery and invocation-local on-demand metadata (§52).
+Kept Export and durable Last Run reading remain because their contracts are still
+valid. Zotero Local API retains only read-only Desktop instance health; historical
+My Library DOI enumeration, parent-key reconciliation and PDF/file inspection
+are removed. Native Connector Parent/PDF handling is unchanged (§42).
+
+### 54.2 Core regression suite
+
+Tests focus on actual application/Web workflows, current Provider boundaries and
+observed regressions. Retired-entrypoint tests and duplicate mock-result/source
+text checks are removed rather than hidden with skip/xfail or archived outside
+discovery. Retained OpenAlex cases execute the real batched production path.
+Identity/alias isolation, immutable saved Papers/Authors, Markdown CAS/content
+preservation, atomic writes, filesystem races/locks, Reset target ownership,
+native-save attribution/settlement and stale-callback rejection retain coverage.
+Low-risk UI implementation details and equivalent old/new-entrypoint combinations
+do not each require separate tests.
+
+The seven failing baseline cases are updated to current contracts: repeated
+Supplement reuses successful invocation-local metadata; Manifest normalization
+allows current type fields; Combining Metadata is stage four; Reset fixtures
+provide explicit months; a run with no pending metadata need not create an empty
+Provider-state database. Existing persistence tests cover actual cache writes.
+
+### 54.3 Version and distribution preparation
+
+Package/lock identity, Provider and AI Mapping Pack User-Agents and Connector
+build identity are 0.6.8. CARSI's explicit compatibility set adds 0.6.8 while
+retaining 0.6.4–0.6.7 and the required verified Executor capability. Unknown
+versions/capabilities remain unsupported. The 0.6.8 heartbeat/Claim regression
+was observed failing before the compatibility update.
+
+Final artifacts are built from a repository-external snapshot containing the
+current authorized source, tests and documentation, including untracked Enrichment
+modules and Connector patches. User list.md, monitor.yaml, .obsidian, Workspace,
+Git metadata and caches are excluded. No installed Connector is overwritten and
+no real Chrome/Zotero acceptance is performed by this preparation task.
+
+### 54.4 Executed evidence — 2026-10-13
+
+Baseline: 7 failed, 2854 passed, 2 existing dependency warnings (27.26s).
+Final results were executed in a repository-external snapshot of the authorized
+working source, including the untracked Enrichment modules and Connector delta:
+
+- `uv run --locked pytest -o addopts='' -q --tb=short`: **2545 passed**, no failures
+  or skips, two existing dependency deprecation warnings, **26.29s**. A first
+  collection attempt exposed a test-only indentation error introduced while
+  removing an obsolete local import; it was corrected before this complete run.
+- `bash connector/test.sh`: **247 passed** (180 Runtime, 41 CARSI, 26 Enrichment).
+  `node --test connector/tests/lifecycle-cleanup.test.cjs`: **3 passed**.
+  `node --test tests/paper_enrichment_ui.test.cjs`: **9 passed**.
+- `uv lock --check` and `git diff --check`: **PASS**, including correction of
+  the five previously reported EOF-whitespace findings. The dependency lock
+  differs only in this project's version; upstream pins and patches 0003/0004
+  retain their prior bytes.
+- Python production: **19,382 → 18,036 lines**, 54 → 53 modules. Python tests:
+  **29,942 → 27,392 lines**, with collected cases **2861 → 2545**. No wall-clock
+  performance or memory-saving claim is made from these counts.
+- `uv build --out-dir ../artifacts`: **PASS**. Wheel and sdist are **0.6.8/MIT**;
+  all 72 package files match source, the UTF-8 README matches wheel metadata,
+  and neither package contains Connector code or protected configuration/data.
+- Fresh CPython 3.12.14 environment, wheel installation with locked runtime
+  dependencies and `uv pip check`: **PASS**. Imports resolve from site-packages;
+  `literature-monitor gui --help`, Settings/Kept/static HTTP routes, accepted
+  0.6.8 CARSI heartbeat and rejected 0.7.0 heartbeat passed. Synthetic configuration
+  remained unchanged and no Workspace was created by those reads.
+- `./connector/build.sh`: **PASS**. Fixed upstream/submodules, sequential patch
+  application and delta checks succeeded. The MV3 manifest is **0.6.8**, AGPL
+  COPYING and overlays match source. The integrity-checked **2323-entry** ZIP
+  includes corresponding patched source/submodules and build instructions,
+  excluding Git metadata, node_modules and user data.
+
+Prepared artifacts, not published release assets:
+
+| Artifact | SHA-256 |
+|---|---|
+| `literature_monitor-0.6.8-py3-none-any.whl` | `034872e87e403284ecc3b428553d33db8073321dadfd00cd4168feeec71b40f9` |
+| `literature_monitor-0.6.8.tar.gz` | `71da2da9a9674daf1d4393154d429f87600b33d4a2eb93184e300577972e574f` |
+| `literature-monitor-connector-0.6.8-chrome-mv3.zip` | `4980393f9f2727cb61d062a62576ab3d546a541cece88bab28d47528f2d6ad26` |
+
+v0.6.8 remains **UNRELEASED**. No commit, tag, push, Release, real-browser
+acceptance, real Workspace operation or Zotero Library access was performed.
+
+### 54.5 Publication authorization and validation reuse — 2026-10-13
+
+The user subsequently authorized the complete v0.6.8 commit, annotated tag,
+normal main/tag pushes, GitHub Release, asset verification and documentation
+closeout. The user also explicitly authorized uploading the current `list.md`;
+its bytes are included in Git without editing. monitor.yaml, src/.obsidian and
+Workspace remain excluded from commits and distribution artifacts.
+
+The 104 project paths match the §54.4 validated snapshot; `list.md` is the only
+additional commit input. All three artifact SHA-256 values and the wheel's
+package files/embedded README match. Functional/build inputs have not changed,
+so §54.4 tests, reconstruction, package inspection and isolated installation are
+reused. This subsection records authorization and preflight, not publication;
+§54.6 records the verified public result after it occurs.

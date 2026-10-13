@@ -2,11 +2,7 @@ from uuid import UUID
 
 import pytest
 
-from literature_monitor.naming import create_internal_id, paper_filename, short_uuid, slugify_title
-
-
-def test_internal_id_is_uuid4() -> None:
-    assert create_internal_id().version == 4
+from literature_monitor.naming import paper_filename, short_uuid, slugify_title
 
 
 @pytest.mark.parametrize(

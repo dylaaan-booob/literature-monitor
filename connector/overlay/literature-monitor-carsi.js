@@ -98,6 +98,46 @@
 		return {status: action === "visit" ? "visited_click" : "ready"};
 	}
 
+	// Runs only in the extension's isolated world of the bound IdP document.
+	function attributeConsentAction(action, origin) {
+		if (location.origin !== origin) return {status: "unverified"};
+		const marker = "__literatureMonitorAttributeConsentAttempted";
+		if (globalThis[marker]) return {status: "attempted"};
+		const controls = () => {
+			const choices = [...document.querySelectorAll("#_shib_idp_globalConsent")];
+			const buttons = [...document.querySelectorAll('input[name="_eventId_proceed"]')];
+			if (choices.length !== 1 || buttons.length !== 1) return null;
+			const choice = choices[0], proceed = buttons[0], form = choice.form;
+			const usable = node => node.isConnected && !node.matches(":disabled")
+				&& node.getClientRects().length > 0
+				&& !["hidden", "collapse"].includes(getComputedStyle(node).visibility);
+			if (choice.tagName !== "INPUT" || !["radio", "checkbox"].includes(choice.type)
+					|| proceed.type !== "submit" || !usable(choice) || !usable(proceed)
+					|| !form || form !== proceed.form) return null;
+			const method = proceed.getAttribute("formmethod") || form.method;
+			const target = proceed.getAttribute("formtarget") || form.target;
+			if (method?.toLowerCase() !== "post" || (target && target !== "_self")) return null;
+			try {
+				const url = new URL(proceed.getAttribute("formaction") || form.getAttribute("action") || location.href, location.href);
+				if (url.origin !== origin || url.username || url.password) return null;
+			}
+			catch (_) {return null;}
+			return {choice, proceed};
+		};
+		const found = controls();
+		if (!found) return {status: "unverified"};
+		if (action === "scan") return {status: "ready"};
+		if (action !== "submit") return {status: "unverified"};
+		// Consume before either native click; navigation or a failed receipt cannot retry.
+		globalThis[marker] = true;
+		if (!found.choice.checked) found.choice.click();
+		const current = controls();
+		if (!current || current.choice !== found.choice || current.proceed !== found.proceed
+				|| found.choice.checked !== true) return {status: "not_selected"};
+		found.proceed.click();
+		return {status: "submitted"};
+	}
+
 	class VisitObservation {
 		constructor(webNavigation, {detailTabID, current,
 				setTimer = (callback, delay) => globalThis.setTimeout(callback, delay),
@@ -224,6 +264,20 @@
 			this.visitBrowserError = false;
 			this.waitingReported = false;
 			this.traceCount = 0;
+			this.consentDocuments = new Set();
+			this.consentBusy = false;
+			this.consentOrigin = null;
+			if (command.automatic_attribute_release_consent === true) {
+				try {
+					const login = new URL(command.login_url);
+					const entity = new URL(login.searchParams.get("entityID"));
+					if (login.origin === "https://ds.carsi.edu.cn"
+							&& login.pathname === "/Shibboleth.sso/Login"
+							&& entity.protocol === "https:" && !entity.username && !entity.password)
+						this.consentOrigin = entity.origin;
+				}
+				catch (_) { /* URN and unconfirmed origins remain manual. */ }
+			}
 		}
 
 		trace(stage) {
@@ -281,6 +335,49 @@
 				return {tab, frame};
 			}
 			catch (_) {return null;}
+		}
+
+		async consentDocument() {
+			if (!this.live() || this.revoked || !this.consentOrigin) return null;
+			try {
+				const tab = await this.browser.tabs.get(this.context.portalTabID);
+				if (!this.live() || this.revoked || !tab || tab.incognito !== false
+						|| tab.windowId !== this.context.windowID || tab.status !== "complete"
+						|| new URL(tab.url).origin !== this.consentOrigin) return null;
+				const frame = await this.browser.webNavigation.getFrame({tabId: tab.id, frameId: 0});
+				if (!this.live() || this.revoked || !frame || frame.errorOccurred
+						|| frame.documentLifecycle !== "active" || !frame.documentId
+						|| new URL(frame.url).origin !== this.consentOrigin) return null;
+				return {tab, frame};
+			}
+			catch (_) {return null;}
+		}
+
+		async consent() {
+			if (!this.consentOrigin || this.consentBusy || !this.live() || this.revoked) return false;
+			this.consentBusy = true;
+			try {
+				const before = await this.consentDocument();
+				if (!before || this.consentDocuments.has(before.frame.documentId) || !await this.authorized()) return false;
+				const inject = action => this.browser.scripting.executeScript({
+					target: {tabId: before.tab.id, documentIds: [before.frame.documentId]},
+					world: "ISOLATED", func: attributeConsentAction, args: [action, this.consentOrigin],
+				});
+				if (!this.live() || this.revoked) return false;
+				const scanned = await inject("scan");
+				if (scanned?.length !== 1 || scanned[0].frameId !== 0
+						|| scanned[0].documentId !== before.frame.documentId
+						|| scanned[0].result?.status !== "ready" || !await this.authorized()) return false;
+				const current = await this.consentDocument();
+				if (!current || current.frame.documentId !== before.frame.documentId || !this.live() || this.revoked) return false;
+				this.consentDocuments.add(before.frame.documentId);
+				const result = await inject("submit");
+				// Do not inspect a redirect or infer authentication from this click.
+				return result?.length === 1 && result[0].frameId === 0
+					&& result[0].documentId === before.frame.documentId && result[0].result?.status === "submitted";
+			}
+			catch (_) {return false;}
+			finally {this.consentBusy = false;}
 		}
 
 		async script(tabID, detail, action) {
@@ -406,6 +503,7 @@
 					loginOpened = true;
 					await this.browser.tabs.update(tab.id, {url: this.command.login_url});
 				}
+				await this.consent();
 				// Report login waiting only after this task invoked the verified
 				// CARSI IdP entry. An unexpected external URL is not IdP evidence.
 				if (loginOpened) await this.reportAuthenticationWait(true);
@@ -590,6 +688,7 @@
 
 		cleanup() {
 			// Preparation 保留所有标签页；这里只释放本 Service 的本地监听资源。
+			this.consentDocuments.clear();
 			this.visitObserver?.cancel();
 			this.visitObserver = null;
 			if (this.detailListener) {
@@ -608,7 +707,8 @@
 
 	global.LiteratureMonitorCARSI = Object.freeze({
 		PORTAL_URL, RESOURCE_URL, officialPortal, exactNameMatches,
-		resourcePageAction, detailPageAction, VisitObservation, Executor,
+		resourcePageAction, detailPageAction, attributeConsentAction, VisitObservation, Executor,
 		verifiedExecutor: true,
+		verifiedConsent: true,
 	});
 })(self);

@@ -22,8 +22,8 @@ class ProgressStage(str, Enum):
 PROGRESS_STAGES = (
     ProgressStage.CHECKING_MONITOR,
     ProgressStage.DISCOVERING_PAPERS,
-    ProgressStage.COMBINING_METADATA,
     ProgressStage.MATCHING_LITERATURE,
+    ProgressStage.COMBINING_METADATA,
     ProgressStage.UPDATING_WORKSPACE,
 )
 

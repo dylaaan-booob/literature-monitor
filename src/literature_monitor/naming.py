@@ -4,11 +4,7 @@ from __future__ import annotations
 
 import unicodedata
 from collections.abc import Iterable
-from uuid import UUID, uuid4
-
-
-def create_internal_id() -> UUID:
-    return uuid4()
+from uuid import UUID
 
 
 def slugify_title(title: str, max_length: int = 80) -> str:

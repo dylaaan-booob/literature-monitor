@@ -130,7 +130,7 @@ def test_ordinary_save_offline(tmp_path,change):
     elif change=='reorder': updates['journals']=tuple(reversed(draft.journals))
     elif change=='remove': updates['journals']=(extra,)
     elif change=='keyword': updates['keyword_expression']='statistics'
-    elif change=='date': updates['date_spec']=replace(draft.date_spec,window_days=30)
+    elif change=='date': updates['date_spec']=replace(draft.date_spec,to_month="2026-02")
     elif change=='output': updates['output_dir']=Path('other')
     elif change=='name': updates['name']='Changed'
     elif change=='log': updates['log_level']='DEBUG'

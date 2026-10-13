@@ -8,6 +8,13 @@
          hx-target="this"
          hx-swap="outerHTML"
          {% endif %}>
+  {% if run_snapshot.status.value != "RUNNING" %}
+    {% if run_months %}
+      <p>Publication months: {{ run_months[0] }} → {{ run_months[1] }}</p>
+    {% elif run_configuration_problem %}
+      <p class="run-message error">{{ run_configuration_problem }} <a href="/settings">Open Settings</a></p>
+    {% endif %}
+  {% endif %}
   {% if run_start_result and run_start_result.outcome.value == "ALREADY_RUNNING" %}
     <span class="run-message">A monitor run is already active.</span>
   {% elif run_start_result and run_start_result.outcome.value == "START_FAILED" %}
@@ -21,7 +28,7 @@
           hx-target="#run-panel"
           hx-swap="outerHTML">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit">Run</button>
+      <button type="submit"{% if not run_months %} disabled{% endif %}>Run</button>
     </form>
   {% elif run_snapshot.status.value == "RUNNING" %}
     {% if not run_snapshot.worker_alive %}
@@ -107,7 +114,7 @@
         {% if result.resolved_date_range %}
           <span>{{ result.resolved_date_range.from_date.isoformat() }} → {{ result.resolved_date_range.to_date.isoformat() }}</span>
         {% endif %}
-        <span>Papers: {{ result.canonical_paper_count }} canonical · {{ result.created_papers }} New Papers · {{ result.matched_existing_papers }} Already Saved</span>
+        <span>Papers: {{ result.created_papers }} New Papers · {{ result.matched_existing_papers }} Already Saved</span>
         {% if result.warnings %}
           <span>{{ result.warnings|length }} warning{{ "" if result.warnings|length == 1 else "s" }}</span>
         {% endif %}
@@ -121,8 +128,8 @@
       {% else %}
         <strong>Run finished</strong>
       {% endif %}
-      {% if run_snapshot.finished_at %}
-        <span>Finished {{ run_snapshot.finished_at.isoformat() }}</span>
+      {% if run_progress.elapsed_text %}
+        <span>Elapsed {{ run_progress.elapsed_text }}</span>
       {% endif %}
     </div>
     <form method="post"
@@ -131,7 +138,7 @@
           hx-target="#run-panel"
           hx-swap="outerHTML">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit">Run again</button>
+      <button type="submit"{% if not run_months %} disabled{% endif %}>Run again</button>
     </form>
   {% endif %}
 </section>

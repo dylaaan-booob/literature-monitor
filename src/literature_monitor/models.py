@@ -28,12 +28,33 @@ class DomainModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
 
+def parse_publication_date(value: Any) -> str | None:
+    """Normalize Paper dates without inventing missing month or day components."""
+    if value is None:
+        return None
+    if type(value) is Date:  # Historical YAML timestamps represented full dates.
+        return value.isoformat()
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}(?:-[0-9]{2}(?:-[0-9]{2})?)?", value):
+        raise ValueError("publication_date must be YYYY, YYYY-MM, YYYY-MM-DD or null")
+    parts = [int(part) for part in value.split("-")]
+    if not 1 <= parts[0] <= 9999 or (len(parts) >= 2 and not 1 <= parts[1] <= 12):
+        raise ValueError("publication_date has an invalid year or month")
+    if len(parts) == 3:
+        Date(*parts)  # Validate the actual calendar date, including leap years.
+    return value
+
+
 class CanonicalMetadata(DomainModel):
     title: NonEmptyStr
     journal: NonEmptyStr
-    publication_date: Date | None = None
+    publication_date: str | None = None
     abstract: str | None = None
     author_keywords: tuple[NonEmptyStr, ...] = ()
+
+    @field_validator("publication_date", mode="before")
+    @classmethod
+    def validate_publication_date(cls, value: Any) -> str | None:
+        return parse_publication_date(value)
 
 
 class ExternalIds(BaseModel):
@@ -204,17 +225,10 @@ class CanonicalPaper(DomainModel):
     id: UUID = Field(default_factory=uuid4)
     metadata: CanonicalMetadata
     external_ids: ExternalIds = Field(default_factory=ExternalIds)
-    authors: tuple[Author, ...]
+    authors: tuple[Author, ...] = ()
     sources: tuple[MetadataSource, ...] = ()
     workflow: Workflow = Field(default_factory=Workflow)
     journal_issns: tuple[str, ...] = ()
-
-    @field_validator("authors")
-    @classmethod
-    def require_author(cls, value: tuple[Author, ...]) -> tuple[Author, ...]:
-        if not value:
-            raise ValueError("at least one author is required")
-        return value
 
     @property
     def doi(self) -> str | None:

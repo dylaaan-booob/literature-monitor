@@ -42,7 +42,6 @@ from literature_monitor.config import (
 from literature_monitor.application.journal_migration import MigrationConfirmation, resolve_legacy_journals
 from literature_monitor.openalex import OpenAlexClient, OpenAlexError, resolve_source_identities, resolve_publisher_metadata
 from literature_monitor.date_range import (
-    DEFAULT_WINDOW_DAYS,
     DateRangeError,
     DateRangeSpec,
     ResolvedDateRange,
@@ -283,7 +282,7 @@ def _default_fields(config_path: Path) -> _DraftFields:
         venue_whitelist=Path("list.md"),
         keyword_expression="",
         output_dir=Path("workspace"),
-        date_spec=DateRangeSpec(window_days=DEFAULT_WINDOW_DAYS),
+        date_spec=DateRangeSpec(date.today().strftime("%Y-%m"), date.today().strftime("%Y-%m")),
         log_level=LogLevel.INFO,
     )
 
@@ -321,23 +320,10 @@ def _recovery_fields(config_path: Path, raw: Any) -> _DraftFields:
     else:
         recovered_log = defaults.log_level
 
-    raw_from = raw.get("from_date")
-    raw_to = raw.get("to_date")
-    raw_window = raw.get("window_days")
-    if raw_from is None and raw_to is None and raw_window is None:
-        recovered_date = defaults.date_spec
-    elif (
-        (raw_from is None or isinstance(raw_from, date))
-        and (raw_to is None or isinstance(raw_to, date))
-        and (raw_window is None or isinstance(raw_window, int))
-    ):
-        recovered_date = DateRangeSpec(
-            from_date=raw_from,
-            to_date=raw_to,
-            window_days=raw_window,
-        )
-    else:
-        recovered_date = defaults.date_spec
+    recovered_date = DateRangeSpec(
+        raw.get("from_month", defaults.date_spec.from_month),
+        raw.get("to_month", defaults.date_spec.to_month),
+    )
 
     return _DraftFields(
         name=recovered_name,
@@ -543,12 +529,8 @@ def _draft_monitor_mapping(
         "output_dir": draft.output_dir,
         "log_level": draft.log_level,
     }
-    if draft.date_spec.from_date is not None:
-        raw["from_date"] = draft.date_spec.from_date
-    if draft.date_spec.to_date is not None:
-        raw["to_date"] = draft.date_spec.to_date
-    if draft.date_spec.window_days is not None:
-        raw["window_days"] = draft.date_spec.window_days
+    raw["from_month"] = draft.date_spec.from_month
+    raw["to_month"] = draft.date_spec.to_month
     raw["institution"] = draft.institution
     return raw
 
@@ -659,18 +641,14 @@ def _render_monitor_yaml(
         "keyword_expression": draft.keyword_expression,
         "output_dir": str(draft.output_dir),
     }
-    if draft.date_spec.from_date is not None:
-        values["from_date"] = draft.date_spec.from_date.isoformat()
-    if draft.date_spec.to_date is not None:
-        values["to_date"] = draft.date_spec.to_date.isoformat()
-    if draft.date_spec.window_days is not None:
-        values["window_days"] = draft.date_spec.window_days
+    values["from_month"] = draft.date_spec.from_month
+    values["to_month"] = draft.date_spec.to_month
     values["log_level"] = (
         draft.log_level.value
         if isinstance(draft.log_level, LogLevel)
         else str(draft.log_level)
     )
-    if draft.institution is not None and (draft.institution.name or draft.institution.idp_entity_id):
+    if draft.institution is not None and (draft.institution.name or draft.institution.idp_entity_id or draft.institution.automatic_attribute_release_consent):
         values["institution"] = draft.institution.model_dump(exclude_none=True)
     return yaml.safe_dump(values, sort_keys=False, allow_unicode=True)
 

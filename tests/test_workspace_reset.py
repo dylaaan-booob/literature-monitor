@@ -29,7 +29,7 @@ def dedicated(tmp_path: Path):
     config = tmp_path / "monitor.yaml"
     config.write_text(
         "name: Synthetic Monitor\nvenue_whitelist: list.md\nkeyword_expression: causal\n"
-        "output_dir: workspace\nwindow_days: 14\nlog_level: INFO\n", encoding="utf-8",
+        "output_dir: workspace\nfrom_month: 2026-01\nto_month: 2026-01\nlog_level: INFO\n", encoding="utf-8",
     )
     (tmp_path / "list.md").write_text(
         "# Venues\n\n## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n"
@@ -84,7 +84,7 @@ def test_historical_attempt_marker_is_not_a_reset_blocker(dedicated, marker):
 def test_empty_or_absent_workspace_is_success(tmp_path, kind):
     config = tmp_path / 'monitor.yaml'
     name = 'deep/missing/workspace' if kind == 'missing-parents' else 'workspace'
-    config.write_text(f'keyword_expression: causal\noutput_dir: {name}\n')
+    config.write_text(f'keyword_expression: causal\noutput_dir: {name}\nfrom_month: 2026-01\nto_month: 2026-01\n')
     workspace = tmp_path / name
     if kind == 'empty': workspace.mkdir()
     assert execute_reset(config, preview_reset(config)).success
@@ -374,7 +374,7 @@ def test_explicit_run_rebuilds_entire_deleted_workspace(dedicated, monkeypatch):
     assert result.outcome is RunOutcome.COMPLETED and result.created_papers == 1
     assert list((workspace / 'Papers').glob('*.md')) and list((workspace / 'Authors').glob('*.md'))
     assert (workspace / 'Inbox.base').read_text() == render_default_inbox_base()
-    assert read_provider_state(workspace).status is ProviderStateStatus.AVAILABLE
+    assert read_provider_state(workspace).status is ProviderStateStatus.MISSING
     assert read_last_run_snapshot(workspace).status is LastRunReadStatus.AVAILABLE
     assert not (workspace / '.obsidian').exists()
 

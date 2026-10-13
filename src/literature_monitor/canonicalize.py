@@ -505,26 +505,6 @@ def _group_records(
     return [tuple(dois[doi]) for doi in sorted(dois)] + singletons
 
 
-def _canonical_eligible(record: ProviderWorkEvidence) -> bool:
-    return (
-        record.title is not None
-        and record.journal is not None
-        and bool(record.authors)
-    )
-
-
-def _representative(
-    records: Sequence[ProviderWorkEvidence],
-) -> ProviderWorkEvidence:
-    eligible = [record for record in records if _canonical_eligible(record)]
-    candidates = eligible or list(records)
-    completeness = max(_completeness(record) for record in candidates)
-    candidates = [
-        record for record in candidates if _completeness(record) == completeness
-    ]
-    return min(candidates, key=_record_key)
-
-
 def _doi_evidence_issues(
     doi: str,
     records: Sequence[ProviderWorkEvidence],
@@ -620,7 +600,7 @@ def _publication_date(
     records: Sequence[ProviderWorkEvidence],
     representative: ProviderWorkEvidence,
     issues: list[CanonicalizationIssue],
-) -> date | None:
+) -> str | None:
     by_kind: dict[EvidenceDateKind, set[date]] = defaultdict(set)
     for record in records:
         for item in record.dates:
@@ -641,69 +621,27 @@ def _publication_date(
             ))
     for kind in _DATE_PRECEDENCE:
         if by_kind[kind]:
-            return min(by_kind[kind])
-    return representative.publication_date
-
-
-def _metadata_issues(
-    representative: ProviderWorkEvidence,
-    records: Sequence[ProviderWorkEvidence],
-) -> list[CanonicalizationIssue]:
-    issues: list[CanonicalizationIssue] = []
-    left_provider = _provider_label(representative.provenance.provider)
-    left_provider_key = representative.provenance.provider.strip().casefold()
-    for record in records:
-        if (
-            record is representative
-            or record.provenance.provider.strip().casefold() == left_provider_key
-        ):
-            continue
-        right_provider = _provider_label(record.provenance.provider)
-        comparisons = (
-            ("title", representative.title, record.title, _normalize_text),
-            ("journal", representative.journal, record.journal, _normalize_text),
-            (
-                "abstract",
-                representative.abstract,
-                record.abstract,
-                _normalize_abstract,
-            ),
-        )
-        if _author_lists_conflict(representative.authors, record.authors):
-            issues.append(
-                CanonicalizationIssue(
-                    stage="metadata_conflict",
-                    record_ids=tuple(
-                        sorted(
-                            {
-                                representative.provenance.record_id,
-                                record.provenance.record_id,
-                            }
-                        )
-                    ),
-                    message=(
-                        f"{left_provider} and {right_provider} conflict on "
-                        f"nonempty authors; kept {left_provider}"
-                    ),
-                )
-            )
-        for field, left_value, right_value, normalizer in comparisons:
-            if (
-                left_value is not None
-                and right_value is not None
-                and normalizer(left_value) != normalizer(right_value)
-            ):
-                issues.append(
-                    CanonicalizationIssue(
-                        stage="metadata_conflict",
-                        record_ids=(representative.provenance.record_id,),
-                        message=(
-                            f"{left_provider} and {right_provider} conflict on "
-                            f"nonempty {field}; kept {left_provider}"
-                        ),
-                    )
-                )
-    return issues
+            return min(by_kind[kind]).isoformat()
+    fallback = next((record.publication_date for record in records
+                     if record.publication_date is not None), None)
+    if fallback is not None:
+        return fallback.isoformat()
+    for kind in _DATE_PRECEDENCE:
+        partials = [item for record in records if record.provenance.provider == "crossref"
+                    for item in record.dates if item.kind is kind]
+        if partials:
+            # Source priority precedes precision; equal precision chooses the earliest value.
+            selected = min(partials, key=lambda item: (
+                -(1 + (item.month is not None) + (item.day is not None)),
+                item.year, item.month or 0, item.day or 0,
+            ))
+            value = f"{selected.year:04d}"
+            if selected.month is not None:
+                value += f"-{selected.month:02d}"
+            if selected.day is not None:
+                value += f"-{selected.day:02d}"
+            return value
+    return None
 
 
 def _deduplicate_sources(
@@ -717,18 +655,6 @@ def _deduplicate_sources(
         if existing is None or source.retrieved_at > existing.retrieved_at:
             sources[key] = source
     return tuple(sources[key] for key in sorted(sources))
-
-
-def _fallback_abstract(
-    representative: ProviderWorkEvidence,
-    records: Sequence[ProviderWorkEvidence],
-) -> str | None:
-    if representative.abstract is not None:
-        return representative.abstract
-    candidates = [record for record in records if record.abstract is not None]
-    if not candidates:
-        return None
-    return _choose_evidence(candidates).abstract
 
 
 def _merged_external_ids(
@@ -779,25 +705,34 @@ def _build_paper(
             message="provider evidence has no valid DOI; no canonical Paper created",
         ))
         return None
-    representative = _representative(evidence)
-    if not _canonical_eligible(representative):
+    ordered = sorted(evidence, key=lambda record: (
+        record.provenance.provider != "crossref", tuple(-value for value in _completeness(record)), _record_key(record),
+    ))
+    def field(name):
+        return next((getattr(record, name) for record in ordered if getattr(record, name)), None)
+
+    title, journal = field("title"), field("journal")
+    if title is None or journal is None:
         issues.append(CanonicalizationIssue(
-            stage="insufficient_metadata",
-            record_ids=record_ids,
-            message=("provider evidence lacks title, journal, or author data "
-                     "required for a canonical paper"),
+            "insufficient_metadata", "provider evidence lacks title or journal", record_ids,
         ))
         return None
-
+    abstracts = [(record, text) for record in ordered if record.abstract
+                 if (text := _normalize_abstract(record.abstract))]
+    abstract = None
+    if abstracts:
+        abstract = (max(abstracts, key=lambda pair: len(pair[1]))[1]
+                    if len({record.provenance.provider for record, _ in abstracts}) > 1
+                    else abstracts[0][0].abstract)
+    representative = next((record for record in ordered if record.authors), ordered[0])
     issues.extend(_doi_evidence_issues(doi, evidence))
-    issues.extend(_metadata_issues(representative, evidence))
     return CanonicalPaper(
         metadata=CanonicalMetadata(
-            title=representative.title,
-            journal=representative.journal,
+            title=title,
+            journal=journal,
             publication_date=_publication_date(evidence, representative, issues),
-            abstract=_fallback_abstract(representative, evidence),
-            author_keywords=representative.author_keywords,
+            abstract=abstract,
+            author_keywords=field("author_keywords") or (),
         ),
         external_ids=_merged_external_ids(representative, evidence).model_copy(
             update={"doi": doi},

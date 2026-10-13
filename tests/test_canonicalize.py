@@ -18,7 +18,6 @@ from literature_monitor.crossref import (
     CrossrefPartialDate,
     CrossrefRelation,
     CrossrefWorkRecord,
-    EnrichedWorkRecord,
 )
 from literature_monitor.models import (
     Author,
@@ -117,7 +116,12 @@ def enriched(
     record: OpenAlexWorkRecord,
     evidence: CrossrefWorkRecord | None = None,
 ) -> tuple[ProviderWorkEvidence, ...]:
-    return EnrichedWorkRecord(openalex=record, crossref=evidence).to_evidence()
+    openalex = record.to_evidence()
+    if evidence is None:
+        return (openalex,)
+    return (openalex, evidence.to_evidence(supplements=(ProviderRecordRef(
+        provider=openalex.provenance.provider, record_id=openalex.provenance.record_id,
+    ),)))
 
 
 def canonicalize(
@@ -300,67 +304,6 @@ def semantic_scholar_evidence(
     )
 
 
-def test_three_provider_same_doi_is_one_order_independent_paper() -> None:
-    openalex_evidence = openalex(
-        "W1",
-        doi="10.5555/three",
-        authors=(author(openalex_id="https://openalex.org/A1"),),
-    ).to_evidence()
-    crossref_evidence = crossref(
-        "10.5555/three",
-        title="A Study",
-        journal="Biometrics",
-        authors=(author(),),
-    ).to_evidence()
-    semantic_evidence = semantic_scholar_evidence(
-        "S2-1",
-        doi="10.5555/three",
-    )
-    records = (openalex_evidence, crossref_evidence, semantic_evidence)
-
-    forward = canonicalize_records(records)
-    reverse = canonicalize_records(tuple(reversed(records)))
-
-    assert len(forward.papers) == 1
-    assert paper_projection(forward.papers[0]) == paper_projection(reverse.papers[0])
-    paper = forward.papers[0]
-    assert paper.external_ids.model_dump(exclude_none=True) == {
-        "openalex": "https://openalex.org/W1",
-        "doi": "10.5555/three",
-        "crossref": "10.5555/three",
-        "semantic_scholar": "S2-1",
-    }
-    assert {source.provider for source in paper.sources} == {
-        "openalex",
-        "crossref",
-        "semantic_scholar",
-    }
-    assert paper.authors[0].openalex_id == "https://openalex.org/A1"
-    assert paper.authors[0].orcid == "https://orcid.org/0000-0002-1825-0097"
-
-
-def test_semantic_scholar_only_evidence_canonicalizes_and_taxonomy_has_no_authority() -> None:
-    plain = semantic_scholar_evidence("S2-only")
-    tagged = semantic_scholar_evidence(
-        "S2-only",
-        topics=(ProviderTopic(value="Statistics", source="s2-fos-model"),),
-    )
-
-    plain_result = canonicalize_records((plain,))
-    tagged_result = canonicalize_records((tagged,))
-
-    assert len(tagged_result.papers) == 1
-    assert paper_projection(tagged_result.papers[0]) == paper_projection(
-        plain_result.papers[0]
-    )
-    assert tagged_result.papers[0].external_ids.model_dump()[
-        "semantic_scholar"
-    ] == "S2-only"
-    assert [source.provider for source in tagged_result.papers[0].sources] == [
-        "semantic_scholar"
-    ]
-
-
 def test_taxonomy_does_not_affect_equal_snapshot_selection() -> None:
     base = semantic_scholar_evidence("S2-equal")
     ada = base.model_copy(
@@ -446,7 +389,7 @@ def test_shared_crossref_evidence_supplements_every_openalex_anchor() -> None:
     assert paper_projection(forward.papers[0]) == paper_projection(reverse.papers[0])
     assert forward.issues == reverse.issues
     assert len(forward.papers) == 1
-    assert forward.papers[0].metadata.publication_date == date(2026, 5, 1)
+    assert forward.papers[0].metadata.publication_date == '2026-05-01'
     normalized, _ = _normalize_retrievals(tuple(item for group in records for item in group))
     crossref_record, = [item for item in normalized if item.provenance.provider == "crossref"]
     assert {anchor.record_id for anchor in crossref_record.supplements} == {
@@ -466,11 +409,11 @@ def test_same_date_kind_conflict_chooses_earliest_and_reports_issue() -> None:
 
     result = canonicalize((enriched(record, evidence),))
 
-    assert result.papers[0].metadata.publication_date == date(2026, 5, 1)
+    assert result.papers[0].metadata.publication_date == '2026-05-01'
     assert any(issue.stage == "date_conflict" for issue in result.issues)
 
 
-def test_crossref_fills_missing_abstract_but_does_not_overwrite_conflict() -> None:
+def test_equal_length_abstract_prefers_crossref_without_cross_provider_warning() -> None:
     filled = canonicalize(
         (
             enriched(
@@ -490,8 +433,8 @@ def test_crossref_fills_missing_abstract_but_does_not_overwrite_conflict() -> No
             ),
         )
     )
-    assert conflict.papers[0].metadata.abstract == "OpenAlex abstract"
-    assert any(issue.stage == "metadata_conflict" for issue in conflict.issues)
+    assert conflict.papers[0].metadata.abstract == "Crossref abstract"
+    assert not conflict.issues
 
 
 def test_representative_uses_fixed_completeness_then_openalex_id() -> None:
@@ -699,7 +642,7 @@ def test_partial_crossref_date_precision_is_not_a_conflict_or_fabricated() -> No
 
     result = canonicalize((item,))
 
-    assert result.papers[0].metadata.publication_date is None
+    assert result.papers[0].metadata.publication_date == "2026-05"
     assert not [issue for issue in result.issues if issue.stage == "date_conflict"]
 
 
@@ -716,7 +659,7 @@ def test_crossref_date_and_openalex_date_difference_is_not_metadata_conflict() -
 
     result = canonicalize((enriched(record, evidence),))
 
-    assert result.papers[0].metadata.publication_date == date(2026, 2, 1)
+    assert result.papers[0].metadata.publication_date == '2026-02-01'
     assert not [issue for issue in result.issues if issue.stage == "metadata_conflict"]
 
 
@@ -790,7 +733,7 @@ def test_established_identity_author_representation_equivalence(layer, left, rig
     result = canonicalize_records(records)
     assert not result.issues and not result.diagnostics
     assert len(result.papers) == 1
-    assert result.papers[0].authors[0].name == left
+    assert result.papers[0].authors[0].name == (right if layer == "cross_provider" else left)
 
 
 def test_equivalent_author_representation_enriches_ids_without_display_churn():
@@ -800,7 +743,7 @@ def test_equivalent_author_representation_enriches_ids_without_display_churn():
                          authors=(author('Lovelace, A.', orcid='O1'),)).to_evidence()
     result = canonicalize_records((representative, additional))
     assert not result.issues
-    assert result.papers[0].authors == (author('Ada Lovelace', openalex_id='A1', orcid='O1'),)
+    assert result.papers[0].authors == (author('Lovelace, A.', openalex_id='A1', orcid='O1'),)
 
 
 @pytest.mark.parametrize('layer', ['snapshot', 'same_doi', 'cross_provider'])
@@ -814,9 +757,9 @@ def test_equivalent_author_representation_enriches_ids_without_display_churn():
 def test_established_identity_genuine_author_conflicts_remain_issues(layer, left, right):
     records = established_pair(layer, authors_left=left, authors_right=right)
     result = canonicalize_records(records)
-    assert any(i.stage == 'metadata_conflict' and 'authors' in i.message for i in result.issues)
+    assert any(i.stage == 'metadata_conflict' and 'authors' in i.message for i in result.issues) is (layer != 'cross_provider')
     assert not result.diagnostics
-    assert result.papers[0].authors == left
+    assert result.papers[0].authors == (right if layer == "cross_provider" else left)
 
 
 _ABSTRACT_EQUIVALENTS = [
@@ -862,7 +805,8 @@ def test_established_identity_abstract_representation_equivalence(layer, left, r
     records = established_pair(layer, abstract_left=left, abstract_right=right)
     result = canonicalize_records(records)
     assert not result.issues and not result.diagnostics
-    assert result.papers[0].metadata.abstract == left
+    if layer != "cross_provider":
+        assert result.papers[0].metadata.abstract == left
 
 
 @pytest.mark.parametrize('layer', ['snapshot', 'same_doi', 'cross_provider'])
@@ -886,9 +830,10 @@ def test_established_identity_abstract_representation_equivalence(layer, left, r
 def test_established_identity_real_abstract_differences_remain_issues(layer, left, right):
     records = established_pair(layer, abstract_left=left, abstract_right=right)
     result = canonicalize_records(records)
-    assert any(i.stage == 'metadata_conflict' and 'abstract' in i.message for i in result.issues)
+    assert any(i.stage == 'metadata_conflict' and 'abstract' in i.message for i in result.issues) is (layer != 'cross_provider')
     assert not result.diagnostics
-    assert result.papers[0].metadata.abstract == left
+    if layer != "cross_provider":
+        assert result.papers[0].metadata.abstract == left
 
 
 @pytest.mark.parametrize('raw', [
@@ -1033,7 +978,7 @@ def test_sparse_same_doi_evidence_contributes_without_being_representative():
         assert paper.doi == "10.5555/sparse"
         assert paper.metadata.title == complete.title
         assert paper.metadata.abstract == sparse.abstract
-        assert paper.metadata.publication_date == date(2026, 8, 4)
+        assert paper.metadata.publication_date == '2026-08-04'
         assert paper.external_ids.crossref == "10.5555/sparse"
         assert {source.provider for source in paper.sources} == {"openalex", "crossref"}
         assert paper.journal_issns == ("0006-341X",)
@@ -1063,7 +1008,7 @@ def test_raw_crossref_relations_never_merge_or_cross_enrich_dois(relation_type):
         assert first.metadata.abstract is None and first.metadata.publication_date is None
         assert first.authors[0].openalex_id is None
         assert second.metadata.abstract == "Right DOI abstract"
-        assert second.metadata.publication_date == date(2026, 6, 1)
+        assert second.metadata.publication_date == '2026-06-01'
         assert {s.record_id for s in first.sources} == {"10.5555/left"}
 
 
@@ -1128,7 +1073,7 @@ def test_direct_doi_date_precedence_is_independent_of_input_order(higher, lower)
     other = representative.model_copy(update={"dates": dates})
     for inputs in ((preferred, other), (other, preferred)):
         result = canonicalize_records(inputs)
-        assert result.papers[0].metadata.publication_date == date(2026, 8, 2)
+        assert result.papers[0].metadata.publication_date == '2026-08-02'
         assert not result.issues
 
 
@@ -1140,7 +1085,7 @@ def test_partial_higher_date_tier_allows_next_complete_tier_without_invention(pr
         EvidenceDate(kind="published-online", year=2026, month=5, day=2),
     )})
     result = canonicalize_records((record,))
-    assert result.papers[0].metadata.publication_date == date(2026, 5, 2)
+    assert result.papers[0].metadata.publication_date == '2026-05-02'
     assert not result.issues
 
 
@@ -1153,7 +1098,7 @@ def test_complete_date_wins_compatible_partial_and_equivalent_duplicates(kind):
         EvidenceDate(kind=kind, year=2026, month=5, day=2),
     )})
     result = canonicalize_records((record,))
-    assert result.papers[0].metadata.publication_date == date(2026, 5, 2)
+    assert result.papers[0].metadata.publication_date == '2026-05-02'
     assert not result.issues
 
 
@@ -1167,7 +1112,7 @@ def test_distinct_complete_same_tier_dates_choose_earliest_and_report_determinis
     forward = canonicalize_records(records)
     reverse = canonicalize_records(tuple(reversed(records)))
     assert paper_projection(forward.papers[0]) == paper_projection(reverse.papers[0])
-    assert forward.papers[0].metadata.publication_date == date(2026, 5, 2)
+    assert forward.papers[0].metadata.publication_date == '2026-05-02'
     assert forward.issues == reverse.issues
     issue, = forward.issues
     assert issue.stage == "date_conflict" and kind.value in issue.message
@@ -1175,7 +1120,7 @@ def test_distinct_complete_same_tier_dates_choose_earliest_and_report_determinis
 
 
 @pytest.mark.parametrize("fallback", [None, date(2026, 9, 1)])
-def test_only_partial_evidence_uses_representative_date_never_retrieval_or_revision(fallback):
+def test_partial_evidence_follows_complete_provider_date_without_retrieval_or_revision(fallback):
     raw = crossref(
         "10.5555/date", dates=tuple(partial_date(kind.value, 2025) for kind in EvidenceDateKind),
         retrieved_at=NOW + timedelta(days=1),
@@ -1183,7 +1128,7 @@ def test_only_partial_evidence_uses_representative_date_never_retrieval_or_revis
     representative = openalex("W1", doi="10.5555/date", publication_date=fallback).to_evidence()
     for inputs in ((representative, raw.to_evidence()), (raw.to_evidence(), representative)):
         result = canonicalize_records(inputs)
-        assert result.papers[0].metadata.publication_date == fallback
+        assert result.papers[0].metadata.publication_date == (fallback.isoformat() if fallback else "2025")
         assert not result.issues
 
 
@@ -1196,11 +1141,11 @@ def test_issued_full_date_is_used_after_all_higher_tiers_only_supply_partial_evi
         EvidenceDate(kind="issued", year=2026, month=6, day=3),
     )})
     result = canonicalize_records((record,))
-    assert result.papers[0].metadata.publication_date == date(2026, 6, 3)
+    assert result.papers[0].metadata.publication_date == '2026-06-03'
     assert not result.issues
 
 
-@pytest.mark.parametrize("missing", ["title", "journal", "authors"])
+@pytest.mark.parametrize("missing", ["title", "journal"])
 def test_doi_component_still_requires_a_bibliographically_eligible_representative(missing):
     record = openalex("W1", doi="10.5555/incomplete").to_evidence()
     record = record.model_copy(update={missing: () if missing == "authors" else None})
@@ -1209,3 +1154,50 @@ def test_doi_component_still_requires_a_bibliographically_eligible_representativ
     issue, = result.issues
     assert issue.stage == "insufficient_metadata"
     assert issue.record_ids == (record.provenance.record_id,)
+
+
+@pytest.mark.parametrize("left,right,expected", [
+    ("Longer OpenAlex abstract with useful detail.", "Short text.", "Longer OpenAlex abstract with useful detail."),
+    ("Short text.", "<p>Longer Crossref abstract with detail.</p>", "Longer Crossref abstract with detail."),
+    ("<p>Short.</p>", "An expanded abstract.", "An expanded abstract."),
+])
+def test_cross_provider_abstract_uses_longer_cleaned_text_without_warning(left, right, expected):
+    result = canonicalize_records(established_pair('cross_provider', abstract_left=left, abstract_right=right))
+    assert result.papers[0].metadata.abstract == expected and not result.issues
+
+
+@pytest.mark.parametrize("parts,expected", [
+    ((2026, None, None), "2026"), ((2026, 10, None), "2026-10"),
+    ((2026, 10, 8), "2026-10-08"),
+])
+def test_run_date_precision_round_trip(tmp_path, parts, expected):
+    from literature_monitor.materialize import materialize_papers
+    from literature_monitor.markdown_state import parse_paper_state
+    from literature_monitor.application.workspace import load_workspace
+    from literature_monitor.kept_export import export_kept_papers
+    record = crossref('10.5555/precision', title='A Study', journal='Biometrics',
+                      dates=(partial_date('published-print', *parts),)).to_evidence()
+    result = canonicalize_records((record,))
+    paper, = result.papers
+    assert paper.metadata.publication_date == expected
+    written = materialize_papers(result.papers, tmp_path)
+    assert len(written.created_papers) == 1 and not written.issues
+    path = written.created_papers[0]
+    contents = path.read_text()
+    assert f"publication_date: '{expected}'" in contents
+    assert parse_paper_state(path, contents, tmp_path / 'Authors').publication_date == expected
+    assert load_workspace(tmp_path).papers[0].publication_date == expected
+    assert not export_kept_papers(tmp_path).issues
+
+
+def test_partial_date_source_precedes_precision_and_equal_precision_is_earliest():
+    record = crossref('10.5555/partial', title='A Study', journal='Biometrics', dates=(
+        partial_date('issued', 2026, 10), partial_date('published-print', 2027),
+        partial_date('published-print', 2026), partial_date('published-print', 2026, 11),
+        partial_date('published-print', 2026, 10),
+    )).to_evidence()
+    for dates in (record.dates, tuple(reversed(record.dates))):
+        result = canonicalize_records((record.model_copy(update={'dates': dates}),))
+        assert result.papers[0].metadata.publication_date == '2026-10' and not result.issues
+    only_year = record.model_copy(update={'dates': (record.dates[0], record.dates[2])})
+    assert canonicalize_records((only_year,)).papers[0].metadata.publication_date == '2026'

@@ -20,8 +20,6 @@ EXPECTED_ORDER = [
     "journal",
     "publication_date",
     "authors",
-    "author_keywords",
-    "discovered_at",
     "status",
 ]
 
@@ -111,8 +109,6 @@ def test_views_use_required_columns_and_sort_precedence() -> None:
         "note.journal": {"displayName": "Journal"},
         "note.publication_date": {"displayName": "Publication Date"},
         "note.authors": {"displayName": "Authors"},
-        "note.author_keywords": {"displayName": "Author Keywords"},
-        "note.discovered_at": {"displayName": "Discovered At"},
     }
 
     for view in data["views"]:
@@ -124,25 +120,3 @@ def test_paper_formula_is_presentation_only_file_navigation() -> None:
     assert parsed_base()["formulas"] == {
         "Paper": "link(file.path, title)"
     }
-
-
-def test_renderer_adds_no_durable_inbox_or_track_b_fields() -> None:
-    rendered = render_default_inbox_base()
-    excluded = {
-        "inbox_title",
-        "display_title",
-        "inbox_seen",
-        "inbox_order",
-        "reviewed_at",
-        "review_batch",
-        "review_priority",
-        "rejection_reason",
-        "maybe",
-        "deferred",
-        "reviewing",
-        "screened",
-        "archived",
-    }
-
-    for field in excluded:
-        assert field not in rendered

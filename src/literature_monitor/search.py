@@ -13,14 +13,13 @@ from dataclasses import dataclass
 from literature_monitor.keywords import (
     And,
     KeywordExpression,
-    Not,
     Or,
     Phrase,
     Prefix,
     Proximity,
     Term,
 )
-from literature_monitor.models import CanonicalMetadata, ProviderWorkEvidence
+from literature_monitor.models import ProviderWorkEvidence
 
 
 class SearchBackendError(RuntimeError):
@@ -68,18 +67,6 @@ def build_searchable_projection(
             for keyword in record.author_keywords
         ),
         abstracts=_deduplicate_units(record.abstract for record in evidence),
-    )
-
-
-def build_metadata_searchable_projection(
-    metadata: CanonicalMetadata,
-) -> SearchableProjection:
-    """Build searchable units from canonical metadata for diagnostic searches."""
-
-    return SearchableProjection(
-        titles=_deduplicate_units((metadata.title,)),
-        author_keywords=_deduplicate_units(metadata.author_keywords),
-        abstracts=_deduplicate_units((metadata.abstract,)),
     )
 
 
@@ -337,9 +324,6 @@ def validate_search_expression(expression: KeywordExpression) -> None:
                 validate(node.left)
                 validate(node.right)
                 return
-            if isinstance(node, Not):
-                validate(node.operand)
-                return
             raise TypeError(
                 f"unsupported keyword expression node: {type(node).__name__}"
             )
@@ -360,7 +344,6 @@ def match_searchable_projections(
         _create_fts5_schema(connection)
         _index_projections(connection, projections)
 
-        universe = frozenset(range(len(projections)))
         token_cache: dict[str, tuple[str, ...]] = {}
         match_cache: dict[
             tuple[str, tuple[str, ...], int | None],
@@ -407,8 +390,6 @@ def match_searchable_projections(
                 return evaluate(node.left) & evaluate(node.right)
             if isinstance(node, Or):
                 return evaluate(node.left) | evaluate(node.right)
-            if isinstance(node, Not):
-                return universe - evaluate(node.operand)
             raise TypeError(
                 f"unsupported keyword expression node: {type(node).__name__}"
             )

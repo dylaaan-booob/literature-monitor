@@ -34,7 +34,8 @@ SERVICE_WAIT_SECONDS = 90.0  # Bounded official operation / missing Result.
 LOGIN_WAIT_SECONDS = 600.0  # Human-controlled IdP/MFA is not subject to Visit's 10-second deadline.
 RELEASE_GRACE_SECONDS = 10.0  # Bounds authority recovery after a lost Connector callback.
 EXECUTOR_CAPABILITY = "carsi-preparation/a4-verified"
-COMPATIBLE_VERSIONS = frozenset({"0.6.4", "0.6.5", "0.6.6", "0.6.7"})
+CONSENT_CAPABILITY = "shibboleth-consent/v1"
+COMPATIBLE_VERSIONS = frozenset({"0.6.4", "0.6.5", "0.6.6", "0.6.7", "0.6.8"})
 CARSI_LOGIN_URL = "https://ds.carsi.edu.cn/Shibboleth.sso/Login"
 CARSI_PORTAL_URL = "https://ds.carsi.edu.cn/wxds"
 REASONS = frozenset({
@@ -99,6 +100,7 @@ class PreparationCommand:
     kind: str = "carsi-preparation/v1"
     login_url: str | None = None
     last_service: bool = False
+    automatic_attribute_release_consent: bool = False
 
 
 @dataclass
@@ -125,6 +127,8 @@ class _Task:
     visit_nonce: str | None = None
     visit_source_tab: int | None = None
     waiting_for_user: bool = False
+    automatic_attribute_release_consent: bool = False
+    consent_notice: str | None = None
 
 
 def institution_login_url(entity_id: str | None) -> str | None:
@@ -189,6 +193,7 @@ class PreparationCoordinator:
         self._connector_instance: str | None = None
         self._last_heartbeat: float | None = None
         self._capability_valid = False
+        self._consent_capable = False
         self._generation = 0
         self._task: _Task | None = None
         self._last = PreparationSnapshot(PreparationPhase.IDLE, None, 0, (), None, (), "Not started")
@@ -204,7 +209,7 @@ class PreparationCoordinator:
             return self._ready_locked(time.monotonic())
 
     def heartbeat(self, instance_id: str, *, capability: str | None = None,
-                  version: str | None = None) -> bool:
+                  version: str | None = None, consent_capability: str | None = None) -> bool:
         if not isinstance(instance_id, str) or not 16 <= len(instance_id) <= 128:
             return False
         now = time.monotonic()
@@ -217,6 +222,7 @@ class PreparationCoordinator:
             self._connector_instance = instance_id
             self._last_heartbeat = now
             self._capability_valid = compatible
+            self._consent_capable = compatible and consent_capability == CONSENT_CAPABILITY
             return self._ready_locked(now)
 
     def _release_locked(self, task: _Task) -> None:
@@ -266,7 +272,9 @@ class PreparationCoordinator:
         relevant = read_saved_preparation_services(config_path)
         services = tuple(service for service in relevant if service.access_method == "carsi")
         manual = tuple(service for service in relevant if service.access_method == "manual")
-        login_url = saved_institution_login_url(config_path) if services else None
+        institution = load_config(config_path).institution if services else None
+        login_url = institution_login_url(institution.idp_entity_id if institution else None)
+        consent_requested = bool(institution and institution.automatic_attribute_release_consent)
         with self._lock:
             now = time.monotonic()
             self._expire_locked(now)
@@ -307,6 +315,9 @@ class PreparationCoordinator:
                 secrets.token_urlsafe(32), self._generation, services, owner,
                 self._connector_instance, login_url=login_url,
                 manual_services=manual, started_item_at=now,
+                automatic_attribute_release_consent=consent_requested and self._consent_capable,
+                consent_notice=("Reload the updated Connector to enable automatic attribute consent; consent remains manual."
+                                if consent_requested and not self._consent_capable else None),
             )
             return self._snapshot_locked()
 
@@ -320,7 +331,7 @@ class PreparationCoordinator:
             current_service_id=(task.services[task.index].id if task.index < len(task.services)
                                 and (task.phase is PreparationPhase.RUNNING
                                      or task.claimed_at is not None) else None),
-            results=tuple(task.results), message=task.message,
+            results=tuple(task.results), message=" ".join(filter(None, (task.message, task.consent_notice))),
             authorization_pending=task.claimed_at is not None,
             waiting_for_user=(task.phase is PreparationPhase.RUNNING
                               and task.waiting_for_user and not task.revoke),
@@ -346,6 +357,7 @@ class PreparationCoordinator:
                 service.id, service.name, service.access_url,
                 login_url=task.login_url,
                 last_service=task.index == len(task.services) - 1,
+                automatic_attribute_release_consent=task.automatic_attribute_release_consent,
             )
             task.claimed_at = time.monotonic()
             return task.command

@@ -119,7 +119,7 @@ def test_each_paper_problem_is_an_issue_and_prevents_export(tmp_path: Path) -> N
     assert [issue.path for issue in result.issues] == [broken, broken]
     assert [issue.message for issue in result.issues] == [
         "id must be a valid UUID",
-        "Invalid isoformat string: 'not-a-date'",
+        "publication_date must be YYYY, YYYY-MM, YYYY-MM-DD or null",
     ]
     assert result.has_errors
 

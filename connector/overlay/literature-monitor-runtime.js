@@ -19,7 +19,6 @@
 	const OBSERVATION_DEADLINE_MS = 75000;
 	const RESULT_RETRY_DELAY_MS = 500;
 	const RESULT_ATTEMPTS = 2;
-	const MAX_RESPONSE_LENGTH = 8192;
 	const MAX_REQUEST_ID_LENGTH = 128;
 
 	const OUTCOME_CONFIRMED = "CONFIRMED";
@@ -121,6 +120,7 @@
 		const translator = typeof Zotero !== "undefined" && Zotero.PageSaving?.translators?.[0];
 		return {
 			ready: document.readyState === "complete", challenge,
+			authentication: !!document.querySelector('input[type="password"]'),
 			manual: challenge && !!error?.textContent.trim(),
 			content: !!title && !!document.body?.childElementCount && !!document.body.textContent.trim(),
 			translatorID: translator?.translatorID, itemType: translator?.itemType,
@@ -137,6 +137,7 @@
 		_prepInstance: null,
 		_prepClaimInFlight: false,
 		_prepActive: null,
+		_enrichActive: null,
 		_prepContext: null,
 		_heartbeatTimer: null,
 		_claimTimer: null,
@@ -323,9 +324,6 @@
 					signal: controller.signal,
 				});
 				const text = await response.text();
-				if (text.length > MAX_RESPONSE_LENGTH) {
-					throw new Error("Literature Monitor bridge response is too large");
-				}
 
 				let body = null;
 				if (text) {
@@ -363,6 +361,7 @@
 					{
 						version: browser.runtime.getManifest().version,
 						zotero_reachable: reachable,
+						capabilities: ["paper-enrichment/v2"],
 					},
 				);
 				if (!response.ok) {
@@ -380,6 +379,7 @@
 						await this._postJSON("/api/connector/preparation/heartbeat", {
 							instance_id: this._prepInstance,
 							capability: "carsi-preparation/a4-verified",
+							consent_capability: LiteratureMonitorCARSI.verifiedConsent === true ? "shibboleth-consent/v1" : null,
 							version: browser.runtime.getManifest().version,
 						});
 					}
@@ -405,7 +405,7 @@
 		},
 
 		async _claimTick() {
-			if (this._claimInFlight || this._activeTask || this._prepActive) {
+			if (this._claimInFlight || this._activeTask || this._prepActive || this._enrichActive) {
 				return;
 			}
 			this._claimInFlight = true;
@@ -465,28 +465,31 @@
 				// A failed claim request cannot manufacture a command or result.
 			}
 			finally {
-				this._claimInFlight = false;
-				if (this._prepInstance && !this._activeTask && !this._prepActive) {
-					void this._claimPreparation();
+				await this._claimEnrichment();
+				if (this._prepInstance && !this._activeTask && !this._prepActive && !this._enrichActive) {
+					await this._claimPreparation();
 				}
+				this._claimInFlight = false;
 			}
 		},
 
 		async _claimPreparation() {
 			if (!this._prepInstance || this._prepClaimInFlight
-					|| this._activeTask || this._prepActive) return;
+					|| this._activeTask || this._prepActive || this._enrichActive) return;
 			this._prepClaimInFlight = true;
 			try {
 				const response = await this._postJSON("/api/connector/preparation/claim", {
 					instance_id: this._prepInstance,
 				});
 				const cmd = response.ok && response.body?.command;
-				if (!cmd || this._activeTask || this._prepActive
+				if (!cmd || this._activeTask || this._prepActive || this._enrichActive
 						|| cmd.kind !== "carsi-preparation/v1"
 						|| !requestIDIsValid(cmd.task_id) || !requestIDIsValid(cmd.request_id)
 						|| !/^svc_[0-9a-f]{32}$/.test(cmd.service_id)
 						|| !Number.isSafeInteger(cmd.generation) || cmd.generation < 1
 						|| typeof cmd.last_service !== "boolean"
+						|| (cmd.automatic_attribute_release_consent !== undefined
+							&& typeof cmd.automatic_attribute_release_consent !== "boolean")
 						|| typeof cmd.name !== "string" || !cmd.name.trim()
 						|| cmd.name.length > 512) return;
 				const login = cmd.login_url;
@@ -549,6 +552,129 @@
 				active.executor = null;
 				if (this._prepActive === active) this._prepActive = null;
 			}
+		},
+
+		async _claimEnrichment() {
+			if (this._activeTask || this._prepActive || this._enrichActive) return;
+			try {
+				const response = await this._postJSON("/api/connector/enrichment/claim", {});
+				const parsed = response.ok && parseCommand(response.body?.command);
+				if (!parsed?.command || this._activeTask || this._prepActive || this._enrichActive) return;
+				const command = parsed.command;
+				const task = {request_id: command.requestID, invocation_id: command.invocationID,
+					doi_url: command.doiURL, tabID: null, documentID: null, translating: false,
+					cancelled: false, manual: false, deadline: Date.now() + OBSERVATION_DEADLINE_MS};
+				this._enrichActive = task;
+				void this._runEnrichment(task);
+			} catch (_) { /* A failed claim cannot create a task. */ }
+		},
+
+		async _runEnrichment(task) {
+			const identity = {request_id: task.request_id, invocation_id: task.invocation_id, doi_url: task.doi_url};
+			let authorityTimer, deadlineTimer, stop;
+			let result = {items: [], error: "Enrichment retrieval failed"};
+			const stopped = new Promise((_, reject) => { stop = message => {
+				if (task.cancelled) return;
+				task.cancelled = true;
+				reject(new Error(message));
+			}; });
+			// This promise can reject while an unrelated browser API is in flight.
+			stopped.catch(() => {});
+			const live = () => this._enrichActive === task && !task.cancelled && Date.now() < task.deadline;
+			const authorize = async waiting => {
+				const reply = await this._postJSON("/api/connector/enrichment/authorize",
+					{...identity, waiting_for_user: waiting});
+				return live() && reply.ok && reply.body?.accepted === true;
+			};
+			const navigation = details => {
+				if (details.tabId === task.tabID && details.frameId === 0 && task.translating) stop("Document changed during translation");
+			};
+			const removed = tabID => { if (tabID === task.tabID) stop("Enrichment task tab was closed"); };
+			try {
+				if (!await authorize(false)) throw new Error("Enrichment request is no longer authorized");
+				let checking = false;
+				authorityTimer = setInterval(async () => {
+					if (checking || !live()) return;
+					checking = true;
+					try { if (!await authorize(false)) stop("Enrichment request cancelled or Connector disconnected"); }
+					catch (_) { stop("Cannot reach the local application"); }
+					finally { checking = false; }
+				}, 1000);
+				deadlineTimer = setInterval(() => { if (Date.now() >= task.deadline) stop("Enrichment retrieval timed out"); }, 500);
+				browser.webNavigation.onBeforeNavigate.addListener(navigation);
+				browser.tabs.onRemoved.addListener(removed);
+				const windows = await browser.windows.getAll({windowTypes: ["normal"]});
+				const normal = windows.find(window => window.type === "normal" && window.incognito === false);
+				if (!normal || !live()) throw new Error("Normal Chrome window unavailable");
+				const tab = await browser.tabs.create({url: "about:blank", windowId: normal.id});
+				if (!tab || tab.incognito !== false || tab.windowId !== normal.id || !Number.isInteger(tab.id)) {
+					throw new Error("Normal task tab unavailable");
+				}
+				task.tabID = tab.id;
+				task.windowID = tab.windowId;
+				if (!live()) throw new Error("Enrichment request cancelled");
+				await browser.tabs.update(tab.id, {url: task.doi_url});
+				let candidate;
+				const challenged = new Set();
+				while (live()) {
+					const currentTab = await browser.tabs.get(tab.id);
+					const frame = await browser.webNavigation.getFrame({tabId: tab.id, frameId: 0});
+					if (currentTab.incognito !== false || currentTab.windowId !== normal.id) throw new Error("Task tab identity changed");
+					if (currentTab.status === "complete" && frame?.documentId && !frame.errorOccurred
+						&& frame.documentLifecycle === "active" && LiteratureMonitorAccess.publicOrigin(frame.url)) {
+						const records = await browser.scripting.executeScript({target: {tabId: tab.id, documentIds: [frame.documentId]},
+							world: "ISOLATED", func: inspectPage});
+						const record = records.length === 1 && records[0];
+						const page = record?.frameId === 0 && record.documentId === frame.documentId && record.result;
+						if (page?.challenge) challenged.add(frame.documentId);
+						if ((page?.challenge || page?.authentication) && !task.manual) {
+							if (!await authorize(true)) throw new Error("Enrichment request cancelled");
+							task.manual = true;
+							task.deadline = Date.now() + 600000;
+						}
+						if (page?.ready && page.content && !page.challenge && !challenged.has(frame.documentId) && page.translatorID) {
+							if (["multiple", "webpage", "attachment", "note"].includes(page.itemType)) throw new Error("Single literature Translator required");
+							const latest = await browser.webNavigation.getFrame({tabId: tab.id, frameId: 0});
+							if (latest?.documentId === frame.documentId && !latest.errorOccurred && latest.documentLifecycle === "active") {
+								candidate = {documentID: frame.documentId, translatorID: page.translatorID}; break;
+							}
+						}
+					}
+					await Promise.race([delay(TRANSLATOR_POLL_INTERVAL_MS), stopped]);
+				}
+				if (!candidate || !live() || !await authorize(false)) throw new Error("Enrichment request expired");
+				task.documentID = candidate.documentID;
+				task.translating = true;
+				const frame = await browser.webNavigation.getFrame({tabId: tab.id, frameId: 0});
+				if (frame?.documentId !== candidate.documentID || !live()) throw new Error("Document changed before translation");
+				const translated = await Promise.race([browser.tabs.sendMessage(tab.id,
+					["literatureMonitorEnrich", [{...candidate, requestID: task.request_id,
+						invocationID: task.invocation_id, doiURL: task.doi_url, expiresAt: task.deadline}]],
+					{documentId: candidate.documentID}), stopped]);
+				const latest = await browser.webNavigation.getFrame({tabId: tab.id, frameId: 0});
+				if (!live() || latest?.documentId !== candidate.documentID || latest.errorOccurred
+					|| latest.documentLifecycle !== "active" || !await authorize(false)) throw new Error("Enrichment result is stale");
+				result = {items: translated?.items || []};
+			} catch (error) { result = {items: [], error: error.message || "Enrichment retrieval failed"}; }
+			finally {
+				task.cancelled = true;
+				clearInterval(authorityTimer); clearInterval(deadlineTimer);
+				browser.webNavigation.onBeforeNavigate.removeListener(navigation);
+				browser.tabs.onRemoved.removeListener(removed);
+				if (this._enrichActive === task) this._enrichActive = null;
+			}
+			try {
+				const reply = await this._postJSON("/api/connector/enrichment/result", {...identity, ...result});
+				if (!result.error && reply.ok && reply.body?.accepted === true && reply.body.phase === "Preview") {
+					const tab = await browser.tabs.get(task.tabID);
+					const frame = await browser.webNavigation.getFrame({tabId: task.tabID, frameId: 0});
+					// Close only our completed document, never a page the user navigated elsewhere.
+					if (tab.incognito === false && tab.windowId === task.windowID
+						&& frame?.documentId === task.documentID && !frame.errorOccurred
+						&& frame.documentLifecycle === "active") await browser.tabs.remove(task.tabID);
+				}
+			}
+			catch (_) { /* Keep the page if delivery or closure is uncertain; never retranslate. */ }
 		},
 
 		async _runTask(task) {

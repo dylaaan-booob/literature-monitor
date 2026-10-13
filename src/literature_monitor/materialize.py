@@ -137,15 +137,11 @@ def render_paper_markdown(
         "title": paper.metadata.title,
         "authors": author_links,
         "journal": paper.metadata.journal,
-        "publication_date": (
-            paper.metadata.publication_date.isoformat()
-            if paper.metadata.publication_date is not None
-            else None
-        ),
+        "publication_date": paper.metadata.publication_date,
         "doi": doi,
         "openalex_id": paper.external_ids.openalex,
         "arxiv_id": paper.external_ids.arxiv,
-        "author_keywords": list(paper.metadata.author_keywords),
+        **({"author_keywords": list(paper.metadata.author_keywords)} if paper.metadata.author_keywords else {}),
         "status": workflow["status"],
         "discovered_at": workflow["discovered_at"],
         "external_ids": external_ids.model_dump(
@@ -155,8 +151,12 @@ def render_paper_markdown(
     }
     if paper.journal_issns:
         frontmatter["journal_issns"] = list(paper.journal_issns)
+    serialized = _yaml_frontmatter(frontmatter)
+    if paper.metadata.publication_date is not None:
+        serialized = re.sub(r"^publication_date:.*$",
+                            f"publication_date: '{paper.metadata.publication_date}'", serialized, flags=re.MULTILINE)
     return (
-        f"{_yaml_frontmatter(frontmatter)}\n"
+        f"{serialized}\n"
         f"# {paper.metadata.title}\n\n"
         f"{render_abstract_section(paper.metadata.abstract)}"
         f"## Sources\n\n{_source_summary(paper.sources)}\n\n"
@@ -312,15 +312,9 @@ def _stable_author_compatible(state: AuthorMarkdownState, author: Author) -> boo
     return normalize_text(state.name) == normalize_text(author.name)
 
 
-def _match_papers(
-    papers: Sequence[CanonicalPaper],
-    states: Sequence[PaperIdentity],
-    papers_dir: Path,
-    issues: list[MaterializationIssue],
-) -> list[_PaperMatch]:
+def _identity_indexes(states, papers_dir, issues):
     uuid_index: dict[UUID, set[Path]] = defaultdict(set)
     doi_index: dict[str, set[Path]] = defaultdict(set)
-    states_by_path = {state.path: state for state in states}
     for state in states:
         if state.paper_id is not None:
             uuid_index[state.paper_id].add(state.path)
@@ -336,6 +330,55 @@ def _match_papers(
                     papers_dir, f"duplicate durable {label} {identifier}: "
                     + ", ".join(str(path) for path in sorted(paths)),
                 ))
+
+    return uuid_index, doi_index, conflicted_paths
+
+
+@dataclass(frozen=True)
+class WorkspaceIdentityIndex:
+    saved: dict[str, PaperIdentity]
+    blocked: frozenset[str]
+    complete: bool
+    issues: tuple[MaterializationIssue, ...]
+
+    def can_create(self, doi: str) -> bool:
+        return self.complete and doi not in self.blocked and doi not in self.saved
+
+
+def read_workspace_identities(lock: WorkspaceOperationLock) -> WorkspaceIdentityIndex:
+    """Invocation-local identity only; final materialization still scans again (§49)."""
+    lock.verify()
+    papers_dir = lock.path / "Papers"
+    issues: list[MaterializationIssue] = []
+    if not papers_dir.exists() and not papers_dir.is_symlink():
+        return WorkspaceIdentityIndex({}, frozenset(), True, ())
+    try:
+        with workspace_text_directory(lock, "Papers") as directory:
+            states, complete = _scan_papers(papers_dir, issues)
+            directory.verify()
+            lock.verify()
+    except (OSError, ContentChangedError, CompareReadError) as error:
+        return WorkspaceIdentityIndex({}, frozenset(), False,
+            (MaterializationIssue(papers_dir, str(error)),))
+    _, _, conflicts = _identity_indexes(states, papers_dir, issues)
+    saved, blocked = {}, set()
+    for state in states:
+        if state.problems or state.path in conflicts:
+            blocked.update(state.dois)
+        elif complete:
+            for doi in state.dois:
+                saved[doi] = state
+    return WorkspaceIdentityIndex(saved, frozenset(blocked), complete, tuple(issues))
+
+
+def _match_papers(
+    papers: Sequence[CanonicalPaper],
+    states: Sequence[PaperIdentity],
+    papers_dir: Path,
+    issues: list[MaterializationIssue],
+) -> list[_PaperMatch]:
+    uuid_index, doi_index, conflicted_paths = _identity_indexes(states, papers_dir, issues)
+    states_by_path = {state.path: state for state in states}
 
     incoming_dois: dict[str, int] = defaultdict(int)
     incoming_uuids: dict[UUID, int] = defaultdict(int)
@@ -564,16 +607,19 @@ def _materialize_papers(
         if not papers_directory_issue
         else ([], False)
     )
-    author_states, openalex_index, orcid_index = (
-        _scan_authors(authors_dir)
-        if not authors_directory_issue
-        else ({}, defaultdict(set), defaultdict(set))
-    )
     matches = _match_papers(
         papers,
         states,
         papers_dir,
         issues,
+    )
+    needs_authors = identity_index_complete and any(
+        paper.authors and match.state is None and not match.blocked
+        for paper, match in zip(papers, matches, strict=True)
+    )
+    author_states, openalex_index, orcid_index = (
+        _scan_authors(authors_dir) if needs_authors and not authors_directory_issue
+        else ({}, defaultdict(set), defaultdict(set))
     )
     _report_activity(
         progress_callback,

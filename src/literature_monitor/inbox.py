@@ -17,10 +17,6 @@ properties:
     displayName: Publication Date
   note.authors:
     displayName: Authors
-  note.author_keywords:
-    displayName: Author Keywords
-  note.discovered_at:
-    displayName: Discovered At
 views:
   - type: table
     name: Inbox
@@ -32,8 +28,6 @@ views:
       - journal
       - publication_date
       - authors
-      - author_keywords
-      - discovered_at
       - status
     sort:
       - property: discovered_at
@@ -52,8 +46,6 @@ views:
       - journal
       - publication_date
       - authors
-      - author_keywords
-      - discovered_at
       - status
     sort:
       - property: discovered_at
@@ -72,8 +64,6 @@ views:
       - journal
       - publication_date
       - authors
-      - author_keywords
-      - discovered_at
       - status
     sort:
       - property: discovered_at
@@ -92,8 +82,6 @@ views:
       - journal
       - publication_date
       - authors
-      - author_keywords
-      - discovered_at
       - status
     sort:
       - property: discovered_at

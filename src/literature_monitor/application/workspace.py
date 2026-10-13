@@ -5,7 +5,7 @@ from __future__ import annotations
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from uuid import UUID
@@ -39,7 +39,7 @@ class WorkspacePaper:
     paper_id: UUID
     title: str
     journal: str
-    publication_date: date | None
+    publication_date: str | None
     discovered_at: datetime
     status: WorkflowStatus
     abstract: str | None

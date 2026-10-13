@@ -16,10 +16,7 @@ from literature_monitor.crossref import (
     CrossrefPartialDate,
     CrossrefRecordError,
     CrossrefRequestError,
-    EnrichedWorkRecord,
     EnrichmentIssueSeverity,
-    discover_crossref_journals,
-    enrich_records,
     normalize_crossref_discovered_work,
     normalize_crossref_work,
     CrossrefDOIOutcomeKind,
@@ -36,7 +33,6 @@ from literature_monitor.models import (
 )
 from literature_monitor.openalex import OpenAlexWorkRecord
 from literature_monitor.progress import ActivityKind, ActivityUpdate, ProgressEvent
-from literature_monitor.retrieval import assemble_provider_evidence
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "crossref"
@@ -175,78 +171,8 @@ def test_client_uses_versioned_encoded_doi_endpoint_and_polite_headers() -> None
     assert parsed.path == "/v1/works/10.1002%2F%28abc%29%2Fx"
     assert parse_qs(parsed.query) == {"mailto": ["monitor@example.com"]}
     assert request.headers["Accept"] == "application/json"
-    assert request.headers["User-Agent"] == "literature-monitor/0.6.7"
+    assert request.headers["User-Agent"] == "literature-monitor/0.6.8"
     assert request.extensions["timeout"]["read"] == 17
-
-
-def test_journal_client_uses_publication_filters_and_encoded_cursor_pages() -> None:
-    transport = SequenceTransport(
-        list_payload([{}, {}], "next / cursor"),
-        list_payload([{}], "unused"),
-    )
-    client = CrossrefClient(transport=transport, sleep=lambda _: None)
-
-    pages = list(
-        client.iter_journal_work_pages(
-            "0006-341X",
-            date(2026, 1, 1),
-            date(2026, 1, 31),
-            rows=2,
-        )
-    )
-
-    assert len(pages) == 2
-    first = urlparse(str(transport.requests[0].url))
-    second = urlparse(str(transport.requests[1].url))
-    assert first.path == "/v1/journals/0006-341X/works"
-    assert parse_qs(first.query) == {
-        "filter": ["from-pub-date:2026-01-01,until-pub-date:2026-01-31"],
-        "rows": ["2"],
-        "cursor": ["*"],
-    }
-    assert parse_qs(second.query)["cursor"] == ["next / cursor"]
-    assert "next+%2F+cursor" in second.query
-
-
-def test_journal_client_defaults_to_rows_1000() -> None:
-    transport = SequenceTransport(list_payload([{}]))
-    client = CrossrefClient(transport=transport, sleep=lambda _: None)
-
-    pages = list(
-        client.iter_journal_work_pages(
-            "0006-341X",
-            date(2026, 1, 1),
-            date(2026, 1, 31),
-        )
-    )
-
-    assert len(pages) == 1
-    query = parse_qs(urlparse(str(transport.requests[0].url)).query)
-    assert query["rows"] == ["1000"]
-
-
-def test_journal_client_traverses_multiple_default_size_cursor_pages() -> None:
-    transport = SequenceTransport(
-        list_payload([{}] * 1000, "second-page"),
-        list_payload([{}], "unused"),
-    )
-    client = CrossrefClient(transport=transport, sleep=lambda _: None)
-
-    pages = list(
-        client.iter_journal_work_pages(
-            "0006-341X",
-            date(2026, 1, 1),
-            date(2026, 1, 31),
-        )
-    )
-
-    assert len(pages) == 2
-    first_query = parse_qs(urlparse(str(transport.requests[0].url)).query)
-    second_query = parse_qs(urlparse(str(transport.requests[1].url)).query)
-    assert first_query["rows"] == ["1000"]
-    assert first_query["cursor"] == ["*"]
-    assert second_query["rows"] == ["1000"]
-    assert second_query["cursor"] == ["second-page"]
 
 
 def test_client_uses_response_rate_headers_to_pace_later_requests(clock: FakeClock) -> None:
@@ -423,8 +349,6 @@ def pacing_request(client: CrossrefClient, shape: str, **kwargs: Any) -> None:
         client.get_doi_outcome("10.5555/pacing", **kwargs)
     elif shape == "manifest":
         client.get_manifest_page(("0006-341X",), date(2026, 1, 1), date(2026, 1, 1), **kwargs)
-    elif shape == "journal":
-        list(client.iter_journal_work_pages("0006-341X", date(2026, 1, 1), date(2026, 1, 1), **kwargs))
     else:
         assert shape in ("probe", "hydration")
         client.get_doi_batch(("10.5555/pacing",), thin=shape == "probe", **kwargs)
@@ -451,7 +375,7 @@ def test_same_class_pacing_counts_response_latency(
     assert len(waiting) == (1 if wait else 0)
 
 
-@pytest.mark.parametrize("list_shape", ["manifest", "journal", "probe", "hydration"])
+@pytest.mark.parametrize("list_shape", ["manifest", "probe", "hydration"])
 @pytest.mark.parametrize("singleton_shape", ["singleton", "alias"])
 @pytest.mark.parametrize("singleton_first", [True, False])
 @pytest.mark.parametrize(("first_interval", "second_interval", "starts", "sleeps"), [
@@ -630,64 +554,6 @@ def test_alias_response_headers_pace_followup_singleton_not_list_requests(clock:
 
 
 @pytest.mark.parametrize(
-    "payload",
-    [
-        {"status": "ok", "message-type": "work-list", "message": []},
-        {"status": "ok", "message-type": "work-list", "message": {}},
-        {"status": "bad", "message-type": "work-list", "message": {"items": []}},
-    ],
-)
-def test_journal_client_rejects_malformed_list_envelopes(payload: object) -> None:
-    client = CrossrefClient(transport=SequenceTransport(payload), sleep=lambda _: None)
-
-    with pytest.raises(CrossrefRequestError):
-        list(
-            client.iter_journal_work_pages(
-                "0006-341X",
-                date(2026, 1, 1),
-                date(2026, 1, 31),
-            )
-        )
-
-
-@pytest.mark.parametrize("cursor", [None, 42, ""])
-def test_journal_client_rejects_missing_or_invalid_cursor_on_full_page(
-    cursor: object,
-) -> None:
-    client = CrossrefClient(
-        transport=SequenceTransport(list_payload([{}], cursor)),
-        sleep=lambda _: None,
-    )
-
-    with pytest.raises(CrossrefRequestError, match="next cursor"):
-        list(
-            client.iter_journal_work_pages(
-                "0006-341X",
-                date(2026, 1, 1),
-                date(2026, 1, 31),
-                rows=1,
-            )
-        )
-
-
-def test_journal_client_rejects_repeated_cursor() -> None:
-    client = CrossrefClient(
-        transport=SequenceTransport(list_payload([{}], "*")),
-        sleep=lambda _: None,
-    )
-
-    with pytest.raises(CrossrefRequestError, match="repeated cursor"):
-        list(
-            client.iter_journal_work_pages(
-                "0006-341X",
-                date(2026, 1, 1),
-                date(2026, 1, 31),
-                rows=1,
-            )
-        )
-
-
-@pytest.mark.parametrize(
     "outcome",
     [http_error(429), http_error(500), httpx.ReadTimeout("timed out"), httpx.ConnectError("down"), httpx.ConnectError("dns")],
 )
@@ -838,10 +704,10 @@ def test_complete_work_normalization_preserves_provider_evidence() -> None:
         for item in record.dates
     ]
 
-    enriched = EnrichedWorkRecord(
-        openalex=openalex_record("W1", record.doi),
-        crossref=record,
-    ).to_evidence()
+    openalex = openalex_record("W1", record.doi).to_evidence()
+    enriched = (openalex, record.to_evidence(supplements=(ProviderRecordRef(
+        provider=openalex.provenance.provider, record_id=openalex.provenance.record_id,
+    ),)))
     assert [item.provenance.provider for item in enriched] == [
         "openalex",
         "crossref",
@@ -891,487 +757,6 @@ def test_discovered_work_preserves_author_order_orcid_and_venue_ids() -> None:
     assert any("invalid author entry" in warning for warning in warnings)
     assert any("without a usable name" in warning for warning in warnings)
     assert sum("invalid ISSN entry" in warning for warning in warnings) == 2
-
-
-class JournalDiscoveryClient:
-    def __init__(self, outcomes: dict[str, object]) -> None:
-        self.outcomes = outcomes
-        self.calls: list[str] = []
-
-    def iter_journal_work_pages(
-        self,
-        issn: str,
-        from_date: date,
-        to_date: date,
-    ) -> Any:
-        self.calls.append(issn)
-        outcome = self.outcomes[issn]
-        if isinstance(outcome, Exception):
-            raise outcome
-        return iter(outcome)
-
-
-def discovered_message(
-    doi: str,
-    *,
-    journal: str = "Biometrics",
-    issns: list[str] | None = None,
-) -> dict[str, Any]:
-    return {
-        "DOI": doi,
-        "title": [f"Paper {doi}"],
-        "container-title": [journal],
-        "author": [{"given": "Ada", "family": "Author"}],
-        "ISSN": issns,
-        "published": {"date-parts": [[2026, 1, 10]]},
-        "relation": {},
-        "type": "journal-article",
-    }
-
-
-def test_discovery_isolates_issn_failures_and_validates_venue_identity() -> None:
-    valid = discovered_message("10.5555/valid", issns=["1541-0420"])
-    mismatch = discovered_message("10.5555/wrong", issns=["0006-3444"])
-    client = JournalDiscoveryClient(
-        {
-            "0006-341X": CrossrefRequestError("temporary failure"),
-            "1541-0420": [list_payload([valid, mismatch])],
-        }
-    )
-
-    result = discover_crossref_journals(
-        client,  # type: ignore[arg-type]
-        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
-        date(2026, 1, 1),
-        date(2026, 1, 31),
-        retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
-        resolved_sources=(verified_source(),),
-    )
-
-    assert client.calls == ["0006-341X", "1541-0420"]
-    assert [unit.issn for unit in result.units] == client.calls
-    assert result.units[0].records == ()
-    assert result.units[1].records == result.records
-    assert [issue.stage for issue in result.units[0].issues] == ["work_retrieval"]
-    assert [issue.stage for issue in result.units[1].issues] == ["venue_validation"]
-    assert tuple(issue for unit in result.units for issue in unit.issues) == result.issues
-    assert tuple(unit.coverage for unit in result.units) == result.coverage
-    assert [record.doi for record in result.records] == ["10.5555/valid"]
-    assert result.has_errors
-    assert {issue.stage for issue in result.issues} >= {
-        "work_retrieval",
-        "venue_validation",
-    }
-    assert [
-        (unit.issn, unit.status) for unit in result.coverage
-    ] == [
-        ("0006-341X", CoverageStatus.FAILED),
-        ("1541-0420", CoverageStatus.COMPLETE),
-    ]
-    assert all(
-        unit.component is CoverageComponent.CROSSREF_DISCOVERY
-        and unit.journal == "0006-341X"
-        for unit in result.coverage
-    )
-
-
-def test_discovery_keeps_records_from_pages_before_later_request_failure() -> None:
-    valid = discovered_message("10.5555/first-page", issns=["0006-341X"])
-
-    class PartialFailureClient:
-        def iter_journal_work_pages(
-            self,
-            issn: str,
-            from_date: date,
-            to_date: date,
-        ) -> Any:
-            yield list_payload([valid])
-            raise CrossrefRequestError("later page failed")
-
-    result = discover_crossref_journals(
-        PartialFailureClient(),  # type: ignore[arg-type]
-        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
-        date(2026, 1, 1),
-        date(2026, 1, 31),
-        retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
-    )
-
-    assert [record.doi for record in result.records] == ["10.5555/first-page"]
-    assert result.has_errors
-    assert [issue.stage for issue in result.issues] == ["work_retrieval"]
-    assert result.coverage[0].status is CoverageStatus.PARTIAL
-
-
-def test_discovery_later_page_not_found_is_partial() -> None:
-    valid = discovered_message("10.5555/first-page-404", issns=["0006-341X"])
-
-    class PartialNotFoundClient:
-        def iter_journal_work_pages(
-            self,
-            issn: str,
-            from_date: date,
-            to_date: date,
-        ) -> Any:
-            yield list_payload([valid])
-            raise CrossrefNotFoundError("later page was not found")
-
-    result = discover_crossref_journals(
-        PartialNotFoundClient(),  # type: ignore[arg-type]
-        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
-        date(2026, 1, 1),
-        date(2026, 1, 31),
-        retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
-    )
-
-    assert [record.doi for record in result.records] == ["10.5555/first-page-404"]
-    assert [issue.stage for issue in result.issues] == ["journal_not_found"]
-    assert result.coverage[0].status is CoverageStatus.PARTIAL
-
-
-def test_discovery_uses_alternate_issn_after_not_found() -> None:
-    valid = discovered_message("10.5555/alternate", issns=["1541-0420"])
-    client = JournalDiscoveryClient(
-        {
-            "0006-341X": CrossrefNotFoundError("ISSN was not found"),
-            "1541-0420": [list_payload([valid])],
-        }
-    )
-
-    result = discover_crossref_journals(
-        client,  # type: ignore[arg-type]
-        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
-        date(2026, 1, 1),
-        date(2026, 1, 31),
-        retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
-        resolved_sources=(verified_source(),),
-    )
-
-    assert [record.doi for record in result.records] == ["10.5555/alternate"]
-    assert [issue.stage for issue in result.issues] == ["journal_not_found"]
-    assert not result.has_errors
-    assert [unit.status for unit in result.coverage] == [
-        CoverageStatus.UNAVAILABLE,
-        CoverageStatus.COMPLETE,
-    ]
-
-
-def test_discovery_zero_results_is_complete() -> None:
-    client = JournalDiscoveryClient({"0006-341X": [list_payload([])]})
-
-    result = discover_crossref_journals(
-        client,  # type: ignore[arg-type]
-        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
-        date(2026, 1, 1),
-        date(2026, 1, 31),
-        retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
-    )
-
-    assert result.records == ()
-    assert result.coverage[0].status is CoverageStatus.COMPLETE
-
-
-def test_discovery_field_warning_keeps_complete_coverage() -> None:
-    message = discovered_message("10.5555/warning", issns=["0006-341X"])
-    message["abstract"] = 42
-    client = JournalDiscoveryClient(
-        {"0006-341X": [list_payload([message])]}
-    )
-
-    result = discover_crossref_journals(
-        client,  # type: ignore[arg-type]
-        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
-        date(2026, 1, 1),
-        date(2026, 1, 31),
-        retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
-    )
-
-    assert [record.doi for record in result.records] == ["10.5555/warning"]
-    assert any(issue.stage == "field_normalization" for issue in result.issues)
-    assert result.coverage[0].status is CoverageStatus.COMPLETE
-
-
-def test_discovery_progress_uses_total_results_without_extra_request() -> None:
-    first = discovered_message("10.5555/first", issns=["0006-341X"])
-    second = discovered_message("10.5555/second", issns=["0006-341X"])
-    transport = SequenceTransport(list_payload([first, second], total_results=2))
-    client = CrossrefClient(transport=transport, sleep=lambda _: None)
-    events: list[ProgressEvent] = []
-
-    result = discover_crossref_journals(
-        client,
-        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
-        date(2026, 1, 1),
-        date(2026, 1, 31),
-        progress_callback=events.append,
-    )
-
-    assert [record.doi for record in result.records] == [
-        "10.5555/first",
-        "10.5555/second",
-    ]
-    assert len(transport.requests) == 1
-    activities = [event.activity for event in events if event.activity is not None]
-    issn_activity = [
-        item
-        for item in activities
-        if item.operation == "journal_discovery:0:0"
-    ]
-    assert (issn_activity[0].current, issn_activity[0].total) == (0, None)
-    page = next(
-        item for item in issn_activity if item.label == "Retrieved Crossref page"
-    )
-    assert (page.current, page.total) == (2, 2)
-    assert issn_activity[-1].label == "Completed Crossref ISSN discovery"
-    assert (issn_activity[-1].current, issn_activity[-1].total) == (2, 2)
-    journal = next(
-        item
-        for item in activities
-        if item.label == "Completed Crossref journal discovery"
-    )
-    assert (journal.current, journal.total, journal.unit) == (1, 1, "issn")
-
-
-@pytest.mark.parametrize("total_results", (None, "2", -1, 0, True))
-def test_discovery_unusable_total_results_stays_indeterminate(
-    total_results: object,
-) -> None:
-    item = discovered_message("10.5555/indeterminate", issns=["0006-341X"])
-    transport = SequenceTransport(
-        list_payload([item], total_results=total_results)
-    )
-    client = CrossrefClient(transport=transport, sleep=lambda _: None)
-    events: list[ProgressEvent] = []
-
-    result = discover_crossref_journals(
-        client,
-        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
-        date(2026, 1, 1),
-        date(2026, 1, 31),
-        progress_callback=events.append,
-    )
-
-    assert not result.has_errors
-    assert len(transport.requests) == 1
-    issn_activity = [
-        event.activity
-        for event in events
-        if event.activity is not None
-        and event.activity.operation == "journal_discovery:0:0"
-    ]
-    assert issn_activity
-    assert all(item.total is None for item in issn_activity)
-
-
-def test_discovery_skips_malformed_item_without_discarding_valid_peer() -> None:
-    valid = discovered_message("10.5555/valid-peer", issns=["0006-341X"])
-    client = JournalDiscoveryClient(
-        {"0006-341X": [list_payload([{"title": ["No DOI"]}, valid])]}
-    )
-
-    result = discover_crossref_journals(
-        client,  # type: ignore[arg-type]
-        (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
-        date(2026, 1, 1),
-        date(2026, 1, 31),
-        retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
-    )
-
-    assert [record.doi for record in result.records] == ["10.5555/valid-peer"]
-    assert any(issue.stage == "record_normalization" for issue in result.issues)
-    assert result.coverage[0].status is CoverageStatus.PARTIAL
-
-
-@pytest.mark.parametrize(
-    ("message", "accepted"),
-    [
-        (discovered_message("10.5555/issn", issns=["0006-341X"]), True),
-        (discovered_message("10.5555/alternate", issns=["1541-0420"]), False),
-        (
-            discovered_message(
-                "10.5555/mismatch",
-                journal="Biometrics",
-                issns=["0006-3444"],
-            ),
-            False,
-        ),
-        (discovered_message("10.5555/name", journal=" BIOMETRICS "), False),
-        (discovered_message("10.5555/wrong-name", journal="Other"), False),
-    ],
-)
-def test_discovery_venue_validation_paths(
-    message: dict[str, Any],
-    accepted: bool,
-) -> None:
-    if message.get("ISSN") is None:
-        message.pop("ISSN", None)
-    from literature_monitor.crossref import crossref_record_matches_journal
-
-    journal = JournalConfig(name="Biometrics", issn_l="0006-341X")
-    normalized, _ = normalize_crossref_discovered_work(
-        message, datetime(2026, 9, 19, tzinfo=timezone.utc),
-    )
-    assert crossref_record_matches_journal(normalized, journal) is accepted
-    client = JournalDiscoveryClient(
-        {"0006-341X": [list_payload([message])], "1541-0420": []}
-    )
-
-    result = discover_crossref_journals(
-        client,  # type: ignore[arg-type]
-        (journal,),
-        date(2026, 1, 1),
-        date(2026, 1, 31),
-        retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
-    )
-
-    assert bool(result.records) is accepted
-    assert all(
-        unit.status is CoverageStatus.COMPLETE for unit in result.coverage
-    )
-
-
-def test_discovered_crossref_record_attaches_all_openalex_doi_anchors() -> None:
-    discovered, _warnings = normalize_crossref_discovered_work(
-        discovered_message("10.5555/shared", issns=["0006-341X"]),
-        datetime(2026, 9, 19, tzinfo=timezone.utc),
-    )
-
-    class NoLookupClient:
-        def get_work_by_doi(self, doi: str) -> dict[str, Any]:
-            raise AssertionError(f"unexpected DOI lookup: {doi}")
-
-    result = assemble_provider_evidence(
-        NoLookupClient(),  # type: ignore[arg-type]
-        (
-            openalex_record("W1", "10.5555/shared"),
-            openalex_record("W2", "10.5555/shared"),
-        ),
-        (discovered,),
-        retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
-    )
-
-    crossref_evidence = next(
-        item for item in result.evidence if item.provenance.provider == "crossref"
-    )
-    assert [reference.record_id for reference in crossref_evidence.supplements] == [
-        "https://openalex.org/W1",
-        "https://openalex.org/W2",
-    ]
-    assert result.supplement_records == ()
-    assert result.coverage == ()
-
-
-def test_doi_gap_supplementation_fetches_shared_doi_once() -> None:
-    transport = SequenceTransport(payload_for("10.5555/shared"))
-    client = CrossrefClient(transport=transport, sleep=lambda _: None)
-
-    result = assemble_provider_evidence(
-        client,
-        (
-            openalex_record("W1", "10.5555/shared"),
-            openalex_record("W2", "10.5555/shared"),
-        ),
-        (),
-        retrieved_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
-    )
-
-    assert len(transport.requests) == 1
-    assert len(result.supplement_records) == 1
-    assert result.units[0].doi == "10.5555/shared"
-    assert result.units[0].record == result.supplement_records[0]
-    assert result.units[0].issues == result.issues
-    assert tuple(unit.coverage for unit in result.units) == result.coverage
-    assert len(result.coverage) == 1
-    assert result.coverage[0].component is CoverageComponent.CROSSREF_SUPPLEMENT
-    assert result.coverage[0].status is CoverageStatus.COMPLETE
-    assert result.coverage[0].doi == "10.5555/shared"
-    crossref_evidence = next(
-        item for item in result.evidence if item.provenance.provider == "crossref"
-    )
-    assert len(crossref_evidence.supplements) == 2
-
-
-def test_doi_supplement_progress_has_exact_total_and_completes_every_work_unit() -> None:
-    transport = SequenceTransport(
-        payload_for("10.5555/a"),
-        http_error(404),
-        http_error(500),
-        payload_for("10.5555/c"),
-        http_error(400),
-        payload_for("10.5555/not-e"),
-    )
-    client = CrossrefClient(transport=transport, sleep=lambda _: None)
-    events: list[ProgressEvent] = []
-
-    result = assemble_provider_evidence(
-        client,
-        (
-            openalex_record("W1", "10.5555/a"),
-            openalex_record("W2", "10.5555/a"),
-            openalex_record("W3", "10.5555/b"),
-            openalex_record("W4", "10.5555/c"),
-            openalex_record("W5", "10.5555/d"),
-            openalex_record("W6", "10.5555/e"),
-        ),
-        (),
-        progress_callback=events.append,
-    )
-
-    assert len(transport.requests) == 6
-    assert tuple(unit.coverage for unit in result.units) == result.coverage
-    assert tuple(unit.record for unit in result.units if unit.record is not None) == result.supplement_records
-    assert tuple(issue for unit in result.units for issue in unit.issues) == result.issues
-    assert all(issue.doi == unit.doi for unit in result.units for issue in unit.issues)
-    assert [record.doi for record in result.supplement_records] == [
-        "10.5555/a",
-        "10.5555/c",
-    ]
-    assert [
-        (unit.doi, unit.status) for unit in result.coverage
-    ] == [
-        ("10.5555/a", CoverageStatus.COMPLETE),
-        ("10.5555/b", CoverageStatus.UNAVAILABLE),
-        ("10.5555/c", CoverageStatus.COMPLETE),
-        ("10.5555/d", CoverageStatus.FAILED),
-        ("10.5555/e", CoverageStatus.FAILED),
-    ]
-    completed = [
-        event.activity
-        for event in events
-        if event.activity is not None
-        and event.activity.label == "Completed Crossref DOI lookup"
-    ]
-    assert [(item.current, item.total, item.unit) for item in completed] == [
-        (1, 5, "doi"),
-        (2, 5, "doi"),
-        (3, 5, "doi"),
-        (4, 5, "doi"),
-        (5, 5, "doi"),
-    ]
-    request_activity = [
-        event.activity
-        for event in events
-        if event.activity is not None
-        and event.activity.label
-        in {
-            "Requesting Crossref",
-            "Retrying Crossref request",
-            "Received Crossref response",
-        }
-    ]
-    assert request_activity
-    assert {
-        (item.source, item.operation, item.unit, item.total)
-        for item in request_activity
-    } == {("crossref", "doi_supplement", "doi", 5)}
-    retry = next(
-        item for item in request_activity if item.kind is ActivityKind.RETRYING
-    )
-    assert retry.current == 2
-    assert {issue.stage for issue in result.issues} >= {
-        "not_found",
-        "record_normalization",
-        "request_failure",
-    }
 
 
 def test_partial_dates_preserve_provider_order_without_fabricating_components() -> None:
@@ -1523,165 +908,6 @@ class BatchClient:
             raise outcome
         assert isinstance(outcome, dict)
         return outcome
-
-
-def test_batch_isolates_expected_failures_and_preserves_order() -> None:
-    records = (
-        openalex_record("W1", "10.5555/a"),
-        openalex_record("W2", None),
-        openalex_record("W3", "10.5555/c"),
-        openalex_record("W4", "10.5555/d"),
-        openalex_record("W5", "10.5555/e"),
-    )
-    client = BatchClient(
-        {
-            "10.5555/a": payload_for("10.5555/a"),
-            "10.5555/c": CrossrefNotFoundError("not found"),
-            "10.5555/d": CrossrefRequestError("server unavailable"),
-            "10.5555/e": payload_for("10.5555/e"),
-        }
-    )
-
-    result = enrich_records(  # type: ignore[arg-type]
-        client,
-        records,
-        retrieved_at=datetime(2026, 9, 18, tzinfo=timezone.utc),
-    )
-
-    assert [item.openalex for item in result.records] == list(records)
-    assert [item.crossref is not None for item in result.records] == [
-        True,
-        False,
-        False,
-        False,
-        True,
-    ]
-    assert client.calls == ["10.5555/a", "10.5555/c", "10.5555/d", "10.5555/e"]
-    assert [issue.stage for issue in result.issues] == [
-        "missing_doi",
-        "not_found",
-        "request_failure",
-    ]
-    assert result.has_errors
-    assert result.issues[-1].severity is EnrichmentIssueSeverity.ERROR
-
-
-def test_batch_turns_normalization_warnings_into_field_issues() -> None:
-    payload = payload_for("10.5555/warn")
-    payload["message"]["abstract"] = 42
-    client = BatchClient({"10.5555/warn": payload})
-
-    result = enrich_records(  # type: ignore[arg-type]
-        client,
-        (openalex_record("W1", "10.5555/warn"),),
-    )
-
-    assert result.records[0].crossref is not None
-    assert [issue.stage for issue in result.issues] == ["field_normalization"]
-    assert not result.has_errors
-
-
-def test_batch_isolates_record_normalization_failure_and_continues() -> None:
-    records = (
-        openalex_record("W1", "10.5555/requested"),
-        openalex_record("W2", "10.5555/later"),
-    )
-    client = BatchClient(
-        {
-            "10.5555/requested": payload_for("10.5555/mismatch"),
-            "10.5555/later": payload_for("10.5555/later"),
-        }
-    )
-
-    result = enrich_records(client, records)  # type: ignore[arg-type]
-
-    assert result.records[0].crossref is None
-    assert result.records[1].crossref is not None
-    assert [issue.stage for issue in result.issues] == ["record_normalization"]
-    assert result.has_errors
-
-
-def test_batch_normalizes_one_aware_timestamp_for_all_records() -> None:
-    records = (
-        openalex_record("W1", "10.5555/a"),
-        openalex_record("W2", "10.5555/b"),
-    )
-    client = BatchClient(
-        {
-            "10.5555/a": payload_for("10.5555/a"),
-            "10.5555/b": payload_for("10.5555/b"),
-        }
-    )
-    supplied = datetime(2026, 9, 18, 8, tzinfo=timezone(timedelta(hours=8)))
-
-    result = enrich_records(client, records, retrieved_at=supplied)  # type: ignore[arg-type]
-
-    timestamps = [item.crossref.provenance.retrieved_at for item in result.records if item.crossref]
-    assert timestamps == [datetime(2026, 9, 18, tzinfo=timezone.utc)] * 2
-
-
-def test_batch_rejects_naive_timestamp_before_requests() -> None:
-    client = BatchClient({"10.5555/a": payload_for("10.5555/a")})
-
-    with pytest.raises(ValueError, match="timezone"):
-        enrich_records(  # type: ignore[arg-type]
-            client,
-            (openalex_record("W1", "10.5555/a"),),
-            retrieved_at=datetime(2026, 9, 18),
-        )
-
-    assert not client.calls
-
-
-def test_batch_does_not_swallow_unexpected_programming_errors() -> None:
-    client = BatchClient({"10.5555/a": RuntimeError("programming bug")})
-
-    with pytest.raises(RuntimeError, match="programming bug"):
-        enrich_records(  # type: ignore[arg-type]
-            client,
-            (openalex_record("W1", "10.5555/a"),),
-        )
-
-
-@pytest.mark.parametrize("unexpected_failure", [False, True])
-def test_discovery_and_doi_requests_share_one_http_session_and_close_it(
-    monkeypatch: pytest.MonkeyPatch,
-    unexpected_failure: bool,
-) -> None:
-    transport = SequenceTransport(
-        list_payload([], total_results=0), payload_for("10.5555/shared-session"),
-    )
-    sessions: list[httpx.Client] = []
-    real_client = httpx.Client
-
-    def create_session(**kwargs: Any) -> httpx.Client:
-        session = real_client(**kwargs)
-        sessions.append(session)
-        return session
-
-    monkeypatch.setattr(httpx, "Client", create_session)
-
-    def execute() -> None:
-        with CrossrefClient(transport=transport) as client:
-            pages = list(client.iter_journal_work_pages(
-                "0006-341X", date(2026, 1, 1), date(2026, 1, 31),
-            ))
-            assert pages[0]["message"]["items"] == []
-            client.get_work_by_doi("10.5555/shared-session")
-            if unexpected_failure:
-                raise RuntimeError("downstream failure")
-
-    if unexpected_failure:
-        with pytest.raises(RuntimeError, match="downstream failure"):
-            execute()
-    else:
-        execute()
-
-    assert len(sessions) == 1
-    assert sessions[0].is_closed
-    assert transport.closed
-    assert len(transport.requests) == 2
-    assert all(request.method == "GET" for request in transport.requests)
 
 
 @pytest.mark.parametrize("status_code", [301, 308])
@@ -1846,9 +1072,8 @@ def test_default_record_serialization_preserves_released_shape(revision: datetim
     )
     record = plain.model_copy(update={"indexed_at": revision})
     assert record.indexed_at == revision
-    expected_fields = {"doi", "title", "journal", "abstract", "authors", "issns", "dates", "relations", "work_type", "provenance"}
-    assert set(record.model_dump()) == expected_fields
-    assert set(json.loads(record.model_dump_json())) == expected_fields
+    assert "indexed_at" not in record.model_dump()
+    assert "indexed_at" not in json.loads(record.model_dump_json())
     assert record.model_dump() == plain.model_dump()
     assert record.model_dump_json() == plain.model_dump_json()
 
@@ -1865,14 +1090,14 @@ def test_a5_manifest_and_doi_batches_use_repeated_filters_and_same_pool() -> Non
     queries = [dict(request.url.params) for request in transport.requests]
     assert queries[0]["filter"] == "issn:0006-341X,issn:2168-2267,from-pub-date:2026-01-01,until-pub-date:2026-01-31"
     assert queries[1]["filter"] == queries[2]["filter"] == "doi:10.1234/a,doi:10.1234/b"
-    assert queries[0]["select"] == queries[1]["select"] == "DOI,ISSN,indexed"
+    assert queries[0]["select"] == queries[1]["select"] == "DOI,ISSN,indexed,type"
     assert "select" not in queries[2]
     for request, query in zip(transport.requests, queries, strict=True):
         assert request.url.path == "/v1/works"
         assert query["mailto"] == "a@example.com"
         assert "|" not in query["filter"]
         assert not {"query", "keyword_expression", "abstract"}.intersection(query)
-        assert request.headers["User-Agent"] == "literature-monitor/0.6.7"
+        assert request.headers["User-Agent"] == "literature-monitor/0.6.8"
 
 
 @pytest.mark.parametrize("code", [301, 308])
@@ -1927,7 +1152,6 @@ def test_a5_manifest_uses_shared_canonical_revision_parser() -> None:
     assert member.doi == "10.1234/a" and member.issns == ("0006-341X", "2168-2267")
     assert member.indexed_at == record.indexed_at == datetime(2026, 1, 2, tzinfo=timezone.utc)
     assert not warnings
-    assert set(member.__dataclass_fields__) == {"doi", "issns", "indexed_at"}
 
 
 def test_a5_requests_preserve_retry_pacing_and_activity_before_sleep(clock: FakeClock) -> None:

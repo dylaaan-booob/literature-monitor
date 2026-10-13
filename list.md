@@ -12,7 +12,6 @@
 | Bernoulli | 1350-7265 | https://openalex.org/P4310321043 | Statistics · T0.5 |
 | Biometrics | 0006-341X | https://openalex.org/P4310311648 | Statistics · T0.5 |
 | Annual Review of Statistics and Its Application | 2326-8298 | https://openalex.org/P4310320373 | Statistics · T0.5 |
-| Bayesian Analysis | 1931-6690 | https://openalex.org/P4310321640 | Statistics · T0.5 |
 | Journal of Computational and Graphical Statistics | 1061-8600 | https://openalex.org/P4310320547 | Statistics · T0.5 |
 | Statistical Science | 0883-4237 | https://openalex.org/P4310319881 | Statistics · T0.5 |
 | Biostatistics | 1465-4644 | https://openalex.org/P4310311648 | Statistics · T1 |
@@ -39,7 +38,6 @@
 | Econometric Reviews | 0747-4938 | https://openalex.org/P4310320547 | Econometrics · T1 |
 | Journal of Machine Learning Research | 1532-4435 | https://openalex.org/P4310315718 | ML · T0.5 |
 | Artificial Intelligence | 0004-3702 | https://openalex.org/P4310320990 | ML · T0.5 |
-| Nature Machine Intelligence | 2522-5839 | https://openalex.org/P4310319908 | ML · T0.5 |
 | IEEE Transactions on Pattern Analysis and Machine Intelligence | 0162-8828 | https://openalex.org/P4310320439 | ML · T0.5 |
 | International Journal of Computer Vision | 0920-5691 | https://openalex.org/P4310319900 | ML · T0.5 |
 | IEEE Transactions on Image Processing | 1057-7149 | https://openalex.org/P4310319808 | ML · T0.5 |
@@ -71,38 +69,47 @@
 | Computers & Operations Research | 0305-0548 | https://openalex.org/P4310320990 | OR · T1 |
 | Manufacturing & Service Operations Management | 1523-4614 | https://openalex.org/P4310315699 | OR · T1 |
 | Bioinformatics | 1367-4803 | https://openalex.org/P4310311648 | Comp Bio |
-| PLoS Computational Biology | 1553-734X | https://openalex.org/P4310315706 | Comp Bio |
-| Nature Methods | 1548-7091 | https://openalex.org/P4310319908 | Comp Bio |
 | Genome biology | 1474-7596 | https://openalex.org/P4310320256 | Comp Bio |
 | Nucleic Acids Research | 0305-1048 | https://openalex.org/P4310311648 | Comp Bio |
-| IEEE Transactions on Information Theory | 0018-9448 | https://openalex.org/P4310319808 |  |
-| Applied and Computational Harmonic Analysis | 1063-5203 | https://openalex.org/P4310320990 |  |
-| SIAM Journal on Computing | 0097-5397 | https://openalex.org/P4310320508 |  |
+| IEEE Transactions on Information Theory | 0018-9448 | https://openalex.org/P4310319808 | ML · T0.5 |
 
 ## Publishers
 
-| Publisher | OpenAlex ID | Access URL |
-| --- | --- | --- |
-| Institute of Mathematical Statistics | https://openalex.org/P4310319881 | http://imstat.org/en/index.html |
-| Oxford University Press | https://openalex.org/P4310311648 | http://global.oup.com/?cc=gb |
-| Chapman and Hall London | https://openalex.org/P4310321043 |  |
-| Annual Reviews | https://openalex.org/P4310320373 | https://www.annualreviews.org |
-| International Society for Bayesian Analysis | https://openalex.org/P4310321640 | http://bayesian.org |
-| Taylor & Francis | https://openalex.org/P4310320547 | https://www.taylorfrancis.com |
-| Wiley | https://openalex.org/P4310320595 | https://www.wiley.com/en-us |
-| Elsevier BV | https://openalex.org/P4310320990 | https://www.relx.com |
-| Royal Statistical Society | https://openalex.org/P4310311763 | https://www.rss.org.uk |
-| Institute of Statistical Science | https://openalex.org/P4362561675 | http://www.stat.sinica.edu.tw/statnewsite/?locale=en_US |
-| Springer Science+Business Media | https://openalex.org/P4310319900 | https://www.springer.com |
-| Society for Industrial and Applied Mathematics | https://openalex.org/P4310320508 | http://www.siam.org |
-| Institute for Operations Research and the Management Sciences | https://openalex.org/P4310315699 | https://www.informs.org |
-| Cambridge University Press | https://openalex.org/P4310311721 | http://www.cambridge.org |
-| The MIT Press | https://openalex.org/P4310315718 | https://mitpress.mit.edu |
-| Nature Portfolio | https://openalex.org/P4310319908 | https://www.springernature.com |
-| IEEE Computer Society | https://openalex.org/P4310320439 | https://www.computer.org |
-| Institute of Electrical and Electronics Engineers | https://openalex.org/P4310319808 | https://www.ieee.org |
-| Public Library of Science | https://openalex.org/P4310315706 | https://www.plos.org |
-| BioMed Central | https://openalex.org/P4310320256 | http://www.biomedcentral.com |
+| Publisher | OpenAlex ID | Publisher URL | Access Service ID |
+| --- | --- | --- | --- |
+| Institute of Mathematical Statistics | https://openalex.org/P4310319881 | http://imstat.org | svc_4d6ec11f368e4a3691d0349243603d57 |
+| Oxford University Press | https://openalex.org/P4310311648 | http://global.oup.com | svc_ff90e87d38ec411586a3bb5ce1898355 |
+| Chapman and Hall London | https://openalex.org/P4310321043 | https://www.chapmanhall.com | svc_4d6ec11f368e4a3691d0349243603d57 |
+| Annual Reviews | https://openalex.org/P4310320373 | https://www.annualreviews.org | svc_30e2912f195144459220bfc80fb868f9 |
+| Taylor & Francis | https://openalex.org/P4310320547 | https://www.taylorfrancis.com | svc_819d728ad6ae4a36a80047beda275244 |
+| Wiley | https://openalex.org/P4310320595 | https://www.wiley.com | svc_6997b6f8e56a4309b6903ce03eda56b2 |
+| Elsevier BV | https://openalex.org/P4310320990 | https://www.relx.com | svc_417e0c792f804cc7b38a6033de2cf987 |
+| Royal Statistical Society | https://openalex.org/P4310311763 | https://www.rss.org.uk | svc_ff90e87d38ec411586a3bb5ce1898355 |
+| Institute of Statistical Science | https://openalex.org/P4362561675 | https://www3.stat.sinica.edu.tw/statistica |  |
+| Springer Science+Business Media | https://openalex.org/P4310319900 | https://www.springer.com | svc_ecabee5de0af49ccae89b93c0fca8c09 |
+| Society for Industrial and Applied Mathematics | https://openalex.org/P4310320508 | http://www.siam.org | svc_a5608da3dabb4b38a7e547336441d559 |
+| Institute for Operations Research and the Management Sciences | https://openalex.org/P4310315699 | https://www.informs.org | svc_e1ebc2eca4a248729a55fe727bd54ef3 |
+| Cambridge University Press | https://openalex.org/P4310311721 | http://www.cambridge.org | svc_619b7b126fa64b42aeaa86d4e16210dc |
+| The MIT Press | https://openalex.org/P4310315718 | https://jmlr.org/ |  |
+| IEEE Computer Society | https://openalex.org/P4310320439 | https://www.computer.org | svc_7ffd6a2201484d1fa8f4f86189a28dc8 |
+| Institute of Electrical and Electronics Engineers | https://openalex.org/P4310319808 | https://www.ieee.org | svc_7ffd6a2201484d1fa8f4f86189a28dc8 |
+| BioMed Central | https://openalex.org/P4310320256 | http://www.biomedcentral.com | svc_ecabee5de0af49ccae89b93c0fca8c09 |
+
+## Access Services
+
+| Service ID | Service | Access URL | Access Method |
+| --- | --- | --- | --- |
+| svc_ff90e87d38ec411586a3bb5ce1898355 | OXFORD JOURNALS | https://academic.oup.com/journals | carsi |
+| svc_30e2912f195144459220bfc80fb868f9 | Annual Reviews | https://www.annualreviews.org | carsi |
+| svc_819d728ad6ae4a36a80047beda275244 | Taylor & Francis期刊数据库 | https://www.tandfonline.com/ | carsi |
+| svc_6997b6f8e56a4309b6903ce03eda56b2 | WILEY 电子书、电子期刊数据库 | https://onlinelibrary.wiley.com/ | carsi |
+| svc_417e0c792f804cc7b38a6033de2cf987 | SCIENCEDIRECT | https://www.sciencedirect.com/ | carsi |
+| svc_ecabee5de0af49ccae89b93c0fca8c09 | Springer Link | https://wayf.springernature.com/?redirect_uri=https://link.springer.com/ | carsi |
+| svc_a5608da3dabb4b38a7e547336441d559 | SIAM电子期刊 | https://epubs.siam.org/journals | carsi |
+| svc_619b7b126fa64b42aeaa86d4e16210dc | Cambridge Core | https://www.cambridge.org/core/ | carsi |
+| svc_7ffd6a2201484d1fa8f4f86189a28dc8 | IEEE-IET ELECTRONIC LIBRARY-美国电气电子工程师学会数据库 | https://ieeexplore.ieee.org/Xplore/home.jsp | carsi |
+| svc_e1ebc2eca4a248729a55fe727bd54ef3 | EBSCO | http://search.ebscohost.com/ | carsi |
+| svc_4d6ec11f368e4a3691d0349243603d57 | Project Euclid | https://projecteuclid.org/ | manual |
 
 ## Conferences
 

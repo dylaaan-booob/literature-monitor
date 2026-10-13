@@ -52,6 +52,8 @@ def test_bridge_heartbeat_requires_no_web_csrf_and_exposes_readiness(tmp_path: P
         "readiness": "connected",
         "connector_version": "1.2.3",
         "zotero_reachable": True,
+        "connector_online": True,
+        "enrichment_capable": False,
         "capture": None,
     }
 

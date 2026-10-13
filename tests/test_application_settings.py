@@ -69,7 +69,7 @@ def write_valid_settings_files(
         f"venue_whitelist: {journal_name}\n"
         f"keyword_expression: {keyword_expression}\n"
         f"output_dir: {output_dir}\n"
-        "window_days: 14\n"
+        "from_month: 2026-01\nto_month: 2026-01\n"
         "log_level: INFO\n",
         encoding="utf-8",
     )
@@ -98,7 +98,7 @@ def test_load_valid_settings_returns_complete_structured_draft(tmp_path: Path) -
     assert result.draft.name == "Statistical Monitor"
     assert result.draft.keyword_expression == "causal"
     assert result.draft.journals == valid_journals()
-    assert result.draft.date_spec == DateRangeSpec(window_days=14)
+    assert result.draft.date_spec == DateRangeSpec("2026-01", "2026-01")
     assert result.draft.output_dir == Path("workspace")
     assert result.draft.log_level is LogLevel.INFO
     assert result.venue_whitelist == Path("venues.md")
@@ -137,7 +137,7 @@ def test_missing_monitor_is_recoverable_and_uses_defaults(tmp_path: Path) -> Non
     assert result.draft.name == "missing-monitor"
     assert result.draft.keyword_expression == ""
     assert result.draft.output_dir == Path("workspace")
-    assert result.draft.date_spec == DateRangeSpec(window_days=14)
+    assert result.draft.date_spec == DateRangeSpec(date.today().strftime("%Y-%m"), date.today().strftime("%Y-%m"))
     assert result.draft.log_level is LogLevel.INFO
     assert result.draft.journals == valid_journals()
     assert not result.draft.monitor_revision.exists
@@ -216,7 +216,7 @@ def test_valid_unsaved_draft_uses_shared_runtime_validation(tmp_path: Path) -> N
     draft = replace(
         opened.draft,
         keyword_expression='"causal inference"~0',
-        date_spec=DateRangeSpec(window_days=7),
+        date_spec=DateRangeSpec("2026-01", "2026-01"),
         output_dir=Path("edited-workspace"),
         log_level=LogLevel.DEBUG,
     )
@@ -232,18 +232,14 @@ def test_valid_unsaved_draft_uses_shared_runtime_validation(tmp_path: Path) -> N
     assert (
         result.resolved_date_range.to_date
         - result.resolved_date_range.from_date
-    ).days == 6
-
-
-def test_runtime_and_settings_reference_the_same_shared_preflight_helpers() -> None:
-    assert monitor_module.validate_runtime_keyword is config_module.validate_runtime_keyword
-    assert settings_module.validate_runtime_config is config_module.validate_runtime_config
+    ).days == 30
 
 
 @pytest.mark.parametrize(
     ("expression", "message"),
     (
         ("alpha AND", "column"),
+        ("statistics AND NOT biology", "NOT operator is no longer supported"),
         ('"---"~2', "at least two lexical tokens"),
     ),
 )
@@ -279,50 +275,6 @@ def test_fts5_unavailable_is_structured_deterministic_failure(
     assert result.outcome is SettingsValidationOutcome.INVALID
     assert result.issues[0].field == "keyword_expression"
     assert "FTS5 is unavailable" in result.issues[0].message
-
-
-@pytest.mark.parametrize(
-    "date_spec",
-    (
-        DateRangeSpec(from_date=date(2026, 9, 1)),
-        DateRangeSpec(to_date=date(2026, 9, 21)),
-        DateRangeSpec(
-            from_date=date(2026, 9, 1),
-            to_date=date(2026, 9, 21),
-            window_days=21,
-        ),
-        DateRangeSpec(window_days=0),
-        DateRangeSpec(
-            from_date=date(2026, 9, 22),
-            to_date=date(2026, 9, 21),
-        ),
-    ),
-)
-def test_invalid_date_policy_forms_fail_draft_validation(
-    date_spec: DateRangeSpec,
-    tmp_path: Path,
-) -> None:
-    config_path, _ = write_valid_settings_files(tmp_path)
-    draft = replace(load_settings(config_path).draft, date_spec=date_spec)
-
-    result = validate_settings(config_path, draft)
-
-    assert result.outcome is SettingsValidationOutcome.INVALID
-    assert result.issues
-
-
-def test_runtime_date_overflow_fails_draft_validation(tmp_path: Path) -> None:
-    config_path, _ = write_valid_settings_files(tmp_path)
-    draft = replace(
-        load_settings(config_path).draft,
-        date_spec=DateRangeSpec(from_date=date.max, window_days=2),
-    )
-
-    result = validate_settings(config_path, draft)
-
-    assert result.outcome is SettingsValidationOutcome.INVALID
-    assert result.issues[0].field == "window_days"
-    assert "datetime.date bounds" in result.issues[0].message
 
 
 @pytest.mark.parametrize(
@@ -414,10 +366,7 @@ def test_save_writes_journal_then_monitor_and_rereads_disk_state(
             JournalConfig(name="Biometrics", issn_l="0006-341X"),
             JournalConfig(name="Annals of Applied Statistics", issn_l="1932-6157", group="Methods"),
         ),
-        date_spec=DateRangeSpec(
-            from_date=date(2026, 9, 1),
-            to_date=date(2026, 9, 21),
-        ),
+        date_spec=DateRangeSpec("2026-09", "2026-09"),
         output_dir=Path("./edited-workspace"),
         log_level=LogLevel.DEBUG,
     )
@@ -449,10 +398,7 @@ def test_save_writes_journal_then_monitor_and_rereads_disk_state(
     assert loaded.keyword_expression == "statistics"
     assert loaded.output_dir == (tmp_path / "edited-workspace").resolve()
     assert loaded.log_level is LogLevel.DEBUG
-    assert loaded.date_spec == DateRangeSpec(
-        from_date=date(2026, 9, 1),
-        to_date=date(2026, 9, 21),
-    )
+    assert loaded.date_spec == DateRangeSpec("2026-09", "2026-09")
     assert [journal.name for journal in parse_journal_whitelist(journal_path)] == [
         "Biometrics",
         "Annals of Applied Statistics",

@@ -18,7 +18,7 @@ from literature_monitor.application.workspace import load_workspace
 def test_legacy_routes_are_csrf_protected_and_cannot_publish_or_reconcile(tmp_path,route,monkeypatch):
     import literature_monitor.zotero_local as zotero
     def forbidden(*args,**kwargs):pytest.fail('Retired entrypoint must not contact Zotero')
-    monkeypatch.setattr(zotero.ZoteroLocalClient,'resolve_identity',forbidden)
+    monkeypatch.setattr(zotero.ZoteroLocalClient,'current_instance',forbidden)
     handle=reservation(tmp_path);path=Path(handle.attempt.workspace_path)/handle.attempt.paper_path;before=path.read_bytes()
     app=create_app(tmp_path/'missing.yaml');coordinator=app.state.capture_coordinator
     coordinator.heartbeat(connector_version='test',zotero_reachable=True)

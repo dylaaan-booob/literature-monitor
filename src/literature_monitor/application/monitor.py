@@ -13,9 +13,10 @@ from pathlib import Path
 
 from literature_monitor.application.candidate_eligibility import (
     filter_candidate_evidence,
-    scope_dispute_diagnostic,
+    openalex_attribution,
+    valid_doi,
 )
-from literature_monitor.application.crossref_retrieval import CrossrefRetrieval
+from literature_monitor.application.crossref_retrieval import CrossrefRetrieval, CrossrefSupplementResult
 from literature_monitor.application.provider_state import (
     STATE_FILENAME, ProviderState, ProviderStateStatus,
     read_provider_state, replace_invalid_provider_state, update_provider_state,
@@ -33,14 +34,13 @@ from literature_monitor.canonicalize import (
     canonicalize_records,
     consolidate_evidence,
 )
-from literature_monitor.diagnostics import RunDiagnostic, RunDiagnosticSummary, summarize_run_diagnostics
+from literature_monitor.diagnostics import RunDiagnostic, RunDiagnosticKind, RunDiagnosticSummary, summarize_run_diagnostics
 from literature_monitor.config import (
     ConfigurationError,
     JournalConfig,
     LoadedConfig,
     LogLevel,
     load_config,
-    normalize_journal_issn,
     resolve_runtime_date,
     validate_runtime_keyword,
 )
@@ -57,24 +57,22 @@ from literature_monitor.crossref import (
 )
 from literature_monitor.date_range import (
     DateRangeError,
-    DateRangeSpec,
     ResolvedDateRange,
 )
 from literature_monitor.keywords import (
     KeywordExpression,
     KeywordSyntaxError,
-    parse_keyword_expression,
 )
 from literature_monitor.safe_write import workspace_operation_lock, ContentChangedError, WorkspaceOperationLock
 from literature_monitor.materialize import (
     MaterializationIssue,
     MaterializationIssueSeverity,
     materialize_papers,
+    read_workspace_identities,
+    WorkspaceIdentityIndex,
 )
 from literature_monitor.models import CanonicalPaper
 from literature_monitor.progress import (
-    ActivityKind,
-    ActivityUpdate,
     ProgressCallback,
     ProgressEvent,
     ProgressStage,
@@ -87,13 +85,12 @@ from literature_monitor.openalex import (
     discover_resolved_sources,
     resolve_journal_sources_batched,
 )
-from literature_monitor.retrieval import assemble_live_provider_evidence
 from literature_monitor.search import (
     SearchBackendError,
     SearchExpressionError,
     build_searchable_projection,
     match_searchable_projections,
-    validate_search_expression,
+    SearchableProjection,
 )
 
 
@@ -109,7 +106,6 @@ class MonitorIssueComponent(str, Enum):
     OPENALEX = "openalex"
     CROSSREF_DISCOVERY = "crossref_discovery"
     CROSSREF_SUPPLEMENT = "crossref_supplement"
-    CANDIDATE_ELIGIBILITY = "candidate_eligibility"
     CONSOLIDATION = "consolidation"
     CANONICALIZATION = "canonicalization"
     MATERIALIZATION = "materialization"
@@ -140,13 +136,6 @@ class RunOutcome(str, Enum):
     INVALID_CONFIGURATION = "INVALID_CONFIGURATION"
 
 
-class ValidationOutcome(str, Enum):
-    VALID = "VALID"
-    VALID_WITH_WARNINGS = "VALID_WITH_WARNINGS"
-    SOURCE_ERRORS = "SOURCE_ERRORS"
-    INVALID_CONFIGURATION = "INVALID_CONFIGURATION"
-
-
 @dataclass(frozen=True)
 class MonitorStatistics:
     openalex_records: int = 0
@@ -158,6 +147,8 @@ class MonitorStatistics:
     canonicalization_issues: int = 0
     provider_issues: int = 0
     materialization_issues: int = 0
+    metadata_success: int = 0
+    metadata_failed: int = 0
 
 
 @dataclass(frozen=True)
@@ -195,18 +186,6 @@ class RunResult:
 
 
 @dataclass(frozen=True)
-class ValidationResult:
-    resolved_date_range: ResolvedDateRange | None
-    configured_journal_count: int
-    configured_issn_l_count: int
-    resolved_sources: tuple[ResolvedSource, ...]
-    warnings: tuple[MonitorIssue, ...]
-    errors: tuple[MonitorIssue, ...]
-    outcome: ValidationOutcome
-    log_level: LogLevel | None = None
-
-
-@dataclass(frozen=True)
 class _PreparedInvocation:
     config: LoadedConfig
     keyword_ast: KeywordExpression
@@ -228,6 +207,7 @@ class _CanonicalCoreResult:
     pending_state: ProviderState = ProviderState()
     state_usage: ProviderStateUsage = ProviderStateUsage()
     diagnostics: tuple[RunDiagnostic, ...] = ()
+    saved_dois: frozenset[str] = frozenset()
 
     @property
     def coverage_summary(self) -> tuple[CoverageSummary, ...]:
@@ -244,14 +224,6 @@ def _emit_progress(
 ) -> None:
     if callback is not None:
         callback(ProgressEvent(stage=stage))
-
-
-def _emit_activity(
-    callback: ProgressCallback | None,
-    activity: ActivityUpdate,
-) -> None:
-    if callback is not None:
-        callback(ProgressEvent(activity=activity))
 
 
 def _split_issues(
@@ -409,102 +381,16 @@ def _coverage_snapshot_issue(error: LastRunSnapshotWriteError) -> MonitorIssue:
 
 
 def _prepare_invocation(
-    config_path: Path,
-    *,
-    date_override: DateRangeSpec | None,
-    issn_l: str | None,
-    keyword_expression: str | None,
-    loaded_config: LoadedConfig | None = None,
-) -> tuple[_PreparedInvocation | None, LoadedConfig | None, MonitorIssue | None]:
+    config_path: Path, *, loaded_config: LoadedConfig,
+) -> tuple[_PreparedInvocation | None, LoadedConfig, MonitorIssue | None]:
     try:
-        config = loaded_config if loaded_config is not None else load_config(config_path)
-    except ConfigurationError as error:
-        return None, None, _configuration_issue(error, config_path)
-
-    date_spec = date_override if date_override is not None else config.date_spec
-    try:
-        resolved_date_range = resolve_runtime_date(
-            config,
-            today=date.today(),
-            date_spec=date_spec,
-        )
+        resolved = resolve_runtime_date(loaded_config, today=date.today())
+        validate_runtime_keyword(loaded_config)
     except DateRangeError as error:
-        return (
-            None,
-            config,
-            _date_issue(
-                error,
-                config_path=config_path,
-                stage="date_override" if date_override is not None else "configured_date",
-            ),
-        )
-
-    journals = config.journals
-    if issn_l is not None:
-        try:
-            identity = normalize_journal_issn(issn_l)
-        except ValueError as error:
-            return None, config, MonitorIssue(
-                MonitorIssueSeverity.ERROR, MonitorIssueComponent.CONFIGURATION,
-                "issn_l_override", str(error), config_path=config_path,
-            )
-        journals = tuple(journal for journal in journals if journal.issn_l == identity)
-        if not journals:
-            return None, config, MonitorIssue(
-                MonitorIssueSeverity.ERROR, MonitorIssueComponent.CONFIGURATION,
-                "issn_l_override", f"unknown configured ISSN-L {identity!r}", config_path=config_path,
-            )
-
-    try:
-        validate_runtime_keyword(config)
-    except SearchExpressionError as error:
-        return (
-            None,
-            config,
-            _search_issue(error, config_path=config_path, stage="configured_keyword"),
-        )
-    except SearchBackendError as error:
-        return None, config, _search_issue(
-            error,
-            config_path=config_path,
-            stage="fts5_backend",
-        )
-
-    keyword_ast = config.keyword_ast
-    if keyword_expression is not None:
-        try:
-            keyword_ast = parse_keyword_expression(keyword_expression)
-        except KeywordSyntaxError as error:
-            return (
-                None,
-                config,
-                _search_issue(error, config_path=config_path, stage="keyword_override"),
-            )
-        try:
-            validate_search_expression(keyword_ast)
-        except SearchExpressionError as error:
-            return (
-                None,
-                config,
-                _search_issue(error, config_path=config_path, stage="keyword_override"),
-            )
-        except SearchBackendError as error:
-            return None, config, _search_issue(
-                error,
-                config_path=config_path,
-                stage="fts5_backend",
-            )
-
-    return (
-        _PreparedInvocation(
-            config=config,
-            keyword_ast=keyword_ast,
-            resolved_date_range=resolved_date_range,
-            journals=tuple(journals),
-        ),
-        config,
-        None,
-    )
+        return None, loaded_config, _date_issue(error, config_path=config_path, stage="configured_date")
+    except (SearchExpressionError, SearchBackendError) as error:
+        return None, loaded_config, _search_issue(error, config_path=config_path, stage="configured_keyword")
+    return _PreparedInvocation(loaded_config, loaded_config.keyword_ast, resolved, loaded_config.journals), loaded_config, None
 
 
 def _invalid_core_result(
@@ -523,309 +409,165 @@ def _invalid_core_result(
     )
 
 
-def _run_canonical_core(
-    config_path: Path,
-    *,
-    date_override: DateRangeSpec | None = None,
-    issn_l: str | None = None,
-    keyword_expression: str | None = None,
-    progress_callback: ProgressCallback | None = None,
-) -> _CanonicalCoreResult:
-    _emit_progress(progress_callback, ProgressStage.CHECKING_MONITOR)
-    prepared, config, preflight_issue = _prepare_invocation(
-        config_path,
-        date_override=date_override,
-        issn_l=issn_l,
-        keyword_expression=keyword_expression,
-    )
-    if preflight_issue is not None:
-        return _invalid_core_result(config, preflight_issue)
-    assert prepared is not None
-
-    return _execute_canonical_core(prepared, config_path, progress_callback=progress_callback)
-
-
 def _execute_canonical_core(
-    prepared: _PreparedInvocation,
-    config_path: Path,
-    *,
+    prepared: _PreparedInvocation, config_path: Path, *,
+    identity: WorkspaceIdentityIndex,
     historical_state: ProviderState = ProviderState(),
     state_issues: tuple[MonitorIssue, ...] = (),
     progress_callback: ProgressCallback | None = None,
 ) -> _CanonicalCoreResult:
     _emit_progress(progress_callback, ProgressStage.DISCOVERING_PAPERS)
+    saved: set[str] = set()
+    issues = [*state_issues, *(_materialization_issue(issue) for issue in identity.issues)]
+    diagnostics = []
+
+    def needs_metadata(doi: str) -> bool:
+        if doi in execution.excluded_dois:
+            return False
+        if doi in identity.saved:
+            saved.add(doi)
+            return False
+        return identity.can_create(doi)
+
     with (
         CrossrefClient(mailto=os.environ.get("CROSSREF_MAILTO")) as crossref_client,
         OpenAlexClient(api_key=os.environ.get("OPENALEX_API_KEY")) as openalex_client,
     ):
-        crossref_execution = CrossrefRetrieval(
-            crossref_client, record_state=historical_state.crossref_records,
-            progress_callback=progress_callback,
-        )
-        resolutions = resolve_journal_sources_batched(
-            openalex_client, prepared.journals, progress_callback=progress_callback,
-        )
-        resolved_sources = tuple(unit.source for unit in resolutions if unit.source is not None)
-        # Join inside client ownership so even a future exception drains workers first.
+        execution = CrossrefRetrieval(crossref_client, record_state=historical_state.crossref_records,
+                                     progress_callback=progress_callback)
+        resolutions = resolve_journal_sources_batched(openalex_client, prepared.journals,
+                                                      progress_callback=progress_callback)
+        sources = tuple(unit.source for unit in resolutions if unit.source is not None)
         with ThreadPoolExecutor(max_workers=2) as executor:
-            openalex_future = executor.submit(
-                discover_resolved_sources,
-                openalex_client, resolutions,
-                prepared.resolved_date_range.from_date,
-                prepared.resolved_date_range.to_date,
-                progress_callback=progress_callback,
-            )
-            crossref_future = executor.submit(
-                crossref_execution.discover,
-                prepared.journals, prepared.resolved_date_range.from_date,
-                prepared.resolved_date_range.to_date,
-                resolved_sources=resolved_sources,
-            )
-            openalex = openalex_future.result()
-            discovery = crossref_future.result()
-        crossref = discovery.discovery
+            oa_future = executor.submit(discover_resolved_sources, openalex_client, resolutions,
+                prepared.resolved_date_range.from_date, prepared.resolved_date_range.to_date,
+                progress_callback=progress_callback)
+            cr_future = executor.submit(execution.discover_manifest, prepared.journals,
+                prepared.resolved_date_range.from_date, prepared.resolved_date_range.to_date,
+                resolved_sources=sources)
+            openalex, manifest = oa_future.result(), cr_future.result()
+        oa_venues = openalex_attribution(openalex, prepared.journals)
+        selected = {doi for doi, venues in manifest.journal_issns.items()
+                    if venues and doi not in execution.excluded_dois and needs_metadata(doi)}
+        oa_records = tuple(record for record in openalex.records
+                           if (doi := valid_doi(record.external_ids.doi)) in oa_venues
+                           and doi not in execution.excluded_dois and needs_metadata(doi))
+        _emit_progress(progress_callback, ProgressStage.MATCHING_LITERATURE)
+        oa_groups = {}
+        for record in oa_records:
+            oa_groups.setdefault(record.external_ids.doi, []).append(record.to_evidence())
+        oa_search = {doi: build_searchable_projection(records) for doi, records in oa_groups.items()}
+        discovery = None
+        try:
+            hits = match_searchable_projections(prepared.keyword_ast, tuple(
+                SearchableProjection(titles=value.titles, abstracts=value.abstracts)
+                for value in oa_search.values())) if oa_search else ()
+            matched = {doi for doi, hit in zip(oa_search, hits, strict=True) if hit}
+            fallback = {doi for doi, value in oa_search.items()
+                        if doi not in matched and (not value.titles or not value.abstracts)}
+            capture_missing = {doi for doi in matched
+                               if not oa_search[doi].titles or not any(item.journal for item in oa_groups[doi])}
+            metadata_dois = (selected - oa_groups.keys()) | fallback | capture_missing
+            discovery = execution.hydrate_manifest(manifest, tuple(sorted(selected & metadata_dois)))
+            early_records = tuple(record for record in oa_records
+                                  if record.external_ids.doi in metadata_dois
+                                  and record.external_ids.doi not in selected)
+            early = execution.supplement(early_records, should_process=needs_metadata)
+            filtered_oa = replace(openalex, records=oa_records)
+            first_evidence = filter_candidate_evidence(filtered_oa, manifest, discovery, early,
+                                                       prepared.journals, execution.excluded_dois)
+            groups = {}
+            for item in first_evidence:
+                groups.setdefault(item.external_ids.doi, []).append(item)
+            aliases = dict(early.aliases)
+            matched = {aliases.get(doi, doi) for doi in matched}
+            search_dois, projections = [], []
+            for doi in sorted({aliases.get(doi, doi) for doi in metadata_dois} - matched):
+                records = groups.get(doi, ())
+                oa = build_searchable_projection(tuple(item for item in records if item.provenance.provider == "openalex"))
+                cr = build_searchable_projection(tuple(item for item in records if item.provenance.provider == "crossref"))
+                search_dois.append(doi)
+                # Crossref fills missing search fields; it never replaces a valid OpenAlex field.
+                projections.append(SearchableProjection(titles=oa.titles or cr.titles,
+                                                         abstracts=oa.abstracts or cr.abstracts))
+            hits = match_searchable_projections(prepared.keyword_ast, projections) if projections else ()
+            matched.update(doi for doi, hit in zip(search_dois, hits, strict=True) if hit)
+        except (SearchExpressionError, SearchBackendError) as error:
+            issues.append(_search_issue(error, config_path=config_path, stage="matching"))
+            warnings, errors = _split_issues(issues)
+            if discovery is None:
+                discovery = execution.hydrate_manifest(manifest, ())
+            return _CanonicalCoreResult(prepared.config, prepared.resolved_date_range, (), sources,
+                warnings, errors, RunOutcome.INVALID_CONFIGURATION, MonitorStatistics(),
+                coverage=(*openalex.coverage, *discovery.discovery.coverage))
+
         _emit_progress(progress_callback, ProgressStage.COMBINING_METADATA)
-        retrieval = crossref_execution.supplement(openalex.records)
-        candidates = filter_candidate_evidence(openalex, crossref, retrieval, prepared.journals)
-        diagnostics = list(candidates.diagnostics)
-        evidence = assemble_live_provider_evidence(
-            candidates.openalex_records, candidates.crossref_records, candidates.supplement_evidence,
-            monitor_journal_issns=candidates.monitor_journal_issns,
+        rejected = {aliases.get(doi, doi) for doi in (selected | oa_groups.keys())} - matched
+        early_requested = {record.external_ids.doi for record in early_records}
+        late_records = tuple(record for record in oa_records
+                             if record.external_ids.doi in matched
+                             and record.external_ids.doi not in selected | early_requested)
+        late = execution.supplement(late_records,
+                                   should_process=lambda doi: needs_metadata(doi) and doi not in rejected,
+                                   hydrate=False)
+        batches = (early, late)
+        retrieval = CrossrefSupplementResult(
+            units=tuple(unit for batch in batches for unit in batch.units),
+            records=tuple({record.doi: record for batch in batches for record in batch.records}.values()),
+            reused_dois=tuple(dict.fromkeys(doi for batch in batches for doi in batch.reused_dois)),
+            refreshed_dois=tuple(dict.fromkeys(doi for batch in batches for doi in batch.refreshed_dois)),
+            new_dois=tuple(dict.fromkeys(doi for batch in batches for doi in batch.new_dois)),
+            pending_changes=execution.pending_changes,
+            skipped_aliases=tuple(pair for batch in batches for pair in batch.skipped_aliases),
+            aliases=tuple(dict(pair for batch in batches for pair in batch.aliases).items()),
+            unresolved_dois=tuple(doi for batch in batches for doi in batch.unresolved_dois),
         )
-        coverage = (*openalex.coverage, *crossref.coverage, *retrieval.coverage)
-        _emit_activity(
-            progress_callback,
-            ActivityUpdate(
-                kind=ActivityKind.WORKING,
-                source="application",
-                operation="consolidate_evidence",
-                label="Consolidating provider evidence",
-                detail=f"{len(evidence)} evidence records",
-            ),
-        )
+        final_aliases = dict(retrieval.aliases)
+        final_matched = {final_aliases.get(doi, doi) for doi in matched} - rejected
+        retained_oa = replace(openalex, records=tuple(record for record in oa_records
+                             if aliases.get(record.external_ids.doi, record.external_ids.doi) in matched))
+        evidence = filter_candidate_evidence(retained_oa, manifest, discovery, retrieval,
+                                             prepared.journals, execution.excluded_dois)
+        evidence = tuple(item for item in evidence
+                         if item.external_ids.doi in final_matched and needs_metadata(item.external_ids.doi))
+        for doi in sorted(execution.excluded_dois):
+            diagnostics.append(RunDiagnostic(RunDiagnosticKind.NON_CANDIDATE_EXCLUSION,
+                                             "Crossref journal-issue excluded", (doi,)))
+        for member in execution._types.values():
+            if member.type_conflict:
+                diagnostics.append(RunDiagnostic(RunDiagnosticKind.SCOPE_DISPUTE,
+                                                 "Conflicting Crossref types; no type exclusion", (member.doi,)))
+        issues.extend(_openalex_issue(issue) for issue in openalex.issues)
+        issues.extend(_crossref_discovery_issue(issue) for issue in discovery.discovery.issues)
+        issues.extend(_enrichment_issue(issue) for issue in retrieval.issues)
+        coverage = (*openalex.coverage, *discovery.discovery.coverage, *retrieval.coverage)
         consolidation = consolidate_evidence(evidence)
         diagnostics.extend(consolidation.diagnostics)
-        _emit_activity(
-            progress_callback,
-            ActivityUpdate(
-                kind=ActivityKind.WORKING,
-                source="application",
-                operation="consolidate_evidence",
-                label="Completed provider evidence consolidation",
-                detail=f"{len(consolidation.clusters)} candidate works",
-            ),
-        )
-
-        issues: list[MonitorIssue] = [
-            *state_issues,
-            *(_openalex_issue(issue) for issue in openalex.issues),
-            *(_crossref_discovery_issue(issue) for issue in crossref.issues),
-            *(_enrichment_issue(issue) for issue in retrieval.issues),
-            *(
-                _canonicalization_issue(
-                    issue,
-                    component=MonitorIssueComponent.CONSOLIDATION,
-                )
-                for issue in consolidation.issues
-            ),
-        ]
-
-        _emit_progress(progress_callback, ProgressStage.MATCHING_LITERATURE)
-        searchable_clusters = []
-        for cluster in consolidation.clusters:
-            eligibility = candidates.cluster_eligibility(cluster.evidence)
-            projection = build_searchable_projection(cluster.evidence)
-            if projection.titles or projection.author_keywords or projection.abstracts:
-                searchable_clusters.append((cluster, projection, eligibility))
-            else:
-                if eligibility.has_eligible:
-                    issues.append(
-                        MonitorIssue(
-                            severity=MonitorIssueSeverity.WARNING,
-                            component=MonitorIssueComponent.SEARCH,
-                            stage="unsearchable",
-                            message="consolidated evidence has no searchable title, author keywords, or abstract",
-                            record_ids=tuple(sorted({
-                                record.provenance.record_id for record in cluster.evidence
-                            })),
-                        )
-                    )
-                if eligibility.has_disputed:
-                    diagnostics.append(scope_dispute_diagnostic(cluster.evidence))
-        projections = tuple(
-            projection for _cluster, projection, _eligibility in searchable_clusters
-        )
-        _emit_activity(
-            progress_callback,
-            ActivityUpdate(
-                kind=ActivityKind.WORKING,
-                source="application",
-                operation="matching_literature",
-                label="Matching literature",
-                detail=f"{len(projections)} candidate works",
-            ),
-        )
-        try:
-            matches = match_searchable_projections(prepared.keyword_ast, projections)
-        except SearchExpressionError as error:
-            issue = _search_issue(
-                error,
-                config_path=config_path,
-                stage="matching",
-            )
-            warnings, errors = _split_issues((*issues, issue))
-            return _CanonicalCoreResult(
-                config=prepared.config,
-                resolved_date_range=prepared.resolved_date_range,
-                papers=(),
-                resolved_sources=openalex.sources,
-                warnings=warnings,
-                errors=errors,
-                outcome=RunOutcome.INVALID_CONFIGURATION,
-                statistics=MonitorStatistics(
-                    openalex_records=len(openalex.records),
-                    crossref_discovery_records=len(crossref.records),
-                    crossref_supplement_records=len(retrieval.records),
-                    evidence_clusters=len(consolidation.clusters),
-                    consolidation_issues=len(consolidation.issues),
-                    provider_issues=(
-                        len(openalex.issues)
-                        + len(crossref.issues)
-                        + len(retrieval.issues)
-                    ),
-                ),
-                coverage=coverage,
-                diagnostics=tuple(diagnostics),
-            )
-        except SearchBackendError as error:
-            issue = _search_issue(
-                error,
-                config_path=config_path,
-                stage="fts5_backend",
-            )
-            warnings, errors = _split_issues((*issues, issue))
-            return _CanonicalCoreResult(
-                config=prepared.config,
-                resolved_date_range=prepared.resolved_date_range,
-                papers=(),
-                resolved_sources=openalex.sources,
-                warnings=warnings,
-                errors=errors,
-                outcome=RunOutcome.INVALID_CONFIGURATION,
-                statistics=MonitorStatistics(
-                    openalex_records=len(openalex.records),
-                    crossref_discovery_records=len(crossref.records),
-                    crossref_supplement_records=len(retrieval.records),
-                    evidence_clusters=len(consolidation.clusters),
-                    consolidation_issues=len(consolidation.issues),
-                    provider_issues=(
-                        len(openalex.issues)
-                        + len(crossref.issues)
-                        + len(retrieval.issues)
-                    ),
-                ),
-                coverage=coverage,
-                diagnostics=tuple(diagnostics),
-            )
-
-        _emit_activity(
-            progress_callback,
-            ActivityUpdate(
-                kind=ActivityKind.WORKING,
-                source="application",
-                operation="matching_literature",
-                label="Completed literature matching",
-                detail=f"{sum(matches)} matched clusters",
-            ),
-        )
-        retained_clusters = []
-        for (cluster, _projection, eligibility), matched in zip(searchable_clusters, matches, strict=True):
-            if eligibility.has_disputed:
-                if matched and not eligibility.has_strong_eligible:
-                    issues.append(MonitorIssue(
-                        severity=MonitorIssueSeverity.WARNING,
-                        component=MonitorIssueComponent.CANDIDATE_ELIGIBILITY,
-                        stage="scope_dispute",
-                        message="topic-matched candidate scope is unresolved without strong eligible evidence",
-                        record_ids=tuple(sorted({record.provenance.record_id for record in cluster.evidence})),
-                    ))
-                else:
-                    diagnostics.append(scope_dispute_diagnostic(cluster.evidence))
-            if matched:
-                retained_clusters.append(cluster)
-        retained_evidence = tuple(
-            evidence
-            for cluster in retained_clusters
-            for evidence in cluster.evidence
-        )
-        _emit_activity(
-            progress_callback,
-            ActivityUpdate(
-                kind=ActivityKind.WORKING,
-                source="application",
-                operation="canonicalize_literature",
-                label="Canonicalizing literature",
-                detail=f"{len(retained_clusters)} matched clusters",
-            ),
-        )
-        crossref_kinds = {
-            doi: kind
-            for result in (discovery, retrieval)
-            for kind, dois in (("reused", result.reused_dois),
-                               ("refreshed", result.refreshed_dois), ("new", result.new_dois))
-            for doi in dois
-        }
-        usage = ProviderStateUsage(
-            crossref_reused=sum(kind == "reused" for kind in crossref_kinds.values()),
-            crossref_refreshed=sum(kind == "refreshed" for kind in crossref_kinds.values()),
-            crossref_new=sum(kind == "new" for kind in crossref_kinds.values()),
-        )
-        canonicalization = canonicalize_records(retained_evidence)
-        _emit_activity(
-            progress_callback,
-            ActivityUpdate(
-                kind=ActivityKind.WORKING,
-                source="application",
-                operation="canonicalize_literature",
-                label="Completed literature canonicalization",
-                detail=f"{len(canonicalization.papers)} canonical papers",
-            ),
-        )
-        issues.extend(
-            _canonicalization_issue(
-                issue,
-                component=MonitorIssueComponent.CANONICALIZATION,
-            )
-            for issue in canonicalization.issues
-        )
+        issues.extend(_canonicalization_issue(issue, component=MonitorIssueComponent.CONSOLIDATION)
+                      for issue in consolidation.issues)
+        retained = consolidation.clusters
+        canonical = canonicalize_records(tuple(item for cluster in retained for item in cluster.evidence)) if retained else None
+        issues.extend(_canonicalization_issue(issue, component=MonitorIssueComponent.CANONICALIZATION)
+                      for issue in (canonical.issues if canonical else ()))
+        success, failed = execution.metadata_counts
+        kinds = {doi: kind for result in (discovery, retrieval)
+                 for kind, dois in (("reused", result.reused_dois), ("refreshed", result.refreshed_dois),
+                                    ("new", result.new_dois)) for doi in dois}
         warnings, errors = _split_issues(issues)
-        statistics = MonitorStatistics(
-            openalex_records=len(openalex.records),
-            crossref_discovery_records=len(crossref.records),
-            crossref_supplement_records=len(retrieval.records),
-            evidence_clusters=len(consolidation.clusters),
-            retained_clusters=len(retained_clusters),
-            consolidation_issues=len(consolidation.issues),
-            canonicalization_issues=len(canonicalization.issues),
-            provider_issues=(
-                len(openalex.issues)
-                + len(crossref.issues)
-                + len(retrieval.issues)
-            ),
-        )
         return _CanonicalCoreResult(
-            config=prepared.config,
-            resolved_date_range=prepared.resolved_date_range,
-            papers=canonicalization.papers,
-            resolved_sources=openalex.sources,
-            warnings=warnings,
-            errors=errors,
-            outcome=_run_outcome(warnings, errors),
-            statistics=statistics,
-            coverage=coverage,
-            pending_state=ProviderState(crossref_records=crossref_execution.pending_changes),
-            state_usage=usage,
-            diagnostics=tuple(diagnostics),
+            config=prepared.config, resolved_date_range=prepared.resolved_date_range,
+            papers=canonical.papers if canonical else (), resolved_sources=sources,
+            warnings=warnings, errors=errors, outcome=_run_outcome(warnings, errors),
+            statistics=MonitorStatistics(openalex_records=len(openalex.records),
+                crossref_discovery_records=len(manifest.members), crossref_supplement_records=len(retrieval.records),
+                evidence_clusters=len(consolidation.clusters), retained_clusters=len(retained),
+                consolidation_issues=len(consolidation.issues), canonicalization_issues=len(canonical.issues) if canonical else 0,
+                provider_issues=len(openalex.issues) + len(discovery.discovery.issues) + len(retrieval.issues),
+                metadata_success=success, metadata_failed=failed),
+            coverage=coverage, pending_state=ProviderState(crossref_records=execution.pending_changes),
+            state_usage=ProviderStateUsage(*(sum(value == kind for value in kinds.values())
+                                             for kind in ("reused", "refreshed", "new"))),
+            diagnostics=tuple(diagnostics), saved_dois=frozenset(saved),
         )
 
 
@@ -896,13 +638,12 @@ def _materialize_canonical_result(
 def run_monitor(
     config_path: Path,
     *,
-    date_override: DateRangeSpec | None = None,
     progress_callback: ProgressCallback | None = None,
     operation_lock: WorkspaceOperationLock | None = None,
+    loaded_config: LoadedConfig | None = None,
 ) -> RunResult:
-    # Web 请求启动时已经取得排他锁；CLI 在此自行取得整段 Run 的锁。
     try:
-        configured = load_config(config_path)
+        configured = loaded_config if loaded_config is not None else load_config(config_path)
     except ConfigurationError as error:
         _emit_progress(progress_callback, ProgressStage.CHECKING_MONITOR)
         return _materialize_canonical_result(
@@ -912,13 +653,11 @@ def run_monitor(
         operation_lock.verify()
         if configured.output_dir != operation_lock.path:
             raise ContentChangedError("Run configuration differs from reserved Workspace")
-        return _run_monitor_owned(config_path, date_override=date_override,
-                                  progress_callback=progress_callback, operation_lock=operation_lock,
+        return _run_monitor_owned(config_path, progress_callback=progress_callback, operation_lock=operation_lock,
                                   loaded_config=configured)
     # Run 从网络发现开始排他，不能让 Reset 趁物化之前删除工作区。
     with workspace_operation_lock(configured.output_dir, create=True) as lock:
-        return _run_monitor_owned(config_path, date_override=date_override,
-                                  progress_callback=progress_callback, operation_lock=lock,
+        return _run_monitor_owned(config_path, progress_callback=progress_callback, operation_lock=lock,
                                   loaded_config=configured)
 
 
@@ -926,14 +665,12 @@ def _run_monitor_owned(
     config_path: Path,
     *,
     loaded_config: LoadedConfig,
-    date_override: DateRangeSpec | None = None,
     progress_callback: ProgressCallback | None = None,
     operation_lock: WorkspaceOperationLock,
 ) -> RunResult:
     _emit_progress(progress_callback, ProgressStage.CHECKING_MONITOR)
     prepared, config, preflight_issue = _prepare_invocation(
-        config_path, date_override=date_override, issn_l=None, keyword_expression=None,
-        loaded_config=loaded_config,
+        config_path, loaded_config=loaded_config,
     )
     if preflight_issue is not None:
         core = _invalid_core_result(config, preflight_issue)
@@ -950,17 +687,29 @@ def _run_monitor_owned(
             MonitorIssueSeverity.WARNING, MonitorIssueComponent.PROVIDER_STATE,
             "read", f"invalid Provider state; running live: {state_read.error}", path=state_path,
         ),)
+    identity = read_workspace_identities(operation_lock)
     core = _execute_canonical_core(
-        prepared, config_path, historical_state=state_read.state or ProviderState(),
+        prepared, config_path, identity=identity, historical_state=state_read.state or ProviderState(),
         state_issues=state_issues, progress_callback=progress_callback,
     )
     output_dir = prepared.config.output_dir
+    final_identity = read_workspace_identities(operation_lock)
+    confirmed_saved = {doi for doi in core.saved_dois
+                       if final_identity.complete and final_identity.saved.get(doi) == identity.saved.get(doi)
+                       and doi in final_identity.saved}
+    changed = core.saved_dois - confirmed_saved
+    if changed:
+        errors = (*core.errors, *(MonitorIssue(MonitorIssueSeverity.ERROR,
+            MonitorIssueComponent.MATERIALIZATION, "identity_changed",
+            "Saved Paper identity changed during Run", doi=doi) for doi in sorted(changed)))
+        core = replace(core, errors=errors, outcome=_run_outcome(core.warnings, errors))
     result = _materialize_canonical_result(
         core,
         output_dir,
         progress_callback=progress_callback,
         operation_lock=operation_lock,
     )
+    result = replace(result, matched_existing_papers=result.matched_existing_papers + len(confirmed_saved))
     if result.outcome is RunOutcome.INVALID_CONFIGURATION:
         return result
 
@@ -1007,84 +756,3 @@ def _run_monitor_owned(
             outcome=_run_outcome(warnings, result.errors),
         )
     return result
-
-
-def validate_monitor(
-    config_path: Path,
-    *,
-    progress_callback: ProgressCallback | None = None,
-) -> ValidationResult:
-    _emit_activity(
-        progress_callback,
-        ActivityUpdate(
-            kind=ActivityKind.WORKING,
-            source="application",
-            operation="validation_preflight",
-            label="Checking monitor configuration",
-        ),
-    )
-    prepared, config, preflight_issue = _prepare_invocation(
-        config_path,
-        date_override=None,
-        issn_l=None,
-        keyword_expression=None,
-    )
-    if preflight_issue is not None:
-        return ValidationResult(
-            resolved_date_range=None,
-            configured_journal_count=len(config.journals) if config is not None else 0,
-            configured_issn_l_count=(
-                len(config.journals)
-                if config is not None
-                else 0
-            ),
-            resolved_sources=(),
-            warnings=(),
-            errors=(preflight_issue,),
-            outcome=ValidationOutcome.INVALID_CONFIGURATION,
-            log_level=config.log_level if config is not None else None,
-        )
-    assert prepared is not None
-
-    _emit_activity(
-        progress_callback,
-        ActivityUpdate(
-            kind=ActivityKind.WORKING,
-            source="application",
-            operation="validation_preflight",
-            label="Completed monitor configuration check",
-        ),
-    )
-    with OpenAlexClient(api_key=os.environ.get("OPENALEX_API_KEY")) as client:
-        sources: list[ResolvedSource] = []
-        issues: list[MonitorIssue] = []
-        journal_activity = ActivityUpdate(
-            kind=ActivityKind.WORKING, source="application", operation="validation_journals",
-            label="Resolving journal sources", current=0, total=len(prepared.journals), unit="journal",
-        )
-        _emit_activity(progress_callback, journal_activity)
-        for index, unit in enumerate(resolve_journal_sources_batched(
-            client, prepared.journals, progress_callback=progress_callback,
-        )):
-            if unit.source is not None:
-                sources.append(unit.source)
-            issues.extend(_openalex_issue(issue) for issue in unit.issues)
-            _emit_activity(progress_callback, replace(journal_activity, detail=unit.journal.name, current=index + 1))
-    warnings, errors = _split_issues(issues)
-    outcome = (
-        ValidationOutcome.SOURCE_ERRORS
-        if errors
-        else ValidationOutcome.VALID_WITH_WARNINGS
-        if warnings
-        else ValidationOutcome.VALID
-    )
-    return ValidationResult(
-        resolved_date_range=prepared.resolved_date_range,
-        configured_journal_count=len(prepared.config.journals),
-        configured_issn_l_count=len(prepared.config.journals),
-        resolved_sources=tuple(sources),
-        warnings=warnings,
-        errors=errors,
-        outcome=outcome,
-        log_level=prepared.config.log_level,
-    )

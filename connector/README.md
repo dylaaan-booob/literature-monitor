@@ -1,14 +1,15 @@
 # Literature Monitor Connector
 
-This directory defines the independent browser component for the v0.6.7 release,
+This directory defines the independent browser component for v0.6.8 preparation,
 following the v0.6.3 batch/Connector contract in SPEC §42. It is derived from the official
 Zotero Connector source and is separate from the MIT Python
 `literature_monitor` package. The tracked build entry point generates the
-Chrome/MV3 artifact with version `0.6.7`.
+Chrome/MV3 artifact with version `0.6.8`.
 
-v0.6.7 is in release preparation. [SPEC §46](../SPEC.md#46-v067-capture-only-run--development-contract)
-defines Capture-Only Run and records its verification. Connector behavior and
-upstream pins are unchanged; the Python server accepts the 0.6.7 handshake.
+v0.6.7 is the latest published release; v0.6.8 is UNRELEASED. The current build
+includes read-only Paper Enrichment, optional Shibboleth consent and lifecycle
+cleanup on the same pinned upstream. The Python server accepts the 0.6.8 CARSI
+handshake alongside 0.6.4–0.6.7. See SPEC §54 for preparation evidence.
 
 A1 establishes source provenance, licensing, reconstruction and Chrome/MV3
 build boundaries. A5 adds the independent Literature Monitor automatic-capture
@@ -55,7 +56,7 @@ From the repository root:
 
 The script reconstructs the pinned upstream source into
 `connector/.work/`, verifies and applies the tracked Literature Monitor
-delta, runs the upstream debug build with release version `0.6.7`, verifies
+delta, runs the upstream debug build with release version `0.6.8`, verifies
 a Manifest V3 Chrome artifact, and copies the result to:
 
 ```text
@@ -245,3 +246,47 @@ were not institution login evidence. See the historical
 [SPEC §42.12](../SPEC.md#4212-a6-access-service-preparation-implementation-evidence)
 and [PROVENANCE.md](PROVENANCE.md). Current CARSI operation is documented above
 and in §44; this historical design is not an enabled access feature.
+
+## Paper Enrichment
+
+The development Connector advertises `paper-enrichment/v2`. Paper Detail offers
+Enrich when Abstract, publication date or Authors are missing, without Zotero Desktop.
+Preview shows only valid missing fields; Save fills them together, including
+partial results (SPEC §§48, 50). Rebuild and reload this Connector to enable the
+capability; older Connectors must be updated.
+
+The result also forwards the original `creators` array. The server selects
+author roles in order, handles personal/single-field names, and fills an empty
+local author list only after explicit Save. It creates or reuses matching
+Paper-local Author notes without guessing stable IDs or merging by name. If
+Paper saving fails after Author creation, the created files remain and their
+paths are reported. Preview and Cancel create no files.
+
+The translator must run in the browser and return one literature Item matching
+the Paper DOI. Original `abstractNote` and `date` are transported with date parts
+from the pinned `Zotero.Date.strToDate()` in MV3 offscreen. Invalid, ambiguous or
+partially unparsed dates yield no date candidate; a valid Abstract remains
+usable. Only the server fills genuinely missing month/day with `01`, then
+validates the calendar date. These compatibility values do not confirm the
+actual publication day; sorting uses the completed date. No print/online choice
+or Abstract quality repair is performed.
+
+No Zotero item/attachment save, source history or persistent enrichment state is
+created. After the server confirms Preview, the completed task tab closes only
+if its document/window identity still matches. Cancellation, failure and user
+navigation retain the page. No Abstract length limit is imposed.
+
+
+## Optional Shibboleth attribute consent
+
+SPEC §53 adds a default-off Institution preference and the optional
+`shibboleth-consent/v1` heartbeat capability. Older Connectors continue ordinary
+Preparation with manual consent and an update notice when this preference is on.
+Only recognized same-origin consent forms in an active task's Portal login wait
+are operated. Native global-consent/proceed clicks do not establish login success
+or access rights, and never close tabs. Existing Manifest permissions are reused.
+
+For this development change, the successful build replaces the existing Chrome-
+loaded `connector/build/chrome-mv3` directory in place. Reload that extension in
+Chrome; source VM tests are not real Chrome/IdP verification. Manual verification
+belongs to the user. No version bump or publication is included.

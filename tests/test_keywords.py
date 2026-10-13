@@ -3,7 +3,6 @@ import pytest
 from literature_monitor.keywords import (
     And,
     KeywordSyntaxError,
-    Not,
     Or,
     Phrase,
     Prefix,
@@ -14,8 +13,8 @@ from literature_monitor.keywords import (
 
 
 def test_operator_precedence_and_case_insensitivity() -> None:
-    assert parse_keyword_expression("alpha oR beta aNd nOt gamma") == Or(
-        Term("alpha"), And(Term("beta"), Not(Term("gamma")))
+    assert parse_keyword_expression("alpha oR beta aNd gamma") == Or(
+        Term("alpha"), And(Term("beta"), Term("gamma"))
     )
 
 
@@ -140,10 +139,10 @@ def test_proximity_token_count_validation_is_deferred_to_fts5_backend() -> None:
 
 def test_prefix_and_proximity_compose_with_boolean_precedence() -> None:
     assert parse_keyword_expression(
-        '(statist* OR "causal inference"~5) AND NOT AND*'
+        '(statist* OR "causal inference"~5) AND AND*'
     ) == And(
         Or(Prefix("statist"), Proximity("causal inference", 5)),
-        Not(Prefix("AND")),
+        Prefix("AND"),
     )
 
 
@@ -181,3 +180,13 @@ def test_p_greater_greater_n_is_one_word_inside_an_expression() -> None:
 def test_invalid_expressions_include_column(expression: str) -> None:
     with pytest.raises(KeywordSyntaxError, match="column"):
         parse_keyword_expression(expression)
+
+
+@pytest.mark.parametrize("expression", ["NOT statistics", "statistics AND NOT biology", "nOt", "(alpha OR NOT beta)"])
+def test_not_operator_is_explicitly_rejected(expression):
+    with pytest.raises(KeywordSyntaxError, match="NOT operator is no longer supported"):
+        parse_keyword_expression(expression)
+
+
+def test_quoted_not_is_search_text():
+    assert parse_keyword_expression('"not" AND statistics') == And(Phrase("not"), Term("statistics"))

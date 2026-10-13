@@ -85,7 +85,7 @@ def test_capability_and_version_are_required_and_loss_revokes_claimed_task(tmp_p
     assert capture.reserve_browser_task("import") is not None
 
 
-@pytest.mark.parametrize("version", ["0.6.5", "0.6.6", "0.6.7"])
+@pytest.mark.parametrize("version", ["0.6.5", "0.6.6", "0.6.7", "0.6.8"])
 def test_claim_freezes_saved_valid_institution_login_without_access_url_navigation(tmp_path, version):
     config, _, _, _ = prepared(tmp_path)
     entity = "https://idp.example.edu/idp/shibboleth"

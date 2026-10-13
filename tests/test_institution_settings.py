@@ -369,3 +369,59 @@ bodyHandlers.settingsSaved(); assert.equal(document.documentElement.dataset.sett
 '''
     run = subprocess.run([node, "-e", script], capture_output=True, text=True)
     assert run.returncode == 0, run.stdout + run.stderr
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_attribute_consent_web_save_roundtrip_preserves_notes(tmp_path, enabled):
+    config, venues, _ = setup(tmp_path)
+    _, document = paper(tmp_path / 'workspace', 'consent')
+    before = venues.read_bytes(), document.read_bytes()
+    with TestClient(create_app(config), base_url='http://localhost') as client:
+        page = client.get('/settings').text
+        assert 'Automatic Attribute Release Consent' in page and 'subsequent services' in page
+        data = browser_settings_submission(page)
+        data.update(institution_name=[PUBLIC.name], institution_idp_entity_id=[PUBLIC.idp_entity_id])
+        if enabled:
+            data['automatic_attribute_release_consent'] = ['1']
+        else:
+            data.pop('automatic_attribute_release_consent', None)
+        response = client.post('/settings/save', data=data)
+        assert 'settingsSaved' in response.headers.get('HX-Trigger', '')
+        restored = load_config(config).institution
+        assert restored.automatic_attribute_release_consent is enabled
+        assert yaml.safe_load(config.read_text())['institution']['automatic_attribute_release_consent'] is enabled
+        assert browser_settings_submission(response.text).get('automatic_attribute_release_consent') == (['1'] if enabled else None)
+    assert (venues.read_bytes(), document.read_bytes()) == before
+
+
+def test_attribute_consent_legacy_default_and_strict_boolean(tmp_path):
+    config, _, _ = setup(tmp_path)
+    raw = yaml.safe_load(config.read_text())
+    raw['institution'] = {'name': PUBLIC.name, 'idp_entity_id': PUBLIC.idp_entity_id}
+    config.write_text(yaml.safe_dump(raw))
+    assert load_config(config).institution.automatic_attribute_release_consent is False
+    raw['institution']['automatic_attribute_release_consent'] = 'true'
+    config.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ConfigurationError):
+        load_config(config)
+
+
+def test_attribute_consent_checkbox_participates_in_settings_draft(tmp_path):
+    node = shutil.which('node')
+    if node is None:
+        pytest.skip('Existing Settings DOM harness requires Node')
+    config, _, _ = setup(tmp_path)
+    with TestClient(create_app(config), base_url='http://localhost') as client:
+        page = client.get('/settings').text
+    javascript = Path('src/literature_monitor/web/static/app.js').read_text()
+    preamble = 'const SOURCE = ' + json.dumps(javascript) + '; const PAGE = ' + json.dumps(SettingsDOM(page).root) + ';\n'
+    assertions = r'''
+const checkbox = document.getElementById("settings-editor").querySelector('[name="automatic_attribute_release_consent"]');
+assert.equal(checkbox.checked, false);
+checkbox.checked = true; handlers.change({target: checkbox});
+assert.equal(document.documentElement.dataset.settingsDirty, "true");
+checkbox.checked = false; handlers.change({target: checkbox});
+assert.equal(document.documentElement.dataset.settingsDirty, "false");
+'''
+    result = subprocess.run([node], input=preamble + SETTINGS_NODE_DOM + assertions, text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr

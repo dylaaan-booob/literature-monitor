@@ -48,6 +48,7 @@
         <p>Live {{ coverage_label }} coverage: {{ coverage.complete }}/{{ coverage.total_units }} complete{% if coverage.partial %} · {{ coverage.partial }} partial{% endif %}{% if coverage.unavailable %} · {{ coverage.unavailable }} unavailable{% endif %}{% if coverage.failed %} · {{ coverage.failed }} failed{% endif %}</p>
       {% endif %}
     {% endfor %}
+    <p>Crossref metadata: {{ result.statistics.metadata_success }} retrieved · {{ result.statistics.metadata_failed }} failed</p>
     {% set usage = result.state_usage %}
     <p>Provider state: Crossref metadata {{ usage.crossref_reused }} reused · {{ usage.crossref_refreshed }} refreshed · {{ usage.crossref_new }} new</p>
   {% elif run_snapshot.status.value == "FINISHED" and run_snapshot.unexpected_error %}

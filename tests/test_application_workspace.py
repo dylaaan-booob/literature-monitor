@@ -461,3 +461,12 @@ def test_current_config_changes_reproject_without_paper_writes_or_cache(tmp_path
         assert all(p.status is WorkflowStatus.CANDIDATE for p in snapshot.papers)
         assert all(p.read_bytes() == contents for p, contents in before.items())
     assert sorted(p.name for p in tmp_path.iterdir()) == ["Papers"]
+
+
+def test_partial_publication_dates_sort_as_iso_strings_with_missing_last(tmp_path):
+    for ordinal, value in enumerate(('2024', '2024-05', '2024-05-16', None), 1):
+        path = write_paper(tmp_path, f'{ordinal}.md', ordinal)
+        replace_frontmatter(path, publication_date=value)
+    snapshot = load_workspace(tmp_path)
+    assert not snapshot.issues
+    assert [paper.publication_date for paper in snapshot.inbox] == ['2024-05-16', '2024-05', '2024', None]

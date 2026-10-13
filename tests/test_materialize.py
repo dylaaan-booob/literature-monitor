@@ -654,6 +654,7 @@ def test_missing_abstract_and_empty_summaries_are_explicit() -> None:
     assert f"## Abstract\n\n{MISSING_ABSTRACT}" in contents
     assert "## Versions" not in contents
     assert "## Sources\n\n- None recorded." in contents
+    assert "author_keywords:" not in contents
 
 
 def test_empty_canonical_abstract_is_preserved() -> None:

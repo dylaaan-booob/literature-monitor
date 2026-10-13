@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from literature_monitor.config import normalize_journal_issn
 from literature_monitor.identifiers import normalize_doi
 from literature_monitor.models import (
+    parse_publication_date,
     ExternalIds,
     ExportAttempt,
     ExportAttemptState,
@@ -73,7 +74,7 @@ class PaperMarkdownState:
     problems: tuple[str, ...]
     title: str | None = None
     journal: str | None = None
-    publication_date: date | None = None
+    publication_date: str | None = None
     abstract: str | None = None
     author_keywords: tuple[str, ...] = ()
     author_links: tuple[AuthorLink, ...] = ()
@@ -438,18 +439,6 @@ def _parse_datetime(value: Any) -> datetime:
     return parsed
 
 
-def _parse_date(value: Any) -> date | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        raise ValueError("publication_date must be a date")
-    if isinstance(value, date):
-        return value
-    if isinstance(value, str):
-        return date.fromisoformat(value)
-    raise ValueError("publication_date must be an ISO date or null")
-
-
 def _identity_external_ids(
     frontmatter: dict[str, Any],
     problems: list[str],
@@ -528,8 +517,8 @@ def _identity_external_ids(
 
 
 def _parse_author_links(value: Any, authors_dir: Path) -> tuple[AuthorLink, ...]:
-    if not isinstance(value, list) or not value:
-        raise ValueError("authors must be a non-empty list of wikilinks")
+    if not isinstance(value, list):
+        raise ValueError("authors must be a list of wikilinks")
     links: list[AuthorLink] = []
     for raw in value:
         if not isinstance(raw, str):
@@ -621,7 +610,7 @@ def parse_paper_state(
         problems.append("journal must be a non-empty string")
         journal = None
     try:
-        publication_date = _parse_date(frontmatter.get("publication_date"))
+        publication_date = parse_publication_date(frontmatter.get("publication_date"))
     except ValueError as error:
         problems.append(str(error))
         publication_date = None

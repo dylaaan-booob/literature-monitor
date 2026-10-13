@@ -6,7 +6,7 @@ import json
 import math
 import re
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
@@ -20,8 +20,6 @@ from pydantic import Field, ValidationError, field_validator, model_validator
 
 from literature_monitor.config import JournalConfig
 from literature_monitor.coverage import (
-    CoverageComponent,
-    CoverageStatus,
     CoverageUnit,
 )
 from literature_monitor.identifiers import normalize_doi
@@ -36,7 +34,7 @@ from literature_monitor.models import (
     ProviderRecordRef,
     ProviderWorkEvidence,
 )
-from literature_monitor.openalex import OpenAlexWorkRecord, ResolvedSource
+from literature_monitor.openalex import ResolvedSource
 from literature_monitor.provider_revision import parse_revision_timestamp
 from literature_monitor.progress import (
     ActivityKind,
@@ -49,7 +47,7 @@ CROSSREF_BASE_URL = "https://api.crossref.org"
 CROSSREF_PAGE_SIZE = 1000
 # Internal URL/filter bound for manifests, DOI probes and full hydration (§30.3).
 _CROSSREF_MANIFEST_BATCH_SIZE = 20
-_CROSSREF_MANIFEST_FIELDS = "DOI,ISSN,indexed"
+_CROSSREF_MANIFEST_FIELDS = "DOI,ISSN,indexed,type"
 _ISSN_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{3}[0-9X]$")
 _RATE_LIMIT_INTERVAL_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)?)s\s*$", re.IGNORECASE)
 _ORCID_PATTERN = re.compile(
@@ -150,21 +148,6 @@ class CrossrefWorkRecord(DomainModel):
         )
 
 
-class EnrichedWorkRecord(DomainModel):
-    openalex: OpenAlexWorkRecord
-    crossref: CrossrefWorkRecord | None = None
-
-    def to_evidence(self) -> tuple[ProviderWorkEvidence, ...]:
-        openalex = self.openalex.to_evidence()
-        if self.crossref is None:
-            return (openalex,)
-        anchor = ProviderRecordRef(
-            provider=openalex.provenance.provider,
-            record_id=openalex.provenance.record_id,
-        )
-        return (openalex, self.crossref.to_evidence(supplements=(anchor,)))
-
-
 class EnrichmentIssueSeverity(str, Enum):
     WARNING = "warning"
     ERROR = "error"
@@ -177,18 +160,6 @@ class EnrichmentIssue:
     message: str
     record_id: str | None = None
     doi: str | None = None
-
-
-@dataclass(frozen=True)
-class EnrichmentResult:
-    records: tuple[EnrichedWorkRecord, ...]
-    issues: tuple[EnrichmentIssue, ...]
-
-    @property
-    def has_errors(self) -> bool:
-        return any(
-            issue.severity is EnrichmentIssueSeverity.ERROR for issue in self.issues
-        )
 
 
 @dataclass(frozen=True)
@@ -512,131 +483,6 @@ class CrossrefClient:
                                       label="Probing Crossref revisions" if thin else "Hydrating Crossref records",
                                       detail=", ".join(dois), unit="doi"))
 
-    def iter_journal_work_pages(
-        self,
-        issn: str,
-        from_date: date,
-        to_date: date,
-        *,
-        rows: int = CROSSREF_PAGE_SIZE,
-        progress_callback: ProgressCallback | None = None,
-        activity: ActivityUpdate | None = None,
-    ) -> Iterator[dict[str, Any]]:
-        if from_date > to_date:
-            raise ValueError("from_date must not be after to_date")
-        if rows < 1:
-            raise ValueError("rows must be positive")
-        if activity is None and progress_callback is not None:
-            activity = ActivityUpdate(
-                kind=ActivityKind.WORKING,
-                source="crossref",
-                operation=f"journal_discovery:{issn}",
-                label="Discovering Crossref works",
-                detail=f"ISSN {issn}",
-                current=0,
-                unit="work",
-            )
-        cursor = "*"
-        seen_cursors: set[str] = set()
-        current = (
-            activity.current
-            if activity is not None and activity.current is not None
-            else 0
-        )
-        total = activity.total if activity is not None else None
-        activity_detail = activity.detail if activity is not None else None
-        page_number = 0
-        _report_activity(progress_callback, activity)
-        while True:
-            if cursor in seen_cursors:
-                raise CrossrefRequestError("Crossref returned a repeated cursor")
-            seen_cursors.add(cursor)
-            page_number += 1
-            request_activity = (
-                replace(
-                    activity,
-                    current=current,
-                    total=total,
-                    detail=(
-                        f"{activity_detail} · page {page_number}"
-                        if activity_detail
-                        else f"page {page_number}"
-                    ),
-                )
-                if activity is not None
-                else None
-            )
-            payload = self._request_json(
-                f"/v1/journals/{quote(issn, safe='')}/works",
-                {
-                    "filter": (
-                        f"from-pub-date:{from_date.isoformat()},"
-                        f"until-pub-date:{to_date.isoformat()}"
-                    ),
-                    "rows": str(rows),
-                    "cursor": cursor,
-                },
-                not_found_message=f"ISSN {issn} is not present in Crossref",
-                progress_callback=progress_callback,
-                activity=request_activity,
-            )
-            if (
-                payload.get("status") != "ok"
-                or payload.get("message-type") != "work-list"
-            ):
-                raise CrossrefRequestError(
-                    "Crossref journal response has an invalid envelope"
-                )
-            message = payload.get("message")
-            if not isinstance(message, dict):
-                raise CrossrefRequestError(
-                    "Crossref journal response lacks a list message"
-                )
-            items = message.get("items")
-            if not isinstance(items, list):
-                raise CrossrefRequestError(
-                    "Crossref journal response lacks a valid items list"
-                )
-            page_current = current + len(items)
-            response_total = _progress_total(message.get("total-results"))
-            if response_total is not None and response_total >= page_current:
-                total = response_total
-            elif total is not None and total < page_current:
-                total = None
-            current = page_current
-            if activity is not None:
-                activity = replace(
-                    activity,
-                    kind=ActivityKind.WORKING,
-                    label="Retrieved Crossref page",
-                    detail=(
-                        f"{activity_detail} · page {page_number}"
-                        if activity_detail
-                        else f"page {page_number}"
-                    ),
-                    current=current,
-                    total=total,
-                )
-                _report_activity(progress_callback, activity)
-            yield payload
-            if len(items) < rows:
-                if activity is not None:
-                    _report_activity(
-                        progress_callback,
-                        replace(
-                            activity,
-                            label="Completed Crossref ISSN discovery",
-                            current=current,
-                            total=total,
-                        ),
-                    )
-                return
-            next_cursor = message.get("next-cursor")
-            if not isinstance(next_cursor, str) or not next_cursor:
-                raise CrossrefRequestError(
-                    "Crossref journal response lacks a valid next cursor"
-                )
-            cursor = next_cursor
 
     def _request_json(
         self,
@@ -656,7 +502,7 @@ class CrossrefClient:
             url = f"{url}?{urlencode(query)}"
         headers = {
             "Accept": "application/json",
-            "User-Agent": "literature-monitor/0.6.7",
+            "User-Agent": "literature-monitor/0.6.8",
         }
 
         # Classify HTTP shape, independently of the caller's Activity operation.
@@ -742,6 +588,8 @@ class CrossrefManifestMember:
     doi: str
     issns: tuple[str, ...]
     indexed_at: datetime | None
+    work_type: str | None = None
+    type_conflict: bool = False
 
     def __post_init__(self) -> None:
         if normalize_doi(self.doi) != self.doi or not re.fullmatch(r"10\.\d{4,9}/\S+", self.doi):
@@ -791,10 +639,10 @@ def normalize_crossref_manifest_member(item: object) -> tuple[CrossrefManifestMe
         indexed_at = parse_crossref_indexed_at(item.get("indexed"))
     except ValueError:
         indexed_at = None
-    if indexed_at is None:
-        warnings.append("Crossref manifest lacks a usable indexed revision")
     try:
-        return CrossrefManifestMember(doi, issns, indexed_at), tuple(warnings)
+        kind = item.get("type")
+        kind = kind.strip() if isinstance(kind, str) and kind.strip() else None
+        return CrossrefManifestMember(doi, issns, indexed_at, kind), tuple(warnings)
     except ValueError as error:
         raise CrossrefRecordError("Crossref manifest has an invalid DOI") from error
 
@@ -812,17 +660,23 @@ def _merge_manifest_members(
             revision = member.indexed_at if member.indexed_at == previous.indexed_at else None
             if revision is None and previous.indexed_at != member.indexed_at:
                 issues.append(f"conflicting manifest revisions for {member.doi}")
+            kinds = {kind for kind in (previous.work_type, member.work_type) if kind is not None}
+            conflict = previous.type_conflict or member.type_conflict or len(kinds) > 1
+            if len(kinds) > 1:
+                issues.append(f"conflicting Crossref types for {member.doi}")
             merged[member.doi] = CrossrefManifestMember(
                 member.doi, tuple(sorted(set(previous.issns) | set(member.issns))), revision,
+                next(iter(kinds)) if len(kinds) == 1 and not conflict else None, conflict,
             )
     return tuple(merged.values()), tuple(issues)
 
 
 def _read_manifest_page(
     payload: dict[str, Any], issns: Sequence[str],
-) -> tuple[tuple[CrossrefManifestMember, ...], int | None, tuple[str, ...]]:
+) -> tuple[tuple[CrossrefManifestMember, ...], int | None, tuple[str, ...], bool]:
     items, total = _crossref_work_list(payload)
     members, issues = [], []
+    valid = total is not None
     if total is None:
         issues.append("Crossref manifest lacks usable total-results")
     for item in items:
@@ -833,9 +687,10 @@ def _read_manifest_page(
                 raise CrossrefRecordError("Crossref manifest member cannot map to a queried ISSN")
             members.append(member)
         except CrossrefRecordError as error:
+            valid = False
             issues.append(str(error))
     merged, conflicts = _merge_manifest_members(members)
-    return merged, total, tuple(issues) + conflicts
+    return merged, total, tuple(issues) + conflicts, valid
 
 
 def retrieve_crossref_manifests(
@@ -853,6 +708,7 @@ def retrieve_crossref_manifests(
 
     def cursor_day(issn, day):
         members, issues, seen = (), [], set()
+        valid = True
         cursor, expected = "*", None
         while True:
             try:
@@ -861,7 +717,8 @@ def retrieve_crossref_manifests(
                 seen.add(cursor)
                 payload = client.get_manifest_page((issn,), day, day, cursor=cursor,
                                                     progress_callback=progress_callback)
-                page, total, warnings = _read_manifest_page(payload, (issn,))
+                page, total, warnings, page_valid = _read_manifest_page(payload, (issn,))
+                valid = valid and page_valid
                 previous_count = len(members)
                 members, conflicts = _merge_manifest_members((*members, *page))
                 issues.extend((*warnings, *conflicts))
@@ -872,8 +729,8 @@ def retrieve_crossref_manifests(
                 expected = total
                 if len(members) > total:
                     raise CrossrefRequestError("Crossref manifest unique count exceeds total-results")
-                if len(members) == total and not issues:
-                    return units((issn,), members, True, ())
+                if len(members) == total:
+                    return units((issn,), members, valid, issues)
                 if len(members) == previous_count and payload["message"]["items"]:
                     raise CrossrefRequestError("Crossref cursor made no unique DOI progress")
                 if len(payload["message"]["items"]) < CROSSREF_PAGE_SIZE:
@@ -889,9 +746,9 @@ def retrieve_crossref_manifests(
         members, issues = (), ()
         try:
             payload = client.get_manifest_page(group, start, end, progress_callback=progress_callback)
-            members, total, issues = _read_manifest_page(payload, group)
-            if total is not None and total <= CROSSREF_PAGE_SIZE and len(members) == total and not issues:
-                return units(group, members, True, ())
+            members, total, issues, valid = _read_manifest_page(payload, group)
+            if total is not None and total <= CROSSREF_PAGE_SIZE and len(members) == total and valid:
+                return units(group, members, True, issues)
             issues += ("Crossref manifest is oversized or incomplete",)
         except CrossrefError as error:
             issues = (str(error),)
@@ -907,7 +764,7 @@ def retrieve_crossref_manifests(
             child = left[group[0]]
             other = right[group[0]]
             combined, conflicts = _merge_manifest_members((*child.members, *other.members))
-            children = units(group, combined, child.complete and other.complete and not conflicts,
+            children = units(group, combined, child.complete and other.complete,
                              (*child.issues, *other.issues, *conflicts))
         else:
             children = cursor_day(group[0], start)
@@ -1440,300 +1297,3 @@ def crossref_record_matches_journal(
 ) -> bool:
     """Only usable identifiers can support configured venue membership (§41.3)."""
     return bool(set(record.issns).intersection((journal.issn_l, *query_aliases)))
-
-
-def discover_crossref_journal_issn(
-    client: CrossrefClient,
-    journal: JournalConfig,
-    issn: str,
-    from_date: date,
-    to_date: date,
-    *,
-    retrieved_at: datetime,
-    progress_callback: ProgressCallback | None = None,
-    journal_index: int = 0,
-    issn_index: int = 0,
-    query_aliases: tuple[str, ...] = (),
-) -> CrossrefDiscoveryUnitResult:
-    """Execute one ISSN query against the full configured venue identity."""
-
-    if issn not in (journal.issn_l, *query_aliases):
-        raise ValueError("queried ISSN must belong to the configured journal")
-    if from_date > to_date:
-        raise ValueError("from_date must not be after to_date")
-    timestamp = retrieved_at or datetime.now(timezone.utc)
-    if timestamp.utcoffset() is None:
-        raise ValueError("retrieved_at must include a timezone")
-    timestamp = timestamp.astimezone(timezone.utc)
-
-    issues: list[CrossrefDiscoveryIssue] = []
-    unit_records: list[CrossrefWorkRecord] = []
-    coverage: list[CoverageUnit] = []
-    activity = ActivityUpdate(
-        kind=ActivityKind.WORKING,
-        source="crossref",
-        operation=f"journal_discovery:{journal_index}:{issn_index}",
-        label="Discovering Crossref works",
-        detail=f"{journal.name} · ISSN {issn}",
-        current=0,
-        total=None,
-        unit="work",
-    )
-    completed_pages = 0
-    dropped_record = False
-    try:
-        if progress_callback is None:
-            pages = client.iter_journal_work_pages(issn, from_date, to_date)
-        else:
-            pages = client.iter_journal_work_pages(
-                issn,
-                from_date,
-                to_date,
-                progress_callback=progress_callback,
-                activity=activity,
-            )
-        for page in pages:
-            completed_pages += 1
-            message = page["message"]
-            for item in message["items"]:
-                raw_doi = item.get("DOI") if isinstance(item, dict) else None
-                try:
-                    record, warnings = normalize_crossref_discovered_work(
-                        item,
-                        timestamp,
-                    )
-                except CrossrefRecordError as error:
-                    dropped_record = True
-                    issues.append(
-                        CrossrefDiscoveryIssue(
-                            severity=EnrichmentIssueSeverity.WARNING,
-                            stage="record_normalization",
-                            journal=journal.name,
-                            issn=issn,
-                            doi=raw_doi if isinstance(raw_doi, str) else None,
-                            message=str(error),
-                        )
-                    )
-                    continue
-                issues.extend(
-                    CrossrefDiscoveryIssue(
-                        severity=EnrichmentIssueSeverity.WARNING,
-                        stage="field_normalization",
-                        journal=journal.name,
-                        issn=issn,
-                        record_id=record.provenance.record_id,
-                        doi=record.doi,
-                        message=warning,
-                    )
-                    for warning in warnings
-                )
-                if not crossref_record_matches_journal(record, journal, query_aliases=query_aliases):
-                    identity = (
-                        f"ISSNs {', '.join(record.issns)}"
-                        if record.issns
-                        else f"journal {record.journal!r}"
-                    )
-                    issues.append(
-                        CrossrefDiscoveryIssue(
-                            severity=EnrichmentIssueSeverity.WARNING,
-                            stage="venue_validation",
-                            journal=journal.name,
-                            issn=issn,
-                            record_id=record.provenance.record_id,
-                            doi=record.doi,
-                            message=(
-                                f"record {identity} does not match configured "
-                                "journal identity"
-                            ),
-                        )
-                    )
-                    continue
-                unit_records.append(record)
-    except CrossrefNotFoundError as error:
-        issues.append(
-            CrossrefDiscoveryIssue(
-                severity=EnrichmentIssueSeverity.WARNING,
-                stage="journal_not_found",
-                journal=journal.name,
-                issn=issn,
-                message=str(error),
-            )
-        )
-        status = (
-            CoverageStatus.PARTIAL
-            if completed_pages
-            else CoverageStatus.UNAVAILABLE
-        )
-    except CrossrefRequestError as error:
-        issues.append(
-            CrossrefDiscoveryIssue(
-                severity=EnrichmentIssueSeverity.ERROR,
-                stage="work_retrieval",
-                journal=journal.name,
-                issn=issn,
-                message=str(error),
-            )
-        )
-        status = (
-            CoverageStatus.PARTIAL
-            if completed_pages
-            else CoverageStatus.FAILED
-        )
-    else:
-        status = (
-            CoverageStatus.PARTIAL
-            if dropped_record
-            else CoverageStatus.COMPLETE
-        )
-    coverage.append(
-        CoverageUnit(
-            provider="crossref",
-            component=CoverageComponent.CROSSREF_DISCOVERY,
-            status=status,
-            journal=journal.issn_l,
-            issn=issn,
-        )
-    )
-    unit_records.sort(key=lambda record: (record.doi, record.provenance.record_id))
-    return CrossrefDiscoveryUnitResult(
-        journal=journal,
-        issn=issn,
-        coverage=coverage[-1],
-        records=tuple(unit_records),
-        issues=tuple(issues),
-    )
-
-
-def discover_crossref_journals(
-    client: CrossrefClient,
-    journals: Sequence[JournalConfig],
-    from_date: date,
-    to_date: date,
-    *,
-    retrieved_at: datetime | None = None,
-    progress_callback: ProgressCallback | None = None,
-    resolved_sources: Sequence[ResolvedSource] = (),
-) -> CrossrefDiscoveryResult:
-    if from_date > to_date:
-        raise ValueError("from_date must not be after to_date")
-    timestamp = retrieved_at or datetime.now(timezone.utc)
-    if timestamp.utcoffset() is None:
-        raise ValueError("retrieved_at must include a timezone")
-    timestamp = timestamp.astimezone(timezone.utc)
-
-    units: list[CrossrefDiscoveryUnitResult] = []
-    plans = plan_crossref_queries(journals, resolved_sources)
-    for journal_index, plan in enumerate(plans):
-        journal = plan.journal
-        for issn_index, issn in enumerate(plan.query_aliases):
-            units.append(discover_crossref_journal_issn(
-                client, journal, issn, from_date, to_date,
-                retrieved_at=timestamp, progress_callback=progress_callback,
-                journal_index=journal_index, issn_index=issn_index, query_aliases=plan.query_aliases,
-            ))
-        if plan.query_aliases:
-            _report_activity(
-                progress_callback,
-                ActivityUpdate(
-                    kind=ActivityKind.WORKING,
-                    source="crossref",
-                    operation=f"journal_completion:{journal_index}",
-                    label="Completed Crossref journal discovery",
-                    detail=journal.name,
-                    current=len(plan.query_aliases), total=len(plan.query_aliases), unit="issn",
-                ),
-            )
-    return CrossrefDiscoveryResult(
-        records=tuple({record.doi: record for unit in units for record in unit.records}.values()),
-        issues=(*tuple(issue for plan in plans for issue in plan.diagnostics),
-                *tuple(issue for unit in units for issue in unit.issues)),
-        coverage=tuple(unit.coverage for unit in units),
-        units=tuple(units),
-    )
-
-
-def enrich_records(
-    client: CrossrefClient,
-    records: Sequence[OpenAlexWorkRecord],
-    *,
-    retrieved_at: datetime | None = None,
-) -> EnrichmentResult:
-    timestamp = retrieved_at or datetime.now(timezone.utc)
-    if timestamp.utcoffset() is None:
-        raise ValueError("retrieved_at must include a timezone")
-    timestamp = timestamp.astimezone(timezone.utc)
-
-    enriched: list[EnrichedWorkRecord] = []
-    issues: list[EnrichmentIssue] = []
-    for record in records:
-        record_id = record.external_ids.openalex
-        doi = record.external_ids.doi
-        if doi is None:
-            enriched.append(EnrichedWorkRecord(openalex=record))
-            issues.append(
-                EnrichmentIssue(
-                    severity=EnrichmentIssueSeverity.WARNING,
-                    stage="missing_doi",
-                    record_id=record_id,
-                    message="record has no DOI; Crossref lookup was skipped",
-                )
-            )
-            continue
-
-        try:
-            payload = client.get_work_by_doi(doi)
-            crossref_record, warnings = normalize_crossref_work(
-                payload,
-                doi,
-                timestamp,
-            )
-        except CrossrefNotFoundError as error:
-            enriched.append(EnrichedWorkRecord(openalex=record))
-            issues.append(
-                EnrichmentIssue(
-                    severity=EnrichmentIssueSeverity.WARNING,
-                    stage="not_found",
-                    record_id=record_id,
-                    doi=doi,
-                    message=str(error),
-                )
-            )
-            continue
-        except CrossrefRequestError as error:
-            enriched.append(EnrichedWorkRecord(openalex=record))
-            issues.append(
-                EnrichmentIssue(
-                    severity=EnrichmentIssueSeverity.ERROR,
-                    stage="request_failure",
-                    record_id=record_id,
-                    doi=doi,
-                    message=str(error),
-                )
-            )
-            continue
-        except CrossrefRecordError as error:
-            enriched.append(EnrichedWorkRecord(openalex=record))
-            issues.append(
-                EnrichmentIssue(
-                    severity=EnrichmentIssueSeverity.ERROR,
-                    stage="record_normalization",
-                    record_id=record_id,
-                    doi=doi,
-                    message=str(error),
-                )
-            )
-            continue
-
-        enriched.append(EnrichedWorkRecord(openalex=record, crossref=crossref_record))
-        issues.extend(
-            EnrichmentIssue(
-                severity=EnrichmentIssueSeverity.WARNING,
-                stage="field_normalization",
-                record_id=record_id,
-                doi=doi,
-                message=warning,
-            )
-            for warning in warnings
-        )
-
-    return EnrichmentResult(records=tuple(enriched), issues=tuple(issues))

@@ -221,7 +221,7 @@ def form_data(values):
     entries = [
         ("name", values.name), ("keyword_expression", values.keyword_expression),
         ("output_dir", values.output_dir), ("log_level", values.log_level),
-        ("from_date", values.from_date), ("to_date", values.to_date), ("window_days", values.window_days),
+        ("from_month", values.from_month), ("to_month", values.to_month),
         ("monitor_revision_exists", values.monitor_revision_exists),
         ("monitor_revision_digest", values.monitor_revision_digest),
         ("journal_revision_exists", values.journal_revision_exists),

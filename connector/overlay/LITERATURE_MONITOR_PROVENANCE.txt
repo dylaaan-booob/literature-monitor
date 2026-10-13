@@ -34,3 +34,41 @@ and recovers pre-save navigation within the original preparation deadline.
 Ordinary DOI same-origin progress is bounded separately from verified federation.
 A challenged document cannot regain eligibility from unversioned DOM/translator
 changes; new-document checks or safe manual fallback are required.
+
+Paper Enrichment (SPEC §§47–48) adds a separate read-only content-script
+message and MV3 offscreen Translate Framework handler. libraryID:false and
+saveAttachments:false plus a loaded-translator browser-mode guard prevent
+native/Server saving. The overlay shares Import/Preparation browser exclusion
+and transports a transient candidate; only explicit Web Save writes missing Abstract/date fields.
+No upstream pin, submodule revision or Manifest permission change is introduced.
+
+The unified read-only handler uses pinned Zotero.Date.strToDate() in offscreen
+and transports original date plus parsed components. Only the MIT server fills
+missing month/day with compatibility 01s and validates the calendar date.
+No date parser source crosses the AGPL/MIT boundary.
+
+Paper Enrichment Authors (SPEC §50) forwards original creators from the same
+read-only Item and advertises paper-enrichment/v2. Role/name interpretation and
+explicit local Author/Paper writes are performed by the MIT server. No native
+save, Manifest permission, upstream pin or submodule revision is changed.
+
+
+Shibboleth Attribute Release Consent (SPEC §53) adds optional
+shibboleth-consent/v1 capability and one command Boolean. The CARSI overlay
+uses existing HTTPS/scripting/webNavigation permissions, existing login waiting
+and current task authorization. It binds isolated-world native clicks to the
+configured HTTPS IdP origin and current Portal document, once per document.
+No credential, attribute payload, Cookie, authentication request construction,
+login-state storage, native save or upstream/submodule pin change is introduced.
+The MIT server owns the default-off Settings preference; IdP consent itself is
+stored only by the school through its native form. Existing §48 date-padding
+notes above are historical and were superseded by SPEC §§51–52.
+
+Connector Lifecycle Cleanup adds patch 0004 after the Paper Enrichment delta.
+It fixes tab-ID comparison, loading-tab liveness, actual cleanup results and
+JSON diagnostics, and removes orphaned tab-info/injection caches. Candidate
+snapshots protect records created during a cleanup query. Existing tab-close
+listeners, periodic intervals, native Translator/parent/attachment saving and
+read-only Enrichment remain unchanged. No tabs or offscreen documents are
+closed; no persistent state, telemetry or measured memory-saving claim is added.
+Upstream pins, submodule revisions and Manifest permissions remain unchanged.

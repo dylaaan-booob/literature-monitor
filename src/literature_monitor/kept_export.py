@@ -52,7 +52,7 @@ def _export_entry(state: PaperMarkdownState) -> str:
     if arxiv is not None:
         return f"arXiv:{arxiv}"
     publication_date = (
-        state.publication_date.isoformat()
+        state.publication_date
         if state.publication_date is not None
         else "unknown"
     )

@@ -81,6 +81,7 @@ from literature_monitor.web.capture_coordinator import (
     PdfOutcome,
     SaveInvocation,
 )
+from literature_monitor.web.paper_enrichment import PaperEnrichment, ENRICHMENT_CAPABILITY
 from literature_monitor.web.run_coordinator import (
     CoordinatorSnapshot,
     CoordinatorStatus,
@@ -169,6 +170,29 @@ class _ConnectorHeartbeatBody(BaseModel):
 
     version: str = Field(min_length=1, max_length=CONNECTOR_VERSION_MAX_LENGTH)
     zotero_reachable: StrictBool
+    capabilities: list[str] = []
+
+
+class _EnrichmentIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str
+    invocation_id: str
+    doi_url: str
+
+
+class _EnrichmentAuthorization(_EnrichmentIdentity):
+    waiting_for_user: StrictBool = False
+
+
+class _EnrichmentResult(_EnrichmentIdentity):
+    items: list[dict] = []
+    error: str | None = None
+
+
+class _EnrichmentAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    csrf_token: str
+    request_id: str | None = None
 
 
 class _ImportBrowserIdleBody(BaseModel):
@@ -192,6 +216,7 @@ class _PreparationHeartbeat(BaseModel):
     instance_id: str = Field(min_length=16, max_length=128)
     capability: str = Field(min_length=1, max_length=128)
     version: str = Field(min_length=1, max_length=32)
+    consent_capability: str | None = Field(default=None, max_length=128)
 
 
 class _PreparationClaim(BaseModel):
@@ -448,7 +473,7 @@ def _workspace_context(
     selected_position = next((index for index, paper in enumerate(view_papers)
                               if paper == selected_paper), None)
     open_doi_url = None
-    if selected_paper is not None and selected_paper.status is WorkflowStatus.KEPT:
+    if selected_paper is not None:
         try:
             normalized_doi = normalize_doi(selected_paper.external_ids.doi)
         except ValueError:
@@ -551,9 +576,18 @@ def _run_context(
     *,
     start_result: StartResult | None = None,
 ) -> dict[str, object]:
+    try:
+        configured = load_config(request.app.state.config_path)
+        months = (configured.date_spec.from_month, configured.date_spec.to_month)
+        configuration_problem = None
+    except ConfigurationError as error:
+        months = None
+        configuration_problem = str(error)
     return {
         "request": request,
         "csrf_token": csrf_token,
+        "run_months": months,
+        "run_configuration_problem": configuration_problem,
         "run_snapshot": snapshot,
         "run_progress": build_run_presentation(snapshot, now=_utc_now()),
         "run_start_result": start_result,
@@ -566,6 +600,8 @@ def _capture_api_state(snapshot: CaptureSnapshot) -> dict[str, object]:
         "readiness": snapshot.readiness.value,
         "connector_version": snapshot.connector_version,
         "zotero_reachable": snapshot.zotero_reachable,
+        "connector_online": snapshot.connector_online,
+        "enrichment_capable": snapshot.enrichment_capable,
         "capture": (
             None
             if attempt is None
@@ -667,6 +703,7 @@ def create_app(config_path: Path) -> FastAPI:
     app.state.csrf_token = csrf_token
     app.state.run_coordinator = RunCoordinator(resolved_config_path)
     app.state.capture_coordinator = CaptureCoordinator()
+    app.state.paper_enrichment = PaperEnrichment(app.state.capture_coordinator)
     app.state.batch_import = BatchImportService(app.state.capture_coordinator)
     # Only a verified Connector capability heartbeat can enable browser claims.
     app.state.preparation_coordinator = PreparationCoordinator(
@@ -690,15 +727,54 @@ def create_app(config_path: Path) -> FastAPI:
             readiness = app.state.capture_coordinator.heartbeat(
                 connector_version=body.version,
                 zotero_reachable=body.zotero_reachable,
+                enrichment_capable=ENRICHMENT_CAPABILITY in body.capabilities,
             )
         except ValueError:
             return JSONResponse({"accepted": False}, status_code=422)
         return JSONResponse({"readiness": readiness.value})
 
+    @app.post("/api/connector/enrichment/claim")
+    def enrichment_claim(body: _ConnectorClaimBody):
+        return JSONResponse({"command": app.state.paper_enrichment.claim()})
+
+    @app.post("/api/connector/enrichment/authorize")
+    def enrichment_authorize(body: _EnrichmentAuthorization):
+        accepted = app.state.paper_enrichment.authorize(
+            body.model_dump(exclude={'waiting_for_user'}), body.waiting_for_user)
+        return JSONResponse({'accepted': accepted}, status_code=200 if accepted else 409)
+
+    @app.post("/api/connector/enrichment/result")
+    def enrichment_result(body: _EnrichmentResult):
+        result = app.state.paper_enrichment.result(
+            body.model_dump(exclude={'items', 'error'}), body.items, body.error)
+        return JSONResponse(result or {'accepted': False}, status_code=200 if result else 409)
+
+    @app.get("/api/papers/{paper_id}/enrichment/state")
+    def enrichment_state(paper_id: UUID, request_id: str | None = None):
+        return JSONResponse(app.state.paper_enrichment.state(paper_id, request_id))
+
+    @app.post("/api/papers/{paper_id}/enrichment/{action}")
+    def enrichment_action(paper_id: UUID, action: str, body: _EnrichmentAction):
+        if not _csrf_valid(body.csrf_token, csrf_token):
+            return JSONResponse({'error': 'Invalid CSRF token'}, status_code=403)
+        service = app.state.paper_enrichment
+        try:
+            if action == 'cancel':
+                accepted = service.cancel(paper_id, body.request_id)
+                return JSONResponse({'accepted': accepted}, status_code=200 if accepted else 409)
+            if action not in {'start', 'save'}:
+                return JSONResponse({'error': 'Unknown action'}, status_code=404)
+            workspace = load_config(resolved_config_path).output_dir
+            state = service.start(workspace, paper_id) if action == 'start' else service.save(workspace, paper_id, body.request_id)
+            return JSONResponse(state)
+        except (ConfigurationError, ValueError, OSError, ContentChangedError, CompareReadError) as exc:
+            return JSONResponse({'error': str(exc)}, status_code=409)
+
     @app.post("/api/connector/preparation/heartbeat")
     def preparation_heartbeat(body: _PreparationHeartbeat) -> JSONResponse:
         ready = app.state.preparation_coordinator.heartbeat(
             body.instance_id, capability=body.capability, version=body.version,
+            consent_capability=body.consent_capability,
         )
         return JSONResponse({"ready": ready})
 

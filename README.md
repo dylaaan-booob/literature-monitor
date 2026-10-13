@@ -2,24 +2,42 @@
 
 This repository contains the journal-monitoring workflow specified in
 `SPEC.md`. The workflow uses OpenAlex for primary discovery and Crossref for
-secondary discovery and bibliographic evidence, consolidates provider evidence
-before local keyword filtering, canonicalizes retained DOI-bound papers,
+secondary discovery and bibliographic evidence, matches trusted OpenAlex text first, obtains Crossref metadata on demand,
+and canonicalizes retained DOI-bound evidence,
 captures new DOI Papers and necessary Author Markdown, skips already saved
-Papers without rewriting them, and exports kept papers.
+Papers without rewriting them, and offers native Zotero Import for kept papers.
 
 ## Release and development status
 
-**v0.6.7 Capture-Only Run is in release preparation.** CLI Run, Web Run
-and diagnostic `materialize` create new DOI Papers and skip reliably saved
-Papers without changing existing Paper or Author files; see
-[SPEC §46](SPEC.md#46-v067-capture-only-run--development-contract).
-Final offline regression passed **3070 Python tests (2 existing warnings)**,
-including all three entrypoints and byte-preservation checks; see
-[SPEC §46.6](SPEC.md#466-implementation-verification--2026-10-12).
-Package, Provider and Connector release identities are `0.6.7`.
-The latest verified published release remains
-[v0.6.6](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.6)
-until publication verification completes.
+**v0.6.8 is UNRELEASED and in release preparation.** It includes natural-month
+Journal Run, OpenAlex-first early matching, explicit Paper Enrichment, optional
+Shibboleth consent, Connector lifecycle cleanup and core-regression simplification.
+Current Python package, Provider and Connector build identities are `0.6.8`.
+The latest published stable release is
+[v0.6.7 Capture-Only Run](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.7).
+
+Run creates new DOI Papers and necessary Authors, and preserves existing Paper
+and Author bytes. New Papers may have empty Authors; publication dates retain
+available ISO precision. See SPEC §§46, 49 and 52. The v0.6.7 baseline's
+**3070 Python tests (2 existing warnings)** remain historical evidence in §46.6;
+they do not describe the current suite. Current cleanup and preparation evidence
+is recorded in [SPEC §54](SPEC.md#54-v068-core-regression-cleanup-and-release-preparation).
+
+Paper Detail offers **Enrich → Preview → Save / Cancel** when Abstract,
+publication date or Authors are missing, in every status. The rebuilt Connector advertises
+`paper-enrichment/v2`; Zotero Desktop is unnecessary. Save fills only missing
+fields, including partial results. Publication dates preserve Translator precision:
+`2024`, `2024-05` or `2024-05-16`; missing components are never invented.
+Authors are filled from Translator creators only after Save; existing Author
+files are preserved. If Paper saving fails after Author creation, new Author
+files remain and their paths are reported. Run remains Capture-Only. See
+[SPEC §50](SPEC.md#50-paper-enrichment-authors--development-contract) and
+[SPEC §51](SPEC.md#51-paper-detail-and-publication-date-precision--development-contract).
+
+Paper Detail focuses on bibliographic content with a clickable DOI in every status.
+External IDs, Sources and Author Keywords remain in existing Markdown but are hidden
+from the ordinary UI. Paper List hides Discovered At; internal sorting still uses it.
+The default `Inbox.base` has the same compact columns; existing custom files are preserved.
 
 Kept offers optional **Prepare CARSI Access** for CARSI Services related to all
 current Kept Papers, deduplicated in saved configuration order. **Manual Login**
@@ -28,6 +46,15 @@ CARSI resource pages, clicks a uniquely matched Detail/Visit control, and report
 **Opened / Needs attention / Failed**. Opened confirms a click and attributable
 target opening, without claiming authentication, entitlement or PDF availability.
 Users complete institutional login/MFA and close all retained browser pages.
+
+Settings → Institution offers **Automatic Attribute Release Consent**, off by
+default. During an active CARSI login wait it can select Global Consent and submit
+a recognized same-origin Shibboleth form in the task's Portal tab. Global Consent
+may allow this IdP to release personal attributes to subsequent services, not just
+this database; the school determines the actual release. Turning it off does not
+revoke previously stored school consent. Save applies to the next Preparation;
+Cancel stops current actions. URN or different-origin IdPs remain manual.
+Credentials, login buttons, MFA and CAPTCHA remain user-operated. See SPEC §53.
 Cancel revokes further actions; **Refresh Status** updates the UI manually while
 preserving disclosure choices. Zotero Import remains a separate action sharing
 browser exclusion and its existing native Parent/PDF safeguards.
@@ -174,7 +201,7 @@ The GUI is local-only and binds to `127.0.0.1:8000`. Missing or invalid
 configuration does not block startup; Settings remains accessible. Ordinary Save
 rejects damaged Journal storage and legacy ISSN/EISSN storage rather than
 implicitly repairing or upgrading it. Unsafe or unreadable files remain blocked.
-GUI Run uses the persisted Monitor date policy and exposes no temporary date override.
+GUI Run uses the saved publication months. Select and Save months in Settings before running.
 
 ### Journals & Access
 
@@ -222,7 +249,7 @@ require a fresh Draft. A list write followed by a monitor-write failure is
 reported as a partial save. Legacy Access Service schema has a separate explicit
 **Preview one-time Access schema Upgrade** / **Confirm Upgrade** flow;
 ordinary Save is not an implicit
-upgrade. The CLI `validate` command remains available.
+upgrade. Configuration editing and Journal Run use the Web UI.
 
 ### Markdown configuration
 
@@ -332,7 +359,7 @@ run**. These details are process-local and are not restored after server restart
 Kept offers **Import to Zotero** for eligible kept Papers with normalized DOIs.
 It saves serially through the separate Connector and marks `exported` only after
 attributable native parent acceptance. **Open DOI** opens a normal browser page
-without changing Paper state. CLI `export-kept` remains a separate read-only handoff.
+without changing Paper state.
 
 Paper Markdown remains the durable workflow state. The GUI does not add a
 workflow/execution database, persistent run history, SSE, WebSocket, batch
@@ -367,496 +394,137 @@ challenge appears; environmental non-occurrence is recorded as not
 live-exercised under §36.14's conditional boundary. Further real writes or
 re-registration require explicit user authorization.
 
-## Run a persistent monitor
+## Journal Run
 
-The normal persistent-monitor entry point is:
+Use Settings to select **Start month** and **End month**, Save, then click **Run**.
+Equal months select a single natural month; a range includes every day from the
+first day of the start month to the last day of the end month. An unconfigured
+Settings draft preselects the current month. Saved months remain fixed.
 
-```bash
-uv run literature-monitor run --config config.example.yaml
-```
-
-`run` reads the journal whitelist, keyword expression, output directory, date
-policy, and log level from the monitor YAML. It then runs the complete production
-path: OpenAlex primary discovery, Crossref secondary discovery and DOI
-supplementation, evidence consolidation, local FTS5 filtering, canonicalization,
-and Paper / Author / Inbox materialization.
-
-On a TTY, `run` renders the five workflow stages, per-source Activities,
-reliable counters, elapsed time, and each source's ETA when available. CLI
-serializes concurrent progress callbacks; non-TTY progress remains intact plain
-event lines on `stderr`. Machine/data output on `stdout` and exit codes are
-unchanged.
-
-Candidate membership remains based on the inclusive publication-date window.
-Crossref `indexed` timestamps validate Crossref metadata revisions only; they
-do not change candidate membership to an update-date window, recover
-late-indexed records, provide watermark synchronization, or resume checkpoints.
-
-Transport remains synchronous and pooled, with one client per Provider
-execution. One OpenAlex and one Crossref discovery branch may run concurrently;
-there is no async rewrite or journal/ISSN/DOI worker pool. Dependent Crossref DOI
-supplementation waits for both discovery branches.
-
-OpenAlex batches configured ISSN-L Source resolution with at most 100 identifiers
-per batch, then uses multi-Source thin Works discovery. The resolved valid aliases
-are transient evidence for bounded compatible Crossref queries, not new durable
-Journal identities. `primary_location`, its `is_published` flag,
-and Source/journal attribution remain discovery evidence. No retained-work
-location requests or OpenAlex revision state are used.
-
-OpenAlex Provider evidence eligibility is separate from `CanonicalPaper`
-eligibility. A valid Work identity, trustworthy Source, and usable DOI or title
-allow evidence to continue even with empty authors, missing abstract, or missing
-publication date. Ordinary sparsity does not create ingestion-time missing-field
-warnings. Normal Source absence is `UNAVAILABLE` with a warning, while
-unrecovered remote request failures and Source/journal identity failures remain
-`FAILED` with an error.
-
-Crossref establishes current DOI membership through live manifests. Matching
-current `indexed` revisions permit normalized metadata reuse; changed or new
-records obtain current full metadata. DOI supplementation fills only Crossref
-gaps anchored by current OpenAlex evidence. Alias lookups preserve requested-DOI
-coverage while evidence and state use the resolved prime DOI.
-
-DOI-anchored partial OpenAlex evidence can receive Crossref supplementation
-even without an OpenAlex title or authors. Title-only evidence without a DOI
-can proceed directly to local matching without an ingestion-time `missing_doi`
-warning or a DOI-supplement request/coverage unit. After consolidation, an
-eligible cluster with no usable title, author keywords, or abstract receives
-an `unsearchable` warning and is excluded from matcher candidates, including for
-pure `NOT` and complement expressions. This is a search-boundary warning,
-not a Provider retrieval issue. Matched evidence needs a valid normalized DOI
-for `CanonicalPaper`; pure no-DOI evidence is skipped with a canonicalization
-`missing_doi` warning and creates no Paper. It also needs a title, journal, and
-at least one author; unmet metadata eligibility produces `insufficient_metadata`.
-Evidence grouping and representative selection remain in use without generic
-field-by-field Provider synthesis.
-
-Normalized valid DOI is the only supported canonical work identity: the same
-DOI produces one Paper, and different DOIs remain separate regardless of title,
-authors, other identifiers or relations. Raw Crossref relations remain provider
-metadata and have no canonical grouping effect. Publication-date precedence is
-`published-print → published-online → published → issued → representative publication_date`.
-Only complete dates participate in date selection; missing month/day components
-are never fabricated.
-
-Candidate Eligibility is evaluated after current Crossref supplementation and
-before evidence assembly and local matching. Exact Crossref `journal-article`
-with compatible identifier evidence for the configured ISSN-L context is strong
-eligible evidence; `journal-issue` is excluded
-before matching. An explicit non-journal type without a target ISSN is
-`INELIGIBLE`; conflicting type/venue evidence, `other`, missing type, or an
-article with explicit non-target ISSNs is `SCOPE_DISPUTED` under SPEC §32.
-OpenAlex `type` itself never vetoes a candidate.
-
-When Crossref has no exact record, OpenAlex `primary_location.is_published`
-provides the fallback: `UNAVAILABLE` and DOI-less evidence use true → eligible,
-false → ineligible, unknown → disputed. `FAILED` uses true → eligible and
-false/unknown → disputed, retaining the Provider execution error. Disputed
-evidence continues to matching to protect recall. Unmatched or unsearchable
-pure disputes remain diagnostics only; matched disputes warn unless the same
-cluster has strong eligible evidence, in which case the dispute remains a
-diagnostic. An empty mixed eligible/disputed cluster retains both its genuine
-unsearchable warning and scope diagnostic.
-
-Non-candidate exclusion and scope dispute are typed transient Run diagnostics.
-CLI completion
-shows their logical-group counts and context separately from warnings/errors;
-Web technical details appear in Advanced & Diagnostics → Current run.
-Diagnostics alone do not change exit codes or `RunOutcome` and are not written
-to last-run, Paper/Author Markdown, monitor YAML, or Provider state.
-
-After DOI grouping, compatible ordered author display forms may compare
-equivalent while preserving author sequence and representative display names.
-Abstract comparison uses deterministic HTML/JATS, entity, Unicode, whitespace,
-punctuation, and structural-label normalization, preserving substantive text
-and the selected raw abstract. These metadata comparisons do not create work
-identity. No fuzzy, embedding, or LLM similarity is used.
-
-OpenAlex Works discovery keeps cursor pagination at `per_page=100`. Crossref
-uses bounded manifest retrieval, splitting ISSNs and date intervals as needed,
-then traversing cursors for oversized single days, with `rows=1000`. A Crossref
-client uses valid `X-Rate-Limit-Limit` and `X-Rate-Limit-Interval` response
-metadata to pace later requests without rate-limit probes or count-only
-requests. In the current source tree, pacing uses elapsed-aware, process-local
-monotonic timing, with independent Provider-derived state for singleton DOI
-and list/filter request classes. Network and processing time count toward the
-interval; retry and pacing deadlines share the remaining wait instead of
-adding duplicate full waits. Rate state is not persisted. HTTP 429, HTTP 5xx,
-and supported timeout/transport failures receive at most three attempts. The
-1-second/2-second retry fallback remains; elapsed time counts toward those
-deadlines too, so actual waits can be shorter.
-Endpoint-specific 404 handling is unchanged, and other HTTP 4xx responses are
-not retried. Retry and pacing state remain process-local and transient.
-
-Each production run also carries retrieval coverage for the work units it
-actually executed: OpenAlex discovery per configured journal, Crossref discovery
-per journal/queried ISSN, and Crossref DOI supplementation per lookup that
-entered the pending set. Coverage distinguishes complete, partial, unavailable,
-and failed execution without claiming that the bibliographic universe itself is
-complete. CLI completion summaries and the GUI finished-run panel show compact
-per-component counts. Completion reporting separately shows Provider-state
-usage: Crossref metadata reused/refreshed/new. Reuse does not remove live
-coverage units or reduce evidence
-statistics. Usage counts are transient completion information, not durable
-telemetry.
-
-After a normal production `run` completes, the application attempts to
-atomically replace one last-run snapshot. When replacement succeeds, that file
-represents the latest successfully persisted completed production run and
-contains its resolved date range, recorded outcome, and ordered coverage units.
-It does not persist provider payloads, issue text, statistics, workflow
-decisions, cursors, retry state, timestamps, or historical runs. Snapshot
-persistence is diagnostic metadata only; a write failure is reported as a
-warning after normal Paper materialization, does not roll back the workspace,
-and leaves any previously valid snapshot in place.
-
-The selected output directory contains:
-
-```text
-<output-dir>/
-├── Inbox.base
-├── Papers/
-├── Authors/
-└── .literature-monitor/
-    ├── last-run.json
-    └── provider-state.sqlite3
-```
-
-`.literature-monitor/last-run.json` is application-owned metadata for the latest
-successfully persisted completed production run, not Paper/Author workflow state. Only one snapshot is retained; it is
-not run history. Deleting it does not remove Papers, Authors, decisions, or
-notes, and the next normal run remains valid. Materialization scanners do not
-treat this hidden metadata directory as Paper data.
-
-`.literature-monitor/provider-state.sqlite3` is application-owned,
-reconstructible optimization state. It stores only normalized Crossref records,
-their revisions and consumed-metadata hashes. It is not Paper/Author workflow
-state, candidate membership, run history, or checkpoint/cursor state. Normal
-production Run automatically uses it, but live Provider evidence always determines
-current membership. Matching Crossref revisions permit metadata reuse; changed
-revisions refresh live. Missing state causes an ordinary all-live Run.
-
-Current Provider-state logical schema is **v3, Crossref-only**. Old v1/v2 state
-is incompatible: Run uses all-live retrieval and only safely replaces it at the
-normal persistence boundary with a successfully constructed fresh database.
-There is no row-preserving migration or reuse of old rows.
-
-Corrupt or incompatible regular state causes an all-live Run with a warning;
-a successfully constructed fresh DB can safely replace that invalid regular
-file. Unsafe objects such as symlinks or directories at the state path or its
-metadata directory remain untouched. Provider-state persistence follows
-Paper/Author materialization; a persistence failure preserves previous state
-where possible and does not roll back workspace files. Provider failures remain
-isolated so successful evidence from other requests or Providers stays usable.
-
-For v0.4.2 compatibility, an old `provider-cache.json` may remain on disk
-untouched. Neither v0.4.3 nor the current source tree reads, writes, deletes,
-migrates, or modifies it. It has
-no authority over current execution and needs no migration. The deprecated
-`run --reuse-provider-cache` compatibility flag expired after v0.5.0 and is
-removed in released v0.5.1; argparse now rejects it as an unknown option.
-Normal Run continues to reuse revision-validated Provider state automatically.
-
-New last-run snapshots remain schema v2 and write `reused_units: []`. Valid
-historical v1/v2 snapshots remain readable, and `last-run` may still display
-historical v2 cache-reuse identities and recorded outcomes without
-reinterpretation under the current warning/error policy. Current Provider-state usage counts are
-not persisted into last-run.
-
-Paper Markdown remains the durable workflow state: UUIDs, review status, human
-notes, unknown human-owned frontmatter, and unmanaged sections survive reruns
-according to current-schema materialization rules. Sources remain provenance.
-The retired pre-v0.5.2 schema used `versions`, `preferred_version` and managed
-`## Versions`; current Papers have none of these. Old-schema frontmatter is
-explicitly rejected, without migration or repair. `Inbox.base` is presentation
-only. It is created when missing and an existing customized file is preserved.
-
-Read the snapshot without contacting providers or modifying the workspace:
+The supported command is the local Web UI launcher:
 
 ```bash
-uv run literature-monitor last-run --config monitor.yaml
+uv run literature-monitor gui --config monitor.yaml
 ```
 
-A valid snapshot prints its resolved date range, recorded outcome, and the same
-compact per-component coverage counts used by run summaries. Missing or invalid
-snapshot data exits `1`; invalid monitor configuration exits `2`.
+Run, validation, discovery, canonicalization, materialization and export CLI
+subcommands are retired. Journal Run and workflow actions are used through the UI.
 
-**last-run snapshot ≠ Provider state ≠ checkpoint.** `last-run.json` alone
-never authorizes request skipping, changes the discovery window, restores a
-cursor, or alters canonicalization/materialization. Automatic state reuse
-requires current live membership and matching revisions; it is not resume or
-synchronization state.
-
-The supported decision model is one monitor to one decision workspace. Paper
-UUID stability, `candidate` / `rejected` / `kept` / `exported`
-decisions, human notes, and other durable Paper state are local to that
-workspace. The same research work is not guaranteed to receive the same UUID in
-another workspace, and Reject/Keep decisions are not inherited across monitors.
-There is no global cross-monitor decision registry.
-
-### Persistent monitor fields and defaults
-
-A monitor accepts `name`, `venue_whitelist`, `keyword_expression`,
-`output_dir`, `from_date`, `to_date`, `window_days`, and `log_level`.
-`keyword_expression` is the only core field without a default and must not be
-missing, null, or empty.
-
-| Field | Default when omitted |
-| --- | --- |
-| `name` | monitor config filename stem |
-| `venue_whitelist` | `<config-directory>/list.md` |
-| `output_dir` | `<config-directory>/workspace` |
-| date policy | rolling 14 days |
-| `log_level` | `INFO` |
-
-Relative `venue_whitelist` and `output_dir` paths are always resolved from
-the monitor config directory, not the shell working directory. The loader does
-not search parent directories or other locations for a replacement `list.md`.
-
-For multiple monitors, use one monitor per config directory or configure a
-different `output_dir` for each monitor. If two monitor YAML files live in the
-same directory and both omit `output_dir`, the existing default rule resolves
-both to the same `<config-directory>/workspace`. The program does not reject
-that arrangement, but shared-workspace multi-monitor operation is unsupported /
-undefined advanced usage and has no cross-monitor UUID or decision-semantics
-guarantee.
-
-A minimal monitor is therefore:
+### Monitor configuration
 
 ```yaml
+name: Statistical ML
+venue_whitelist: list.md
 keyword_expression: 'statist*'
+output_dir: ./workspace
+from_month: '2026-10'
+to_month: '2026-10'
+log_level: INFO
 ```
 
-This is usable only when a valid `list.md` exists beside the monitor file. Its
-effective defaults are the config filename stem for `name`, `./workspace`
-relative to the config file for output, a rolling 14-day window, and `INFO`
-logging.
+`keyword_expression`, `from_month` and `to_month` are required. Relative paths
+resolve from the configuration directory. Defaults remain the configuration
+filename stem for `name`, `list.md` for the whitelist, `workspace` for output,
+and `INFO` for logging. Institution settings remain independent.
 
-### Date policy and temporary CLI overrides
+Old `from_date`, `to_date` and `window_days` fields are no longer accepted.
+Replace them with explicit `from_month` and `to_month` values. There is no legacy
+configuration migration or special Save repair path. Later month changes use
+Settings and Save.
 
-Persistent date policy supports five forms: no date fields, `window_days` only,
-`from_date + to_date`, `from_date + window_days`, or
-`to_date + window_days`. Date ranges are inclusive. For example, with
-`window_days: 14` and today equal to 2026-09-21, the resolved range is
-2026-09-08 through 2026-09-21 inclusive.
+### Discovery and capture
 
-`from_date` alone, `to_date` alone, all three date fields together,
-`window_days < 1`, and `from_date > to_date` are invalid.
+OpenAlex and Crossref discover in parallel using each Provider's native
+Publication Date. OpenAlex Primary Source IDs and trusted Crossref ISSN-L/aliases
+are independent discovery paths. A failure in one Provider does not discard
+usable evidence from the other. There is no automatic backfill or watermark.
 
-`run` and the existing date-bearing diagnostic commands accept temporary
-`--from-date`, `--to-date`, and `--window-days` overrides:
+Run reads transient DOI/UUID identities from Paper Markdown before obtaining
+Crossref full metadata. Reliable saved DOIs skip metadata retrieval, keyword
+matching and canonicalization regardless of workflow status. Duplicate or
+uncertain identities are reported rather than counted as Already Saved.
+Explicit Crossref `journal-issue` records are excluded across DOI paths;
+missing or conflicting types do not imply exclusion. Publication Stage and
+`is_published` are not candidate rules.
 
-```bash
-uv run literature-monitor run \
-  --config monitor.yaml \
-  --window-days 30
+New DOI candidates first match the Title and Abstract returned by trusted OpenAlex
+Discovery. A match with enough metadata to Capture needs no extra Crossref full
+metadata. A complete OpenAlex Title/Abstract that does not match excludes the DOI,
+even if Crossref might have matched: this is an intentional retrieval limitation.
+Missing OpenAlex search fields may be filled on demand from Crossref; valid
+OpenAlex fields retain priority for matching. Crossref-only DOIs use Crossref
+metadata. Failed retrieval is reported as a failure rather than a trusted nonmatch.
+Required metadata uses the current-revision cache and shared invocation results.
+OpenAlex-only matches still undergo DOI/Prime/Alias identity confirmation, using
+thin evidence where possible. Previously rejected final DOIs are not revived by
+later aliases or metadata.
 
-uv run literature-monitor run \
-  --config monitor.yaml \
-  --from-date 2026-01-01 \
-  --to-date 2026-06-30
-```
+When Crossref metadata was actually obtained, Title and ordered Authors retain
+field priority with OpenAlex fallback. Abstract uses the longer cleaned available
+Provider text (Crossref wins equal lengths); no request is made just to compare it.
+Ordinary differences between Providers do not produce metadata warnings; identity
+and same-Provider evidence problems still do. OpenAlex author names prefer
+`raw_author_name`; compatible stable IDs may supplement the chosen ordered names.
+Capture requires DOI, Title and Journal; Authors, Abstract and date may be absent.
+Empty authors are stored as `authors: []` without placeholder notes.
 
-Once any CLI date field is supplied, the CLI fields form the complete date
-policy for that invocation; missing pieces are not borrowed from the monitor
-YAML. Thus config `window_days: 14` combined with CLI
-`--to-date 2026-09-01` is invalid. CLI date overrides are ephemeral and are
-never written back to the monitor file.
+Publication dates retain actual precision as quoted `YYYY`, `YYYY-MM` or
+`YYYY-MM-DD` strings. Complete dates preserve print → online → published → issued
+precedence and existing complete Provider fallback. Only when no complete date
+exists do Crossref partial dates apply in the same source order, choosing higher
+precision and then the earliest value within one source. Components are never
+combined or invented. This affects new captures only; saved Paper dates are not
+repaired or overwritten by Run.
+Run creates new Paper/Author notes only. Existing metadata, workflow, Sources,
+Enrichment state and human content remain unchanged. No new Paper needing Authors
+means no Author scan. Existing operation locks and safe create-only writes remain.
 
-### Runtime environment and non-features
+### Run results and cache
 
-Optional provider credentials/contact information remain environment settings,
-not monitor fields: `OPENALEX_API_KEY` and `CROSSREF_MAILTO`.
+**New Papers** counts actual successful creations. **Already Saved** counts
+reliable distinct final DOIs discovered in the selected journals/months before
+keyword matching; it does not mean those Papers were matched again.
 
-The workflow does not add monitor/workspace UUIDs, workspace ownership
-markers, a global research-work or decision registry, last-successful-run
-synchronization state, provider cursors/watermarks/checkpoints, incremental
-delta / “What's New” state, scheduler or daemon durable state, notifications,
-run history, or a workflow/execution database. The last-run snapshot is
-observational metadata; Provider state is a reconstructible revision-validated
-optimization, and every Run still establishes live membership.
-Current Zotero Import uses the separate Connector's native parent-save
-confirmation and transient batch state under §42. It does not require My Library
-preflight or exact-DOI parent reconciliation. Custom PDF acquisition/staging,
-publisher-login automation and the retired Browser Companion remain outside
-the current workflow.
+Discovery Coverage describes manifest traversal. Crossref metadata retrieval
+successes/failures are reported separately in Current run. Missing Indexed
+revisions do not make an otherwise complete manifest incomplete or trigger date
+splitting; they also never authorize stale cache reuse. Real paging, request and
+identity failures remain visible. Zero-new runs still record the result and Coverage.
 
-## Validate configuration
+Provider SQLite schema v3 and Last Run Snapshot v2 are retained; historical v1/v2
+snapshots keep their original day-level dates. No persistent DOI index, month
+cache, metadata history or lifecycle state is added. Empty cache changes cause
+no write transaction.
 
-`config.example.yaml` contains a syntax example, not a real research query.
-Before making any provider request, `validate` loads the monitor and journal
-whitelist, validates keyword parser syntax and date-policy form, runs the same
-FTS5-dependent lexical semantic validation used by production local filtering,
-and resolves the monitor's effective runtime date range. This catches
-parser-valid but lexically invalid Prefix/Proximity operands, an unavailable
-SQLite FTS5 backend, and date arithmetic outside the supported
-`datetime.date` bounds before provider work begins.
+### Workspace compatibility
 
-```bash
-uv run literature-monitor validate --config config.example.yaml
-```
+Normal existing Workspaces can be reused. If incompatible or conflicting data
+must be discarded, use the existing Settings Workspace Reset and type `RESET`.
+First Save the new month configuration. Reset permanently deletes the configured
+Workspace and starts no Run; a later explicit Run recreates supported outputs.
+External `list.md`, `monitor.yaml`, Zotero and Chrome data are outside Reset.
+There is no data migration or Undo. Older application versions may reject Papers
+with empty Authors; reverting code does not restore deleted data.
 
-After local preflight succeeds, the command contacts OpenAlex only to resolve
-every configured journal Source through the same batched resolver as production,
-with up to 100 configured ISSN-L values per batch. Source kind, identity and
-identifier membership checks apply, including conflicting-Source rejection.
-Journal titles do not match or veto identity; each malformed alias is excluded
-and diagnosed independently. OpenAlex supports anonymous Source
-lookups; set `OPENALEX_API_KEY` in the environment to use an API key. Local
-configuration or runtime-preflight failures exit with status `2`; OpenAlex
-Source-resolution
-errors exit with status `1`; warning-only and fully valid validation exit with
-status `0`.
+### Provider environment
 
-Normal Source absence yields `VALID_WITH_WARNINGS`; an unrecovered remote
-Source request failure or identity-validation failure yields `SOURCE_ERRORS`.
-
-TTY `validate` shows validation-specific progress, including reliable journal
-Source-resolution counts, without presenting the five-stage Run model. Non-TTY
-validation progress uses the same plain `stderr` event-line convention.
-
-`validate` does not request OpenAlex Works, contact Crossref or Semantic
-Scholar, read/write Provider state, check whether `output_dir` is writable,
-create a workspace, or materialize Paper, Author, or Inbox files. OpenAlex Source
-resolution is its only network/provider validation.
-
-## Run tests
-
-```bash
-uv run pytest
-```
-
-## End-to-end validation
-
-The default `uv run pytest` suite includes deterministic full-cycle CLI
-regressions using local HTTP fixtures. The representative persistent-monitor
-lifecycle enters through `run --config`, while explicit `materialize` coverage
-remains for the diagnostic surface and an overlapping multi-journal
-rerun. The CLI can also be used for manual smoke validation against the real
-OpenAlex and Crossref providers, but those results depend on external service
-availability and are not part of the deterministic default suite. Optional
-credentials and contact details are supplied only through `OPENALEX_API_KEY`
-and `CROSSREF_MAILTO` environment variables.
-
-## Diagnostic and lower-level commands
-
-`run` is the normal persistent-monitor entry point. The commands below remain
-available as explicit diagnostic or lower-level surfaces for provider inspection,
-search diagnostics, canonicalization diagnostics, and diagnostic materialization.
-
-## Diagnose OpenAlex discovery
-
-The OpenAlex discovery diagnostic resolves each configured ISSN-L,
-retrieves works from the resolved OpenAlex Source in an inclusive date window,
-and writes normalized records as NDJSON to stdout. Logs are written to stderr.
-The NDJSON shape is a validation surface for OpenAlex discovery, not a stable
-export format.
-
-```bash
-uv run literature-monitor openalex-discover \
-  --config config.example.yaml \
-  --issn-l "0006-341X" \
-  --from-date 2026-01-01 \
-  --to-date 2026-09-18
-```
-
-OpenAlex supports anonymous requests. For a larger run, set a free API key in
-the environment without placing it in repository configuration:
-
-```bash
-OPENALEX_API_KEY=your-key uv run literature-monitor openalex-discover \
-  --config config.example.yaml \
-  --from-date 2026-01-01 \
-  --to-date 2026-01-31
-```
-
-The OpenAlex discovery diagnostic does not perform keyword filtering, Crossref
-enrichment, Markdown materialization, Zotero integration, conference monitoring,
-or persistence.
-
-## Diagnose Crossref discovery
-
-The Crossref-only discovery diagnostic queries each configured ISSN-L
-within the inclusive publication-date window and writes normalized provider
-records as NDJSON. It does not construct an OpenAlex client or apply local
-keyword filtering.
-
-```bash
-uv run literature-monitor crossref-discover \
-  --config config.example.yaml \
-  --issn-l "0006-341X" \
-  --from-date 2026-01-20 \
-  --to-date 2026-01-25
-```
-
-The output is diagnostic rather than a stable export. `CROSSREF_MAILTO` may be
-set in the environment to use Crossref's polite API pool.
-
-## Diagnose local keyword filtering
-
-The local keyword filtering diagnostic runs venue-first OpenAlex discovery and
-then evaluates the configured keyword expression with the local FTS5 matcher.
-It writes only retained original OpenAlex records as NDJSON to stdout and
-reports discovered, retained, and filtered-out counts on stderr. This NDJSON is
-not a stable export format.
-
-Use the configured expression:
-
-```bash
-uv run literature-monitor openalex-filter \
-  --config config.example.yaml \
-  --issn-l "0006-341X" \
-  --from-date 2026-01-20 \
-  --to-date 2026-01-25
-```
-
-For a one-run diagnostic expression, use an override. It is not written to the
-configuration file:
-
-```bash
-uv run literature-monitor openalex-filter \
-  --config config.example.yaml \
-  --issn-l "0006-341X" \
-  --from-date 2026-01-20 \
-  --to-date 2026-01-25 \
-  --keyword-expression '"multiview learning"'
-```
-
-Prefix and Proximity operands may be combined with the same Boolean grammar:
-
-```bash
-uv run literature-monitor openalex-filter \
-  --config config.example.yaml \
-  --issn-l "0006-341X" \
-  --from-date 2026-01-20 \
-  --to-date 2026-01-25 \
-  --keyword-expression 'statist* AND "causal inference"~1'
-```
-
-The local keyword filtering diagnostic does not perform Crossref enrichment,
-canonicalization, Markdown materialization, Zotero integration, conference
-monitoring, or persistence.
-
-In the current source tree, filtering uses `record.to_evidence()` and its Provider
-searchable projection. Partial title-only or DOI-only records, empty authors,
-and missing abstract/publication date are supported. Records with no title,
-author keywords, or abstract are filtered out before the matcher, so an empty
-projection cannot be retained through `NOT`. Searchable records keep the normal
-FTS5 semantics and discovery order; output remains the original OpenAlex records.
-Legacy `openalex-filter` and `crossref-enrich` do not apply the production
-Candidate Eligibility boundary described above.
+`OPENALEX_API_KEY` and `CROSSREF_MAILTO` remain environment settings. This change
+adds no credentials, Provider, automatic Enrichment, Zotero integration, browser
+session management, scheduler or synchronization engine.
 
 ## Keyword matching semantics
 
-Local filtering searches only Title, true author- or publisher-supplied Author
-Keywords, and Abstract. Each title, abstract, and individual author keyword is
+Journal Run applies its source-selection policy to Title and Abstract before
+local matching. The shared lexical engine also supports explicitly supplied Author
+Keywords; Provider Discovery currently supplies none. Each title, abstract, and individual author keyword is
 an independent searchable unit. Provider topics, fields of study, and inferred
 topics are not searchable.
 
 Expressions support Terms, quoted phrases, Prefix operands such as `statist*`,
-Proximity operands such as `"causal inference"~1`, `AND`, `OR`, `NOT`, and
-parentheses. Before matching, text is normalized with Unicode NFKC, Unicode
+Proximity operands such as `"causal inference"~1`, `AND`, `OR`, and
+parentheses. The standalone `NOT` operator (case-insensitive) is rejected in
+Settings and before Run; old expressions must be edited explicitly. Quoted `"not"`
+remains ordinary search text. Before matching, text is normalized with Unicode NFKC, Unicode
 casefold, and whitespace normalization, then tokenized with SQLite FTS5
 `unicode61` semantics. Each Term's complete token sequence must occur
 contiguously within one searchable unit. For example, `strasse` matches
@@ -896,150 +564,18 @@ provider title and the Proximity operand in another provider abstract.
 Each filtering stage builds a transient in-memory SQLite FTS5 index and discards
 it after the run. The index is rebuilt as needed, writes no persistent search
 database, and is not a second durable source of truth beside Markdown. If the
-current Python SQLite runtime lacks FTS5, commands that require local filtering
-report a clear error and exit without falling back to the previous substring
+current Python SQLite runtime lacks FTS5, Run reports a clear error and stops without falling back to the previous substring
 matcher. Local matching does not provide synonym expansion, stemming, arbitrary
 user-facing FTS5 `NEAR(...)` syntax, wildcard forms beyond the defined trailing
 `*` Prefix, `?` wildcard syntax, BM25 ranking, fuzzy search, or semantic
 search.
-
-## Diagnose Crossref DOI enrichment
-
-This historical stage diagnostic runs venue-first OpenAlex discovery, applies
-the keyword expression with the same local FTS5 semantics described above, and
-performs Crossref DOI lookups only for retained records.
-It preserves each original OpenAlex record and attaches normalized Crossref
-provider evidence when available. Records without a DOI, and records that are
-not present in Crossref, remain in the output with `crossref: null`.
-
-Filtering uses the same Provider evidence projections and excludes empty
-projections before matching, including for pure `NOT`. The historical order
-remains discovery → local filtering → enrichment: a DOI-only record with no
-searchable fields is filtered out before any Crossref lookup. Retained DOI-less
-records may still produce the historical diagnostic `missing_doi` warning.
-That warning belongs to this enrichment diagnostic; production Run does not
-emit an unconditional missing-DOI warning. Counts include records filtered out
-for lacking searchable fields.
-
-```bash
-uv run literature-monitor crossref-enrich \
-  --config config.example.yaml \
-  --issn-l "0006-341X" \
-  --from-date 2026-01-20 \
-  --to-date 2026-01-25 \
-  --keyword-expression '"multiview learning"'
-```
-
-Crossref access is anonymous. An optional contact address can be supplied for
-the polite API pool without changing repository configuration:
-
-```bash
-CROSSREF_MAILTO=you@example.com uv run literature-monitor crossref-enrich \
-  --config config.example.yaml \
-  --issn-l "0006-341X" \
-  --from-date 2026-01-20 \
-  --to-date 2026-01-25 \
-  --keyword-expression '"multiview learning"'
-```
-
-stdout is diagnostic `EnrichedWorkRecord` NDJSON and is not a stable export
-format. This historical diagnostic does not merge Crossref fields into canonical
-metadata and does not implement canonical grouping, UUID
-creation, Markdown materialization, Zotero integration, or persistence.
-
-## Diagnose DOI-first canonicalization
-
-The canonicalization diagnostic uses current live retrieval algorithms:
-batched OpenAlex discovery, Crossref manifest/full retrieval and DOI
-supplementation. It neither reads nor writes Provider state, modifies
-`last-run.json`, nor touches old `provider-cache.json`. Persistent revision reuse
-does not apply to diagnostics. All available evidence is consolidated before
-local FTS5 filtering. Retained valid DOI groups become canonical papers; pure
-no-DOI evidence is skipped. Different DOIs remain separate, and neither relations
-nor title/author similarity establish identity.
-
-```bash
-uv run literature-monitor canonicalize \
-  --config config.example.yaml \
-  --issn-l "0006-341X" \
-  --from-date 2026-01-20 \
-  --to-date 2026-01-25 \
-  --keyword-expression '"multiview learning"'
-```
-
-stdout is diagnostic `CanonicalPaper` NDJSON with DOI-bound identity, selected
-bibliographic metadata and provider provenance; it is not a stable export format.
-Date selection follows the precedence above without inventing partial dates.
-
-The canonicalization diagnostic does not implement Markdown materialization,
-persistent rerun state, stable UUID recovery across independent runs, or Zotero
-export.
-
-## Diagnostic materialization
-
-`materialize` remains an explicit diagnostic entry point. It
-runs the same OpenAlex/Crossref consolidation-before-filter production pipeline
-as `run`, but it still requires an explicit CLI `--output-dir` and continues to
-support the existing diagnostic `--issn-l` and `--keyword-expression`
-overrides. The normal `run` command instead takes its output directory,
-journal whitelist, and keyword expression from the monitor definition:
-
-```bash
-uv run literature-monitor materialize \
-  --config config.example.yaml \
-  --issn-l "0006-341X" \
-  --from-date 2026-01-20 \
-  --to-date 2026-01-25 \
-  --keyword-expression '"multiview learning"' \
-  --output-dir /path/to/obsidian-vault/literature-monitor
-```
-
-The command writes to:
-
-```text
-<output-dir>/
-├── Inbox.base
-├── Papers/
-└── Authors/
-```
-
-This diagnostic `materialize` command uses the current live retrieval algorithms
-without persistent revision reuse. It neither reads nor writes Provider state,
-modifies `.literature-monitor/last-run.json`, nor touches old `provider-cache.json`.
-Only normal production `run` writes Provider state and last-run metadata.
-
-Capture-Only materialization matches existing Papers by normalized DOI and
-preserves their workspace UUID and path. Title, authors, Sources and other
-external identifiers never provide fallback work identity. A new valid DOI
-creates one Paper from this run's Canonical Metadata and the necessary Authors;
-provider consolidation still happens within the current run.
-
-Already Saved means a unique, trustworthy DOI/UUID match. These Papers are skipped
-without comparing or rewriting any metadata, Sources, journal attribution,
-workflow fields, custom frontmatter or body content. Missing metadata is not
-repaired and ordinary metadata differences do not generate warnings. Existing
-Author notes are reused safely without supplementing identifiers or other fields.
-Opaque Author notes remain reusable at their existing deterministic paths.
-Existing customized `Inbox.base` bytes are preserved.
-
-Malformed non-identity metadata does not prevent a reliable DOI match. Duplicate
-DOIs/UUIDs, conflicting DOI identifiers and unsupported legacy schemas remain
-errors and are never counted as Already Saved. Unreadable or unidentifiable
-Paper candidates make the identity index incomplete: no new Paper or Author is
-created and uncertain matches are not counted. Localized identity conflicts
-with fully enumerable DOIs leave unrelated capture usable. No migration, repair,
-automatic merge, deletion or renaming of existing notes is performed.
-
-CLI and Web report **New Papers** and **Already Saved**, without an Updated
-Papers metric. A clean repeat run with zero new Papers completes normally.
-See SPEC §46 for the current contract; earlier metadata-update rules are historical.
 
 ### Review candidates in Obsidian
 
 Open `<output-dir>/Inbox.base`, review candidate papers in the **Inbox** view,
 and change each Paper's `status` to `kept` or `rejected`. The Paper moves
 automatically between the status-derived **Inbox**, **Kept**, **Rejected**, and
-**Exported** views. Use `export-kept` for the Zotero handoff.
+**Exported** views. Use the Web UI Kept view for native Zotero Import.
 
 Paper Markdown remains the durable workflow state. `Inbox.base` contains only
 presentation configuration, so there is no Inbox synchronization command. It
@@ -1051,32 +587,3 @@ The Review Inbox uses Obsidian Bases and was validated with Obsidian Desktop
 1.13.7. Bases is the only additional presentation capability used. No
 community plugin, Dataview, custom CSS, or additional Python runtime dependency
 is required.
-
-## Export Kept Papers for Zotero
-
-The export command reads the existing durable Paper Markdown without running
-discovery, enrichment, canonicalization, or materialization:
-
-```bash
-uv run literature-monitor export-kept \
-  --output-dir /path/to/obsidian-vault/literature-monitor
-```
-
-Only Papers with `status: kept` are written to stdout. All other statuses
-are skipped. Each kept Paper produces
-one line containing its normalized DOI. Current-schema Papers require a valid
-DOI; DOI-less or unsupported old-schema files are reported as invalid rather
-than exported through another identifier. Malformed Paper files are reported on
-stderr without blocking other valid entries, and make the command exit with
-status 1. The output can be redirected to a file:
-
-```bash
-uv run literature-monitor export-kept \
-  --output-dir /path/to/obsidian-vault/literature-monitor \
-  > kept-for-zotero.txt
-```
-
-The command does not call Zotero APIs or change Markdown state. Manual downstream
-use of this CLI output does not automatically reconcile Paper state. Web
-**Import to Zotero** uses the separate native acceptance flow described above
-to persist `kept → exported`.

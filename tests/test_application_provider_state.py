@@ -500,3 +500,11 @@ def test_state_specific_record_serialization_preserves_excluded_revision(tmp_pat
     state = ps.CrossrefRecordState.from_record(restored)
     ps.update_provider_state(tmp_path, ps.ProviderState((state,)))
     assert ps.read_provider_state(tmp_path).state.crossref_records == (state,)
+
+
+def test_empty_cache_change_does_not_create_or_open_a_database(tmp_path,monkeypatch):
+    ps.update_provider_state(tmp_path,ps.ProviderState())
+    assert not (tmp_path/'.literature-monitor').exists()
+    ps.update_provider_state(tmp_path,changes())
+    monkeypatch.setattr(ps,'_connect',lambda *a,**kw:pytest.fail('empty update opened SQLite'))
+    ps.update_provider_state(tmp_path,ps.ProviderState())

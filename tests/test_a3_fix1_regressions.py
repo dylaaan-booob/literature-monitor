@@ -7,9 +7,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from literature_monitor.application.settings import load_settings, save_settings, SettingsSaveOutcome
-from literature_monitor.application.candidate_eligibility import filter_candidate_evidence, CandidateEligibility
+from literature_monitor.application.candidate_eligibility import openalex_attribution
 from literature_monitor.config import JournalConfig, PublisherConfig, render_journal_whitelist_text, render_settings_list_text, load_config
-from literature_monitor.crossref import plan_crossref_queries, discover_crossref_journals, CrossrefDiscoveryResult
+from literature_monitor.crossref import plan_crossref_queries, CrossrefDiscoveryResult
 from literature_monitor.openalex import ResolvedSource, DiscoveryResult
 from literature_monitor.web.app import create_app
 from test_application_settings import write_valid_settings_files
@@ -124,50 +124,18 @@ def test_shared_source_remains_canonical_only_and_conflicted():
     assert all(p.excluded_aliases == (X,) and p.diagnostics for p in plans)
 
 
-@pytest.mark.parametrize('lower_level', [False, True])
-def test_discovery_surfaces_conflict_without_request_or_coverage_for_excluded_alias(lower_level):
+def test_discovery_surfaces_conflict_without_request_or_coverage_for_excluded_alias():
     journals, sources = evidence()
-    if lower_level:
-        class EmptyClient:
-            def iter_journal_work_pages(self, issn, *args, **kwargs):
-                requested.append(issn)
-                yield {'message': {'items': []}}
-        requested = []
-        result = discover_crossref_journals(EmptyClient(), journals, DAY, DAY,
-            retrieved_at=datetime(2026, 1, 1, tzinfo=timezone.utc), resolved_sources=sources)
-        assert requested == [A, B]
-    else:
-        from test_application_crossref_retrieval import HTTP, work_list
-        http = HTTP(lambda r: work_list())
-        result = http.retrieval().discover(journals, DAY, DAY, resolved_sources=sources).discovery
-        assert all(X not in r.url.params['filter'] for r in http.requests)
+    from test_application_crossref_retrieval import HTTP, work_list, discover
+    http = HTTP(lambda r: work_list())
+    result = discover(http.retrieval(), journals, DAY, DAY, resolved_sources=sources).discovery
+    assert all(X not in r.url.params['filter'] for r in http.requests)
     assert [u.issn for u in result.coverage] == [A, B]
     assert all(u.status.value == 'COMPLETE' for u in result.coverage)
     assert len([i for i in result.issues if i.stage == 'alias_reconciliation']) == 2
     assert all(i.severity.value == 'warning' and i.issn == X for i in result.issues)
 
 
-@pytest.mark.parametrize('configured_alias', [False, True])
-def test_candidate_uses_global_plan_without_double_attribution_from_excluded_alias(configured_alias, monkeypatch):
-    from test_application_candidate_eligibility import cr, discovery, supplementation
-    import literature_monitor.application.candidate_eligibility as eligibility
-    journals, sources = evidence(configured_alias=configured_alias)
-    alias = A if configured_alias else X
-    record = cr(issns=(alias,))
-    units = tuple(discovery((record,), j).units[0] for j in journals)
-    crossref = CrossrefDiscoveryResult((record,), (), tuple(u.coverage for u in units), units)
-    calls = []
-    real_plan = eligibility.plan_crossref_queries
-    def plan(js, ss):
-        calls.append(tuple(j.issn_l for j in js))
-        return real_plan(js, ss)
-    monkeypatch.setattr(eligibility, 'plan_crossref_queries', plan)
-    result = filter_candidate_evidence(DiscoveryResult(sources, (), ()), crossref, supplementation(), journals)
-    assert calls == [(A, B)]
-    assert set(result.monitor_journal_issns.values()) == ({(A,)} if configured_alias else {()})
-    decisions = next(iter(result.attribution.values()))
-    assert sum(d.strong for d in decisions) == int(configured_alias)
-    assert decisions[-1].state is CandidateEligibility.SCOPE_DISPUTED
 
 
 def test_configured_owner_precedence_survives_its_source_failure():
@@ -190,17 +158,6 @@ def test_revision_conflict_still_precedes_metadata_rejection(tmp_path, changed_f
     assert (config.read_bytes(), path.read_bytes()) == before
 
 
-def test_excluded_alias_supplement_cannot_attribute_the_crossref_record_to_both_targets():
-    from test_application_candidate_eligibility import cr, oa, supplementation, supplement
-    journals, sources = evidence()
-    record = cr(issns=(X,))
-    anchors = (oa(journal=journals[0]), oa(journal=journals[1], source_number=2, number=2))
-    units = tuple(supplement(anchor, record) for anchor in anchors)
-    candidates = filter_candidate_evidence(DiscoveryResult(sources, anchors, ()), CrossrefDiscoveryResult((), ()),
-                                          supplementation(*units), journals)
-    crossref_ref = next(ref for ref in candidates.monitor_journal_issns if ref.provider == 'crossref')
-    assert candidates.monitor_journal_issns[crossref_ref] == ()
-    assert not any(d.strong for decisions in candidates.attribution.values() for d in decisions)
 
 
 def test_production_collision_resolution_adds_no_source_lookup(tmp_path, monkeypatch):
@@ -211,7 +168,7 @@ def test_production_collision_resolution_adds_no_source_lookup(tmp_path, monkeyp
     journals, sources = evidence(same_name=True)
     (tmp_path / 'list.md').write_text(render_journal_whitelist_text(None, journals, path=tmp_path / 'list.md'))
     config = tmp_path / 'monitor.yaml'
-    config.write_text('keyword_expression: statistics\nfrom_date: 2026-01-01\nto_date: 2026-01-01\n')
+    config.write_text('keyword_expression: statistics\nfrom_month: 2026-01\nto_month: 2026-01\n')
     requests = []
     def oa_response(request):
         requests.append(('oa', request))
@@ -227,8 +184,7 @@ def test_production_collision_resolution_adds_no_source_lookup(tmp_path, monkeyp
         return httpx.Response(200, json=work_list())
     monkeypatch.setattr(monitor, 'OpenAlexClient', lambda **kw: OpenAlexClient(transport=httpx.MockTransport(oa_response)))
     monkeypatch.setattr(monitor, 'CrossrefClient', lambda **kw: CrossrefClient(transport=httpx.MockTransport(cr_response)))
-    result = monitor._run_canonical_core(config)
+    result = monitor.run_monitor(config)
     assert len([r for provider, r in requests if provider == 'oa' and r.url.path.startswith('/sources')]) == 1
     assert [u.issn for u in result.coverage if u.provider == 'crossref'] == [A, B]
     assert len([i for i in result.warnings if i.stage == 'alias_reconciliation']) == 2
-    assert not (tmp_path / 'workspace').exists()

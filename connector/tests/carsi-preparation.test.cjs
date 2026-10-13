@@ -623,3 +623,104 @@ for (const scenario of ["Opened", "loading", "redirects", "active", "same-tab", 
         allDisposed(nav);
     });
 }
+
+function consentPage(options = {}) {
+    let selected = 0, submitted = 0;
+    const location = {origin: "https://idp.example", href: "https://idp.example/idp/profile/SAML2/Redirect/SSO?execution=e1s2"};
+    const form = {method: "post", target: "", getAttribute(name) {return name === "action" ? location.href : null;}};
+    const control = type => ({tagName: "INPUT", type, form, isConnected: true,
+        matches() {return false;}, getClientRects() {return [{}];}, getAttribute() {return null;}});
+    const choice = {...control("radio"), checked: false, click() {selected++; this.checked = true;}};
+    const proceed = {...control("submit"), click() {submitted++;}};
+    if (options.disabled) choice.matches = () => true;
+    if (options.hidden) choice.getClientRects = () => [];
+    if (options.foreignForm) proceed.form = {...form};
+    if (options.foreignAction) proceed.getAttribute = name => name === "formaction" ? "https://other.example/submit" : null;
+    if (options.selectFailure) choice.click = () => {selected++;};
+    if (options.submitFailure) proceed.click = () => {submitted++; throw Error("native click failed");};
+    const document = {querySelectorAll(selector) {
+        if (selector === "#_shib_idp_globalConsent") return options.missing ? [] : options.ambiguous ? [choice, choice] : [choice];
+        return [proceed];
+    }};
+    const world = {URL, location, document, getComputedStyle: () => ({visibility: "visible"})};
+    const run = action => vm.runInNewContext(`(${context.LiteratureMonitorCARSI.attributeConsentAction.toString()})("${action}", "https://idp.example")`, world);
+    return {run, world, counts: () => ({selected, submitted})};
+}
+
+test("attribute consent uses native clicks once per document, across executor cleanup", () => {
+    const page = consentPage();
+    assert.equal(page.run("scan").status, "ready");
+    assert.equal(page.run("submit").status, "submitted");
+    assert.equal(page.run("submit").status, "attempted");
+    assert.deepEqual(page.counts(), {selected: 1, submitted: 1});
+});
+
+for (const problem of ["missing", "ambiguous", "disabled", "hidden", "foreignForm", "foreignAction"]) {
+    test(`attribute consent leaves ${problem} forms manual`, () => {
+        const page = consentPage({[problem]: true});
+        assert.equal(page.run("submit").status, "unverified");
+        assert.deepEqual(page.counts(), {selected: 0, submitted: 0});
+    });
+}
+
+test("attribute consent failed selection or click cannot cause a second submit", () => {
+    const missing = consentPage({selectFailure: true});
+    assert.equal(missing.run("submit").status, "not_selected");
+    assert.equal(missing.run("submit").status, "attempted");
+    assert.equal(missing.counts().submitted, 0);
+    const failed = consentPage({submitFailure: true});
+    assert.throws(() => failed.run("submit"));
+    assert.equal(failed.run("submit").status, "attempted");
+    assert.equal(failed.counts().submitted, 1);
+});
+
+function consentExecutor({enabled = true, foreign = false, urn = false, navigation = false} = {}) {
+    const f = executorFixture({portalID: 3});
+    const page = consentPage();
+    const url = foreign ? "https://foreign.example/idp" : page.world.location.href;
+    f.tabs.set(3, {id: 3, incognito: false, windowId: 1, status: "complete", url});
+    // getFrame({frameId:0}) need not repeat frameId in its response.
+    f.frames.set(3, {documentId: "idp-document", documentLifecycle: "active", url});
+    const command = {...f.executor.command, automatic_attribute_release_consent: enabled,
+        login_url: "https://ds.carsi.edu.cn/Shibboleth.sso/Login?entityID=" + encodeURIComponent(urn ? "urn:mace:example:idp" : "https://idp.example/idp/shibboleth")};
+    const injections = [];
+    f.browser.scripting = {async executeScript(details) {
+        injections.push(details);
+        const result = page.run(details.args[0]);
+        if (navigation && details.args[0] === "submit") throw Error("navigation replaced document");
+        return [{frameId: 0, documentId: "idp-document", result}];
+    }};
+    f.executor = new Executor(f.browser, async () => ({ok: true, body: {accepted: true}}), command, f.context, () => true);
+    return {...f, page, injections};
+}
+
+test("consent executor binds the active top document and does not wait for redirect", async () => {
+    const f = consentExecutor({navigation: true});
+    assert.equal(await f.executor.consent(), false); // A lost receipt does not undo the native click.
+    assert.equal(await f.executor.consent(), false);
+    assert.deepEqual(f.page.counts(), {selected: 1, submitted: 1});
+    assert(f.injections.every(i => i.world === "ISOLATED" && i.target.tabId === 3 && i.target.documentIds[0] === "idp-document"));
+    f.executor.cancel();
+    assert.equal(f.executor.consentDocuments.size, 0);
+    assert.deepEqual(f.removedIDs, []);
+});
+
+for (const condition of ["disabled", "foreign", "urn", "cancel", "expired", "newDocument", "cancelDuringAuthorization"]) {
+    test(`consent executor refuses ${condition} authority`, async () => {
+        const f = consentExecutor({enabled: condition !== "disabled", foreign: condition === "foreign", urn: condition === "urn"});
+        if (condition === "cancel") f.executor.cancel();
+        if (condition === "expired") f.executor.post = async () => ({status: 409, ok: false, body: {accepted: false}});
+        if (["newDocument", "cancelDuringAuthorization"].includes(condition)) {
+            let authorizations = 0;
+            f.executor.post = async () => {
+                if (++authorizations === 2) {
+                    if (condition === "cancelDuringAuthorization") f.executor.cancel();
+                    else f.frames.set(3, {...f.frames.get(3), documentId: "replacement"});
+                }
+                return {ok: true, body: {accepted: true}};
+            };
+        }
+        assert.equal(await f.executor.consent(), false);
+        assert.deepEqual(f.page.counts(), {selected: 0, submitted: 0});
+    });
+}

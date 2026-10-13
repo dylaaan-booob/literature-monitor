@@ -1,1632 +1,261 @@
-from __future__ import annotations
-
-import json
+"""Journal Run behavior through the production pipeline, using isolated Providers."""
 from dataclasses import replace
-from datetime import date, datetime, timezone
-from types import SimpleNamespace
-from contextlib import nullcontext
 from pathlib import Path
-
-import httpx
+from unittest.mock import Mock
 import pytest
+from fastapi.testclient import TestClient
 
 from literature_monitor.application import monitor
-from literature_monitor.application.monitor import (
-    MonitorIssueComponent,
-    MonitorStatistics,
-    ProgressStage,
-    RunOutcome,
-    ValidationOutcome,
-    _materialize_canonical_result,
-    _run_canonical_core,
-    run_monitor,
-    validate_monitor,
-)
-from literature_monitor.application.run_state import (
-    LAST_RUN_SCHEMA_VERSION,
-    LastRunReadStatus,
-    LastRunSnapshot,
-    LastRunSnapshotWriteError,
-    RecordedRunOutcome,
-    last_run_snapshot_path,
-    read_last_run_snapshot,
-    write_last_run_snapshot,
-)
-from literature_monitor.canonicalize import (
-    CanonicalizationIssue,
-    CanonicalizationResult,
-    EvidenceCluster,
-    EvidenceConsolidationResult,
-)
-from literature_monitor.config import JournalConfig, load_config
-from literature_monitor.coverage import CoverageComponent, CoverageStatus, CoverageUnit
-from literature_monitor.crossref import (
-    CrossrefClient,
-    CrossrefDiscoveryIssue,
-    CrossrefDiscoveryResult,
-    CrossrefDiscoveryUnitResult,
-    EnrichmentIssue,
-    EnrichmentIssueSeverity,
-)
-from literature_monitor.date_range import DateRangeSpec, ResolvedDateRange
-from literature_monitor.materialize import (
-    MaterializationIssue,
-    MaterializationIssueSeverity,
-    MaterializationResult,
-)
-from literature_monitor.models import (
-    Author,
-    CanonicalMetadata,
-    CanonicalPaper,
-    ExternalIds,
-    MetadataSource,
-    ProviderWorkEvidence,
-)
-from literature_monitor.openalex import (
-    DiscoveryIssue,
-    DiscoveryResult,
-    OpenAlexDiscoveryUnitResult,
-    IssueSeverity,
-    OpenAlexClient,
-    ResolvedSource,
-    SourceResolutionUnit,
-)
-from literature_monitor.progress import (
-    ActivityKind,
-    ActivityUpdate,
-    ProgressCallback,
-    ProgressEvent,
-)
-from literature_monitor.retrieval import CrossrefSupplementUnitResult, EvidenceRetrievalResult
-from literature_monitor.search import SearchBackendError, SearchExpressionError, SearchableProjection
-
-
-class FixedDate(date):
-    @classmethod
-    def today(cls) -> date:
-        return cls(2026, 9, 21)
-
-
-def write_monitor(
-    tmp_path: Path,
-    *,
-    date_policy: str = "from_date: 2026-01-01\nto_date: 2026-01-31\n",
-    keyword_expression: str = "statistics",
-    output_dir: str = "workspace",
-) -> Path:
-    whitelist = tmp_path / "journals.md"
-    whitelist.write_text(
-        '# List\n\n## Journals\n\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| Biometrics | 0006-341X |  |  |\n| Annals of Statistics | 0090-5364 |  |  |\n',
-        encoding="utf-8",
-    )
-    config_path = tmp_path / "monitor.yaml"
-    config_path.write_text(
-        "venue_whitelist: journals.md\n"
-        f"keyword_expression: {keyword_expression!r}\n"
-        f"output_dir: {output_dir}\n"
-        "log_level: INFO\n"
-        f"{date_policy}",
-        encoding="utf-8",
-    )
-    return config_path
-
-
-def canonical_paper() -> CanonicalPaper:
-    return CanonicalPaper(
-        metadata=CanonicalMetadata(title="Canonical paper", journal="Biometrics"),
-        external_ids=ExternalIds(doi="10.5555/paper"),
-        authors=(Author(name="Ada Author"),),
-    )
-
-
-@pytest.mark.parametrize("entrypoint", ["cli-run", "cli-materialize", "web"])
-def test_real_entrypoints_capture_then_skip_without_rewriting_notes(tmp_path, monkeypatch, capsys, entrypoint):
-    from fastapi.testclient import TestClient
-    from literature_monitor.cli import main
-    from literature_monitor.web.app import create_app
-    from literature_monitor.web.run_coordinator import CoordinatorStatus
-
-    config_path = write_monitor(tmp_path)
-    original = install_core_mocks(monkeypatch)
-    workspace = tmp_path / "workspace"
-    app = create_app(config_path) if entrypoint == "web" else None
-
-    def execute():
-        if app is None:
-            command = "run" if entrypoint == "cli-run" else "materialize"
-            args = [command, "--config", str(config_path)]
-            if command == "materialize":
-                args.extend(["--output-dir", str(workspace)])
-            assert main(args) == 0
-            text = capsys.readouterr().err
-            assert "paper files updated" not in text
-            return text
-        with TestClient(app, base_url="http://localhost") as client:
-            response = client.post("/run", data={"csrf_token": app.state.csrf_token})
-            assert response.status_code == 200
-            app.state.run_coordinator._worker.join(5)
-            snapshot = app.state.run_coordinator.snapshot()
-            assert snapshot.status is CoordinatorStatus.FINISHED and snapshot.unexpected_error is None
-            assert snapshot.result.outcome is RunOutcome.COMPLETED
-            text = client.get("/fragments/run").text
-            assert " updated" not in text
-            return text
-
-    first = execute()
-    assert "1 New Papers" in first and "0 Already Saved" in first
-    paper_path, = (workspace / "Papers").glob("*.md")
-    paper_path.write_bytes(paper_path.read_bytes().replace(
-        b"status: candidate", b"status: kept\ncustom: retained") + b"\n## Notes\nHuman note.\n")
-    before = {p: p.read_bytes() for p in workspace.rglob("*.md")}
-    inbox = (workspace / "Inbox.base").read_bytes()
-    incoming = original.model_copy(update={
-        "metadata": original.metadata.model_copy(update={"title": "Later title", "abstract": "Later abstract"}),
-        "authors": (Author(name="Later Author", openalex_id="A99"),),
-    })
-    monkeypatch.setattr(monitor, "canonicalize_records", lambda evidence: CanonicalizationResult(papers=(incoming,), issues=()))
-    second = execute()
-    assert "0 New Papers" in second and "1 Already Saved" in second
-    assert {p: p.read_bytes() for p in workspace.rglob("*.md")} == before
-    assert (workspace / "Inbox.base").read_bytes() == inbox
-    if entrypoint == "cli-materialize":
-        assert not (workspace / ".literature-monitor").exists()
-    else:
-        assert read_last_run_snapshot(workspace).status is LastRunReadStatus.AVAILABLE
-
-
-@pytest.mark.parametrize("entrypoint", ["cli", "web"])
-def test_run_config_switch_at_preflight_never_writes_unlocked_workspace(tmp_path, monkeypatch, entrypoint):
-    from literature_monitor.web.run_coordinator import RunCoordinator, CoordinatorStatus
-    config_path = write_monitor(tmp_path)
-    locked = tmp_path / "workspace"
-    other = tmp_path / "workspace-b"
-    other.mkdir()
-    (other / "personal.txt").write_text("untouched")
-    install_core_mocks(monkeypatch)
-    switched = []
-
-    def switch(event):
-        if event.stage is ProgressStage.CHECKING_MONITOR and not switched:
-            switched.append(True)
-            config_path.write_text(config_path.read_text().replace("output_dir: workspace", "output_dir: workspace-b"))
-
-    if entrypoint == "cli":
-        result = run_monitor(config_path, progress_callback=switch)
-    else:
-        coordinator = RunCoordinator(config_path)
-        original = coordinator._update_progress
-        def progress(event):
-            switch(event)
-            original(event)
-        monkeypatch.setattr(coordinator, "_update_progress", progress)
-        coordinator.start()
-        coordinator._worker.join(5)
-        assert coordinator.snapshot().status is CoordinatorStatus.FINISHED
-        assert coordinator.snapshot().unexpected_error is None
-        result = coordinator.snapshot().result
-    assert switched == [True]
-    assert set(p.name for p in other.iterdir()) == {"personal.txt"}
-    assert (other / "personal.txt").read_text() == "untouched"
-    assert result.outcome is RunOutcome.COMPLETED
-    assert (locked / "Inbox.base").exists()
-    assert list((locked / "Papers").glob("*.md"))
-    assert list((locked / "Authors").glob("*.md"))
-    assert (locked / ".literature-monitor" / "provider-state.sqlite3").exists()
-    assert read_last_run_snapshot(locked).status is LastRunReadStatus.AVAILABLE
-
-
-def resolved_source(journal: JournalConfig) -> ResolvedSource:
-    return ResolvedSource(journal=journal.name, configured_issn_l=journal.issn_l, openalex_id=f"https://openalex.org/S-{journal.name.replace(' ', '-')}", display_name=journal.name, provider_issn_l=journal.issn_l, aliases=(journal.issn_l,))
-
-
-def install_core_mocks(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    events: list[str] | None = None,
-    ranges: list[tuple[str, date, date]] | None = None,
-    journal_batches: list[tuple[str, ...]] | None = None,
-    expressions: list[object] | None = None,
-    openalex_issues: tuple[DiscoveryIssue, ...] = (),
-    crossref_issues: tuple[CrossrefDiscoveryIssue, ...] = (),
-    retrieval_issues: tuple[EnrichmentIssue, ...] = (),
-    openalex_coverage: tuple[CoverageUnit, ...] = (),
-    crossref_coverage: tuple[CoverageUnit, ...] = (),
-    retrieval_coverage: tuple[CoverageUnit, ...] = (),
-    openalex_units: tuple[OpenAlexDiscoveryUnitResult, ...] = (),
-    crossref_units: tuple[CrossrefDiscoveryUnitResult, ...] = (),
-    retrieval_units: tuple[CrossrefSupplementUnitResult, ...] = (),
-    consolidation_issues: tuple[CanonicalizationIssue, ...] = (),
-    canonicalization_issues: tuple[CanonicalizationIssue, ...] = (),
-    progress_callbacks: list[ProgressCallback | None] | None = None,
-    emit_provider_activity: bool = False,
-) -> CanonicalPaper:
-    openalex_evidence = ProviderWorkEvidence(provenance=MetadataSource(
-        provider="openalex", record_id="https://openalex.org/W1", retrieved_at=datetime.now(timezone.utc),
-    ), title="statistics", external_ids=ExternalIds(doi="10.5555/test"))
-    crossref_evidence = ProviderWorkEvidence(provenance=MetadataSource(
-        provider="crossref", record_id="10.5555/test", retrieved_at=datetime.now(timezone.utc),
-    ), title="different")
-    oa_record = SimpleNamespace(provenance=openalex_evidence.provenance,
-                                external_ids=openalex_evidence.external_ids,
-                                to_evidence=lambda: openalex_evidence)
-    cr_record = object()
-    paper = canonical_paper()
-
-    monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kwargs: nullcontext(object()))
-    monkeypatch.setattr(monitor, "CrossrefClient", lambda **kwargs: nullcontext(object()))
-
-    def discover_openalex(
-        client: object,
-        journals: tuple[JournalConfig, ...],
-        from_date: date,
-        to_date: date,
-        *,
-        progress_callback: ProgressCallback | None = None,
-    ) -> DiscoveryResult:
-        journals = tuple(unit.journal for unit in journals)
-        if progress_callbacks is not None:
-            progress_callbacks.append(progress_callback)
-        if emit_provider_activity and progress_callback is not None:
-            progress_callback(
-                ProgressEvent(
-                    activity=ActivityUpdate(
-                        kind=ActivityKind.WORKING,
-                        source="openalex",
-                        operation="test_openalex",
-                        label="OpenAlex activity",
-                    )
-                )
-            )
-        if events is not None:
-            events.append("openalex")
-        if ranges is not None:
-            ranges.append(("openalex", from_date, to_date))
-        if journal_batches is not None:
-            journal_batches.append(tuple(journal.name for journal in journals))
-        return DiscoveryResult(
-            sources=tuple(resolved_source(journal) for journal in journals),
-            records=(oa_record,),  # type: ignore[arg-type]
-            issues=openalex_issues,
-            coverage=openalex_coverage,
-            units=openalex_units,
-        )
-
-    def discover_crossref(
-        client: object,
-        journals: tuple[JournalConfig, ...],
-        from_date: date,
-        to_date: date,
-        *,
-        progress_callback: ProgressCallback | None = None,
-    ) -> CrossrefDiscoveryResult:
-        if progress_callbacks is not None:
-            progress_callbacks.append(progress_callback)
-        if emit_provider_activity and progress_callback is not None:
-            progress_callback(
-                ProgressEvent(
-                    activity=ActivityUpdate(
-                        kind=ActivityKind.WORKING,
-                        source="crossref",
-                        operation="test_crossref_discovery",
-                        label="Crossref discovery activity",
-                    )
-                )
-            )
-        if events is not None:
-            events.append("crossref")
-        if ranges is not None:
-            ranges.append(("crossref", from_date, to_date))
-        return CrossrefDiscoveryResult(
-            records=(cr_record,),  # type: ignore[arg-type]
-            issues=crossref_issues,
-            coverage=crossref_coverage,
-            units=crossref_units,
-        )
-
-    def assemble(
-        client: object,
-        openalex_records: tuple[object, ...],
-        crossref_records: tuple[object, ...],
-        *,
-        progress_callback: ProgressCallback | None = None,
-    ) -> EvidenceRetrievalResult:
-        if progress_callbacks is not None:
-            progress_callbacks.append(progress_callback)
-        if emit_provider_activity and progress_callback is not None:
-            progress_callback(
-                ProgressEvent(
-                    activity=ActivityUpdate(
-                        kind=ActivityKind.WORKING,
-                        source="crossref",
-                        operation="test_crossref_supplement",
-                        label="Crossref supplement activity",
-                    )
-                )
-            )
-        if events is not None:
-            events.append("supplement")
-        assert openalex_records == (oa_record,)
-        assert crossref_records == (cr_record,)
-        return EvidenceRetrievalResult(
-            evidence=(openalex_evidence, crossref_evidence),  # type: ignore[arg-type]
-            supplement_records=(cr_record,),  # type: ignore[arg-type]
-            issues=retrieval_issues,
-            coverage=retrieval_coverage,
-            units=retrieval_units,
-        )
-
-    def consolidate(evidence: tuple[object, ...]) -> EvidenceConsolidationResult:
-        if events is not None:
-            events.append("consolidate")
-        assert evidence == (openalex_evidence, crossref_evidence)
-        return EvidenceConsolidationResult(
-            clusters=(
-                EvidenceCluster(evidence=(openalex_evidence,)),  # type: ignore[arg-type]
-                EvidenceCluster(evidence=(crossref_evidence,)),  # type: ignore[arg-type]
-            ),
-            issues=consolidation_issues,
-        )
-
-    def build_projection(evidence: tuple[object, ...]) -> SearchableProjection:
-        return SearchableProjection(titles=(str(id(evidence[0])),))
-
-    def match(expression: object, projections: tuple[SearchableProjection, ...]) -> tuple[bool, ...]:
-        if events is not None:
-            events.append("match")
-        if expressions is not None:
-            expressions.append(expression)
-        assert len(projections) == 2
-        return (True, False)
-
-    def canonicalize(evidence: tuple[object, ...]) -> CanonicalizationResult:
-        if events is not None:
-            events.append("canonicalize")
-        assert evidence == (openalex_evidence,)
-        return CanonicalizationResult(
-            papers=(paper,),
-            issues=canonicalization_issues,
-        )
-
-    class CrossrefExecution:
-        pending_changes = ()
-
-        def __init__(self, client, *, record_state=(), progress_callback=None):
-            self.client = client
-            self.callback = progress_callback
-
-        def discover(self, journals, from_date, to_date, *, resolved_sources=()):
-            return SimpleNamespace(discovery=discover_crossref(
-                self.client, journals, from_date, to_date, progress_callback=self.callback,
-            ), reused_dois=(), refreshed_dois=(), new_dois=())
-
-        def supplement(self, records):
-            result = assemble(self.client, records, (cr_record,), progress_callback=self.callback)
-            return SimpleNamespace(evidence=result.evidence, records=result.supplement_records,
-                                   issues=result.issues, coverage=result.coverage,
-                                   reused_dois=(), refreshed_dois=(), new_dois=())
-
-    monkeypatch.setattr(monitor, "resolve_journal_sources_batched", lambda client, journals, **kw:
-                        tuple(SourceResolutionUnit(j, resolved_source(j), (), None) for j in journals))
-    monkeypatch.setattr(monitor, "discover_resolved_sources", discover_openalex)
-    monkeypatch.setattr(monitor, "CrossrefRetrieval", CrossrefExecution)
-    monkeypatch.setattr(monitor, "assemble_live_provider_evidence", lambda oa, cr, supplied, **kw: supplied)
-    # These orchestration tests use opaque records; scope decisions have dedicated tests.
-    from literature_monitor.application.candidate_eligibility import ClusterEligibility
-    monkeypatch.setattr(monitor, "filter_candidate_evidence", lambda oa, cr, supplied, journals: SimpleNamespace(
-        openalex_records=oa.records,
-        crossref_records=cr.records,
-        supplement_evidence=supplied.evidence,
-        diagnostics=(),
-        cluster_eligibility=lambda evidence: ClusterEligibility(True, False, False),
-        monitor_journal_issns={},
-    ))
-    monkeypatch.setattr(monitor, "consolidate_evidence", consolidate)
-    monkeypatch.setattr(monitor, "build_searchable_projection", build_projection)
-    monkeypatch.setattr(monitor, "match_searchable_projections", match)
-    monkeypatch.setattr(monitor, "canonicalize_records", canonicalize)
-    return paper
-
-
-def materialization_result(
-    output_dir: Path,
-    *,
-    issues: tuple[MaterializationIssue, ...] = (),
-) -> MaterializationResult:
-    return MaterializationResult(
-        created_papers=(output_dir / "Papers" / "new.md",),
-        existing_papers=(output_dir / "Papers" / "existing.md",),
-        created_authors=(output_dir / "Authors" / "new.md",),
-        existing_authors=(output_dir / "Authors" / "existing.md",),
-        issues=issues,
-    )
-
-
-def install_source_resolution_mock(monkeypatch, resolve):
-    def batch(client, journals, *, progress_callback=None):
-        units = []
-        for index, journal in enumerate(journals):
-            source, issues = resolve(client, journal, progress_callback=progress_callback,
-                                     operation=f"validation_source_resolution:{index}")
-            units.append(SourceResolutionUnit(journal, source, issues, None))
-        return tuple(units)
-    monkeypatch.setattr(monitor, "resolve_journal_sources_batched", batch)
-
-
-def test_runtime_contract_has_no_semantic_scholar_specific_issue_or_statistics_surface() -> None:
-    assert "SEMANTIC_SCHOLAR" not in MonitorIssueComponent.__members__
-    assert "semantic_scholar_supplement_records" not in MonitorStatistics.__dataclass_fields__
-    assert "semantic_scholar_discovery_records" not in MonitorStatistics.__dataclass_fields__
-    assert "coverage" not in MonitorStatistics.__dataclass_fields__
-
-
-def test_canonical_core_preserves_real_orchestration_order_and_stops_before_materialization(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    events: list[str] = []
-    paper = install_core_mocks(monkeypatch, events=events)
-
-    def unexpected_materialize(*args: object) -> object:
-        raise AssertionError("canonical core must stop before materialization")
-
-    monkeypatch.setattr(monitor, "materialize_papers", unexpected_materialize)
-
-    result = _run_canonical_core(config_path)
-
-    assert result.outcome is RunOutcome.COMPLETED
-    assert result.papers == (paper,)
-    assert set(events[:2]) == {"openalex", "crossref"}
-    assert events[2:] == [
-        "supplement",
-        "consolidate",
-        "match",
-        "canonicalize",
-    ]
-    assert not last_run_snapshot_path(tmp_path / "workspace").exists()
-
-
-def test_canonical_core_preserves_coverage_order_and_summarizes_components(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    openalex = (
-        CoverageUnit(
-            provider="openalex",
-            component=CoverageComponent.OPENALEX_DISCOVERY,
-            status=CoverageStatus.COMPLETE,
-            journal="Biometrics",
-        ),
-    )
-    crossref = (
-        CoverageUnit(
-            provider="crossref",
-            component=CoverageComponent.CROSSREF_DISCOVERY,
-            status=CoverageStatus.COMPLETE,
-            journal="Biometrics",
-            issn="0006-341X",
-        ),
-        CoverageUnit(
-            provider="crossref",
-            component=CoverageComponent.CROSSREF_DISCOVERY,
-            status=CoverageStatus.UNAVAILABLE,
-            journal="Biometrics",
-            issn="1541-0420",
-        ),
-    )
-    supplement = (
-        CoverageUnit(
-            provider="crossref",
-            component=CoverageComponent.CROSSREF_SUPPLEMENT,
-            status=CoverageStatus.FAILED,
-            doi="10.5555/missing",
-        ),
-    )
-    install_core_mocks(
-        monkeypatch,
-        openalex_coverage=openalex,
-        crossref_coverage=crossref,
-        retrieval_coverage=supplement,
-    )
-
-    result = _run_canonical_core(config_path)
-
-    assert result.coverage == (*openalex, *crossref, *supplement)
-    assert [
-        (
-            summary.component,
-            summary.total_units,
-            summary.complete,
-            summary.partial,
-            summary.unavailable,
-            summary.failed,
-        )
-        for summary in result.coverage_summary
-    ] == [
-        (CoverageComponent.OPENALEX_DISCOVERY, 1, 1, 0, 0, 0),
-        (CoverageComponent.CROSSREF_DISCOVERY, 2, 1, 0, 1, 0),
-        (CoverageComponent.CROSSREF_SUPPLEMENT, 1, 0, 0, 0, 1),
-    ]
-
-
-def test_canonical_core_applies_diagnostic_journal_and_keyword_overrides(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path, keyword_expression="configured")
-    journal_batches: list[tuple[str, ...]] = []
-    expressions: list[object] = []
-    install_core_mocks(
-        monkeypatch,
-        journal_batches=journal_batches,
-        expressions=expressions,
-    )
-
-    result = _run_canonical_core(
-        config_path,
-        issn_l="0006-341X",
-        keyword_expression='"diagnostic phrase"',
-    )
-
-    assert result.outcome is RunOutcome.COMPLETED
-    assert journal_batches == [("Biometrics",)]
-    assert expressions == [monitor.parse_keyword_expression('"diagnostic phrase"')]
-
-
-def test_materialize_consumes_the_same_canonical_result(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    coverage = (
-        CoverageUnit(
-            provider="openalex",
-            component=CoverageComponent.OPENALEX_DISCOVERY,
-            status=CoverageStatus.COMPLETE,
-            journal="Biometrics",
-        ),
-    )
-    paper = install_core_mocks(monkeypatch, openalex_coverage=coverage)
-    core = _run_canonical_core(config_path)
-    output_dir = tmp_path / "explicit"
-    received: list[tuple[tuple[CanonicalPaper, ...], Path]] = []
-    received_callbacks: list[ProgressCallback | None] = []
-
-    def materialize(
-        papers: tuple[CanonicalPaper, ...],
-        destination: Path,
-        *,
-        progress_callback: ProgressCallback | None = None,
-        operation_lock: object | None = None,
-    ) -> MaterializationResult:
-        received.append((papers, destination))
-        received_callbacks.append(progress_callback)
-        return materialization_result(destination)
-
-    monkeypatch.setattr(monitor, "materialize_papers", materialize)
-
-    progress_events: list[ProgressEvent] = []
-
-    def report(event: ProgressEvent) -> None:
-        progress_events.append(event)
-
-    result = _materialize_canonical_result(
-        core,
-        output_dir,
-        progress_callback=report,
-    )
-
-    assert received == [((paper,), output_dir)]
-    assert received_callbacks == [report]
-    assert [event.stage for event in progress_events if event.stage is not None] == [
-        ProgressStage.UPDATING_WORKSPACE
-    ]
-    assert result.canonical_paper_count == 1
-    assert result.created_papers == 1
-    assert result.matched_existing_papers == 1
-    assert result.created_authors == 1
-    assert result.existing_authors == 1
-    assert result.coverage == coverage
-    assert not (output_dir / ".literature-monitor").exists()
-
-
-def test_run_monitor_uses_core_materialization_and_progress_contract(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path, output_dir="run-workspace")
-    events: list[str] = []
-    install_core_mocks(monkeypatch, events=events)
-    progress_events: list[ProgressEvent] = []
-
-    def materialize(
-        papers: tuple[CanonicalPaper, ...],
-        destination: Path,
-        *,
-        progress_callback: ProgressCallback | None = None,
-        operation_lock: object | None = None,
-    ) -> MaterializationResult:
-        events.append("materialize")
-        assert destination == (tmp_path / "run-workspace").resolve()
-        assert progress_callback is not None
-        progress_callback(
-            ProgressEvent(
-                activity=ActivityUpdate(
-                    kind=ActivityKind.WORKING,
-                    source="workspace",
-                    operation="test_materialize",
-                    label="Materialization activity",
-                )
-            )
-        )
-        return materialization_result(destination)
-
-    monkeypatch.setattr(monitor, "materialize_papers", materialize)
-
-    result = run_monitor(config_path, progress_callback=progress_events.append)
-
-    assert result.outcome is RunOutcome.COMPLETED
-    assert [event.stage for event in progress_events if event.stage is not None] == [
-        ProgressStage.CHECKING_MONITOR,
-        ProgressStage.DISCOVERING_PAPERS,
-        ProgressStage.COMBINING_METADATA,
-        ProgressStage.MATCHING_LITERATURE,
-        ProgressStage.UPDATING_WORKSPACE,
-    ]
-    stage: ProgressStage | None = None
-    activity_locations: list[tuple[ProgressStage | None, str]] = []
-    for event in progress_events:
-        if event.stage is not None:
-            stage = event.stage
-        if event.activity is not None:
-            activity_locations.append((stage, event.activity.operation))
-    assert activity_locations == [
-        (ProgressStage.COMBINING_METADATA, "consolidate_evidence"),
-        (ProgressStage.COMBINING_METADATA, "consolidate_evidence"),
-        (ProgressStage.MATCHING_LITERATURE, "matching_literature"),
-        (ProgressStage.MATCHING_LITERATURE, "matching_literature"),
-        (ProgressStage.MATCHING_LITERATURE, "canonicalize_literature"),
-        (ProgressStage.MATCHING_LITERATURE, "canonicalize_literature"),
-        (ProgressStage.UPDATING_WORKSPACE, "test_materialize"),
-    ]
-    assert events[-1] == "materialize"
-    assert result.canonical_paper_count == 1
-    assert result.created_papers == 1
-    assert result.matched_existing_papers == 1
-    assert result.created_authors == 1
-    assert result.existing_authors == 1
-
-
-def test_canonical_core_does_not_read_or_construct_semantic_scholar(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    install_core_mocks(monkeypatch)
-    requested_environment: list[str] = []
-
-    class TrackingEnvironment(dict[str, str]):
-        def get(self, key: str, default: str | None = None) -> str | None:
-            requested_environment.append(key)
-            return super().get(key, default)
-
-    monkeypatch.setattr(
-        monitor.os,
-        "environ",
-        TrackingEnvironment(dict(monitor.os.environ)),
-    )
-    progress_events: list[ProgressEvent] = []
-
-    result = _run_canonical_core(
-        config_path,
-        progress_callback=progress_events.append,
-    )
-
-    assert result.outcome is RunOutcome.COMPLETED
-    assert requested_environment == ["CROSSREF_MAILTO", "OPENALEX_API_KEY"]
-    assert not hasattr(monitor, "create_semantic_scholar_client")
-    assert not hasattr(monitor, "augment_with_semantic_scholar")
-    assert all(
-        event.activity is None or event.activity.source != "semantic_scholar"
-        for event in progress_events
-    )
-
-
-def test_run_monitor_passes_one_progress_callback_through_provider_boundaries(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    progress_events: list[ProgressEvent] = []
-    provider_callbacks: list[ProgressCallback | None] = []
-    install_core_mocks(
-        monkeypatch,
-        progress_callbacks=provider_callbacks,
-        emit_provider_activity=True,
-    )
-    monkeypatch.setattr(
-        monitor,
-        "materialize_papers",
-        lambda papers, output_dir, **kwargs: materialization_result(output_dir),
-    )
-
-    def report(event: ProgressEvent) -> None:
-        progress_events.append(event)
-
-    result = run_monitor(config_path, progress_callback=report)
-
-    assert result.outcome is RunOutcome.COMPLETED
-    assert provider_callbacks == [report, report, report]
-    assert [event.stage for event in progress_events if event.stage is not None] == [
-        ProgressStage.CHECKING_MONITOR,
-        ProgressStage.DISCOVERING_PAPERS,
-        ProgressStage.COMBINING_METADATA,
-        ProgressStage.MATCHING_LITERATURE,
-        ProgressStage.UPDATING_WORKSPACE,
-    ]
-    assert [
-        (
-            event.activity.source,
-            event.activity.operation,
-        )
-        for event in progress_events
-        if event.activity is not None
-        and event.activity.operation.startswith("test_")
-    ] == [
-        ("openalex", "test_openalex"),
-        ("crossref", "test_crossref_discovery"),
-        ("crossref", "test_crossref_supplement"),
-    ]
-
-
-@pytest.mark.parametrize(
-    ("date_override", "expected"),
-    (
-        (DateRangeSpec(window_days=30), (date(2026, 8, 23), date(2026, 9, 21))),
-        (
-            DateRangeSpec(from_date=date(2026, 1, 1), to_date=date(2026, 1, 31)),
-            (date(2026, 1, 1), date(2026, 1, 31)),
-        ),
-        (
-            DateRangeSpec(from_date=date(2026, 9, 1), window_days=21),
-            (date(2026, 9, 1), date(2026, 9, 21)),
-        ),
-        (
-            DateRangeSpec(to_date=date(2026, 9, 21), window_days=14),
-            (date(2026, 9, 8), date(2026, 9, 21)),
-        ),
-    ),
-)
-def test_application_date_override_forms_are_complete_and_ephemeral(
-    date_override: DateRangeSpec,
-    expected: tuple[date, date],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path, date_policy="window_days: 7\n")
-    ranges: list[tuple[str, date, date]] = []
-    install_core_mocks(monkeypatch, ranges=ranges)
-    monkeypatch.setattr(monitor, "date", FixedDate)
-    monkeypatch.setattr(
-        monitor,
-        "materialize_papers",
-        lambda papers, output_dir, **kwargs: materialization_result(output_dir),
-    )
-
-    result = run_monitor(config_path, date_override=date_override)
-
-    assert result.resolved_date_range is not None
-    assert (
-        result.resolved_date_range.from_date,
-        result.resolved_date_range.to_date,
-    ) == expected
-    assert [(provider, start, end) for provider, start, end in ranges] == [
-        ("openalex", *expected),
-        ("crossref", *expected),
-    ]
-    snapshot_result = read_last_run_snapshot(tmp_path / "workspace")
-    assert snapshot_result.status is LastRunReadStatus.AVAILABLE
-    assert snapshot_result.snapshot is not None
-    assert (
-        snapshot_result.snapshot.resolved_date_range.from_date,
-        snapshot_result.snapshot.resolved_date_range.to_date,
-    ) == expected
-    assert snapshot_result.snapshot.outcome is RecordedRunOutcome.COMPLETED
-
-
-def test_persisted_date_policy_is_used_without_override(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(
-        tmp_path,
-        date_policy="from_date: 2026-03-01\nto_date: 2026-03-15\n",
-    )
-    ranges: list[tuple[str, date, date]] = []
-    install_core_mocks(monkeypatch, ranges=ranges)
-    monkeypatch.setattr(
-        monitor,
-        "materialize_papers",
-        lambda papers, output_dir, **kwargs: materialization_result(output_dir),
-    )
-
-    result = run_monitor(config_path)
-
-    assert result.resolved_date_range is not None
-    assert result.resolved_date_range.from_date == date(2026, 3, 1)
-    assert result.resolved_date_range.to_date == date(2026, 3, 15)
-
-
-def test_second_production_run_replaces_single_latest_snapshot(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path, date_policy="window_days: 7\n")
-    install_core_mocks(monkeypatch)
-    monkeypatch.setattr(
-        monitor,
-        "materialize_papers",
-        lambda papers, output_dir, **kwargs: materialization_result(output_dir),
-    )
-
-    run_monitor(
-        config_path,
-        date_override=DateRangeSpec(
-            from_date=date(2026, 1, 1),
-            to_date=date(2026, 1, 31),
-        ),
-    )
-    run_monitor(
-        config_path,
-        date_override=DateRangeSpec(
-            from_date=date(2026, 2, 1),
-            to_date=date(2026, 2, 28),
-        ),
-    )
-
-    output_dir = tmp_path / "workspace"
-    snapshot_result = read_last_run_snapshot(output_dir)
-    assert snapshot_result.status is LastRunReadStatus.AVAILABLE
-    assert snapshot_result.snapshot is not None
-    assert snapshot_result.snapshot.resolved_date_range == ResolvedDateRange(
-        from_date=date(2026, 2, 1),
-        to_date=date(2026, 2, 28),
-    )
-    assert {path.name for path in (output_dir / ".literature-monitor").iterdir()} == {
-        "last-run.json", "provider-state.sqlite3",
-    }
-
-
-def test_snapshot_write_failure_is_warning_after_materialization(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    install_core_mocks(monkeypatch)
-    materialized: list[CanonicalPaper] = []
-
-    def materialize(
-        papers: tuple[CanonicalPaper, ...],
-        destination: Path,
-        *,
-        progress_callback: ProgressCallback | None = None,
-        operation_lock: object | None = None,
-    ) -> MaterializationResult:
-        materialized.extend(papers)
-        return materialization_result(destination)
-
-    def fail_snapshot(output_dir: Path, snapshot: LastRunSnapshot) -> None:
-        raise LastRunSnapshotWriteError(
-            last_run_snapshot_path(output_dir),
-            "snapshot disk failure",
-        )
-
-    monkeypatch.setattr(monitor, "materialize_papers", materialize)
-    monkeypatch.setattr(monitor, "write_last_run_snapshot", fail_snapshot)
-
-    result = run_monitor(config_path)
-
-    assert len(materialized) == 1
-    assert result.outcome is RunOutcome.COMPLETED_WITH_WARNINGS
-    assert result.errors == ()
-    assert result.statistics.materialization_issues == 0
-    assert result.warnings[-1].component is MonitorIssueComponent.COVERAGE_SNAPSHOT
-    assert result.warnings[-1].stage == "write"
-    assert "snapshot disk failure" in result.warnings[-1].message
-
-
-def test_incomplete_override_never_borrows_config_date_fields(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path, date_policy="window_days: 14\n")
-    output_dir = tmp_path / "workspace"
-    write_last_run_snapshot(
-        output_dir,
-        LastRunSnapshot(
-            schema_version=LAST_RUN_SCHEMA_VERSION,
-            resolved_date_range=ResolvedDateRange(
-                from_date=date(2025, 12, 1),
-                to_date=date(2025, 12, 31),
-            ),
-            outcome=RecordedRunOutcome.COMPLETED,
-            coverage=(),
-        ),
-    )
-    previous_snapshot = last_run_snapshot_path(output_dir).read_bytes()
-
-    def unexpected_provider(*args: object, **kwargs: object) -> object:
-        raise AssertionError("provider work must not start")
-
-    monkeypatch.setattr(monitor, "OpenAlexClient", unexpected_provider)
-    monkeypatch.setattr(monitor, "CrossrefClient", unexpected_provider)
-    monkeypatch.setattr(monitor, "materialize_papers", unexpected_provider)
-
-    result = run_monitor(
-        config_path,
-        date_override=DateRangeSpec(to_date=date(2026, 9, 1)),
-    )
-
-    assert result.outcome is RunOutcome.INVALID_CONFIGURATION
-    assert result.errors[0].component is MonitorIssueComponent.DATE_RANGE
-    assert "must be combined with another date field" in result.errors[0].message
-    assert result.coverage == ()
-    assert last_run_snapshot_path(output_dir).read_bytes() == previous_snapshot
-
-
-def test_preflight_failure_occurs_before_provider_work_and_skips_workspace_stage(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    progress_events: list[ProgressEvent] = []
-
-    def fail_validation(*args: object) -> None:
-        raise SearchBackendError("SQLite FTS5 is unavailable")
-
-    def unexpected_provider(*args: object, **kwargs: object) -> object:
-        raise AssertionError("provider work must not start")
-
-    monkeypatch.setattr(monitor, "validate_runtime_keyword", fail_validation)
-    monkeypatch.setattr(monitor, "OpenAlexClient", unexpected_provider)
-
-    result = run_monitor(config_path, progress_callback=progress_events.append)
-
-    assert result.outcome is RunOutcome.INVALID_CONFIGURATION
-    assert [event.stage for event in progress_events] == [
-        ProgressStage.CHECKING_MONITOR
-    ]
-    assert all(event.activity is None for event in progress_events)
-    assert result.coverage == ()
-    assert not last_run_snapshot_path(tmp_path / "workspace").exists()
-
-
-def test_provider_error_still_materializes_successful_papers(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    failed_coverage = (
-        CoverageUnit(
-            provider="openalex",
-            component=CoverageComponent.OPENALEX_DISCOVERY,
-            status=CoverageStatus.FAILED,
-            journal="Biometrics",
-        ),
-    )
-    install_core_mocks(
-        monkeypatch,
-        openalex_issues=(
-            DiscoveryIssue(
-                severity=IssueSeverity.ERROR,
-                stage="work_retrieval",
-                journal="Biometrics",
-                message="provider unavailable",
-            ),
-        ),
-        openalex_coverage=failed_coverage,
-    )
-    materialized: list[CanonicalPaper] = []
-
-    def materialize(
-        papers: tuple[CanonicalPaper, ...],
-        destination: Path,
-        *,
-        progress_callback: ProgressCallback | None = None,
-        operation_lock: object | None = None,
-    ) -> MaterializationResult:
-        materialized.extend(papers)
-        return materialization_result(destination)
-
-    monkeypatch.setattr(monitor, "materialize_papers", materialize)
-
-    result = run_monitor(config_path)
-
-    assert len(materialized) == 1
-    assert result.outcome is RunOutcome.COMPLETED_WITH_ERRORS
-    assert any(issue.component is MonitorIssueComponent.OPENALEX for issue in result.errors)
-    assert result.coverage == failed_coverage
-    snapshot_result = read_last_run_snapshot(tmp_path / "workspace")
-    assert snapshot_result.status is LastRunReadStatus.AVAILABLE
-    assert snapshot_result.snapshot is not None
-    assert snapshot_result.snapshot.outcome is RecordedRunOutcome.COMPLETED_WITH_ERRORS
-    assert snapshot_result.snapshot.coverage == failed_coverage
-
-
-def test_provider_warning_is_nonfatal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    install_core_mocks(
-        monkeypatch,
-        openalex_issues=(
-            DiscoveryIssue(
-                severity=IssueSeverity.WARNING,
-                stage="record_normalization",
-                journal="Biometrics",
-                message="provider warning",
-            ),
-        ),
-    )
-    monkeypatch.setattr(
-        monitor,
-        "materialize_papers",
-        lambda papers, output_dir, **kwargs: materialization_result(output_dir),
-    )
-
-    result = run_monitor(config_path)
-
-    assert result.outcome is RunOutcome.COMPLETED_WITH_WARNINGS
-    assert result.errors == ()
-    assert any(issue.component is MonitorIssueComponent.OPENALEX for issue in result.warnings)
-    snapshot_result = read_last_run_snapshot(tmp_path / "workspace")
-    assert snapshot_result.status is LastRunReadStatus.AVAILABLE
-    assert snapshot_result.snapshot is not None
-    assert snapshot_result.snapshot.outcome is RecordedRunOutcome.COMPLETED_WITH_WARNINGS
-
-
-@pytest.mark.parametrize(
-    ("severity", "expected"),
-    (
-        (MaterializationIssueSeverity.WARNING, RunOutcome.COMPLETED_WITH_WARNINGS),
-        (MaterializationIssueSeverity.ERROR, RunOutcome.COMPLETED_WITH_ERRORS),
-    ),
-)
-def test_materialization_issue_controls_structured_run_outcome(
-    severity: MaterializationIssueSeverity,
-    expected: RunOutcome,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    install_core_mocks(monkeypatch)
-
-    def materialize(
-        papers: tuple[CanonicalPaper, ...],
-        destination: Path,
-        *,
-        progress_callback: ProgressCallback | None = None,
-        operation_lock: object | None = None,
-    ) -> MaterializationResult:
-        return materialization_result(
-            destination,
-            issues=(
-                MaterializationIssue(
-                    destination / "Papers" / "problem.md",
-                    "materialization diagnostic",
-                    severity,
-                ),
-            ),
-        )
-
-    monkeypatch.setattr(monitor, "materialize_papers", materialize)
-
-    result = run_monitor(config_path)
-
-    assert result.outcome is expected
-    issues = result.errors if severity is MaterializationIssueSeverity.ERROR else result.warnings
-    assert any(issue.component is MonitorIssueComponent.MATERIALIZATION for issue in issues)
-
-
-def test_canonicalization_warning_is_nonfatal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    install_core_mocks(
-        monkeypatch,
-        canonicalization_issues=(
-            CanonicalizationIssue(
-                stage="metadata_conflict",
-                message="conflicting author metadata",
-                record_ids=("W1", "W2"),
-            ),
-        ),
-    )
-    monkeypatch.setattr(
-        monitor,
-        "materialize_papers",
-        lambda papers, output_dir, **kwargs: materialization_result(output_dir),
-    )
-
-    result = run_monitor(config_path)
-
-    assert result.outcome is RunOutcome.COMPLETED_WITH_WARNINGS
-    assert result.errors == ()
-    assert result.warnings[0].component is MonitorIssueComponent.CANONICALIZATION
-
-
-def test_unexpected_programming_exception_propagates(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    output_dir = tmp_path / "workspace"
-    write_last_run_snapshot(
-        output_dir,
-        LastRunSnapshot(
-            schema_version=LAST_RUN_SCHEMA_VERSION,
-            resolved_date_range=ResolvedDateRange(
-                from_date=date(2025, 11, 1),
-                to_date=date(2025, 11, 30),
-            ),
-            outcome=RecordedRunOutcome.COMPLETED,
-            coverage=(),
-        ),
-    )
-    previous_snapshot = last_run_snapshot_path(output_dir).read_bytes()
-    install_core_mocks(monkeypatch)
-
-    def explode(*args: object) -> object:
-        raise RuntimeError("programming failure")
-
-    monkeypatch.setattr(monitor, "canonicalize_records", explode)
-
-    with pytest.raises(RuntimeError, match="programming failure"):
-        run_monitor(config_path)
-
-    assert last_run_snapshot_path(output_dir).read_bytes() == previous_snapshot
-
-
-def test_validate_monitor_success_and_only_resolves_sources(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    config = load_config(config_path)
-    calls: list[str] = []
-    progress_events: list[ProgressEvent] = []
-    source_callbacks: list[ProgressCallback | None] = []
-
-    monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kwargs: nullcontext(object()))
-
-    def resolve(
-        client: object,
-        journal: JournalConfig,
-        *,
-        progress_callback: ProgressCallback | None = None,
-        operation: str | None = None,
-    ) -> tuple[ResolvedSource, tuple[DiscoveryIssue, ...]]:
-        calls.append(journal.name)
-        source_callbacks.append(progress_callback)
-        if progress_callback is not None:
-            progress_callback(
-                ProgressEvent(
-                    activity=ActivityUpdate(
-                        kind=ActivityKind.WORKING,
-                        source="openalex",
-                        operation=operation or "source_resolution",
-                        label="Requesting OpenAlex",
-                    )
-                )
-            )
-        return resolved_source(journal), ()
-
-    install_source_resolution_mock(monkeypatch, resolve)
-
-    def unexpected(*args: object, **kwargs: object) -> object:
-        raise AssertionError("validation must not enter Works or materialization paths")
-
-    for name in (
-        "discover_resolved_sources",
-        "CrossrefClient",
-        "CrossrefRetrieval",
-        "materialize_papers",
-    ):
-        monkeypatch.setattr(monitor, name, unexpected)
-
-    def report(event: ProgressEvent) -> None:
-        progress_events.append(event)
-
-    result = validate_monitor(config_path, progress_callback=report)
-
-    assert result.outcome is ValidationOutcome.VALID
-    assert calls == [journal.name for journal in config.journals]
-    assert source_callbacks == [report, report]
-    assert all(event.stage is None for event in progress_events)
-    journal_progress = [
-        event.activity
-        for event in progress_events
-        if event.activity is not None
-        and event.activity.operation == "validation_journals"
-    ]
-    assert [
-        (activity.current, activity.total, activity.unit)
-        for activity in journal_progress
-    ] == [
-        (0, 2, "journal"),
-        (1, 2, "journal"),
-        (2, 2, "journal"),
-    ]
-    assert [
-        event.activity.operation
-        for event in progress_events
-        if event.activity is not None and event.activity.source == "openalex"
-    ] == [
-        "validation_source_resolution:0",
-        "validation_source_resolution:1",
-    ]
-    assert result.configured_journal_count == 2
-    assert result.configured_issn_l_count == 2
-    assert len(result.resolved_sources) == 2
-    assert not last_run_snapshot_path(config.output_dir).exists()
-
-
-def test_validate_monitor_reuses_openalex_request_retry_progress(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    calls: list[str] = []
-    request_count = 0
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        nonlocal request_count
-        request_count += 1
-        url = str(request.url)
-        calls.append(url)
-        if request_count == 1:
-            raise httpx.ReadTimeout("simulated transient timeout")
-        return httpx.Response(200, json={"meta": {"count": 2}, "results": [
-            {"id": "https://openalex.org/S1234567", "display_name": "Annals of Statistics",
-             "issn_l": "0090-5364", "issn": ["0090-5364"], "type": "journal"},
-            {"id": "https://openalex.org/S8265502", "display_name": "Biometrics",
-             "issn_l": "0006-341X", "issn": ["0006-341X", "1541-0420"], "type": "journal"},
-        ]})
-
-    client = OpenAlexClient(transport=httpx.MockTransport(respond), sleep=lambda _delay: None)
-    monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kwargs: client)
-
-    def unexpected(*args: object, **kwargs: object) -> object:
-        raise AssertionError("validation must not expand beyond Source resolution")
-
-    for name in (
-        "discover_resolved_sources",
-        "CrossrefClient",
-        "CrossrefRetrieval",
-        "materialize_papers",
-    ):
-        monkeypatch.setattr(monitor, name, unexpected)
-
-    progress_events: list[ProgressEvent] = []
-    result = validate_monitor(
-        config_path,
-        progress_callback=progress_events.append,
-    )
-
-    assert result.outcome is ValidationOutcome.VALID
-    assert request_count == 2
-    assert not any("/works" in url for url in calls)
-    openalex_activity = [
-        event.activity
-        for event in progress_events
-        if event.activity is not None and event.activity.source == "openalex"
-    ]
-    assert any(
-        activity.kind is ActivityKind.RETRYING
-        and activity.operation == "source_resolution:batch"
-        for activity in openalex_activity
-    )
-    assert any(
-        activity.label == "Requesting OpenAlex"
-        for activity in openalex_activity
-    )
-    assert any(
-        activity.label == "Received OpenAlex response"
-        for activity in openalex_activity
-    )
-
-
-@pytest.mark.parametrize(
-    ("severity", "expected"),
-    (
-        (IssueSeverity.WARNING, ValidationOutcome.VALID_WITH_WARNINGS),
-        (IssueSeverity.ERROR, ValidationOutcome.SOURCE_ERRORS),
-    ),
-)
-def test_validate_monitor_source_issue_classification(
-    severity: IssueSeverity,
-    expected: ValidationOutcome,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kwargs: nullcontext(object()))
-
-    def resolve(client: object, journal: JournalConfig, **kwargs) -> tuple[ResolvedSource | None, tuple[DiscoveryIssue, ...]]:
-        source = resolved_source(journal) if severity is IssueSeverity.WARNING else None
-        return source, (
-            DiscoveryIssue(
-                severity=severity,
-                stage="source_resolution",
-                journal=journal.name,
-                message="source diagnostic",
-            ),
-        )
-
-    install_source_resolution_mock(monkeypatch, resolve)
-
-    result = validate_monitor(config_path)
-
-    assert result.outcome is expected
-    target = result.warnings if severity is IssueSeverity.WARNING else result.errors
-    assert target
-    assert all(issue.component is MonitorIssueComponent.OPENALEX for issue in target)
-
-
-@pytest.mark.parametrize(("failure", "expected"), [
-    ("absent", ValidationOutcome.VALID_WITH_WARNINGS),
-    ("remote", ValidationOutcome.SOURCE_ERRORS),
-    ("identity", ValidationOutcome.SOURCE_ERRORS),
-])
-def test_validate_uses_real_shared_source_resolution_severity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, expected: ValidationOutcome,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    requests: list[httpx.Request] = []
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        assert request.url.path.startswith("/sources")  # Validation must not request Works.
-        if failure == "remote":
-            return httpx.Response(500)
-        if request.url.path == "/sources":
-            return httpx.Response(200, json={"meta": {"count": 0}, "results": []})
-        if failure == "identity":
-            source = json.loads((Path(__file__).parent / "fixtures/openalex/source_biometrics.json").read_text())
-            source["type"] = "repository"
-            return httpx.Response(200, json=source)
-        return httpx.Response(404)
-
-    client = OpenAlexClient(transport=httpx.MockTransport(respond), sleep=lambda _: None)
-    monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kwargs: client)
-    result = validate_monitor(config_path)
-    assert result.outcome is expected
-    assert not result.resolved_sources
-    assert bool(result.errors) is (failure != "absent")
-    assert bool(result.warnings) is (failure == "absent")
-    assert requests and client._http_client.is_closed
-    assert not (tmp_path / "workspace").exists()
-
-
-@pytest.mark.parametrize(("alternate", "expected"), [
-    ("remote", ValidationOutcome.SOURCE_ERRORS),
-    ("absent", ValidationOutcome.VALID_WITH_WARNINGS),
-    ("recovered", ValidationOutcome.VALID),
-])
-def test_validate_mixed_source_success_uses_final_remote_failure_severity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    alternate: str, expected: ValidationOutcome,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    source = json.loads((Path(__file__).parent / "fixtures/openalex/source_biometrics.json").read_text())
-    annals = dict(source, id="https://openalex.org/S999", display_name="Annals of Statistics",
-                  issn_l="0090-5364", issn=["0090-5364"])
-    requests: list[httpx.Request] = []
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        assert request.url.path.startswith("/sources")
-        if request.url.path == "/sources":
-            if alternate == "recovered":
-                return httpx.Response(500)
-            primary = dict(source, issn=["0006-341X"])
-            return httpx.Response(200, json={"meta": {"count": 1}, "results": [annals]})
-        if request.url.path == "/sources/issn:0006-341X" and alternate != "recovered":
-            return httpx.Response(500 if alternate == "remote" else 404)
-        assert alternate == "recovered"
-        return httpx.Response(200, json=annals if request.url.path.endswith("0090-5364") else source)
-
-    client = OpenAlexClient(transport=httpx.MockTransport(respond), sleep=lambda _: None)
-    monkeypatch.setattr(monitor, "OpenAlexClient", lambda **kwargs: client)
-    result = validate_monitor(config_path)
-
-    assert result.outcome is expected
-    assert [source.journal for source in result.resolved_sources] == (
-        ["Annals of Statistics"] if alternate in {"remote", "absent"} else ["Biometrics", "Annals of Statistics"]
-    )
-    assert bool(result.errors) is (alternate == "remote")
-    assert bool(result.warnings) is (alternate == "absent")
-    if alternate == "remote":
-        assert all(issue.component is MonitorIssueComponent.OPENALEX for issue in result.errors)
-        assert any("configured ISSN-L" in issue.message for issue in result.errors)
-    assert len(requests) == {"remote": 4, "absent": 2, "recovered": 5}[alternate]
-    assert client._http_client.is_closed
-    assert not (tmp_path / "workspace").exists()
-
-
-@pytest.mark.parametrize("failure", ("config", "lexical", "fts5", "date"))
-def test_validate_monitor_local_failures_are_invalid_before_source_resolution(
-    failure: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    if failure == "config":
-        config_path = tmp_path / "bad.yaml"
-        config_path.write_text("keyword_expression: statistics\n", encoding="utf-8")
-    elif failure == "date":
-        config_path = write_monitor(
-            tmp_path,
-            date_policy="from_date: 9999-12-31\nwindow_days: 2\n",
-        )
-    else:
-        config_path = write_monitor(tmp_path)
-
-    if failure == "lexical":
-        monkeypatch.setattr(
-            monitor,
-            "validate_runtime_keyword",
-            lambda expression: (_ for _ in ()).throw(
-                SearchExpressionError("invalid lexical expression")
-            ),
-        )
-    elif failure == "fts5":
-        monkeypatch.setattr(
-            monitor,
-            "validate_runtime_keyword",
-            lambda expression: (_ for _ in ()).throw(
-                SearchBackendError("SQLite FTS5 is unavailable")
-            ),
-        )
-
-    def unexpected(*args: object, **kwargs: object) -> object:
-        raise AssertionError("source resolution must not start")
-
-    monkeypatch.setattr(monitor, "OpenAlexClient", unexpected)
-    monkeypatch.setattr(monitor, "resolve_journal_sources_batched", unexpected)
-    progress_events: list[ProgressEvent] = []
-
-    result = validate_monitor(
-        config_path,
-        progress_callback=progress_events.append,
-    )
-
-    assert result.outcome is ValidationOutcome.INVALID_CONFIGURATION
+from literature_monitor.application.run_state import read_last_run_snapshot, LastRunReadStatus
+from literature_monitor.web.app import create_app
+from test_application_state_migration import Execution, cr_record, oa_work
+
+
+@pytest.fixture
+def execution(tmp_path, monkeypatch):
+    return Execution(tmp_path, monkeypatch)
+
+
+def install_core_mocks(monkeypatch):
+    # Used by the existing Reset rebuild regression without changing its target/config.
+    from contextlib import nullcontext
+    from literature_monitor.crossref import CrossrefClient
+    from literature_monitor.openalex import OpenAlexWorkRecord, OpenAlexMetadata, ResolvedSource, DiscoveryResult, SourceResolutionUnit
+    from literature_monitor.models import ExternalIds, MetadataSource, Author
+    from literature_monitor.coverage import CoverageStatus
+    from datetime import datetime, timezone
+    import httpx
+    source = ResolvedSource('0006-341X','https://openalex.org/S1','Biometrics',('0006-341X',),'0006-341X')
+    record = OpenAlexWorkRecord(metadata=OpenAlexMetadata(title='statistics causal',journal='Biometrics'),
+        external_ids=ExternalIds(doi='10.5555/a',openalex='https://openalex.org/W1'),authors=(Author(name='Ada Author'),),
+        source_id=source.openalex_id,provenance=MetadataSource(provider='openalex',record_id='https://openalex.org/W1',retrieved_at=datetime.now(timezone.utc)))
+    def response(request):
+        return httpx.Response(200,json={'status':'ok','message-type':'work-list','message':{'items':[cr_record(title='statistics causal')],'total-results':1}})
+    monkeypatch.setattr(monitor,'OpenAlexClient',lambda **kw:nullcontext(object()))
+    monkeypatch.setattr(monitor,'CrossrefClient',lambda **kw:CrossrefClient(transport=httpx.MockTransport(response),sleep=lambda _:None))
+    monkeypatch.setattr(monitor,'resolve_journal_sources_batched',lambda client,journals,**kw:(SourceResolutionUnit(journals[0],source,(),CoverageStatus.COMPLETE),))
+    monkeypatch.setattr(monitor,'discover_resolved_sources',lambda *a,**kw:DiscoveryResult((source,),(record,),()))
+
+
+@pytest.mark.parametrize('status',['candidate','kept','rejected','exported'])
+def test_repeat_skips_metadata_matching_and_preserves_notes(execution,monkeypatch,status):
+    import literature_monitor.materialize as materialize
+    e=execution
+    assert e.run().created_papers == 1
+    paper,= (e.output/'Papers').glob('*.md')
+    paper.write_text(paper.read_text().replace('status: candidate',f'status: {status}')+'\nUser notes.\n')
+    before={p:p.read_bytes() for p in e.output.rglob('*.md')}
+    e.records['10.5555/a']['indexed']['date-time']='2026-03-01T00:00:00Z'
+    for module,name in ((monitor,'match_searchable_projections'),(monitor,'canonicalize_records'),(materialize,'_scan_authors')):
+        monkeypatch.setattr(module,name,lambda *a,**kw:pytest.fail('saved DOI entered new-paper processing'))
+    result=e.run()
+    assert (result.created_papers,result.matched_existing_papers)==(0,1)
+    assert len(e.cr_transports[-1].requests)==1 and not e.full_requests
+    assert before=={p:p.read_bytes() for p in e.output.rglob('*.md')}
+    assert read_last_run_snapshot(e.output).status is LastRunReadStatus.AVAILABLE
+
+
+def test_missing_indexed_does_not_split_and_repeat_reduces_requests(execution,monkeypatch):
+    import literature_monitor.materialize as materialize
+    e=execution;e.records['10.5555/a'].pop('indexed')
+    canonical=Mock(wraps=monitor.canonicalize_records);authors=Mock(wraps=materialize._scan_authors)
+    monkeypatch.setattr(monitor,'canonicalize_records',canonical);monkeypatch.setattr(materialize,'_scan_authors',authors)
+    first=e.run();before=(len(e.cr_transports[-1].requests),canonical.call_count,authors.call_count)
+    canonical.reset_mock();authors.reset_mock()
+    second=e.run();after=(len(e.cr_transports[-1].requests),canonical.call_count,authors.call_count)
+    assert (first.created_papers,second.matched_existing_papers)==(1,1)
+    assert before==(1,1,1) and after==(1,0,0)
+    assert all(unit.status.value=='COMPLETE' for unit in second.coverage)
+
+
+def test_abstract_only_crossref_match_field_priority_and_optional_authors(execution):
+    from literature_monitor.markdown_state import parse_paper_state
+    e=execution;e.works[0]['title']='OA display title';e.works[0]['authorships']=[]
+    record=e.records['10.5555/a'];record['title']=['Crossref title'];record['author']=[]
+    record.pop('published');record['abstract']='<jats:p>statistics exclusive abstract</jats:p>'
+    e.works[0].pop('publication_date')
+    result=e.run();assert result.created_papers==1
+    path,=(e.output/'Papers').glob('*.md')
+    paper=parse_paper_state(path,path.read_text(),e.output/'Authors')
+    assert paper is not None and paper.title=='Crossref title' and not paper.author_links
+    assert not list((e.output/'Authors').glob('*.md'))
+    assert paper.publication_date is None
+    with TestClient(create_app(e.config),base_url='http://localhost') as client:
+        assert client.get('/').status_code==200
+        response=client.post(f'/papers/{paper.paper_id}/keep',data={
+            'csrf_token':client.app.state.csrf_token,'expected_status':'candidate',
+        })
+        assert response.status_code==200
+        assert 'status: kept' in path.read_text()
+
+
+def test_manifest_complete_metadata_failure_is_not_a_normal_nonmatch(execution):
+    e=execution;e.failed_dois.add('10.5555/a');e.works[0]["title"]=None
+    result=e.run()
+    assert result.created_papers==0 and result.statistics.metadata_failed==1
+    assert next(unit for unit in result.coverage if unit.component.value=='crossref_discovery').status.value=='COMPLETE'
     assert result.errors
-    assert [
-        event.activity.operation
-        for event in progress_events
-        if event.activity is not None
-    ] == ["validation_preflight"]
-    assert all(
-        event.activity is None or event.activity.source != "openalex"
-        for event in progress_events
-    )
 
 
-class LifecycleTransport(httpx.MockTransport):
-    closed = False
-
-    def close(self) -> None:
-        self.closed = True
-        super().close()
-
-
-def install_owned_clients(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[tuple[object, LifecycleTransport]]]:
-    owned: dict[str, list[tuple[object, LifecycleTransport]]] = {"OpenAlexClient": [], "CrossrefClient": []}
-
-    def unexpected_request(request: httpx.Request) -> httpx.Response:
-        raise AssertionError(f"unexpected HTTP request: {request.url}")
-
-    def factory(name: str, provider: type):
-        def create(**kwargs: object):
-            transport = LifecycleTransport(unexpected_request)
-            client = provider(transport=transport, **kwargs)
-            owned[name].append((client, transport))
-            return client
-        return create
-
-    monkeypatch.setattr(monitor, "OpenAlexClient", factory("OpenAlexClient", OpenAlexClient))
-    monkeypatch.setattr(monitor, "CrossrefClient", factory("CrossrefClient", CrossrefClient))
-    return owned
+@pytest.mark.parametrize('kind',['journal-issue','posted-content',None])
+def test_only_explicit_journal_issue_is_excluded_across_paths(execution,kind):
+    e=execution;e.records['10.5555/a']['type']=kind
+    result=e.run()
+    assert result.created_papers==int(kind!='journal-issue')
+    if kind=='journal-issue':assert not e.full_requests
 
 
-@pytest.mark.parametrize("entrypoint", [run_monitor, _run_canonical_core])
-@pytest.mark.parametrize("failure_at", [None, "discover_resolved_sources", "CrossrefRetrieval", "crossref_supplement", "assemble_live_provider_evidence", "match_searchable_projections", "canonicalize_records"])
-def test_canonical_execution_closes_owned_clients_on_all_paths(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    entrypoint,
-    failure_at: str | None,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    install_core_mocks(monkeypatch, openalex_issues=(DiscoveryIssue(
-        severity=IssueSeverity.ERROR, stage="discovery", journal="Biometrics", message="provider failure",
-    ),))
-    owned = install_owned_clients(monkeypatch)
-    crossref_uses: list[object] = []
-
-    def track(original):
-        def call(execution, *args, **kwargs):
-            crossref_uses.append(execution.client)
-            return original(execution, *args, **kwargs)
-        return call
-
-    monkeypatch.setattr(monitor.CrossrefRetrieval, "discover", track(monitor.CrossrefRetrieval.discover))
-    monkeypatch.setattr(monitor.CrossrefRetrieval, "supplement", track(monitor.CrossrefRetrieval.supplement))
-    if failure_at is not None:
-        def fail(*args: object, **kwargs: object) -> None:
-            raise RuntimeError("unexpected pipeline failure")
-        if failure_at == "crossref_supplement":
-            monkeypatch.setattr(monitor.CrossrefRetrieval, "supplement", fail)
-        else:
-            monkeypatch.setattr(monitor, failure_at, fail)
-        with pytest.raises(RuntimeError, match="unexpected pipeline failure"):
-            entrypoint(config_path)
-    else:
-        result = entrypoint(config_path)
-        assert result.outcome is RunOutcome.COMPLETED_WITH_ERRORS
-        assert crossref_uses == [owned["CrossrefClient"][0][0]] * 2
-
-    assert all(len(clients) == 1 for clients in owned.values())
-    assert all(transport.closed for clients in owned.values() for _, transport in clients)
+def test_prime_alias_saved_skips_prime_metadata(execution):
+    e=execution;assert e.run().created_papers==1
+    e.members=[];e.aliases={'10.5555/alias':'10.5555/a'};e.works=[oa_work(doi='10.5555/alias')]
+    result=e.run()
+    assert (result.created_papers,result.matched_existing_papers)==(0,1)
+    assert not any(r.url.path == '/v1/works' for r in e.full_requests)
+    assert not any('doi:10.5555/a' in r.url.params.get('filter','').split(',') for r in e.cr_transports[-1].requests)
 
 
-@pytest.mark.parametrize("unexpected_failure", [False, True])
-def test_validate_closes_owned_openalex_client(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    unexpected_failure: bool,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    owned = install_owned_clients(monkeypatch)
-
-    def resolve(client: object, journal: JournalConfig, **kwargs):
-        if unexpected_failure:
-            raise RuntimeError("unexpected resolution failure")
-        return None, (DiscoveryIssue(
-            severity=IssueSeverity.ERROR, stage="source_resolution", journal=journal.name, message="source failure",
-        ),)
-
-    install_source_resolution_mock(monkeypatch, resolve)
-    if unexpected_failure:
-        with pytest.raises(RuntimeError, match="unexpected resolution failure"):
-            validate_monitor(config_path)
-    else:
-        assert validate_monitor(config_path).outcome is ValidationOutcome.SOURCE_ERRORS
-
-    assert len(owned["OpenAlexClient"]) == 1
-    assert owned["OpenAlexClient"][0][1].closed
-    assert not owned["CrossrefClient"]
+@pytest.mark.parametrize("in_manifest",[False,True])
+def test_prime_alias_new_creates_one_final_identity(execution,in_manifest):
+    e=execution;e.members=e.members if in_manifest else [];e.aliases={'10.5555/alias':'10.5555/a'}
+    e.works=[oa_work(doi='10.5555/alias'),oa_work(2)]
+    result=e.run()
+    assert result.created_papers==1
+    path,=(e.output/'Papers').glob('*.md')
+    assert 'doi: 10.5555/a' in path.read_text()
+    if in_manifest:
+        prime_queries=[r for r in e.cr_transports[-1].requests if 'doi:10.5555/a' in r.url.params.get('filter','').split(',')]
+        assert not prime_queries
 
 
-def test_first_client_closes_when_second_client_construction_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = write_monitor(tmp_path)
-    install_core_mocks(monkeypatch)
-    owned = install_owned_clients(monkeypatch)
 
-    def fail(**kwargs: object):
-        raise RuntimeError("client construction failure")
+def test_local_identity_conflict_does_not_block_other_new_doi(execution):
+    e=execution;assert e.run().created_papers==1
+    paper,=(e.output/'Papers').glob('*.md');(paper.parent/'duplicate.md').write_bytes(paper.read_bytes())
+    e.works.append(oa_work(2,'10.5555/b'));e.records['10.5555/b']=cr_record('10.5555/b');e.members.append('10.5555/b')
+    result=e.run()
+    assert result.created_papers==1 and result.matched_existing_papers==0 and result.errors
 
-    monkeypatch.setattr(monitor, "OpenAlexClient", fail)
-    with pytest.raises(RuntimeError, match="client construction failure"):
-        _run_canonical_core(config_path)
 
-    assert not owned["OpenAlexClient"]
-    assert len(owned["CrossrefClient"]) == 1
-    assert owned["CrossrefClient"][0][1].closed
+def test_web_uses_real_run_and_displays_months_and_counters(execution):
+    e=execution
+    with TestClient(create_app(e.config),base_url='http://localhost') as client:
+        app=client.app
+        before=client.get('/fragments/run').text
+        assert '2026-01' in before
+        for new,saved in ((1,0),(0,1)):
+            assert client.post('/run',data={'csrf_token':app.state.csrf_token}).status_code==200
+            app.state.run_coordinator._worker.join(5)
+            html=client.get('/fragments/run').text
+            assert f'{new} New Papers' in html and f'{saved} Already Saved' in html
+            assert ' canonical' not in html
+
+
+def test_run_configuration_is_frozen_before_provider_work(execution):
+    e=execution
+    def edit(event):
+        if event.stage is monitor.ProgressStage.CHECKING_MONITOR:
+            e.config.write_text(e.config.read_text().replace('2026-01','2026-02').replace('output_dir: workspace','output_dir: other'))
+    result=monitor.run_monitor(e.config,progress_callback=edit)
+    assert result.created_papers==1 and result.resolved_date_range.from_date.month==1
+    assert not (e.config.parent/'other').exists()
+
+
+def test_crossref_manifest_attribution_survives_sparse_full_issns(execution,monkeypatch):
+    from copy import deepcopy
+    e=execution;e.works=[]
+    original=e.route_cr
+    def response(request):
+        result=original(request)
+        if request.url.path=='/v1/works' and 'select' not in request.url.params:
+            result=deepcopy(result)
+            for record in result['message']['items']:record.pop('ISSN',None)
+        return result
+    monkeypatch.setattr(e,'route_cr',response)
+    assert e.run().created_papers==1
+
+
+@pytest.mark.parametrize("title,abstract,crossref_abstract,oa_present,created,full", [
+    ("Unrelated biology", "unrelated biology", "statistics", True, 0, 0),
+    ("statistics study", None, None, True, 1, 0),
+    ("Unrelated biology", None, "statistics methods", True, 1, 1),
+    (None, "unrelated biology", None, True, 1, 1),
+    ("Unrelated biology", None, None, True, 0, 1),
+    (None, None, "statistics methods", False, 1, 1),
+])
+def test_early_matching_and_missing_field_fallback(execution, title, abstract, crossref_abstract, oa_present, created, full):
+    e = execution
+    e.works[0]['title'] = title
+    if abstract:
+        e.works[0]['abstract_inverted_index'] = {word: [i] for i, word in enumerate(abstract.split())}
+    if not oa_present:
+        e.works = []
+    e.records['10.5555/a']['title'] = ['statistics Crossref title']
+    if crossref_abstract:
+        e.records['10.5555/a']['abstract'] = crossref_abstract
+    events = []
+    result = monitor.run_monitor(e.config, progress_callback=events.append)
+    assert result.created_papers == created and not result.errors
+    assert len(e.full_requests) == full
+    assert result.statistics.metadata_success == full and result.statistics.metadata_failed == 0
+    assert all(unit.status.value == 'COMPLETE' for unit in result.coverage)
+    from literature_monitor.progress import PROGRESS_STAGES
+    assert tuple(event.stage for event in events if event.stage) == PROGRESS_STAGES
+    if not full:
+        assert not e.path.exists() and result.state_usage == monitor.ProviderStateUsage()
+
+
+def test_openalex_only_match_uses_identity_probe_without_full_hydration(execution):
+    e = execution
+    e.members = []
+    result = e.run()
+    assert result.created_papers == 1 and not result.errors
+    assert not e.full_requests and result.statistics.metadata_success == result.statistics.metadata_failed == 0
+    assert all(unit.status.value == 'COMPLETE' for unit in result.coverage)
+    assert result.state_usage == monitor.ProviderStateUsage() and not e.path.exists()
+
+
+def test_not_configuration_stops_before_provider_or_workspace_work(execution):
+    e = execution
+    e.config.write_text(e.config.read_text().replace('keyword_expression: statistics', 'keyword_expression: statistics AND NOT biology'))
+    result = e.run()
+    assert result.outcome is monitor.RunOutcome.INVALID_CONFIGURATION
+    assert any('NOT operator is no longer supported' in issue.message for issue in result.errors)
+    assert not e.oa_transports and not e.cr_transports and not e.output.exists()
+
+
+def test_alias_cannot_resurrect_a_rejected_prime(execution):
+    e = execution
+    e.works = [oa_work(doi='10.5555/alias')]
+    e.aliases = {'10.5555/alias': '10.5555/a'}
+    e.records['10.5555/a']['title'] = ['Unrelated biology']
+    result = e.run()
+    assert result.created_papers == 0 and not result.errors
+    assert len(e.full_requests) == 2  # One required fallback batch and the alias singleton.
+    assert result.statistics.metadata_success == 1
+
+
+def test_matched_alias_shares_earlier_prime_metadata(execution):
+    e = execution
+    e.members = []
+    e.works[0]['title'] = None
+    e.works.append(oa_work(2, '10.5555/alias'))
+    e.aliases = {'10.5555/alias': '10.5555/a'}
+    result = e.run()
+    assert result.created_papers == 1 and not result.errors
+    prime = [r for r in e.cr_transports[-1].requests if r.url.params.get('filter') == 'doi:10.5555/a']
+    assert len(prime) == 2 and sum('select' not in r.url.params for r in prime) == 1
+    assert result.statistics.metadata_success == 1
+
+
+def test_failed_identity_request_blocks_capture_without_fake_metadata_failure(execution, monkeypatch):
+    import httpx
+    e = execution
+    e.members = []
+    e.records = {}
+    original = e.route_cr
+    monkeypatch.setattr(e, 'route_cr', lambda request: httpx.Response(403)
+                        if request.url.path != '/v1/works' else original(request))
+    result = e.run()
+    assert result.created_papers == 0 and result.errors
+    assert result.statistics.metadata_failed == 0
+    assert any(unit.status.value == 'FAILED' for unit in result.coverage if unit.component.value == 'crossref_supplement')

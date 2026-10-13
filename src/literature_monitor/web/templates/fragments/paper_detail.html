@@ -4,36 +4,33 @@
   {% if selected_paper %}
     {% set paper = selected_paper %}
     <h2>{{ paper.title }}</h2>
-    <p class="paper-subtitle">{{ paper.journal }} · {{ paper.publication_date.isoformat() if paper.publication_date else "Publication date unavailable" }}</p>
+    <p class="paper-subtitle">{{ paper.journal }} · <span data-paper-publication-date>{{ paper.publication_date if paper.publication_date else "Publication date unavailable" }}</span></p>
 
     <dl class="details">
       <dt>Status</dt><dd>{{ paper.status.value }}</dd>
-      <dt>Authors</dt><dd>{{ paper.authors | map(attribute='name') | join(', ') }}</dd>
-      <dt>Author keywords</dt><dd>{{ paper.author_keywords | join(', ') if paper.author_keywords else "None supplied" }}</dd>
+      <dt>Authors</dt><dd data-paper-authors>{{ paper.authors | map(attribute='name') | join(', ') }}</dd>
+      <dt>DOI</dt><dd>{% if open_doi_url %}<a href="{{ open_doi_url }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" data-open-doi>{{ paper.external_ids.doi }}</a>{% else %}DOI unavailable{% endif %}</dd>
       <dt>Abstract</dt><dd>{{ paper.abstract if paper.abstract else "Abstract unavailable" }}</dd>
     </dl>
 
-    <h3>External IDs</h3>
-    {% set external_ids = paper.external_ids.model_dump(exclude_none=True) %}
-    {% if external_ids %}
-      <ul>
-        {% for key, value in external_ids.items() %}
-          <li><strong>{{ key }}</strong>: {{ value }}</li>
-        {% endfor %}
-      </ul>
-    {% else %}
-      <p class="muted">No external identifiers.</p>
-    {% endif %}
-
-    <h3>Sources</h3>
-    {% if paper.sources %}
-      <ul>
-        {% for source in paper.sources %}
-          <li>{{ source.provider }} · {{ source.record_id }}</li>
-        {% endfor %}
-      </ul>
-    {% else %}
-      <p class="muted">No source records.</p>
+    {% if not paper.abstract or not paper.abstract.strip() or not paper.publication_date or not paper.authors %}
+      <div data-paper-enrichment data-enrichment-paper-id="{{ paper.paper_id }}" data-csrf="{{ csrf_token }}"
+           data-missing-abstract="{{ 'true' if not paper.abstract or not paper.abstract.strip() else 'false' }}"
+           data-missing-date="{{ 'true' if not paper.publication_date else 'false' }}"
+           data-missing-authors="{{ 'true' if not paper.authors else 'false' }}">
+        <p class="muted" data-enrichment-message role="status" aria-live="polite"></p>
+        <div data-enrichment-preview hidden>
+          <p data-enrichment-abstract-label hidden><strong>Abstract</strong></p>
+          <div data-enrichment-abstract hidden style="white-space: pre-wrap; overflow-wrap: anywhere; margin-block: 1rem;"></div>
+          <p data-enrichment-date hidden></p>
+          <p data-enrichment-authors hidden style="white-space: pre-wrap; overflow-wrap: anywhere;"></p>
+        </div>
+        <div class="decision-actions">
+          <button type="button" class="secondary" data-enrichment-action="start">Enrich</button>
+          <button type="button" data-enrichment-action="save" hidden>Save</button>
+          <button type="button" class="secondary" data-enrichment-action="cancel" hidden>Cancel</button>
+        </div>
+      </div>
     {% endif %}
 
     <div class="decision-actions">
@@ -64,12 +61,6 @@
         {% if paper.export_attempt_present %}
           <p class="muted">Historical export-attempt metadata is preserved. It does not block a new explicit Import; inspect Zotero for a possible existing parent.</p>
         {% endif %}
-        <a class="button secondary"
-           href="{{ open_doi_url }}"
-           target="_blank"
-           rel="noopener noreferrer"
-           referrerpolicy="no-referrer"
-           data-open-doi>Open DOI</a>
       {% endif %}
     </div>
   {% else %}

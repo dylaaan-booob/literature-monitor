@@ -22,13 +22,12 @@
                    hx-swap="outerHTML">
                   <strong>{{ paper.title }}</strong>
                   <span>{{ paper.journal }}</span>
-                  <span>{{ paper.publication_date.isoformat() if paper.publication_date else "Publication date unavailable" }}</span>
+                  <span>{{ paper.publication_date if paper.publication_date else "Publication date unavailable" }}</span>
                   <span>{{ paper.authors | map(attribute='name') | join(', ') }}</span>
                   <span>Status: {{ paper.status.value }}</span>
                   {% if paper.export_attempt_present %}
                     <span>Legacy export-attempt metadata retained; it does not prevent a new explicit import.</span>
                   {% endif %}
-                  <span>Discovered: {{ paper.discovered_at.date().isoformat() }}</span>
                 </a>
               </li>
             {% endfor %}

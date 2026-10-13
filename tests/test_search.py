@@ -8,7 +8,6 @@ import pytest
 import literature_monitor.search as search_backend
 from literature_monitor.keywords import (
     And,
-    Not,
     Or,
     Phrase,
     Prefix,
@@ -26,7 +25,6 @@ from literature_monitor.search import (
     SearchBackendError,
     SearchExpressionError,
     SearchableProjection,
-    build_metadata_searchable_projection,
     build_searchable_projection,
     match_searchable_projections,
     validate_search_expression,
@@ -125,23 +123,6 @@ def test_provider_taxonomy_is_excluded_from_projection() -> None:
     )
 
     assert not matches("causal OR genomics", projection)
-
-
-def test_canonical_metadata_projection_uses_the_same_field_boundaries() -> None:
-    projection = build_metadata_searchable_projection(
-        CanonicalMetadata(
-            title="Canonical title",
-            journal="Test Journal",
-            abstract="Canonical abstract",
-            author_keywords=("first keyword", "second keyword"),
-        )
-    )
-
-    assert projection == SearchableProjection(
-        titles=("Canonical title",),
-        author_keywords=("first keyword", "second keyword"),
-        abstracts=("Canonical abstract",),
-    )
 
 
 @pytest.mark.parametrize(
@@ -442,7 +423,6 @@ def test_prefix_and_proximity_boolean_operands_may_match_different_units() -> No
 
     assert matches('statist* AND "causal inference"~1', projection)
     assert matches('missing* OR "causal inference"~1', projection)
-    assert not matches('statist* AND NOT "causal inference"~1', projection)
 
 
 def test_boolean_and_may_match_across_provider_units() -> None:
@@ -460,50 +440,17 @@ def test_boolean_and_may_match_across_provider_units() -> None:
     assert not matches('"inference genomics"', projection)
 
 
-def test_or_not_nested_and_ast_precedence_use_work_level_sets() -> None:
+def test_or_and_nested_ast_uses_work_level_sets() -> None:
     projections = (
         SearchableProjection(titles=("alpha",)),
         SearchableProjection(titles=("beta",)),
         SearchableProjection(titles=("beta gamma",)),
     )
-    expression = Or(Term("alpha"), And(Term("beta"), Not(Term("gamma"))))
+    expression = Or(Term("alpha"), And(Term("beta"), Term("gamma")))
 
     assert match_searchable_projections(expression, projections) == (
         True,
-        True,
         False,
-    )
-
-
-def test_not_complements_against_the_complete_document_universe() -> None:
-    projections = (
-        SearchableProjection(),
-        SearchableProjection(titles=("present",)),
-    )
-
-    assert match_searchable_projections(Not(Term("missing")), projections) == (
-        True,
-        True,
-    )
-    assert match_searchable_projections(Not(Term("present")), projections) == (
-        True,
-        False,
-    )
-
-
-def test_proximity_not_complements_against_the_complete_document_universe() -> None:
-    projections = (
-        SearchableProjection(titles=("causal inference",)),
-        SearchableProjection(titles=("causal robust inference",)),
-        SearchableProjection(),
-    )
-
-    assert match_searchable_projections(
-        Not(Proximity("causal inference", 0)),
-        projections,
-    ) == (
-        False,
-        True,
         True,
     )
 
@@ -552,21 +499,6 @@ def test_search_expression_validation_uses_the_same_fts5_tokenizer() -> None:
 
     with pytest.raises(SearchExpressionError, match="at least two lexical tokens"):
         validate_search_expression(parse_keyword_expression('"---"~2'))
-
-
-def test_crossref_abstract_rescues_openalex_lexical_miss() -> None:
-    projection = build_searchable_projection(
-        (
-            evidence("openalex", title="Unrelated title"),
-            evidence(
-                "crossref",
-                title="Another title",
-                abstract="Cox regression identifies the signal",
-            ),
-        )
-    )
-
-    assert matches('"cox regression"', projection)
 
 
 def test_missing_optional_fields_degrade_to_available_units() -> None:

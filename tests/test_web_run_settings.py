@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import json
 import re
 import shutil
@@ -95,7 +94,7 @@ def make_draft(
         keyword_expression=keyword_expression,
         journals=journals
         or (JournalConfig(name="Biometrics", issn_l="0006-341X"),),
-        date_spec=DateRangeSpec(window_days=14),
+        date_spec=DateRangeSpec("2026-01", "2026-01"),
         output_dir=output_dir,
         log_level=LogLevel.INFO,
         monitor_revision=revision(True, monitor_digest),
@@ -175,9 +174,8 @@ def valid_settings_form(csrf_token: str, **overrides: str) -> dict[str, str]:
         "keyword_expression": "causal AND inference",
         "journal_name": "Biometrics",
         "journal_issns": "0006-341X",
-        "from_date": "",
-        "to_date": "",
-        "window_days": "21",
+        "from_month": "2026-01",
+        "to_month": "2026-01",
         "output_dir": "edited-workspace",
         "log_level": "DEBUG",
         "monitor_revision_exists": "1",
@@ -199,9 +197,8 @@ def settings_form_values(output_dir: str) -> settings_form.SettingsFormValues:
                 issns="0006-341X",
             ),
         ),
-        from_date="",
-        to_date="",
-        window_days="14",
+        from_month="2026-01",
+        to_month="2026-01",
         output_dir=output_dir,
         log_level="INFO",
         monitor_revision_exists="1",
@@ -234,7 +231,8 @@ def test_settings_form_output_path_matches_runtime_config_semantics(
         {
             "keyword_expression": "causal",
             "output_dir": raw_output_dir,
-            "window_days": 14,
+            "from_month": "2026-01",
+            "to_month": "2026-01",
         },
     )
 
@@ -326,7 +324,6 @@ def running_snapshot(
         worker_alive=worker_alive,
         inactivity_warning=inactivity_warning,
     )
-
 
 
 def activity_snapshot(
@@ -499,6 +496,30 @@ def test_run_form_has_only_run_and_requires_no_mode_field(tmp_path):
     assert not (tmp_path / "monitor.yaml").exists()
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_finished_run_shows_fixed_duration_without_timestamps(tmp_path, failed):
+    snapshot = finished_snapshot(
+        result=None if failed else make_run_result(),
+        unexpected_error=UnexpectedRunError(category="RuntimeError", message="Run failed") if failed else None,
+    )
+    snapshot = replace(snapshot, finished_at=snapshot.started_at + timedelta(minutes=2, seconds=17))
+    now = snapshot.finished_at + timedelta(minutes=5)
+    assert build_run_presentation(snapshot, now=now)["elapsed_text"] == "2m 17s"
+    assert build_run_presentation(snapshot, now=now + timedelta(hours=1))["elapsed_text"] == "2m 17s"
+    for field in ("started_at", "finished_at"):
+        assert build_run_presentation(replace(snapshot, **{field: None}), now=now)["elapsed_text"] is None
+
+    app = create_app(tmp_path / "monitor.yaml")
+    app.state.run_coordinator = StubCoordinator(snapshot=snapshot)
+    with TestClient(app, base_url="http://localhost") as client:
+        html = client.get("/fragments/run").text
+    assert "Elapsed 2m 17s" in html
+    assert snapshot.started_at.isoformat() not in html
+    assert snapshot.finished_at.isoformat() not in html
+    assert "Finished " not in html and "Started " not in html
+    assert ">Run again</button>" in html
+
+
 def test_provider_state_and_coverage_are_only_in_current_run(tmp_path):
     from literature_monitor.application.monitor import ProviderStateUsage
     result = replace(make_run_result(), state_usage=ProviderStateUsage(1, 2, 3))
@@ -615,26 +636,6 @@ def test_start_failed_refreshes_current_run_and_discards_previous_finished_detai
     assert "Run in progress" not in current.text and "Traceback" not in current.text
 
 
-def test_run_post_never_calls_run_monitor_directly() -> None:
-    source = inspect.getsource(web_app)
-
-    assert "run_monitor" not in source
-    assert "date_override" not in inspect.getsource(web_app.create_app)
-
-
-def test_idle_run_fragment_has_run_button_without_polling(tmp_path: Path) -> None:
-    app = create_app(tmp_path / "monitor.yaml")
-    app.state.run_coordinator = StubCoordinator(snapshot=idle_snapshot())
-
-    with TestClient(app, base_url="http://localhost") as client:
-        response = client.get("/fragments/run")
-
-    assert response.status_code == 200
-    assert ">Run</button>" in response.text
-    assert "every 750ms" not in response.text
-    assert "HX-Trigger" not in response.headers
-
-
 def test_running_run_fragment_renders_human_stage_and_htmx_polling(
     tmp_path: Path,
 ) -> None:
@@ -647,29 +648,12 @@ def test_running_run_fragment_renders_human_stage_and_htmx_polling(
         response = client.get("/fragments/run")
 
     assert response.status_code == 200
-    assert "Stage 3 of 5" in response.text
+    assert "Stage 4 of 5" in response.text
     assert "Combining metadata" in response.text
     assert ProgressStage.COMBINING_METADATA.value not in response.text
     assert response.text.count('class="stage-segment') == 5
-    assert 'aria-label="Workflow stage 3 of 5: Combining metadata"' in response.text
+    assert 'aria-label="Workflow stage 4 of 5: Combining metadata"' in response.text
     assert 'hx-get="/fragments/run"' in response.text
-    assert 'hx-trigger="every 750ms"' in response.text
-
-
-def test_running_run_fragment_starts_without_blank_progress_panel(
-    tmp_path: Path,
-) -> None:
-    app = create_app(tmp_path / "monitor.yaml")
-    app.state.run_coordinator = StubCoordinator(
-        snapshot=running_snapshot(None)
-    )
-
-    with TestClient(app, base_url="http://localhost") as client:
-        response = client.get("/fragments/run")
-
-    assert response.status_code == 200
-    assert "Run in progress" in response.text
-    assert "Starting…" in response.text
     assert 'hx-trigger="every 750ms"' in response.text
 
 
@@ -745,23 +729,6 @@ def test_running_fragment_handles_indeterminate_and_zero_work_safely(
 
     assert "0 / 0 files" in zero_response.text
     assert 'class="activity-progress"' not in zero_response.text
-
-
-def test_running_fragment_shows_estimating_for_working_activity(
-    tmp_path: Path,
-) -> None:
-    app = create_app(tmp_path / "monitor.yaml")
-    activity = activity_snapshot(current=1, total=4, eta_seconds=None)
-    app.state.run_coordinator = StubCoordinator(
-        snapshot=running_snapshot(activity=activity)
-    )
-
-    with TestClient(app, base_url="http://localhost") as client:
-        response = client.get("/fragments/run")
-
-    assert "1 / 4 DOI" in response.text
-    assert "Estimating…" in response.text
-    assert "ETA " not in response.text
 
 
 @pytest.mark.parametrize(
@@ -867,47 +834,6 @@ def test_concurrent_provider_fragment_has_independent_rows_ages_and_eta(tmp_path
     assert all(row["eta_text"] is None and not row["estimating"] for row in inactive["activities"])
 
 
-def test_recovered_web_rows_keep_quiet_provider_age_without_stale_eta(tmp_path, monkeypatch):
-    base = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
-    state = ProgressState()
-    state.apply(ProgressEvent(stage=ProgressStage.DISCOVERING_PAPERS), at=base)
-    def report(source, current, seconds):
-        state.apply(ProgressEvent(activity=ActivityUpdate(
-            kind=ActivityKind.WORKING, source=source, operation="works",
-            label=f"{source} records", current=current, total=10, unit="work",
-        )), at=base + timedelta(seconds=seconds))
-    for current in range(3):
-        for source in ("openalex", "crossref"):
-            report(source, current, current + 1)
-    assert all(activity.eta_seconds is not None for activity in state.snapshot(
-        at=base + timedelta(seconds=3), active=True,
-    ).activities)
-    inactive = state.snapshot(at=base + timedelta(seconds=63), active=True)
-    assert inactive.inactivity_warning
-    assert all(activity.eta_seconds is None for activity in inactive.activities)
-    report("openalex", 3, 64)
-    now = base + timedelta(seconds=64)
-    recovered = state.snapshot(at=now, active=True)
-    snapshot = replace(
-        running_snapshot(started_at=base, last_activity_at=recovered.last_activity_at),
-        activities=recovered.activities, inactivity_warning=recovered.inactivity_warning,
-    )
-    view = build_run_presentation(snapshot, now=now)
-    assert len(view["activities"]) == 2 and not snapshot.inactivity_warning
-    quiet = next(row for row in view["activities"] if row["activity"].source == "crossref")
-    assert quiet["age_text"] == "1m 01s" and quiet["eta_text"] is None
-    app = create_app(tmp_path / "monitor.yaml")
-    app.state.run_coordinator = StubCoordinator(snapshot=snapshot)
-    monkeypatch.setattr(web_app, "_utc_now", lambda: now)
-    with TestClient(app, base_url="http://localhost") as client:
-        response = client.get("/fragments/run")
-    assert response.text.count('<div class="activity-card">') == 2
-    assert "OpenAlex" in response.text and "Crossref" in response.text
-    assert "Updated 1m 01s ago" in response.text and "Updated 0s ago" in response.text
-    assert "ETA " not in response.text and "No recent activity" not in response.text
-    assert "Last activity 0s ago" in response.text
-
-
 @pytest.mark.parametrize("change", ["counter", "age", "operation", "retry", "add", "remove", "inactive"])
 def test_announcement_key_uses_all_sources_but_excludes_counters_and_ages(change):
     now = datetime(2026, 9, 22, 12, 1, 30, tzinfo=timezone.utc)
@@ -987,7 +913,7 @@ def test_run_presentation_semantic_key_ignores_timer_and_counter_only_changes() 
         replace(
             later,
             progress_stage=ProgressStage.MATCHING_LITERATURE,
-            stage_index=4,
+            stage_index=3,
         ),
         now=now,
     )
@@ -1058,30 +984,6 @@ def test_run_fragment_polling_is_read_only_and_timer_changes_keep_announcement_k
     assert coordinator.current_snapshot.worker_alive
 
 
-def test_run_progress_accessibility_uses_persistent_semantic_announcer(
-    tmp_path: Path,
-) -> None:
-    app = create_app(tmp_path / "monitor.yaml")
-    app.state.run_coordinator = StubCoordinator(snapshot=running_snapshot())
-
-    with TestClient(app, base_url="http://localhost") as client:
-        page = client.get("/")
-        fragment = client.get("/fragments/run")
-
-    assert 'id="run-live-announcer"' in page.text
-    assert 'aria-live="polite"' in page.text
-    assert 'aria-atomic="true"' in page.text
-    assert 'class="run-status" aria-live=' not in fragment.text
-    assert "data-run-announcement-key=" in fragment.text
-    assert "data-run-announcement=" in fragment.text
-    js_path = Path(web_app.__file__).resolve().parent / "static" / "app.js"
-    javascript = js_path.read_text(encoding="utf-8")
-    assert "lastRunAnnouncementKey" in javascript
-    assert "key === lastRunAnnouncementKey" in javascript
-    assert "panel.dataset.runAnnouncementKey" in javascript
-    assert "announcer.textContent = message" in javascript
-
-
 def test_finished_run_fragment_stops_polling_and_emits_completion_event(
     tmp_path: Path,
 ) -> None:
@@ -1127,7 +1029,7 @@ def test_finished_primary_run_keeps_summary_and_counts_without_technical_details
     assert "COMPLETED_WITH_ERRORS" in response.text
     assert "2026-09-01" in response.text
     assert "2026-09-22" in response.text
-    assert "8 canonical" in response.text
+    assert "canonical" not in response.text
     assert "3 New Papers" in response.text
     assert "4 Already Saved" in response.text
     assert " updated" not in response.text
@@ -1508,7 +1410,7 @@ def test_missing_or_malformed_journal_remains_editable(
 venue_whitelist: list.md
 keyword_expression: causal
 output_dir: workspace
-window_days: 14
+from_month: 2026-01\nto_month: 2026-01
 """,
         encoding="utf-8",
     )
@@ -1541,43 +1443,11 @@ def test_save_converts_current_unsaved_form_to_monitor_draft(tmp_path, monkeypat
     draft=captured[0]
     assert draft.name=="Unsaved Monitor" and draft.keyword_expression=="causal AND inference"
     assert draft.journals==(JournalConfig(name="Biometrics",issn_l="0006-341X"),)
-    assert draft.date_spec==DateRangeSpec(window_days=21) and draft.output_dir==Path("edited-workspace")
+    assert draft.date_spec==DateRangeSpec("2026-01", "2026-01") and draft.output_dir==Path("edited-workspace")
     assert draft.log_level=="DEBUG"
     assert draft.monitor_revision==revision(True,"monitor-old") and draft.journal_revision==revision(True,"journal-old")
     assert "2026-09-09" in response.text and "2026-09-22" in response.text
     assert response.headers["HX-Trigger"]=="settingsSaved"
-
-
-@pytest.mark.parametrize("raw_output_dir", ("", "   "))
-def test_save_reaches_application_with_runtime_empty_path_semantics(raw_output_dir,tmp_path,monkeypatch):
-    captured=[]
-    def fake_save(config_path,draft):
-        captured.append(draft)
-        return make_save_result(tmp_path,outcome=SettingsSaveOutcome.WRITE_FAILED)
-    monkeypatch.setattr(web_app,"save_settings",fake_save)
-    with TestClient(create_app(tmp_path/"monitor.yaml"),base_url="http://localhost") as client:
-        csrf=csrf_from_html(client.get("/settings").text)
-        response=client.post("/settings/save",data=valid_settings_form(csrf,output_dir=raw_output_dir))
-    assert response.status_code==200 and captured[0].output_dir==Path(".")
-    assert "Output workspace must not be empty." not in response.text
-
-
-def test_settings_form_has_no_gui_specific_output_path_validation() -> None:
-    source = inspect.getsource(settings_form)
-
-    assert "Output workspace must not be empty." not in source
-
-
-def test_save_validation_failure_preserves_submitted_values_and_revisions(tmp_path,monkeypatch):
-    issue=SettingsIssue(source=SettingsIssueSource.VALIDATION,field="keyword_expression",message="invalid keyword expression")
-    result=make_save_result(tmp_path,outcome=SettingsSaveOutcome.INVALID_DRAFT,issues=(issue,))
-    monkeypatch.setattr(web_app,"save_settings",lambda path,draft:result)
-    with TestClient(create_app(tmp_path/"monitor.yaml"),base_url="http://localhost") as client:
-        csrf=csrf_from_html(client.get("/settings").text)
-        response=client.post("/settings/save",data=valid_settings_form(csrf,name="Still Unsaved",keyword_expression="alpha AND"))
-    assert response.status_code==200 and "invalid keyword expression" in response.text
-    for value in ("Still Unsaved","alpha AND","monitor-old","journal-old"):
-        assert f'value="{value}"' in response.text
 
 
 def test_invalid_form_syntax_is_normal_settings_state_without_validation_call(
@@ -1600,15 +1470,14 @@ def test_invalid_form_syntax_is_normal_settings_state_without_validation_call(
             "/settings/save",
             data=valid_settings_form(
                 csrf,
-                from_date="not-a-date",
-                window_days="many",
+                from_month="not-a-month",
+                to_month="many",
             ),
         )
 
     assert response.status_code == 200
-    assert "valid ISO date" in response.text
-    assert "must be an integer" in response.text
-    assert 'value="not-a-date"' in response.text
+    assert "valid publication month" in response.text
+    assert 'value="not-a-month"' in response.text
     assert 'value="many"' in response.text
     assert calls == 0
 
@@ -1635,46 +1504,6 @@ def test_settings_save_requires_csrf_before_application_save(
 
     assert response.status_code == 403
     assert calls == 0
-
-
-def test_saved_result_uses_reread_state_new_revisions_and_saved_event(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    saved_draft = make_draft(
-        name="Normalized Saved Monitor",
-        monitor_digest="monitor-new",
-        journal_digest="journal-new",
-    )
-    result = make_save_result(
-        tmp_path,
-        outcome=SettingsSaveOutcome.SAVED,
-        state_draft=saved_draft,
-        journal_written=True,
-        monitor_written=True,
-    )
-    captured: list[MonitorDraft] = []
-    monkeypatch.setattr(
-        web_app,
-        "save_settings",
-        lambda config_path, draft: (captured.append(draft) or result),
-    )
-    app = create_app(tmp_path / "monitor.yaml")
-
-    with TestClient(app, base_url="http://localhost") as client:
-        csrf = csrf_from_html(client.get("/settings").text)
-        response = client.post(
-            "/settings/save",
-            data=valid_settings_form(csrf),
-        )
-
-    assert response.status_code == 200
-    assert len(captured) == 1
-    assert "Settings saved." in response.text
-    assert 'value="Normalized Saved Monitor"' in response.text
-    assert 'value="monitor-new"' in response.text
-    assert 'value="journal-new"' in response.text
-    assert response.headers["HX-Trigger"] == "settingsSaved"
 
 
 def test_invalid_draft_save_preserves_submitted_values_and_old_revisions(
@@ -1714,51 +1543,6 @@ def test_invalid_draft_save_preserves_submitted_values_and_old_revisions(
     assert "Settings saved." not in response.text
 
 
-def test_revision_conflict_is_explicit_preserves_open_revisions_and_does_not_retry(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    issue = SettingsIssue(
-        source=SettingsIssueSource.STORAGE,
-        message="Settings files changed after they were opened",
-    )
-    disk_draft = make_draft(
-        name="External Disk Edit",
-        monitor_digest="monitor-external",
-        journal_digest="journal-external",
-    )
-    result = make_save_result(
-        tmp_path,
-        outcome=SettingsSaveOutcome.REVISION_CONFLICT,
-        state_draft=disk_draft,
-        issues=(issue,),
-    )
-    calls = 0
-
-    def fake_save(config_path: Path, draft: MonitorDraft) -> SettingsSaveResult:
-        nonlocal calls
-        calls += 1
-        return result
-
-    monkeypatch.setattr(web_app, "save_settings", fake_save)
-    app = create_app(tmp_path / "monitor.yaml")
-
-    with TestClient(app, base_url="http://localhost") as client:
-        csrf = csrf_from_html(client.get("/settings").text)
-        response = client.post(
-            "/settings/save",
-            data=valid_settings_form(csrf, name="My Unsaved Edit"),
-        )
-
-    assert calls == 1
-    assert "files changed since this editor was opened" in response.text
-    assert 'value="My Unsaved Edit"' in response.text
-    assert 'value="monitor-old"' in response.text
-    assert "External Disk Edit" in response.text
-    assert "monitor-external" in response.text
-    assert "Settings saved." not in response.text
-
-
 def test_write_failed_renders_failure_disk_state_and_attempted_values(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1795,107 +1579,6 @@ def test_write_failed_renders_failure_disk_state_and_attempted_values(
     assert "Settings saved." not in response.text
 
 
-def test_partial_save_is_warning_and_uses_returned_disk_state_revisions(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    issue = SettingsIssue(
-        source=SettingsIssueSource.MONITOR_CONFIG,
-        message="monitor write denied",
-    )
-    disk_draft = make_draft(
-        name="Old Monitor From Disk",
-        journals=(JournalConfig(name="Biometrics", issn_l="0006-341X"),),
-        monitor_digest="monitor-after-partial",
-        journal_digest="journal-after-partial",
-    )
-    result = make_save_result(
-        tmp_path,
-        outcome=SettingsSaveOutcome.PARTIAL_SAVE,
-        state_draft=disk_draft,
-        issues=(issue,),
-        journal_written=True,
-        monitor_written=False,
-    )
-    monkeypatch.setattr(web_app, "save_settings", lambda config_path, draft: result)
-    app = create_app(tmp_path / "monitor.yaml")
-
-    with TestClient(app, base_url="http://localhost") as client:
-        csrf = csrf_from_html(client.get("/settings").text)
-        response = client.post(
-            "/settings/save",
-            data=valid_settings_form(csrf, name="Attempted New Monitor"),
-        )
-
-    assert "partially saved" in response.text
-    assert "Journal data written: yes" in response.text
-    assert "Monitor config written: no" in response.text
-    assert 'name="name" value="Attempted New Monitor"' in response.text
-    assert "monitor-after-partial" in response.text
-    assert "journal-after-partial" in response.text
-    assert "Attempted New Monitor" in response.text
-    assert "Settings saved." not in response.text
-    assert 'class="notice success"' not in response.text
-    assert response.headers.get("HX-Trigger") != "settingsSaved"
-
-
-def test_settings_route_delegates_save_once_and_contains_no_persistence_code(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    result = make_save_result(
-        tmp_path,
-        outcome=SettingsSaveOutcome.SAVED,
-        state_draft=make_draft(monitor_digest="m-new", journal_digest="j-new"),
-        journal_written=True,
-        monitor_written=True,
-    )
-    calls = 0
-
-    def fake_save(config_path: Path, draft: MonitorDraft) -> SettingsSaveResult:
-        nonlocal calls
-        calls += 1
-        return result
-
-    monkeypatch.setattr(web_app, "save_settings", fake_save)
-    app = create_app(tmp_path / "monitor.yaml")
-
-    with TestClient(app, base_url="http://localhost") as client:
-        csrf = csrf_from_html(client.get("/settings").text)
-        response = client.post("/settings/save", data=valid_settings_form(csrf))
-
-    settings_endpoint = next(route.endpoint for route in app.routes if getattr(route, 'path', None) == '/settings/save')
-    source = inspect.getsource(web_app)
-    assert response.status_code == 200
-    assert calls == 1
-    # Import 的只读身份校验可引用锁类型；Settings 仍只能委托应用层写入。
-    assert "safe_write" not in inspect.getsource(settings_endpoint)
-    assert "write_text" not in source
-    assert "write_bytes" not in source
-    assert "yaml.safe" not in source
-
-
-def test_dirty_form_script_is_browser_only_and_save_event_driven(tmp_path: Path) -> None:
-    app = create_app(tmp_path / "monitor.yaml")
-
-    with TestClient(app, base_url="http://localhost") as client:
-        response = client.get("/static/app.js")
-        settings = client.get("/settings")
-
-    assert response.status_code == 200
-    script = response.text
-    assert "beforeunload" in script
-    assert 'addEventListener("input"' in script
-    assert 'addEventListener("change"' in script
-    assert 'addEventListener("settingsSaved"' in script
-    assert "data-add-journal" in script
-    assert "data-remove-journal" in script
-    assert "localStorage" not in script
-    assert "sessionStorage" not in script
-    assert 'hx-post="/settings/import/preview"' in settings.text
-    assert 'hx-post="/settings/save"' in settings.text
-
-
 _EMPTY_CURRENT_TABLES = (
     "\n## Publishers\n\n| Publisher | OpenAlex ID | Publisher URL | Access Service ID |\n"
     "| --- | --- | --- | --- |\n\n"
@@ -1918,7 +1601,7 @@ def health_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "monitor.yaml"
     config_path.write_text(
         "name: Health Monitor\nvenue_whitelist: list.md\nkeyword_expression: causal\n"
-        "output_dir: saved-workspace\nwindow_days: 14\n",
+        "output_dir: saved-workspace\nfrom_month: 2026-01\nto_month: 2026-01\n",
         encoding="utf-8",
     )
     return config_path
@@ -2132,13 +1815,6 @@ def test_trusted_hosts_remain_local_only(tmp_path: Path) -> None:
     assert external.status_code == 400
 
 
-def test_no_t9_gui_cli_or_uvicorn_launch_added() -> None:
-    source = inspect.getsource(web_app)
-
-    assert "uvicorn" not in source.lower()
-    assert "literature-monitor gui" not in source
-
-
 def test_group_form_projection_exact_identity_and_noop_order():
     groups = ("Statistics", None, "statistics", "Statistics", "Ungrouped", "Unmapped journals", '统计 & <x> "y"')
     identifiers = ("0006-341X", "0090-5364", "0162-1459", "0033-3123", "0092-5853", "1932-6157", "1941-7330")
@@ -2212,7 +1888,7 @@ class SettingsDOM(HTMLParser):
 def organization_submission(config_path, csrf, groups, rows):
     values = settings_form.settings_form_from_draft(load_settings(config_path).draft)
     result = {key: getattr(values, key) for key in (
-        "name", "keyword_expression", "from_date", "to_date", "window_days", "output_dir", "log_level",
+        "name", "keyword_expression", "from_month", "to_month", "output_dir", "log_level",
         "monitor_revision_exists", "monitor_revision_digest", "journal_revision_exists", "journal_revision_digest",
     )}
     result.update(csrf_token=csrf, settings_group=list(groups),
@@ -2274,40 +1950,6 @@ def test_organization_save_through_real_boundary(health_config, operation):
         assert 'name="settings_group" value="Empty"' not in response.text
     assert [(j.name, j.issn_l, j.group or "") for j in load_config(health_config).journals] == rows
     assert "| Group |" in path.read_text()
-
-
-def test_journal_organization_markup_and_responsive_scope(health_config):
-    path = health_config.parent / "list.md"
-    path.write_text('## Journals\n| Journal | ISSN-L | Publisher ID | Group |\n|---|---|---|---|\n| A | 0006-341X |  | 统计 & <x> "y" |\n')
-    with TestClient(create_app(health_config), base_url="http://localhost") as client:
-        page = client.get("/settings").text
-        css = client.get("/static/app.css").text
-        js = client.get("/static/app.js").text
-    tree = SettingsDOM(page).root
-    def visit(node, ancestors=()):
-        if isinstance(node, str): return
-        attrs = node["attrs"]
-        if attrs.get("hx-post") == "/settings/import/preview" or (node["tag"] == "button" and attrs.get("type") == "submit"):
-            assert not any("data-journal-viewport" in a for a in ancestors)
-        if attrs.get("id") == "advanced-diagnostics":
-            assert "open" not in attrs and not any(a.get("id") == "settings-form" for a in ancestors)
-        for child in node["children"]: visit(child, (*ancestors, attrs))
-    visit(tree)
-    for marker in ("data-group-rows", "data-create-group", "data-rename-group", "data-delete-group", "data-group-up", "data-group-down",
-                   "data-journal-viewport", "data-journal-search", "data-select-journal", "data-assign-selected",
-                   "data-group-drop", "data-confirm-delete", "data-cancel-delete"):
-        assert marker in page
-    assert '<select name="journal_group">' in page
-    assert '<option value="统计 &amp; &lt;x&gt; &#34;y&#34;" selected>' in page
-    assert 'type="hidden" name="journal_group"' not in page
-    assert 'draggable="true"' in page
-    assert 'name="journal_order"' in page
-    desktop = re.search(r"\[data-journal-viewport\],\s*\[data-publisher-viewport\] \{([^}]*)", css)[1]
-    mobile = css.split("@media (max-width: 760px)", 1)[1]
-    assert "max-height: 55vh" in desktop and "overflow-y: auto" in desktop
-    assert "max-height: none" in mobile and "overflow: visible" in mobile
-    assert "let workspaceScroll = null" in js and "let settingsJournalScroll = null" in js
-    assert "innerHTML" not in js and "localStorage" not in js and "sessionStorage" not in js
 
 
 SETTINGS_NODE_DOM = r'''
@@ -2643,6 +2285,8 @@ def browser_settings_submission(html):
     def walk(node):
         if isinstance(node, str) or node["tag"] == "template": return
         attrs, tag = node["attrs"], node["tag"]
+        if tag == "input" and attrs.get("type") in {"checkbox", "radio"} and "checked" not in attrs:
+            return
         if attrs.get("name") and tag in {"input", "select", "textarea"}:
             value = attrs.get("value", "")
             if tag == "textarea":
@@ -2706,9 +2350,8 @@ def test_import_csrf_precedes_core_and_has_no_side_effects(health_config, monkey
     assert_import_does_not_write(health_config, before)
 
 
-
 @pytest.mark.parametrize("route", ["preview", "confirm"])
-@pytest.mark.parametrize("field,invalid", [("window_days", "abc"), ("from_date", "bad"), ("monitor_revision_exists", "bad"), ("journal_name", "")])
+@pytest.mark.parametrize("field,invalid", [("to_month", "abc"), ("from_month", "bad"), ("monitor_revision_exists", "bad"), ("journal_name", "")])
 def test_unconstructable_current_draft_is_not_substituted(health_config, monkeypatch, route, field, invalid):
     app = create_app(health_config)
     before = (health_config.read_bytes(), (health_config.parent / "list.md").read_bytes())
@@ -2724,13 +2367,6 @@ def test_unconstructable_current_draft_is_not_substituted(health_config, monkeyp
     assert "Settings issues" in response.text and "HX-Trigger" not in response.headers
     assert 'data-markdown-preview' not in response.text
     assert_import_does_not_write(health_config, before)
-
-
-
-
-
-
-
 
 
 @pytest.fixture

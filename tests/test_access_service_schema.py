@@ -72,7 +72,7 @@ def monitor(tmp_path: Path) -> Path:
     config = tmp_path / "monitor.yaml"
     config.write_text(
         "name: Test Monitor\nvenue_whitelist: list.md\nkeyword_expression: causal\n"
-        "output_dir: workspace\nwindow_days: 7\n", encoding="utf-8",
+        "output_dir: workspace\nfrom_month: 2026-01\nto_month: 2026-01\n", encoding="utf-8",
     )
     return config
 

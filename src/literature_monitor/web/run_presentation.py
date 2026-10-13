@@ -205,10 +205,11 @@ def build_run_presentation(
         if snapshot.progress_stage is not None
         else None
     )
+    elapsed_end = now if snapshot.status is CoordinatorStatus.RUNNING else snapshot.finished_at
     elapsed_text = (
-        _duration_text((now - snapshot.started_at).total_seconds())
+        _duration_text((elapsed_end - snapshot.started_at).total_seconds())
         if snapshot.started_at is not None
-        and snapshot.status is CoordinatorStatus.RUNNING
+        and elapsed_end is not None
         else None
     )
     last_activity_text = (

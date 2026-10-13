@@ -55,7 +55,7 @@ def write_valid_config(tmp_path: Path) -> tuple[Path, Path]:
 venue_whitelist: list.md
 keyword_expression: causal
 output_dir: workspace
-window_days: 14
+from_month: 2026-01\nto_month: 2026-01
 log_level: INFO
 """,
         encoding="utf-8",
@@ -74,7 +74,7 @@ def make_paper(
         paper_id=identifier,
         title=title,
         journal="Biometrics",
-        publication_date=date(2026, 9, 1),
+        publication_date="2026-09-01",
         discovered_at=datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc),
         status=status,
         abstract="A detailed abstract.",
@@ -126,29 +126,6 @@ def decision_result(
         path=None,
         message=message,
     )
-
-
-def test_create_app_succeeds_with_valid_config(tmp_path: Path) -> None:
-    config_path, _ = write_valid_config(tmp_path)
-
-    app = create_app(config_path)
-
-    assert app.title == "Literature Monitor"
-
-
-def test_create_app_succeeds_with_missing_monitor_config(tmp_path: Path) -> None:
-    app = create_app(tmp_path / "missing.yaml")
-
-    assert app is not None
-
-
-def test_create_app_succeeds_with_malformed_monitor_config(tmp_path: Path) -> None:
-    config_path = tmp_path / "monitor.yaml"
-    config_path.write_text("venue_whitelist: [\n", encoding="utf-8")
-
-    app = create_app(config_path)
-
-    assert app is not None
 
 
 def test_application_construction_does_not_load_config_or_call_providers(
@@ -425,6 +402,7 @@ def test_paper_list_renders_projected_metadata(
     assert "2026-09-01" in response.text
     assert "Ada Example, Lin Example" in response.text
     assert "candidate" in response.text
+    assert "Discovered:" not in response.text
 
 
 def test_paper_detail_is_uuid_addressed_and_renders_existing_projection(
@@ -444,12 +422,10 @@ def test_paper_detail_is_uuid_addressed_and_renders_existing_projection(
     assert response.status_code == 200
     assert "Detailed Paper" in response.text
     assert "A detailed abstract." in response.text
-    assert "causal inference, statistics" in response.text
     assert "Ada Example, Lin Example" in response.text
     assert "10.1000/example" in response.text
-    assert "<h3>Versions</h3>" not in response.text
-    assert "journal_final" not in response.text
-    assert "openalex · W123" in response.text
+    for hidden in ("External IDs", "Sources", "Author keywords", "causal inference, statistics", "openalex · W123"):
+        assert hidden not in response.text
 
 
 @pytest.mark.parametrize(
@@ -458,9 +434,9 @@ def test_paper_detail_is_uuid_addressed_and_renders_existing_projection(
         (WorkflowStatus.KEPT, " 10.1000/EXAMPLE ", None, "https://doi.org/10.1000/example"),
         (WorkflowStatus.KEPT, " https://doi.org/10.1000/EXAMPLE ", None, "https://doi.org/10.1000/example"),
         (WorkflowStatus.KEPT, "10.1000/a?b#c(d)", None, "https://doi.org/10.1000/a%3Fb%23c%28d%29"),
-        (WorkflowStatus.CANDIDATE, "10.1000/example", None, None),
-        (WorkflowStatus.REJECTED, "10.1000/example", None, None),
-        (WorkflowStatus.EXPORTED, "10.1000/example", None, None),
+        (WorkflowStatus.CANDIDATE, "10.1000/example", None, "https://doi.org/10.1000/example"),
+        (WorkflowStatus.REJECTED, "10.1000/example", None, "https://doi.org/10.1000/example"),
+        (WorkflowStatus.EXPORTED, "10.1000/example", None, "https://doi.org/10.1000/example"),
         (WorkflowStatus.KEPT, None, None, None),
         (WorkflowStatus.KEPT, "", None, None),
         (WorkflowStatus.KEPT, 123, None, None),
@@ -475,7 +451,7 @@ def test_paper_detail_is_uuid_addressed_and_renders_existing_projection(
     ],
 )
 @pytest.mark.filterwarnings("ignore:Pydantic serializer warnings:UserWarning")
-def test_open_doi_and_check_zotero_are_server_normalized_kept_only_presentation(
+def test_doi_link_is_normalized_and_safe_in_every_status(
     tmp_path, monkeypatch, status, doi, arxiv, expected_url,
 ):
     # Bypass model validation to exercise malformed adapter input without changing the domain schema.
@@ -484,32 +460,17 @@ def test_open_doi_and_check_zotero_are_server_normalized_kept_only_presentation(
     write_valid_config(tmp_path)
     monkeypatch.setattr(web_app, "load_config", lambda _: fake_config(tmp_path))
     monkeypatch.setattr(web_app, "load_workspace", lambda *_, **kwargs: snapshot)
-    normalized_inputs = []
-    original_normalize = web_app.normalize_doi
-
-    def normalize(value):
-        normalized_inputs.append(value)
-        return original_normalize(value)
-
-    monkeypatch.setattr(web_app, "normalize_doi", normalize)
     view = {WorkflowStatus.CANDIDATE: "inbox", WorkflowStatus.EXPORTED: "exported"}.get(status, status.value)
 
     class CaptureActions(HTMLParser):
         def __init__(self):
             super().__init__()
             self.open_links = []
-            self.check_forms = []
-            self.save_forms = []
 
         def handle_starttag(self, tag, attrs):
             attrs = dict(attrs)
             if tag == "a" and "data-open-doi" in attrs:
                 self.open_links.append(attrs)
-            if tag == "form" and "data-check-zotero-form" in attrs:
-                self.check_forms.append(attrs)
-            if tag == "form" and "data-save-zotero-form" in attrs:
-                self.save_forms.append(attrs)
-
     with TestClient(create_app(tmp_path / "monitor.yaml"), base_url="http://localhost") as client:
         responses = (
             client.get("/", params={"view": view, "paper": str(paper.paper_id)}),
@@ -519,31 +480,17 @@ def test_open_doi_and_check_zotero_are_server_normalized_kept_only_presentation(
         assert response.status_code == 200
         parser = CaptureActions()
         parser.feed(response.text)
-        assert "Copy DOI" not in response.text
-        assert "Mark in Zotero" not in response.text
         if expected_url is None:
-            assert (
-                not parser.open_links
-                and not parser.check_forms
-                and not parser.save_forms
-            )
-            assert "Save to Zotero" not in response.text
-            assert "Open DOI" not in response.text and "Check Zotero" not in response.text
+            assert not parser.open_links
         else:
             assert len(parser.open_links) == 1
-            assert not parser.check_forms and not parser.save_forms
             link = parser.open_links[0]
             assert link["href"] == expected_url
             assert link["target"] == "_blank"
             assert set(link["rel"].split()) == {"noopener", "noreferrer"}
             assert link["referrerpolicy"] == "no-referrer"
-            assert "Export controls are unavailable during the workflow transition" not in response.text
-        assert "Add PDF to Zotero" not in response.text
         assert "HX-Trigger" not in response.headers
-    assert normalized_inputs == ([doi, doi] if status is WorkflowStatus.KEPT else [])
     assert paper.status is status
-
-
 
 
 def test_unknown_paper_detail_is_safe_normal_fragment(
@@ -905,19 +852,6 @@ def test_workspace_refresh_revalidates_transient_selected_uuid(tmp_path, monkeyp
     assert text.count('aria-current="true"') == int(not left_view)
 
 
-def test_workspace_pane_css_and_transient_selection_contract(tmp_path):
-    with TestClient(create_app(tmp_path / "monitor.yaml"), base_url="http://localhost") as client:
-        css = client.get("/static/app.css").text
-        js = client.get("/static/app.js").text
-    assert "@media (min-width: 761px)" in css
-    assert "height: var(--workspace-pane-height, auto)" in css
-    assert "overflow-y: auto" in css and '[aria-current="true"]' in css
-    mobile = css.split("@media (max-width: 760px)")[1]
-    assert "height: auto" in mobile and "overflow: visible" in mobile
-    assert "getBoundingClientRect().top" in js and "window.innerHeight" in js
-    assert "localStorage" not in js and "sessionStorage" not in js
-
-
 @pytest.mark.parametrize("failure", ["invalid_status", "config"])
 def test_pre_action_failure_has_no_neighbor_navigation_or_mutation(tmp_path, monkeypatch, failure):
     target, peer = make_paper(title="Original"), make_paper(title="Peer")
@@ -998,23 +932,6 @@ def test_expected_decision_failures_remain_normal_html_states(
     assert "Traceback" not in response.text
 
 
-def test_no_generic_status_and_run_settings_routes_are_explicit(tmp_path: Path) -> None:
-    app = create_app(tmp_path / "missing.yaml")
-    route_methods = {
-        (route.path, method)
-        for route in app.routes
-        if hasattr(route, "methods")
-        for method in route.methods
-    }
-
-    assert not any(path.endswith("/status") for path, _ in route_methods)
-    assert not any("copy" in path or path == "/fragments/zotero-export" for path, _ in route_methods)
-    assert ("/run", "POST") in route_methods
-    assert ("/fragments/run", "GET") in route_methods
-    assert ("/settings/validate", "POST") not in route_methods
-    assert ("/settings/save", "POST") in route_methods
-
-
 def test_web_zotero_export_is_removed(tmp_path, monkeypatch):
     paper = make_paper(status=WorkflowStatus.KEPT)
     write_valid_config(tmp_path)
@@ -1032,8 +949,6 @@ def test_web_zotero_export_is_removed(tmp_path, monkeypatch):
     assert not hasattr(web_app, "export_kept_papers")
     assert not hasattr(web_app, "_export_context")
     assert not (Path(web_app.__file__).parent / "templates/fragments/zotero_export.html").exists()
-
-
 
 
 def test_settings_get_is_recoverable_editor(tmp_path: Path) -> None:

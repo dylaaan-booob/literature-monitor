@@ -92,6 +92,7 @@ class RunCoordinator:
         self._worker: threading.Thread | None = None
         self._ownership: AbstractContextManager[WorkspaceOperationLock] | None = None
         self._operation_lock: WorkspaceOperationLock | None = None
+        self._config_snapshot = None
 
     def start(self) -> StartResult:
         """Start a production run on a dedicated worker if none is active."""
@@ -115,6 +116,7 @@ class RunCoordinator:
                     config = load_config(self._config_path)
                 except ConfigurationError:
                     config = None
+                self._config_snapshot = config
                 if config is not None:
                     ownership = workspace_operation_lock(config.output_dir, create=True)
                     operation_lock = ownership.__enter__()
@@ -221,6 +223,7 @@ class RunCoordinator:
                     self._config_path,
                     progress_callback=self._update_progress,
                     operation_lock=self._operation_lock,
+                    loaded_config=self._config_snapshot,
                 )
         except BaseException as error:
             LOGGER.exception("Unexpected exception during monitor run")

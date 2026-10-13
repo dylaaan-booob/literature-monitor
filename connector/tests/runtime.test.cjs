@@ -203,8 +203,11 @@ function makeEnvironment({
 		if (pathname === "/api/connector/heartbeat") {
 			return response(200, {readiness: "connected"});
 		}
-		if (pathname === "/api/connector/claim" || pathname === "/api/connector/preparation/claim") {
+		if (pathname === "/api/connector/claim" || pathname === "/api/connector/preparation/claim" || pathname === "/api/connector/enrichment/claim") {
 			return response(200, {command: null});
+		}
+		if (pathname === "/api/connector/enrichment/authorize" || pathname === "/api/connector/enrichment/result") {
+			return response(200, {accepted: true});
 		}
 		if (pathname === "/api/connector/preparation/heartbeat") {
 			return response(200, {ready: true});
@@ -634,6 +637,7 @@ test("heartbeat is immediate, uses manifest version, and repeats inside stale wi
 	assert.deepEqual(JSON.parse(heartbeats[0].options.body), {
 		version: "5.0.999",
 		zotero_reachable: true,
+		capabilities: ["paper-enrichment/v2"],
 	});
 
 	await env.clock.advance(10000);
@@ -2444,9 +2448,155 @@ test("A4: native parent confirmation consumes permission; replay cannot save a s
 	assert.equal(bodiesFor(env, "/api/connector/result")[0].outcome, "CONFIRMED");
 });
 
+async function enrichmentEnvironment() {
+	const env = makeEnvironment();
+	env.context.Date = class extends Date { static now() { return env.clock.now; } };
+	env.setDefaultOnline(false);
+	await startRuntime(env);
+	const command = {request_id: "abstract-request", invocation_id: "abstract-invocation", doi_url: "https://doi.org/10.5555/abstract"};
+	env.enqueue("/api/connector/enrichment/claim", response(200, {command}));
+	await env.runtime._claimTick(); await flush();
+	assert.equal(env.createdTabs.length, 1);
+	return env;
+}
+async function enrichmentDocument(env, doc = {}) {
+	const tab = env.createdTabs[0].tab;
+	commit(env, tab, "https://publisher.example/article");
+	tab.status = "complete";
+	Object.assign(env.documents.get(env.frames.get(tab.id).documentId), {
+		translators: [{translatorID: "abstract-translator", itemType: "journalArticle"}], ...doc
+	});
+	return tab;
+}
+test("Abstract: Desktop offline closes only the task tab after accepted Preview", async () => {
+	const env = await enrichmentEnvironment();
+	env.enqueue("/api/connector/enrichment/result", response(200, {accepted: true, phase: "Preview"}));
+	const sent = [];
+	env.browser.tabs.sendMessage = async (tabID, message, options) => {
+		sent.push({tabID, message, options});
+		return {items: [{item_type: "journalArticle", doi: "10.5555/abstract", abstract: "Full abstract"}]};
+	};
+	const tab = await enrichmentDocument(env);
+	await env.clock.advance(500);
+	assert.equal(sent.length, 1);
+	assert.equal(sent[0].message[0], "literatureMonitorEnrich");
+	assert.equal(sent[0].options.documentId, env.frames.get(tab.id).documentId);
+	assert.equal(bodiesFor(env, "/api/connector/enrichment/result")[0].items[0].abstract, "Full abstract");
+	assert.equal(env.saveCalls.length, 0);
+	assert.equal(requestsFor(env, "/api/connector/dispatch").length, 0);
+	assert.equal(env.runtime._enrichActive, null);
+	assert.deepEqual(env.removedTabs, [tab.id]);
+});
+test("Abstract: active operation excludes both Import and Preparation claims", async () => {
+	const env = await enrichmentEnvironment();
+	const before = env.requests.length;
+	await env.runtime._claimTick(); await env.runtime._claimPreparation();
+	assert.equal(env.requests.length, before);
+	assert.equal(env.saveCalls.length, 0);
+});
+test("Abstract: cancellation during translation discards late results and releases resources", async () => {
+	const env = await enrichmentEnvironment(); const gate = new Deferred();
+	env.browser.tabs.sendMessage = () => gate.promise;
+	await enrichmentDocument(env); await env.clock.advance(500);
+	env.enqueue("/api/connector/enrichment/authorize", response(409, {accepted: false}));
+	await env.clock.advance(500);
+	assert.equal(env.runtime._enrichActive, null);
+	gate.resolve({items: [{item_type: "journalArticle", doi: "10.5555/abstract", abstract: "Late"}]}); await flush();
+	const results = bodiesFor(env, "/api/connector/enrichment/result");
+	assert.equal(results.length, 1); assert.equal(results[0].items.length, 0);
+	assert.equal(env.saveCalls.length, 0); assert.deepEqual(env.removedTabs, []);
+});
+test("Abstract: document navigation during translation cannot deliver candidate", async () => {
+	const env = await enrichmentEnvironment(); const gate = new Deferred();
+	env.browser.tabs.sendMessage = () => gate.promise;
+	const tab = await enrichmentDocument(env); await env.clock.advance(500);
+	env.beforeNavigate.emit({tabId: tab.id, frameId: 0}); await flush();
+	assert.equal(env.runtime._enrichActive, null);
+	assert.match(bodiesFor(env, "/api/connector/enrichment/result")[0].error, /Document changed/);
+	gate.resolve({items: []}); await flush(); assert.equal(env.saveCalls.length, 0);
+});
+test("Abstract: no Translator fails at ordinary timeout without starting manual wait", async () => {
+	const env = await enrichmentEnvironment(); await enrichmentDocument(env, {translators: []});
+	await env.clock.advance(75000);
+	assert.equal(env.runtime._enrichActive, null);
+	assert.match(bodiesFor(env, "/api/connector/enrichment/result")[0].error, /timed out/);
+	assert.equal(bodiesFor(env, "/api/connector/enrichment/authorize").some(body => body.waiting_for_user), false);
+});
+test("Abstract: challenge allows human wait then a fresh document translates", async () => {
+	const env = await enrichmentEnvironment();
+	await enrichmentDocument(env, {markers: new Set(["#challenge-form"])}); await env.clock.advance(500);
+	assert.equal(env.runtime._enrichActive.manual, true);
+	assert.equal(bodiesFor(env, "/api/connector/enrichment/authorize").some(body => body.waiting_for_user), true);
+	env.browser.tabs.sendMessage = async () => ({items: [{item_type: "journalArticle", doi: "10.5555/abstract", abstract: "After authentication"}]});
+	await enrichmentDocument(env); await env.clock.advance(500);
+	assert.equal(bodiesFor(env, "/api/connector/enrichment/result")[0].items[0].abstract, "After authentication");
+	assert.equal(env.saveCalls.length, 0);
+});
+for (const itemType of ["multiple", "attachment", "webpage"]) {
+	test(`Abstract: ${itemType} detection never starts translation`, async () => {
+		const env = await enrichmentEnvironment();
+		env.browser.tabs.sendMessage = () => assert.fail("Must not translate non-literature items");
+		await enrichmentDocument(env, {translators: [{translatorID: "wrong", itemType}]}); await env.clock.advance(500);
+		assert.equal(bodiesFor(env, "/api/connector/enrichment/result")[0].items.length, 0);
+		assert.equal(env.saveCalls.length, 0);
+	});
+}
+
+for (const receipt of [{accepted: true, phase: "Failed"}, {accepted: false}, {accepted: true}]) {
+	test(`Abstract: rejected or incomplete receipt ${JSON.stringify(receipt)} retains the page`, async () => {
+		const env = await enrichmentEnvironment();
+		env.enqueue("/api/connector/enrichment/result", response(200, receipt));
+		env.browser.tabs.sendMessage = async () => ({items: [{item_type: "journalArticle", doi: "10.5555/abstract", abstract: "Candidate"}]});
+		await enrichmentDocument(env); await env.clock.advance(500);
+		assert.deepEqual(env.removedTabs, []);
+	});
+}
+test("Abstract: close waits for server Preview acknowledgement and preserves unrelated tabs", async () => {
+	const env = await enrichmentEnvironment(); const gate = new Deferred();
+	env.enqueue("/api/connector/enrichment/result", gate.promise);
+	env.browser.tabs.sendMessage = async () => ({items: [{item_type: "journalArticle", doi: "10.5555/abstract", abstract: "Candidate"}]});
+	env.tabs.set(99, {id: 99, url: "https://example.org/user-tab"});
+	const tab = await enrichmentDocument(env); await env.clock.advance(500);
+	assert.deepEqual(env.removedTabs, []);
+	gate.resolve(response(200, {accepted: true, phase: "Preview"})); await flush();
+	assert.deepEqual(env.removedTabs, [tab.id]);
+	assert.equal(env.tabs.has(99), true);
+});
+for (const changed of ["document", "window"]) {
+	test(`Abstract: user changes ${changed} while result is returning, page is retained`, async () => {
+		const env = await enrichmentEnvironment(); const gate = new Deferred();
+		env.enqueue("/api/connector/enrichment/result", gate.promise);
+		env.browser.tabs.sendMessage = async () => ({items: [{item_type: "journalArticle", doi: "10.5555/abstract", abstract: "Candidate"}]});
+		const tab = await enrichmentDocument(env); await env.clock.advance(500);
+		if (changed === "document") env.frames.get(tab.id).documentId = "user-navigated-document";
+		else tab.windowId = 999;
+		gate.resolve(response(200, {accepted: true, phase: "Preview"})); await flush();
+		assert.deepEqual(env.removedTabs, []);
+	});
+}
+test("Abstract: lost result acknowledgement retains the page without retrying translation", async () => {
+	const env = await enrichmentEnvironment();
+	env.enqueue("/api/connector/enrichment/result", new Error("Lost receipt"));
+	let translations = 0;
+	env.browser.tabs.sendMessage = async () => { translations++; return {items: []}; };
+	await enrichmentDocument(env); await env.clock.advance(500);
+	assert.deepEqual(env.removedTabs, []); assert.equal(translations, 1);
+});
+
+test("Preparation heartbeat advertises optional attribute consent", async () => {
+    const env = makeEnvironment({enablePreparation: true});
+    await startRuntime(env);
+    const heartbeat = requestsFor(env, "/api/connector/preparation/heartbeat");
+    assert.equal(heartbeat.length, 1);
+    assert.equal(JSON.parse(heartbeat[0].options.body).capability, "carsi-preparation/a4-verified");
+    assert.equal(JSON.parse(heartbeat[0].options.body).consent_capability, "shibboleth-consent/v1");
+});
+
 (async () => {
 	let failed = 0;
-	for (const [name, fn] of tests) {
+    const pattern = process.argv[2] ? new RegExp(process.argv[2]) : null;
+    const selected = pattern ? tests.filter(([name]) => pattern.test(name)) : tests;
+	for (const [name, fn] of selected) {
 		try {
 			await fn();
 			process.stdout.write(`ok - ${name}\n`);
@@ -2457,7 +2607,7 @@ test("A4: native parent confirmation consumes permission; replay cannot save a s
 			process.stderr.write(`${error.stack || error}\n`);
 		}
 	}
-	process.stdout.write(`\n${tests.length - failed}/${tests.length} tests passed\n`);
+	process.stdout.write(`\n${selected.length - failed}/${selected.length} tests passed\n`);
 	if (failed) {
 		process.exitCode = 1;
 	}

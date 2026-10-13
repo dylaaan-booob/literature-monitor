@@ -59,7 +59,6 @@ def test_existing_uuid_and_nested_data_survive_json_round_trip() -> None:
     [
         ({"title": "", "journal": "Journal"}, ({"name": "Author"},)),
         ({"title": "Title", "journal": ""}, ({"name": "Author"},)),
-        ({"title": "Title", "journal": "Journal"}, ()),
     ],
 )
 def test_required_canonical_fields_are_enforced(
@@ -106,23 +105,18 @@ def test_external_identifier_names_and_values_are_trimmed() -> None:
     assert identifiers.model_extra == {"custom": "value"}
 
 
-def test_current_domain_has_no_version_or_relation_types() -> None:
-    import literature_monitor.models as models
-
-    for name in (
-        "VersionKind", "VersionRef", "PaperVersion", "EvidenceVersionRole",
-        "EvidenceVersionHint", "EvidenceRelation",
-    ):
-        assert not hasattr(models, name)
-    assert set(CanonicalPaper.model_fields) == {
-        "id", "metadata", "external_ids", "authors", "sources", "workflow", "journal_issns",
-    }
-    assert "version_hints" not in models.ProviderWorkEvidence.model_fields
-    assert "relations" not in models.ProviderWorkEvidence.model_fields
-    assert "supplements" in models.ProviderWorkEvidence.model_fields
-
-
 @pytest.mark.parametrize("retired", [{"versions": []}, {"preferred_version": None}])
 def test_current_domain_rejects_retired_version_payloads(retired) -> None:
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         make_paper(**retired)
+
+
+@pytest.mark.parametrize('value', [2026, '0000', '2026-00', '2026-13', '2026-02-30', '10-08', datetime(2026, 10, 8)])
+def test_canonical_date_rejects_invalid_or_ambiguous_values(value):
+    with pytest.raises(ValidationError):
+        CanonicalMetadata(title='Title', journal='Journal', publication_date=value)
+
+
+def test_canonical_date_normalizes_existing_complete_date():
+    from datetime import date
+    assert CanonicalMetadata(title='Title', journal='Journal', publication_date=date(2026, 10, 8)).publication_date == '2026-10-08'

@@ -52,7 +52,6 @@ def join_worker(worker: threading.Thread) -> None:
 
 
 def test_start_has_one_automatic_mode_and_preserves_active_lock(tmp_path, monkeypatch):
-    import inspect
     entered, release = threading.Event(), threading.Event()
     calls = []
     def run(path, *, progress_callback):
@@ -62,7 +61,6 @@ def test_start_has_one_automatic_mode_and_preserves_active_lock(tmp_path, monkey
         return make_run_result()
     monkeypatch.setattr(coordinator_module, "run_monitor", run)
     coordinator = RunCoordinator(tmp_path / "monitor.yaml")
-    assert tuple(inspect.signature(coordinator.start).parameters) == ()
     assert coordinator.start().outcome is StartOutcome.STARTED
     assert entered.wait(5)
     assert coordinator.start().outcome is StartOutcome.ALREADY_RUNNING
@@ -262,7 +260,7 @@ def test_activity_event_updates_snapshot_without_read_side_effects(
     second = coordinator.snapshot()
 
     assert first.progress_stage is ProgressStage.COMBINING_METADATA
-    assert first.stage_index == 3
+    assert first.stage_index == 4
     assert first.current_activity is not None
     assert first.current_activity.kind is ActivityKind.WORKING
     assert first.current_activity.operation == "doi_lookup"

@@ -17,7 +17,6 @@ import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StringConstraints, ValidationError, field_validator
 
 from literature_monitor.date_range import (
-    DEFAULT_WINDOW_DAYS,
     DateRangeError,
     DateRangeSpec,
     ResolvedDateRange,
@@ -147,6 +146,7 @@ class InstitutionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, revalidate_instances="always")
     name: str | None = None
     idp_entity_id: str | None = None
+    automatic_attribute_release_consent: bool = Field(default=False, strict=True)
 
     @field_validator("name", "idp_entity_id", mode="before")
     @classmethod
@@ -192,25 +192,23 @@ class _Settings(BaseModel):
     venue_whitelist: Path | None = None
     keyword_expression: NonEmptyStr
     output_dir: Path | None = None
-    from_date: date | None = None
-    to_date: date | None = None
-    window_days: int | None = None
+    from_month: str
+    to_month: str
     log_level: LogLevel = LogLevel.INFO
     institution: InstitutionConfig | None = None
 
     @field_validator("institution")
     @classmethod
     def empty_institution(cls, value: InstitutionConfig | None) -> InstitutionConfig | None:
-        return value if value is not None and (value.name or value.idp_entity_id) else None
+        return value if value is not None and (value.name or value.idp_entity_id or value.automatic_attribute_release_consent) else None
 
     @field_validator(
         "name",
         "venue_whitelist",
         "keyword_expression",
         "output_dir",
-        "from_date",
-        "to_date",
-        "window_days",
+        "from_month",
+        "to_month",
         "log_level",
         mode="before",
     )
@@ -575,17 +573,7 @@ def parse_monitor_definition(path: Path, raw: Any) -> MonitorDefinition:
     except ValidationError as error:
         raise _format_validation_error(path, error) from error
 
-    date_spec = DateRangeSpec(
-        from_date=settings.from_date,
-        to_date=settings.to_date,
-        window_days=settings.window_days,
-    )
-    if (
-        date_spec.from_date is None
-        and date_spec.to_date is None
-        and date_spec.window_days is None
-    ):
-        date_spec = DateRangeSpec(window_days=DEFAULT_WINDOW_DAYS)
+    date_spec = DateRangeSpec(settings.from_month, settings.to_month)
     try:
         validate_date_range_spec(date_spec)
     except DateRangeError as error:
