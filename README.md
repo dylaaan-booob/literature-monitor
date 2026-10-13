@@ -9,18 +9,18 @@ Papers without rewriting them, and offers native Zotero Import for kept papers.
 
 ## Release and development status
 
-**v0.6.8 is UNRELEASED and in release preparation.** It includes natural-month
+**v0.6.8 is RELEASED and is the latest published stable release.** It includes natural-month
 Journal Run, OpenAlex-first early matching, explicit Paper Enrichment, optional
 Shibboleth consent, Connector lifecycle cleanup and core-regression simplification.
 Current Python package, Provider and Connector build identities are `0.6.8`.
 The latest published stable release is
-[v0.6.7 Capture-Only Run](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.7).
+[v0.6.8: Journal Run & Paper Enrichment](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.8).
 
 Run creates new DOI Papers and necessary Authors, and preserves existing Paper
 and Author bytes. New Papers may have empty Authors; publication dates retain
 available ISO precision. See SPEC §§46, 49 and 52. The v0.6.7 baseline's
 **3070 Python tests (2 existing warnings)** remain historical evidence in §46.6;
-they do not describe the current suite. Current cleanup and preparation evidence
+they do not describe the current suite. Cleanup, validation and publication evidence
 is recorded in [SPEC §54](SPEC.md#54-v068-core-regression-cleanup-and-release-preparation).
 
 Paper Detail offers **Enrich → Preview → Save / Cancel** when Abstract,
@@ -369,7 +369,7 @@ active capture attempt are transient process-local state.
 ### Connector prerequisites
 
 - Run **Zotero Desktop** and the local Web UI bridge at `http://127.0.0.1:8000`.
-- Download and extract the published **v0.6.7 Connector ZIP**. In Chrome,
+- Download and extract the published **v0.6.8 Connector ZIP**. In Chrome,
   open `chrome://extensions/`, enable Developer Mode, choose **Load unpacked**,
   and select `chrome-mv3/`; see [Connector instructions](connector/README.md).
 - Settings must show the Connector as `connected` before Import. The official

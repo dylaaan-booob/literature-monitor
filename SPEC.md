@@ -1,9 +1,9 @@
 # Literature Monitoring Workflow — Specification v1.4
 
-**Current status:** Active. **v0.6.8 is UNRELEASED and in release preparation** (§54).
+**Current status:** Active. **v0.6.8 is RELEASED** (§54.6).
 The latest published stable release is
-[v0.6.7](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.7),
-published on 2026-10-12; its peeled tag is `1519f0f6204da427a13eccec340d09dfa42641b0`.
+[v0.6.8](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.8),
+published on 2026-10-13; its peeled tag is `f6e707a8416d6ecd08a4b5f7eaa61317bc750049`.
 Current package, Provider and Connector build identities are `0.6.8`.
 
 **Current contract:** §§46–54 govern current Run, Enrichment, date precision,
@@ -9066,3 +9066,39 @@ package files/embedded README match. Functional/build inputs have not changed,
 so §54.4 tests, reconstruction, package inspection and isolated installation are
 reused. This subsection records authorization and preflight, not publication;
 §54.6 records the verified public result after it occurs.
+
+### 54.6 v0.6.8 Publication Verification and Closeout — 2026-10-13
+
+**v0.6.8 is RELEASED and is the latest verified stable release.** This publication
+record supersedes the earlier preparation/pending statements in §54 without
+rewriting historical test and release evidence.
+
+- Release commit and peeled annotated `v0.6.8^{}` tag:
+  `f6e707a8416d6ecd08a4b5f7eaa61317bc750049`.
+- [GitHub Release v0.6.8](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.8),
+  published `2026-10-13T01:17:05Z`, non-draft, non-prerelease, verified as latest.
+- Normal main and tag pushes succeeded. The wheel payload/embedded README and
+  Connector corresponding-source delta match the release commit. The prior
+  `v0.6.7` tag remains fixed at `1519f0f6204da427a13eccec340d09dfa42641b0`.
+- All three Release assets were downloaded after upload. Their SHA-256 values
+  match both §54.4's local artifacts and GitHub's authoritative asset digests;
+  every asset is in `uploaded` state with the expected size.
+
+| Asset | Verified bytes |
+|---|---:|
+| `literature_monitor-0.6.8-py3-none-any.whl` | 269902 |
+| `literature_monitor-0.6.8.tar.gz` | 246265 |
+| `literature-monitor-connector-0.6.8-chrome-mv3.zip` | 10677664 |
+
+The user-authorized `list.md` was committed and uploaded without changing its
+bytes. Real monitor.yaml, src/.obsidian and Workspace remain local/untracked and
+were neither staged nor packaged. GitHub reports zero configured Actions
+workflows and zero check runs for the release commit; this is not a CI pass.
+Functional validation, reconstruction and isolated-install results are reused
+from §54.4 because their inputs remained unchanged. No new real Provider,
+Chrome/IdP or Zotero Library acceptance, installed-Connector replacement or data
+migration was performed.
+
+The post-publication documentation closeout changes current status/download
+links only. The annotated release tag and its verified assets remain fixed at
+the release commit; documentation-only updates require no functional rerun.

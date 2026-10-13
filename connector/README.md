@@ -1,15 +1,15 @@
 # Literature Monitor Connector
 
-This directory defines the independent browser component for v0.6.8 preparation,
+This directory defines the independent browser component for the v0.6.8 release,
 following the v0.6.3 batch/Connector contract in SPEC §42. It is derived from the official
 Zotero Connector source and is separate from the MIT Python
 `literature_monitor` package. The tracked build entry point generates the
 Chrome/MV3 artifact with version `0.6.8`.
 
-v0.6.7 is the latest published release; v0.6.8 is UNRELEASED. The current build
+v0.6.8 is the latest published stable release. The current build
 includes read-only Paper Enrichment, optional Shibboleth consent and lifecycle
 cleanup on the same pinned upstream. The Python server accepts the 0.6.8 CARSI
-handshake alongside 0.6.4–0.6.7. See SPEC §54 for preparation evidence.
+handshake alongside 0.6.4–0.6.7. See SPEC §54 for validation and publication evidence.
 
 A1 establishes source provenance, licensing, reconstruction and Chrome/MV3
 build boundaries. A5 adds the independent Literature Monitor automatic-capture
@@ -75,7 +75,7 @@ directories from being treated as disposable Connector build state.
 For local installation or verification, open `chrome://extensions/`, enable
 Developer Mode, choose **Load unpacked**, and select the generated `chrome-mv3`
 directory. Alternatively, extract the published
-[Connector ZIP](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.7)
+[Connector ZIP](https://github.com/dylaaan-booob/literature-monitor/releases/tag/v0.6.8)
 and select its `chrome-mv3/` directory; it includes corresponding source and
 license/build instructions. This is a local install path, not a Chrome Web Store release.
 A7 recorded a successful toolbar-free automatic save in normal Chrome with
