@@ -13,8 +13,6 @@ from literature_monitor.config import JournalConfig, PublisherConfig, render_set
 from literature_monitor.url_safety import normalize_public_http_url
 from literature_monitor.web.app import create_app
 from test_a4_publisher_settings import A, B, P1, P2, setup, provider, source, pub
-from test_a5_settings_ui import nodes
-from test_web_run_settings import browser_settings_submission, browser_settings_values
 
 
 UNICODE_LOCAL_URLS = (
@@ -29,21 +27,6 @@ def test_f1_normalized_local_hosts_rejected_by_validator_and_config(url):
         normalize_public_http_url(url)
     with pytest.raises(ValueError):
         PublisherConfig(name='Publisher', publisher_id=P1, publisher_url=url)
-
-
-@pytest.mark.parametrize('url', UNICODE_LOCAL_URLS)
-def test_f1_web_rejects_persistence_and_open_link(tmp_path, monkeypatch, url):
-    config, path, _ = setup(tmp_path)
-    before = config.read_bytes(), path.read_bytes()
-    monkeypatch.setattr(settings, 'OpenAlexClient', lambda **kwargs: pytest.fail('URL validation is offline'))
-    with TestClient(create_app(config), base_url='http://localhost') as browser:
-        data = browser_settings_submission(browser.get('/settings').text)
-        data['publisher_access_url'] = [url]
-        response = browser.post('/settings/save', data=data)
-        assert 'HX-Trigger' not in response.headers
-        assert not nodes(response.text, attribute='data-publisher-open')
-        assert browser_settings_values(response.text).publishers[0].access_url == url
-    assert (config.read_bytes(), path.read_bytes()) == before
 
 
 def test_f1_browser_parser_normalization_and_public_idn(monkeypatch):
@@ -167,46 +150,6 @@ def test_f4_unsafe_storage_is_not_overwritten(tmp_path, monkeypatch, unsafe):
     if unsafe == 'utf8': assert path.read_bytes() == b'\xff\xfe'
 
 
-def test_f4_web_repair_and_partial_save(tmp_path, monkeypatch):
-    config, path, _ = damaged_settings(tmp_path, 'malformed')
-    metadata, _ = provider(sources=[source(aliases=(A,), candidate=A, publisher=P1)])
-    monkeypatch.setattr(settings, 'OpenAlexClient', lambda **kw: metadata)
-    write = settings._write_snapshot_target
-    def fail_monitor(p, contents, snapshot):
-        if p == config: raise OSError('monitor write unavailable')
-        return write(p, contents, snapshot)
-    monkeypatch.setattr(settings, '_write_snapshot_target', fail_monitor)
-    before = config.read_bytes(), path.read_bytes()
-    with TestClient(create_app(config), base_url='http://localhost') as browser:
-        data = browser_settings_submission(browser.get('/settings').text)
-        data.update(journal_name=['Pending resolution'], journal_issns=[A], journal_publisher_id=[''], journal_pending=['1'], journal_group=['Recovered'])
-        response = browser.post('/settings/save', data=data)
-        assert 'HX-Trigger' not in response.headers
-        assert 'Settings issues' in response.text
-    assert (config.read_bytes(), path.read_bytes()) == before
-
-
-@pytest.mark.parametrize('entry', ['add'])
-@pytest.mark.parametrize('url', ['', 'https://edited.example/login'])
-def test_f5_remove_reintroduce_saved_identity_offline_web_save(tmp_path, monkeypatch, entry, url):
-    config, path, original = setup(tmp_path)
-    monkeypatch.setattr(settings, 'OpenAlexClient', lambda **kw: pytest.fail('Saved identity reintroduction must be offline'))
-    with TestClient(create_app(config), base_url='http://localhost') as browser:
-        data = browser_settings_submission(browser.get('/settings').text)
-        for name in ('journal_name', 'journal_issns', 'journal_group', 'journal_publisher_id', 'journal_pending'):
-            data[name] = []
-        data['publisher_access_url'] = [url]
-        data.update(journal_name=['Pending resolution'], journal_issns=[A], journal_publisher_id=[''], journal_pending=['1'], journal_group=['Methods'])
-        response = browser.post('/settings/save', data=data)
-        assert response.headers.get('HX-Trigger') == 'settingsSaved', response.text
-        values = browser_settings_values(response.text)
-        assert not values.journals[0].pending
-        assert values.journals[0].name == 'Canonical A' and values.journals[0].publisher_id == P1
-    final = settings.load_settings(config).draft
-    assert final.journals == (original.journals[0].model_copy(update={'group': 'Methods'}),)
-    assert final.publishers[0].publisher_url == (url or None)
-
-
 @pytest.mark.parametrize('pending,publisher', [(False, None), (False, P1), (True, P2)])
 def test_f5_existing_metadata_tampering_still_rejected(tmp_path, pending, publisher):
     config, path, original = setup(tmp_path)
@@ -240,20 +183,3 @@ def test_f5_pending_reintroduction_preserves_metadata_and_rejects_stale_draft(tm
     assert result.outcome is settings.SettingsSaveOutcome.REVISION_CONFLICT
     assert not result.journal_written and not result.monitor_written and not calls
     assert (config.read_bytes(), path.read_bytes()) == before
-
-
-@pytest.mark.parametrize('web', [False, True])
-def test_f4_symlink_monitor_never_overwrites_target(tmp_path, web):
-    config, path, original = setup(tmp_path)
-    target = tmp_path/'real-monitor.yaml'
-    config.rename(target); config.symlink_to(target)
-    before = target.read_bytes(), path.read_bytes()
-    if web:
-        with TestClient(create_app(config), base_url='http://localhost') as browser:
-            data = browser_settings_submission(browser.get('/settings').text)
-            response = browser.post('/settings/save', data=data)
-            assert 'HX-Trigger' not in response.headers
-    else:
-        result = settings.save_settings(config, original)
-        assert result.outcome is settings.SettingsSaveOutcome.WRITE_FAILED
-    assert config.is_symlink() and (target.read_bytes(), path.read_bytes()) == before

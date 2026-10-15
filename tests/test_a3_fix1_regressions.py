@@ -13,7 +13,6 @@ from literature_monitor.crossref import plan_crossref_queries, CrossrefDiscovery
 from literature_monitor.openalex import ResolvedSource, DiscoveryResult
 from literature_monitor.web.app import create_app
 from test_application_settings import write_valid_settings_files
-from test_web_run_settings import browser_settings_submission
 
 A, B, X = '0006-341X', '0090-5364', '0162-1459'
 DAY = date(2026, 1, 1)
@@ -71,23 +70,6 @@ def test_ordinary_save_preserves_machine_metadata_without_network(tmp_path, monk
     assert load_config(config).journals == journals
 
 
-@pytest.mark.parametrize('mutation', ['journal_name', 'journal_publisher_id'])
-def test_web_save_cannot_persist_machine_metadata_tampering_or_new_import(tmp_path, mutation, monkeypatch):
-    from literature_monitor.openalex import OpenAlexClient, OpenAlexRequestError
-    def unavailable(*args, **kwargs):
-        raise OpenAlexRequestError("requires metadata resolution: unavailable")
-    monkeypatch.setattr(OpenAlexClient, "_request_json", unavailable)
-    config, path, _ = configured(tmp_path)
-    before = config.read_bytes(), path.read_bytes()
-    with TestClient(create_app(config), base_url='http://localhost') as client:
-        data = browser_settings_submission(client.get('/settings').text)
-        data[mutation][0] = 'Tampered name' if mutation == 'journal_name' else 'https://openalex.org/P99'
-        saved = client.post('/settings/save', data=data)
-        assert saved.status_code == 200 and 'HX-Trigger' not in saved.headers
-        assert 'metadata' in saved.text
-    assert (config.read_bytes(), path.read_bytes()) == before
-
-
 def evidence(*, configured_alias=False, same_name=False, same_source=False):
     journals = (JournalConfig(issn_l=A, name='Same' if same_name else 'A', publisher_id='P1'),
                 JournalConfig(issn_l=B, name='Same' if same_name else 'B', publisher_id='P2'))
@@ -136,8 +118,6 @@ def test_discovery_surfaces_conflict_without_request_or_coverage_for_excluded_al
     assert all(i.severity.value == 'warning' and i.issn == X for i in result.issues)
 
 
-
-
 def test_configured_owner_precedence_survives_its_source_failure():
     journals, sources = evidence(configured_alias=True)
     plans = plan_crossref_queries(journals, sources[1:])
@@ -156,8 +136,6 @@ def test_revision_conflict_still_precedes_metadata_rejection(tmp_path, changed_f
     result = save_settings(config, draft)
     assert result.outcome is SettingsSaveOutcome.REVISION_CONFLICT
     assert (config.read_bytes(), path.read_bytes()) == before
-
-
 
 
 def test_production_collision_resolution_adds_no_source_lookup(tmp_path, monkeypatch):

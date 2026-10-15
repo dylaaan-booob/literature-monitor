@@ -1,20 +1,23 @@
-# Literature Monitor Connector provenance
+# Connector source provenance and license boundary
 
-## Upstream authority
+The Literature Monitor Chrome/MV3 Connector is a derivative of Zotero Connector source. It is **separate** from
+the MIT `literature_monitor` Python distribution and its runtime import graph. This file records the exact
+upstream baseline, the changes owned by Literature Monitor and the corresponding-source obligations. Do not
+remove original license headers, notices or upstream attribution when changing the build or publishing an
+artifact.
 
-- Upstream project: `zotero/zotero-connectors`
-- Canonical repository: `https://github.com/zotero/zotero-connectors.git`
-- Pinned revision: `876e41ad15139077f2e07b2f71a0fa94742e0b4a`
-- Upstream commit date: 2026-09-17
-- Upstream commit subject: `Let users suppress the Safari all-websites recommendation (#639)`
-- License: GNU Affero General Public License version 3 as stated in the
-  pinned upstream `COPYING`; individual upstream files retain their own
-  copyright/license notices.
+## Pinned upstream authority
 
-`upstream.lock` also records every top-level gitlink required by this exact
-revision:
+- Project: [zotero/zotero-connectors](https://github.com/zotero/zotero-connectors)
+- Git repository: `https://github.com/zotero/zotero-connectors.git`
+- Commit: `876e41ad15139077f2e07b2f71a0fa94742e0b4a`
+- Commit date: 2026-09-17
+- Commit subject: `Let users suppress the Safari all-websites recommendation (#639)`
+- Governing upstream license: **GNU Affero General Public License, version 3**, as reproduced verbatim in [COPYING](COPYING). Individual source files and bundled third parties retain their own copyrights and notices.
 
-| Path | Pinned revision |
+[upstream.lock](upstream.lock) pins the upstream commit and all required top-level submodules:
+
+| Upstream gitlink | Exact commit |
 | --- | --- |
 | `src/translate` | `485ac36edbd66459e2aa3bad4d4b36921be2c7c2` |
 | `src/utilities` | `cccf1235a318c259345fc623d5e9d6770ba19df7` |
@@ -22,298 +25,114 @@ revision:
 | `src/zotero-google-docs-integration` | `a46413151134ad699c351ac42ecbbe9c76c8e6cc` |
 | `src/zotero-schema` | `b5b3f51217a99b3c41585d468ee1dc0837233d13` |
 
-The pinned upstream README states that normal Connector builds require only
-these top-level submodules; recursive submodule initialization is not required.
+The pinned upstream README specifies these top-level submodules; recursive initialization is not required for
+the normal build. The top-level Connector `COPYING` must remain byte-identical to the pinned upstream copy. The
+current tracked Connector build passes version `0.7.0` to upstream's supported `-v` option without moving
+upstream pins or altering its package metadata.
 
-## Reconstruction and delta
+## Exact reconstruction and Literature Monitor delta
 
-`scripts/reconstruct-upstream.sh` initializes an empty checkout, fetches only
-the exact upstream revision, verifies that its complete gitlink set matches
-`upstream.lock`, initializes those exact top-level submodule commits, and
-checks that this directory's `COPYING` remains byte-identical to the pinned
-upstream license file.
+[reconstruct-upstream.sh](scripts/reconstruct-upstream.sh) starts from an empty checkout, fetches only the
+pinned upstream commit, verifies its gitlink set, initializes the five exact submodules and verifies the license
+copy. The [build script](build.sh) applies [patches](patches/README.md) in lexical order after
+`git apply --check`, builds the original Chrome/MV3 product and adds Literature Monitor-owned `overlay/` files.
+A mismatch of upstream commit, gitlink, license, patch context or [delta.lock](delta.lock) causes a failed
+build. The generated source/build directories are not substitutes for the tracked inputs.
 
-Literature Monitor-owned changes are not mixed into `src/literature_monitor`.
-They are represented only by:
+The reviewable delta consists of:
 
-- `patches/*.patch`: source patches applied in lexical order after
-  `git apply --check`;
-- `overlay/`: files copied into the generated Chrome/MV3 artifact after the
-  upstream build;
-- `delta.lock`: the expected upstream paths and overlay files changed by
-  Literature Monitor.
+| Changed source boundary | Purpose |
+| --- | --- |
+| `0001-literature-monitor-component-name.patch` | Distinct Chrome/MV3 component identity |
+| `0002-literature-monitor-automatic-capture-hooks.patch` | Worker wiring, document-bound automatic translator invocation, one-shot native `saveItems` authorization, attributable parent response observation and local-only save isolation |
+| `0003-literature-monitor-paper-enrichment.patch` | Separate read-only translation message and MV3 offscreen handler; no native or Zotero-server save |
+| `0004-literature-monitor-connector-lifecycle-cleanup.patch` | Tab-ID normalization, live-tab/offscreen cache cleanup with safe snapshot iteration |
+| `overlay/literature-monitor-runtime.js` | Localhost heartbeat, Import and Enrichment tasks, browser owner, results and window context |
+| `overlay/literature-monitor-access.js` | Conservative DOI landing-origin observation; no production verified SP auto-login rule |
+| `overlay/literature-monitor-carsi.js` | Official CARSI Shibboleth Portal, Service search, Detail and Visit automation, optional recognized IdP consent |
+| `overlay/literature-monitor-covers.js` | Google Images first-original extraction and Chrome-side bounded image fetch |
+| `overlay/LITERATURE_MONITOR_PROVENANCE.txt` | Artifact provenance boundary and license pointers |
 
-The released v0.6.1 delta keeps the A1 Chrome/MV3 component-name
-and provenance changes and the A5 automatic-capture runtime. The tracked
-Literature Monitor build entry point supplies release version `0.6.7` to the pinned
-upstream build through its supported `-v` option; the upstream revision,
-submodule pins and upstream package metadata remain unchanged. Published v0.6.2
-source and artifact verification are recorded in SPEC §41.16. The A5 source delta is
-limited to:
+The authoritative list of **all modified upstream file paths and overlay additions** is `delta.lock`. The source
+patch boundary includes background worker/manifest, `background.js`, PageSaving/ItemSaver, native Connector
+transport, inject and offscreen translation files. No Connector-derived AGPL code or parsed Zotero date utility
+is copied into the MIT Python package. The runtime uses the pinned upstream translator and
+`Zotero.Date.strToDate()` under the Connector license; the Python application only validates returned data and
+operates on local Markdown.
 
-- wiring a Literature Monitor-owned background runtime into the MV3 worker;
-- propagating an automatic/local-only save marker through the existing
-  page-saving and ItemSaver path;
-- disabling Zotero-server fallback only for that automatic path;
-- surfacing a tab-correlated top-level local `saveItems` acceptance signal
-  before collection lookup and attachment work, plus deterministic pre-parent
-  failure signaling.
+The independent [Chrome Connector README](README.md) records installation, permissions, current browser behavior
+and developer verification commands. Review the patch README before changing a patched upstream location.
+Upstream's existing copyright and embedded third-party licenses continue to apply; the independent frontend
+asset notices are in [UI Next SOURCES](../src/literature_monitor/web/static/ui_next/SOURCES.md).
 
-The runtime itself remains an overlay file. It communicates only with
-`http://127.0.0.1:8000`, creates one dedicated normal task tab per accepted
-command, and reuses the pinned upstream translator machinery. It does not
-introduce collection/tag routing, Group Library fallback, attachment-completion
-gating, credential automation or a Python import/runtime dependency.
+## Native Save attribution and scope
 
-The v0.6.5 CARSI Preparation delta also copies `literature-monitor-carsi.js` as an
-AGPL-compatible Overlay and imports it before the existing runtime. It adds
-no Zotero parent-save or PDF hook and requests no new Manifest permissions.
-The page selectors are grounded in the user's normal-Chrome DevTools DOM
-observations. The module now executes bounded, authorized CARSI name and
-Visit clicks; its isolated tests are not live institutional acceptance.
-The existing native-save and Parent/PDF hooks remain unchanged.
+In the pinned `src/common/itemSaver.js` and bundled Zotero Desktop connector-source implementation, native
+`saveItems` returns its parent acceptance before downstream collection/attachment completion. A successful local
+HTTP 201 may have an empty body or a one-item response containing the same client-side parent identity. This
+identity is **not** a Zotero Library key. If both request and response carry IDs, they must be valid
+own-property scalar values (a nonblank string or finite nonzero number) with exact type-sensitive equality;
+missing, malformed or mismatched responses never establish attributable parent acceptance. Any post-dispatch
+transport error remains uncertain, not a proven no-effect failure.
 
-## Intentional upstream updates
+The pinned attachment code can report progress and Snapshots without confirming a real saved PDF. The checked-in
+Desktop source does not supply a proven actual-file completion receipt for this producer; the application
+therefore keeps PDF `unverified` in the absence of stronger attributable evidence. Do not turn generic
+attachment progress, response status, `snapshot=false`, native parent acceptance or an arbitrary timeout into
+PDF success. Nor may a browser navigation or CARSI Visit grant Zotero native-save permission.
 
-An upstream update is a review event, not a floating build:
+Automatic translation is bound to the current task DOI, committed Document, tab, invocation/native session,
+finite deadline and single-use dispatch authorization. It disables upstream remote Zotero-server fallback for
+this path only. Translator readiness uses current-document evidence; stale background caches or a challenged
+page cannot authorize saving. Chrome main-frame challenge observation reads only relevant non-blocking metadata
+and avoids credentials, Cookies and response bodies. The task may not reissue a native save after an uncertain
+first dispatch. Manual Zotero saving remains upstream-owned.
 
-1. resolve the intended `zotero/zotero-connectors` commit explicitly;
-2. inspect its `.gitmodules`, gitlink revisions, `COPYING`, lockfile and
-   build instructions;
-3. update `upstream.lock` with the new full commit SHA and exact top-level
-   gitlink SHAs;
-4. replace `COPYING` only with the verbatim file from that pinned revision;
-5. rebase/review every patch and update `delta.lock` if the Literature
-   Monitor delta changes;
-6. update the artifact provenance marker;
-7. reconstruct from an empty directory and rerun the Connector build,
-   packaging-isolation checks and applicable upstream tests.
+## CARSI, Enrichment, Covers and browser ownership
 
-The build fails when the upstream revision, gitlink set, submodule commit,
-license copy, patch context or declared delta does not match the tracked locks.
+CARSI automated Preparation navigates only official Shibboleth Portal → verified resource search → official
+Detail/Visit paths. It accepts a full saved Service Name, verifies the `onlyMySchool` filter-off state and
+enforces task/document/Visit-nonce checks. It reports observed navigation, not authentication or entitlement.
+Preparation leaves every tab/window open; local cleanup releases listeners and stale authority. Optional
+`shibboleth-consent/v1` handles only recognized same-origin native consent forms, never passwords, MFA, Cookies
+or arbitrary login.
 
-## v0.6.3 A2 development outcome evidence
+Read-only `paper-enrichment/v2` invokes the pinned Translate Framework in browser mode with saving disabled,
+returning original Item data including creators and parsed date components. Python owns the subsequent narrow
+Markdown save. Current date precision is preserved; legacy default-month/day padding and accepted-Preview page
+cleanup no longer define the current contract.
 
-This section records source inspection and deterministic tests, not live
-Chrome/Zotero acceptance. The upstream and every gitlink above are unchanged.
-The A2 delta remains confined to the already declared worker, PageSaving,
-ItemSaver and overlay paths in `delta.lock`.
+`journal-covers/v2` obtains first-result original image URLs using recognized Google Images result data,
+including regional domains. Chrome background fetches are bounded, serial and credential-free. Source inspection
+was informed by [ViewImage](https://github.com/bijij/ViewImage) and
+[Classic View for Google Images](https://github.com/hsr88/classic-view-for-google-images); **no code/dependency
+from those projects is bundled**. Chrome network policy does not replicate an old Python DNS-pinned image
+downloader.
 
-### Evidence from the exact pinned source
+`background-task-windows/v1` creates unfocused normal Chrome windows and reuses one window for a Kept
+Preparation/Import workflow. Optional `window_context` is ephemeral routing metadata, never proof of identity,
+login or a native-save grant. Enrich and Import may close only unchanged matching task documents under their
+accepted lifecycle; CARSI pages are not closed. The shared browser exclusion and native save authorization
+remain independent.
 
-| Source | Observed behavior | Outcome authority |
-| --- | --- | --- |
-| `src/common/itemSaver.js`, `_saveToZotero()` | Native `saveItems` resolves before `getSelectedCollection` and `saveAttachmentsToZotero`. | Parent acceptance is independent of attachment work. |
-| `src/common/connector.js`, `callMethod()` | Transport, parse and HTTP errors reject; a lost response cannot establish whether a save occurred. | Errors after dispatch are uncertain, never no-effect proof. |
-| Pinned `src/zotero/chrome/content/zotero/xpcom/connector/server_connector.js`, `SaveItems.init()` / `saveItems()` | The bundled Desktop source returns `201` with parent item IDs from `onTopLevelItemsDone`; attachment work can continue after that response. | A matching native parent response supports acceptance, not PDF existence. This bundled source is not a probe of the user's installed Desktop. |
-| `src/common/itemSaver.js`, `_saveAttachmentsToZotero()` | `snapshot === false` links also receive progress `100`; primary types include PDF and EPUB; resolver fallback may continue after a failed attachment attempt. | Generic progress/failure is not proof of this parent having an actual saved PDF or a final PDF failure. |
-| `src/common/itemSaver.js`, `_executeSingleFile()` | Snapshot callbacks use the same `0`, `100`, and `false` progress vocabulary. | Snapshot success is not PDF success. |
-| `src/common/itemSaver_background.js`, `saveAttachmentToZotero()` | The native download/upload path forwards attachment metadata and returns the connector-server response. The pinned bundled Desktop source has no `saveAttachment` endpoint implementation to inspect. | No proven actual-file receipt or terminal PDF evidence is available from this source bundle. No installed Desktop/file inspection was performed. |
+The Connector requests no new credentials, cookie extraction/transfer, browser-session registry, Zotero Library
+inspection, background sync, generic PDF acquisition or institution-specific login routes. The automatically
+observed DOI landing-origin access overlay has **no verified production SP rule**; synthetic fixtures are not
+evidence of live federation.
 
-### Producer and bridge contract
+## Corresponding source and intentional updates
 
-The claim supplies unpredictable request and invocation capabilities plus the
-server-built DOI target. The runtime freezes these values and a finite expiry
-before calling the native translator. PageSaving passes an invocation-local
-object to ItemSaver; subsequent changes to shared `sessionDetails` cannot
-change that object's identity or dispatch state.
+Every distributed Connector binary/ZIP must retain an AGPL-compatible component identity, original/upstream
+copyright and license notices, this pinned source relationship and access to **complete corresponding source**,
+including required upstream and submodule revisions, local patches, overlays, lockfiles, scripts and build
+instructions. The release ZIP's `chrome-mv3/` and `corresponding-source/` boundaries implement that obligation.
+Neither an upstream link alone nor an opaque compiled bundle substitutes for the reviewed local delta and
+corresponding-source information. Distribution requirements for separately licensed bundled dependencies also
+continue to apply.
 
-Immediately before native `saveItems`, the automatic hook requires one
-bibliographic item whose DOI matches the target and requests one live dispatch
-permission. The runtime verifies its own extension sender, task tab, request,
-invocation and DOI; it binds the native session, frame and document. The bridge
-consumes the permission once, binds tab/session and revalidates any A1 durable
-reservation. Neither permission loss, worker/application restart nor timeout
-reissues it. Content also checks a monotonic finite deadline before and after
-permission receipt, so a paused/late reply cannot revive the command.
-
-Only a matching native parent acceptance response emits `CONFIRMED`. Explicit
-pre-dispatch failures map to parent `NO_EFFECT` (legacy `FAILED`); ambiguous
-transport/permission errors or observation expiry map to `UNCERTAIN` (legacy
-`UNCONFIRMED`). Ordinary failure after dispatch is never no-effect proof.
-No bridge outcome clears an A1 marker. The existing guarded legacy completion
-reconciliation remains in place until A3; this task adds no `exported` transition.
-
-Parent delivery does not wait for the full native save promise or attachments.
-PDF is separately `unverified` in snapshots and completion handoffs. The contract
-names `verified success` and `verified failure`, but this producer has no proven
-evidence for either; the bridge rejects those assertions. No PDF event producer,
-attachment registry, downloader, library scan or fixed-delay success inference
-is introduced. Late, duplicate or unbound callbacks cannot change the parent.
-The manual recovery path is inspection of the retained task tab and the saved
-parent in Zotero Desktop; lack of PDF evidence does not imply PDF failure.
-
-A2 verification uses temporary Workspaces, mocked browser/server boundaries and
-executed shipped hook code. Release gates still require real ordinary Chrome
-and Zotero acceptance of parent observations and truthful PDF `unverified`
-behavior. Verified PDF reporting requires a separately established actual-save
-or final-failure evidence source with invocation/parent attribution.
-
-### A2 review fix: native parent identity
-
-At the same pinned revision, `ItemSaver._saveToZotero()` preserves a supplied
-truthy `item.id` or fills it with `Zotero.Utilities.randomString(8)` before
-copying the native request. The pinned utility uses ASCII digits and letters.
-The bundled Desktop `SaveItems.saveItems()` preserves supplied IDs and can
-assign numeric IDs when absent; its `onTopLevelItemsDone` response copies
-`item.id` into `items[].id` and returns `201`. This is a client correlation ID,
-not a Zotero library item key. Neither an eight-character-only nor a
-string-only acceptance rule represents that protocol.
-
-The automatic hook now freezes the request's single parent ID before the native
-call. Both identities must be own fields on item objects and valid JSON scalar
-IDs: a nonblank string or a finite nonzero number. Response structure must
-contain its own single-item `items` array. IDs must match without type coercion.
-Missing IDs, null/empty IDs, booleans, object/array IDs, non-finite numbers,
-inherited fields, damaged response structure and mismatches do not establish
-acceptance, even if HTTP succeeded. They yield legacy `UNCONFIRMED` / parent
-`UNCERTAIN`, never a no-effect claim or a second native save. The bridge leaves
-the A1 attempt marker unresolved; the existing legacy completion adapter is
-unchanged. PDF remains `unverified`.
-
-Regression tests execute the shipped patch fragment with the actual overlay
-listener, including valid native string/numeric identities and invalid equal
-values. A temporary-Workspace Python test verifies that receiving this uncertain
-outcome preserves the marker and prevents another reservation. These are
-source/deterministic checks, not real Desktop response acceptance evidence.
-
-### Unreleased v0.6.3 A6: bounded Access Service preparation
-
-`literature-monitor-access.js` is an AGPL overlay loaded before the runtime.
-The upstream save hooks, pin and existing MV3 permissions are unchanged.
-Only actual main-frame commits/redirect events in the current dedicated DOI tab
-contribute landing origins. A bibliographic Publisher, DOI prefix, manual Access
-URL and IdP hostname are never SP identity authority. An origin becomes a known
-SP only through an unambiguous, reviewed static identity rule.
-
-The production rule table is empty: **no verified SP/federation routes** are
-currently enabled. Rules need separate evidence references for SP identity,
-institution selector, allowed destinations, return behavior and preservation of
-existing host associations. Entries cannot contain sensitive query/fragment
-parameters. Synthetic `.example` fixtures demonstrate the policy, not real
-institution acceptance. Unknown services retain ordinary official bibliographic
-capture and offer Open DOI for manual institutional access.
-
-One opaque batch context retains service preparation outcomes only in worker
-memory. Each service gets at most one automatic preparation per batch; each task
-has a monotonic 20-second preparation budget and at most eight observed main-frame
-redirect/commit hops. Repeated destinations, untrusted hosts, challenge form
-submissions and expiry stop preparation. Redirect observation uses existing
-webRequest permission without headers, cookies or blocking redirects; navigation
-is restricted to a reviewed static entry and the original server-built DOI in
-the owned task tab. Same-host repetition is conservatively treated as a loop.
-Missing events cannot be advertised as complete redirect-chain evidence.
-
-Only public HTTPS origins and a fixed reason reach the process-local bridge.
-IdP session, SP session, authentication and resource entitlement are four distinct
-unknown observations; navigation never proves any of them. No credentials,
-Cookies, SAML assertions, sensitive URLs, browser storage or Paper/configuration
-observations are persisted. Existing OpenAthens associations are neither read
-nor changed by this overlay; rules require preservation, never overwrite.
-
-Preparation cannot grant parent-save permission. Every asynchronous readiness or
-navigation callback rechecks live task identity and deadline. Terminal tasks
-cannot resume saving. Navigation after the translator trigger ends observation
-as uncertain; an escaped A4 dispatch remains unresolved. The official translator,
-one-shot native dispatch/acceptance hooks and PDF `unverified` boundary remain.
-Actual service rules, real federation behavior and Chrome/Zotero acceptance are
-future explicitly authorized live gates; see SPEC §42.12 for current evidence.
-
-
-## Unreleased v0.6.3 challenge/readiness correction (2026-10-09)
-
-This correction supersedes A6's conservative same-origin-loop behavior for
-ordinary DOI navigation only. Such navigation compares path fingerprints without
-retaining paths/query values, permits one same-URL reload, and retains the eight
-hop limit and original 20-second deadline. Verified federation retains its
-origin allowlist, SP/resource return checks and single-use return exception.
-`form_submit` still falls back: Chrome does not identify who submitted the form.
-
-The runtime now observes only the task tab's main-frame response header
-`cf-mitigated: challenge` through non-blocking `webRequest`, using existing
-permissions. Latest request IDs, the pre-request document, `getFrame` and
-navigation generations prevent stale response/candidate reuse; no Cookie,
-response body or sensitive query value is retained. Exact challenge DOM markers
-and orchestrate scripts supplement the header; JSD and standalone Turnstile do
-not establish a full-page challenge. No refresh or challenge interaction occurs.
-
-Current top-frame `Zotero.PageSaving.translators` is read in the extension's
-isolated world with `scripting.executeScript(target.documentIds)`. Background
-translator caches and top-frame `instanceID = 0` cannot establish document
-identity. Pinned `onPageLoad()` has no detection-start provenance; a challenged
-document remains ineligible after same-document DOM changes or array replacement.
-A new document must pass fresh checks, otherwise the task falls back at deadline.
-
-`0002` additionally patches `src/browserExt/background.js` (declared in
-`delta.lock`) only to target an automatic `translate` message at the selected
-`documentId` and translator. The manual path and native `saveItems` implementation
-are unchanged. Preparation navigation discards candidates and resumes under the
-same deadline. After the first `saveWithTranslator()` invocation, navigation is
-uncertain and cannot trigger another invocation. Native dispatch validates the
-selected document before and after its bridge await; accepted-parent attribution
-continues to be the completion authority, independently of PDF evidence.
-
-Real Chrome 154.0.8037.98 API probes used temporary profiles and local test pages,
-not the user's Chrome profile or Zotero data. They observed response headers
-without a document ID, header-before-navigation ordering, distinct document IDs
-for same-URL reload, isolated access to pinned PageSaving and stale-document
-injection rejection. These probes establish API feasibility, not actual
-Cloudflare passage, translator detection or Zotero parent/Paper completion.
-See SPEC §42.16 for executable regression/build evidence and live gaps.
-
-## Paper Enrichment development delta
-
-SPEC §§47–48 add `0003-literature-monitor-paper-enrichment.patch`, modifying
-`src/common/inject/inject.jsx`, `src/common/inject/pageSaving.js` and
-`src/browserExt/offscreen/offscreenTranslate.js`. These remain inside this AGPL
-component. It registers a distinct read-only message and runs the existing
-Translate Framework in the MV3 sandbox with saving disabled. The per-instance
-loaded-translator guard bypasses remote save branches and is restored after
-translation. No upstream/submodule pin, permission, Python dependency or native
-Import/attachment pipeline is changed. The overlay adds transient command/result
-transport and shares browser exclusion with Import and Preparation.
-
-The unified message `literatureMonitorEnrich` returns the same Item's original
-Abstract/date and parsed date components. Date parsing uses the pinned AGPL
-`Zotero.Date.strToDate()` inside offscreen; no parser code enters the MIT Python
-package. The server validates components and supplies compatibility `01` values
-only for missing month/day. Shared browser ownership and accepted-Preview tab
-cleanup remain unchanged. See SPEC §48 for byte-preserving atomic writes and
-partial-result behavior.
-
-SPEC §50 extends the existing read-only Item projection with the original
-`creators` array and updates the heartbeat capability to `paper-enrichment/v2`.
-Author role/name conversion and local Markdown writes stay in the MIT server.
-No native Zotero save, new permission, parser copy or upstream pin change is
-introduced. The Connector still executes one browser-only translation.
-
-
-Shibboleth Attribute Release Consent (SPEC §53) adds optional
-shibboleth-consent/v1 capability and one command Boolean. The CARSI overlay
-uses existing HTTPS/scripting/webNavigation permissions, existing login waiting
-and current task authorization. It binds isolated-world native clicks to the
-configured HTTPS IdP origin and current Portal document, once per document.
-No credential, attribute payload, Cookie, authentication request construction,
-login-state storage, native save or upstream/submodule pin change is introduced.
-The MIT server owns the default-off Settings preference; IdP consent itself is
-stored only by the school through its native form. Existing §48 date-padding
-notes above are historical and were superseded by SPEC §§51–52.
-
-## Connector lifecycle cleanup development delta
-
-`0004-literature-monitor-connector-lifecycle-cleanup.patch` applies after the
-Paper Enrichment patch on the same pinned upstream revision. It modifies
-`src/browserExt/background.js`, `src/browserExt/background/offscreenManager.js`
-and `src/browserExt/offscreen/offscreenTranslate.js` within this AGPL component.
-It corrects string/numeric tab-ID comparison, includes loading tabs in liveness
-queries, reports actual offscreen removals without the JSON diagnostic typo,
-and sweeps orphaned tab-info and injection caches. Candidate IDs are snapshotted
-before querying live tabs to preserve entries created during the query.
-
-The internal offscreen messages add `translateCleanupCandidates` and pass
-`[liveTabIds, candidateTabIds]` to `translateCleanup`; Bridge interfaces remain
-unchanged. Immediate tab-close listeners and periodic intervals are retained.
-The delta removes cache references only: it adds no cancellation, tab/document
-closure, persistence, telemetry or changes to native parent/attachment saving
-and read-only Enrichment. It repairs source-level lifecycle defects without
-claiming a measured memory leak or memory saving.
+To intentionally update upstream: select and verify an exact upstream commit; inspect `.gitmodules`, gitlinks,
+original `COPYING`, lockfile and build procedure; update `upstream.lock` with the exact commit set; retain the
+verbatim license; review/rebase **every** patch; update `delta.lock` and provenance marker where necessary; then
+reconstruct from an empty checkout and validate the separated artifacts, licenses, upstream tests and runtime
+behavior. Never auto-accept failed patch contexts or silently change source pins. Publishing a new Connector
+requires the normal separate user authorization.

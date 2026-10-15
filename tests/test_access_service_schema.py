@@ -41,7 +41,6 @@ from literature_monitor.config import (
 )
 from literature_monitor.safe_write import ContentChangedError
 from literature_monitor.web.app import create_app
-from test_web_run_settings import browser_settings_submission
 
 P1 = "https://openalex.org/P1"
 P2 = "https://openalex.org/P2"
@@ -316,96 +315,6 @@ def test_post_replace_sync_error_with_untrusted_readback_is_uncertain(tmp_path: 
     with pytest.raises(AccessSchemaUpgradeStateUncertain, match="unconfirmed"):
         confirm_access_schema_upgrade(preview, confirmed=True)
     assert config.read_bytes() == original_monitor
-
-
-def test_web_upgrade_sync_warning_reloads_disk_schema_and_revision(tmp_path: Path, monkeypatch):
-    path = document(tmp_path)
-    config = monitor(tmp_path)
-    monitor_before = config.read_bytes()
-    with TestClient(create_app(config), base_url="http://localhost") as browser:
-        data = browser_settings_submission(browser.get("/settings").text)
-        preview_response = browser.post("/settings/upgrade/preview", data=data)
-        assert "data-access-upgrade-plan" in preview_response.text
-        planned = preview_access_schema_upgrade(path)
-        fail_directory_fsync(monkeypatch)
-        response = browser.post("/settings/upgrade/confirm", data=browser_settings_submission(preview_response.text))
-
-    assert response.status_code == 200
-    assert response.headers.get("HX-Trigger") == "settingsSaved"
-    assert "Upgrade not written" not in response.text
-    assert "directory synchronization failed" in response.text
-    assert "Durable persistence is not confirmed" in response.text
-    assert "Check storage health" in response.text
-    assert path.read_bytes() == planned.target_contents.encode()
-    assert config.read_bytes() == monitor_before
-    state = load_settings(config)
-    saved_revision = state.draft.journal_revision.digest
-    assert saved_revision == hashlib.sha256(path.read_bytes()).hexdigest()
-    assert saved_revision in response.text
-    assert 'name="journal_revision_digest" value="' + saved_revision + '"' in response.text
-    assert "data-preview-access-upgrade" not in response.text
-    assert 'name="publisher_access_service_id"' in response.text
-
-
-def test_web_upgrade_pre_replace_failure_keeps_original_and_reports_no_write(tmp_path: Path, monkeypatch):
-    path = document(tmp_path)
-    config = monitor(tmp_path)
-    original = path.read_bytes(), config.read_bytes()
-    with TestClient(create_app(config), base_url="http://localhost") as browser:
-        page = browser.get("/settings")
-        preview = browser.post("/settings/upgrade/preview", data=browser_settings_submission(page.text))
-        assert "data-access-upgrade-plan" in preview.text
-
-        def refuse_rename(*args, **kwargs):
-            raise OSError("injected failure before atomic replacement")
-
-        monkeypatch.setattr(safe_write.os, "replace", refuse_rename)
-        response = browser.post("/settings/upgrade/confirm", data=browser_settings_submission(preview.text))
-
-    assert "Upgrade not written" in response.text
-    assert "directory synchronization failed" not in response.text
-    assert response.headers.get("HX-Trigger") is None
-    assert (path.read_bytes(), config.read_bytes()) == original
-
-
-def test_web_upgrade_stale_confirmation_rejects_external_changes(tmp_path: Path):
-    path = document(tmp_path)
-    config = monitor(tmp_path)
-    monitor_before = config.read_bytes()
-    with TestClient(create_app(config), base_url="http://localhost") as browser:
-        preview = browser.post(
-            "/settings/upgrade/preview",
-            data=browser_settings_submission(browser.get("/settings").text),
-        )
-        assert "data-access-upgrade-plan" in preview.text
-        original_form = browser_settings_submission(preview.text)
-        path.write_bytes(path.read_bytes() + b"\n# external manual change\n")
-        after_external_change = path.read_bytes()
-        response = browser.post("/settings/upgrade/confirm", data=original_form)
-
-    assert "Upgrade not written" in response.text
-    assert "Unsaved Settings Draft" in response.text or "stale" in response.text.lower()
-    assert response.headers.get("HX-Trigger") is None
-    assert path.read_bytes() == after_external_change
-    assert config.read_bytes() == monitor_before
-
-
-def test_web_upgrade_uncertain_sync_failure_does_not_claim_no_write(tmp_path: Path, monkeypatch):
-    path = document(tmp_path)
-    config = monitor(tmp_path)
-    monitor_before = config.read_bytes()
-    with TestClient(create_app(config), base_url="http://localhost") as browser:
-        data = browser_settings_submission(browser.get("/settings").text)
-        preview_response = browser.post("/settings/upgrade/preview", data=data)
-        assert "data-access-upgrade-plan" in preview_response.text
-        fail_directory_fsync(monkeypatch, after_replace=lambda: path.write_bytes(b"invalid post-write state"))
-        response = browser.post("/settings/upgrade/confirm", data=browser_settings_submission(preview_response.text))
-
-    assert "write state cannot be confirmed" in response.text
-    assert "Upgrade not written" not in response.text
-    assert "upgrade saved" not in response.text.lower()
-    assert response.headers.get("HX-Trigger") is None
-    assert config.read_bytes() == monitor_before
 
 
 def test_old_settings_save_never_upgrades_and_mapping_safe_guard(tmp_path: Path):

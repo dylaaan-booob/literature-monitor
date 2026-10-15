@@ -139,6 +139,57 @@ def test_only_eligible_kept_in_plan(tmp_path):
     assert all(exclusion.kind != "blocked" for exclusion in plan.exclusions)
 
 
+def test_batch_checks_grant_after_local_result_resolution(tmp_path, monkeypatch):
+    import literature_monitor.application.batch_import as batch_module
+
+    paper(tmp_path, "a")
+    paper(tmp_path, "b")
+    batch = service()
+    resolve = batch_module.resolve_export_completion
+    settled = []
+
+    def resolution_with_late_settlement(completion, *, coordinator):
+        result = resolve(completion, coordinator=coordinator)
+        if completion.save_invocation is not None:
+            assert coordinator.report_native_save_settled(completion.save_invocation)
+            settled.append(completion.request_id)
+        return result
+
+    monkeypatch.setattr(batch_module, "resolve_export_completion", resolution_with_late_settlement)
+    batch.start(tmp_path)
+    first = command(batch)
+    native = invocation(first)
+    assert batch.coordinator.authorize_parent_dispatch(native)
+    assert batch.coordinator.submit_connector_result(
+        request_id=native.request_id, invocation_id=native.invocation_id,
+        doi_url=native.doi_url, tab_id=native.tab_id, session_id=native.session_id,
+        outcome=CaptureOutcome.CONFIRMED, pdf_outcome=PdfOutcome.UNVERIFIED)
+
+    second = command(batch)
+    assert second.request_id != first.request_id
+    assert outcome(batch, second, CaptureOutcome.FAILED, dispatch=False)
+    result = finished(batch)
+    assert result.phase is BatchPhase.COMPLETED
+    assert settled == [first.request_id]
+
+
+def test_batch_pauses_when_original_grant_remains_unsettled(tmp_path):
+    paper(tmp_path, "a")
+    paper(tmp_path, "b")
+    batch = service()
+    batch.start(tmp_path)
+    first = command(batch)
+    native = invocation(first)
+    assert batch.coordinator.authorize_parent_dispatch(native)
+    assert batch.coordinator.submit_connector_result(
+        request_id=native.request_id, invocation_id=native.invocation_id,
+        doi_url=native.doi_url, tab_id=native.tab_id, session_id=native.session_id,
+        outcome=CaptureOutcome.CONFIRMED, pdf_outcome=PdfOutcome.UNVERIFIED)
+    result = finished(batch)
+    assert result.phase is BatchPhase.PAUSED
+    assert batch.coordinator.report_native_save_settled(native)
+
+
 def test_batch_no_effect_does_not_block_next_paper(tmp_path):
     _, path1 = paper(tmp_path, "a")
     _, path2 = paper(tmp_path, "b")

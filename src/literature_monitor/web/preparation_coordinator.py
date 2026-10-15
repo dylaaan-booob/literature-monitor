@@ -35,7 +35,6 @@ LOGIN_WAIT_SECONDS = 600.0  # Human-controlled IdP/MFA is not subject to Visit's
 RELEASE_GRACE_SECONDS = 10.0  # Bounds authority recovery after a lost Connector callback.
 EXECUTOR_CAPABILITY = "carsi-preparation/a4-verified"
 CONSENT_CAPABILITY = "shibboleth-consent/v1"
-COMPATIBLE_VERSIONS = frozenset({"0.6.4", "0.6.5", "0.6.6", "0.6.7", "0.6.8"})
 CARSI_LOGIN_URL = "https://ds.carsi.edu.cn/Shibboleth.sso/Login"
 CARSI_PORTAL_URL = "https://ds.carsi.edu.cn/wxds"
 REASONS = frozenset({
@@ -216,9 +215,9 @@ class PreparationCoordinator:
         with self._lock:
             if self._connector_instance is not None and self._connector_instance != instance_id:
                 self._stop_locked("Connector instance changed; previous task revoked")
-            compatible = capability == EXECUTOR_CAPABILITY and version in COMPATIBLE_VERSIONS
+            compatible = capability == EXECUTOR_CAPABILITY
             if not compatible:
-                self._stop_locked("Connector preparation executor capability or version unavailable")
+                self._stop_locked("Connector preparation executor capability unavailable")
             self._connector_instance = instance_id
             self._last_heartbeat = now
             self._capability_valid = compatible
@@ -260,12 +259,13 @@ class PreparationCoordinator:
         if not self._ready_locked(now) or task.connector_instance != self._connector_instance:
             self._stop_locked("Connector disconnected; browser authority revoked")
             return
-        if now - task.started_item_at > (LOGIN_WAIT_SECONDS if task.waiting_for_user else SERVICE_WAIT_SECONDS):
+        if (task.claimed_at is not None and now - task.started_item_at
+                > (LOGIN_WAIT_SECONDS if task.waiting_for_user else SERVICE_WAIT_SECONDS)):
             # 没有 Connector Result 时也产生确定的人工处理结果。
             self._advance_locked(PreparationResult(
                 task.services[task.index].id, PreparationOutcome.NEEDS_ATTENTION,
                 "timeout",
-            ), revoke=True)
+            ), revoke=task.waiting_for_user)
 
     def start(self, config_path: Path) -> PreparationSnapshot:
         # Read outside locks; a later user edit cannot mutate the frozen tuple.
@@ -360,6 +360,7 @@ class PreparationCoordinator:
                 automatic_attribute_release_consent=task.automatic_attribute_release_consent,
             )
             task.claimed_at = time.monotonic()
+            task.started_item_at = task.claimed_at
             return task.command
 
     def _matches_locked(self, instance_id: str, task_id: str, generation: int,
@@ -455,7 +456,7 @@ class PreparationCoordinator:
         if revoke:
             task.revoke = True
             task.phase = PreparationPhase.BLOCKED
-            task.message = "Service deadline exceeded; remaining Preparation canceled"
+            task.message = "Institution login deadline exceeded; remaining Preparation canceled"
             # 迟到操作不得重新获得授权。旧浏览器调用只持有有限的隔离期。
             if claimed:
                 task.claimed_at = task.started_item_at

@@ -6,3 +6,10 @@ output_dir: ./workspace
 from_month: '2026-10'
 to_month: '2026-10'
 log_level: INFO
+
+# Applies only after an explicit PREPARE & IMPORT click.
+kept_workflow:
+  auto_import_after_preparation: false
+  transition_delay_seconds: 3
+  # Optional public display text, never school login credentials.
+  display_name: null

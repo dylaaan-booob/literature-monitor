@@ -16,7 +16,6 @@ from literature_monitor.web.preparation_coordinator import (
 from literature_monitor.web.capture_coordinator import CaptureCoordinator
 from literature_monitor.web.app import create_app
 from preparation_helpers import prepared
-from test_web_run_settings import csrf_from_html
 
 
 def test_exact_official_entry_and_url_encoding():
@@ -58,15 +57,15 @@ def test_saved_institution_only_no_manual_guess_and_claim_contract(tmp_path):
     }
 
 
-def test_capability_and_version_are_required_and_loss_revokes_claimed_task(tmp_path, monkeypatch):
+def test_capability_required_and_loss_revokes_claimed_task(tmp_path, monkeypatch):
     config, _, _, _ = prepared(tmp_path)
     capture = CaptureCoordinator()
     prep = PreparationCoordinator(capture, execution_enabled=True)
     instance = "carsi-test-instance-001"
     assert not prep.heartbeat(instance)
-    assert not prep.heartbeat(instance, capability="carsi-preparation/a3", version="0.6.4")
-    assert not prep.heartbeat(instance, capability=EXECUTOR_CAPABILITY, version="0.7.0")
-    assert prep.heartbeat(instance, capability=EXECUTOR_CAPABILITY, version="0.6.4")
+    assert not prep.heartbeat(instance, capability="carsi-preparation/a3", version="0.7.0")
+    assert prep.heartbeat(instance, capability=EXECUTOR_CAPABILITY, version="0.7.0")
+    assert prep.heartbeat(instance, capability=EXECUTOR_CAPABILITY)
     assert prep.start(config).phase is PreparationPhase.RUNNING
     command = prep.claim(instance)
     assert command and command.login_url is None
@@ -74,7 +73,9 @@ def test_capability_and_version_are_required_and_loss_revokes_claimed_task(tmp_p
                     generation=command.generation, request_id=command.request_id,
                     service_id=command.service_id)
     assert prep.authorize(**identity)
-    assert not prep.heartbeat(instance, capability=EXECUTOR_CAPABILITY, version="0.7.0")
+    assert prep.heartbeat(instance, capability=EXECUTOR_CAPABILITY, version="0.7.0")
+    assert prep.authorize(**identity)
+    assert not prep.heartbeat(instance, capability="carsi-preparation/a3", version="0.7.0")
     assert not prep.authorize(**identity)
     assert capture.reserve_browser_task("import") is None
     assert prep.snapshot().results[0].reason == "connector_disconnected"
@@ -85,15 +86,14 @@ def test_capability_and_version_are_required_and_loss_revokes_claimed_task(tmp_p
     assert capture.reserve_browser_task("import") is not None
 
 
-@pytest.mark.parametrize("version", ["0.6.5", "0.6.6", "0.6.7", "0.6.8"])
-def test_claim_freezes_saved_valid_institution_login_without_access_url_navigation(tmp_path, version):
+def test_claim_freezes_saved_valid_institution_login_without_access_url_navigation(tmp_path):
     config, _, _, _ = prepared(tmp_path)
     entity = "https://idp.example.edu/idp/shibboleth"
     config.write_text(config.read_text(encoding="utf-8") +
                       "\ninstitution:\n  idp_entity_id: " + entity + "\n", encoding="utf-8")
     prep = PreparationCoordinator(CaptureCoordinator(), execution_enabled=True)
     instance = "carsi-test-instance-002"
-    assert prep.heartbeat(instance, capability=EXECUTOR_CAPABILITY, version=version)
+    assert prep.heartbeat(instance, capability=EXECUTOR_CAPABILITY, version="0.7.0")
     assert prep.start(config).phase is PreparationPhase.RUNNING
     first = prep.claim(instance)
     assert first is not None
@@ -107,11 +107,10 @@ def test_bridge_visit_nonce_and_attributable_opening_evidence_are_one_shot(tmp_p
     app = create_app(config)
     instance = "carsi-instance-verified-001"
     with TestClient(app, base_url="http://localhost") as client:
-        token = csrf_from_html(client.get("/settings").text)
         assert client.post("/api/connector/preparation/heartbeat", json={
-            "instance_id": instance, "capability": EXECUTOR_CAPABILITY, "version": "0.6.4",
+            "instance_id": instance, "capability": EXECUTOR_CAPABILITY, "version": "0.7.0",
         }).json() == {"ready": True}
-        assert client.post("/api/preparation/start", json={"csrf_token": token}).status_code == 200
+        assert app.state.preparation_coordinator.start(config).phase is PreparationPhase.RUNNING
         claimed = client.post("/api/connector/preparation/claim", json={
             "instance_id": instance,
         }).json()["command"]
@@ -151,7 +150,7 @@ def test_bridge_visit_nonce_and_attributable_opening_evidence_are_one_shot(tmp_p
             **identity, "source_tab_id": 42,
         }).status_code == 409
         assert client.post("/api/connector/preparation/settled", json=identity).status_code == 404
-        state = client.get("/api/preparation/state").json()
-        assert state["results"][0] == {"service_id": claimed["service_id"],
-                                       "outcome": "Opened", "reason": "target_opened"}
-        assert len(state["results"]) == 1
+        results = app.state.preparation_coordinator.snapshot().results
+        assert results[0].service_id == claimed["service_id"]
+        assert results[0].outcome.value == "Opened" and results[0].reason == "target_opened"
+        assert len(results) == 1

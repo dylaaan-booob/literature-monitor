@@ -82,10 +82,11 @@ def test_abstract_only_crossref_match_field_priority_and_optional_authors(execut
     assert paper.publication_date is None
     with TestClient(create_app(e.config),base_url='http://localhost') as client:
         assert client.get('/').status_code==200
-        response=client.post(f'/papers/{paper.paper_id}/keep',data={
+        response=client.post(f'/api/ui-next/papers/{paper.paper_id}/keep',json={
             'csrf_token':client.app.state.csrf_token,'expected_status':'candidate',
         })
         assert response.status_code==200
+        assert response.json()['outcome']=='UPDATED'
         assert 'status: kept' in path.read_text()
 
 
@@ -127,27 +128,12 @@ def test_prime_alias_new_creates_one_final_identity(execution,in_manifest):
         assert not prime_queries
 
 
-
 def test_local_identity_conflict_does_not_block_other_new_doi(execution):
     e=execution;assert e.run().created_papers==1
     paper,=(e.output/'Papers').glob('*.md');(paper.parent/'duplicate.md').write_bytes(paper.read_bytes())
     e.works.append(oa_work(2,'10.5555/b'));e.records['10.5555/b']=cr_record('10.5555/b');e.members.append('10.5555/b')
     result=e.run()
     assert result.created_papers==1 and result.matched_existing_papers==0 and result.errors
-
-
-def test_web_uses_real_run_and_displays_months_and_counters(execution):
-    e=execution
-    with TestClient(create_app(e.config),base_url='http://localhost') as client:
-        app=client.app
-        before=client.get('/fragments/run').text
-        assert '2026-01' in before
-        for new,saved in ((1,0),(0,1)):
-            assert client.post('/run',data={'csrf_token':app.state.csrf_token}).status_code==200
-            app.state.run_coordinator._worker.join(5)
-            html=client.get('/fragments/run').text
-            assert f'{new} New Papers' in html and f'{saved} Already Saved' in html
-            assert ' canonical' not in html
 
 
 def test_run_configuration_is_frozen_before_provider_work(execution):

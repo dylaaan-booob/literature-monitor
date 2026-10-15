@@ -27,6 +27,7 @@ WAITING_TIMEOUT_SECONDS = 30.0
 ACTIVE_TIMEOUT_SECONDS = 120.0
 CONNECTOR_VERSION_MAX_LENGTH = 64
 REQUEST_ID_MAX_LENGTH = 128
+PROCESSED_RECEIPT_LIMIT = 256
 
 _monotonic = time.monotonic
 
@@ -138,6 +139,7 @@ class CaptureSnapshot:
     completion_pending: bool
     connector_online: bool = False
     enrichment_capable: bool = False
+    covers_capable: bool = False
 
 
 @dataclass(frozen=True)
@@ -194,12 +196,16 @@ class CaptureCoordinator:
         # retires this slot. This does not change Import parent/PDF authority.
         self._import_browser_unsettled: set[tuple[str, str, str]] = set()
         self._import_browser_terminal: set[tuple[str, str, str]] = set()
+        # 最近已确认的释放证明只用于响应丢失后的幂等重投，绝不授权其他身份。
+        self._processed_browser_idle: dict[tuple[str, str, str], None] = {}
+        self._processed_native_settled: dict[SaveInvocation, None] = {}
         self._reset_guard_contexts: dict[Path, object] = {}
         self._last_heartbeat_monotonic: float | None = None
         self._last_heartbeat_at: datetime | None = None
         self._connector_version: str | None = None
         self._zotero_reachable = False
         self._enrichment_capable = False
+        self._covers_capable = False
         self._attempt: _Attempt | None = None
         self._completion: CaptureCompletion | None = None
         self._delivered_completion: CaptureCompletion | None = None
@@ -207,7 +213,7 @@ class CaptureCoordinator:
 
     def reserve_browser_task(self, kind: str, *, deadline: float | None = None) -> str | None:
         """Atomically exclude Import/Preparation and unsettled native saves."""
-        if kind not in {"import", "preparation", "enrichment"}:
+        if kind not in {"import", "preparation", "enrichment", "covers"}:
             raise ValueError("unsupported browser task")
         with self._lock:
             self._expire_locked(_monotonic(), _utc_now())
@@ -215,7 +221,7 @@ class CaptureCoordinator:
             # native grant remains unsettled; the Connector serializes those
             # captures. Preparation MUST wait for every such grant and task.
             if (self._browser_owner is not None
-                    or kind in {"preparation", "enrichment"} and (
+                    or kind in {"preparation", "enrichment", "covers"} and (
                         self._native_save_grants or self._import_browser_unsettled)
                     or self._operation_lock is not None or self._completion is not None
                     or self._delivered_completion is not None or self._resolved_completion is not None
@@ -252,10 +258,15 @@ class CaptureCoordinator:
         """
         with self._lock:
             identity = (request_id, invocation_id, doi_url)
+            if identity in self._processed_browser_idle:
+                return True
             if identity not in self._import_browser_unsettled or identity not in self._import_browser_terminal:
                 return False
             self._import_browser_unsettled.remove(identity)
             self._import_browser_terminal.remove(identity)
+            self._processed_browser_idle[identity] = None
+            if len(self._processed_browser_idle) > PROCESSED_RECEIPT_LIMIT:
+                self._processed_browser_idle.pop(next(iter(self._processed_browser_idle)))
             return True
 
     def heartbeat(
@@ -264,6 +275,7 @@ class CaptureCoordinator:
         connector_version: str,
         zotero_reachable: bool,
         enrichment_capable: bool = False,
+        covers_capable: bool = False,
     ) -> ConnectorReadiness:
         """Record bounded process-local Connector presence."""
 
@@ -282,6 +294,7 @@ class CaptureCoordinator:
             self._connector_version = version
             self._zotero_reachable = zotero_reachable
             self._enrichment_capable = enrichment_capable
+            self._covers_capable = covers_capable
             return self._readiness_locked(now_monotonic)
 
     @property
@@ -329,12 +342,19 @@ class CaptureCoordinator:
                 or not isinstance(invocation.doi_url, str)):
             return False
         with self._lock:
-            workspace = self._native_save_grants.pop(invocation, None)
+            if invocation in self._processed_native_settled:
+                return True
+            workspace = self._native_save_grants.get(invocation)
             if workspace is None:
                 return False
-            if workspace not in self._native_save_grants.values():
-                guard = self._reset_guard_contexts.pop(workspace)
+            if workspace not in (path for key, path in self._native_save_grants.items() if key != invocation):
+                guard = self._reset_guard_contexts[workspace]
                 guard.__exit__(None, None, None)
+                self._reset_guard_contexts.pop(workspace)
+            self._native_save_grants.pop(invocation)
+            self._processed_native_settled[invocation] = None
+            if len(self._processed_native_settled) > PROCESSED_RECEIPT_LIMIT:
+                self._processed_native_settled.pop(next(iter(self._processed_native_settled)))
             return True
 
     def _validate_slot(self, reservation: ExportReservation) -> None:
@@ -353,6 +373,8 @@ class CaptureCoordinator:
                 return CaptureStartResult(CaptureStartOutcome.ALREADY_ACTIVE)
             now_monotonic, now = _monotonic(), _utc_now()
             self._expire_locked(now_monotonic, now)
+            if self._browser_kind == "covers":
+                return CaptureStartResult(CaptureStartOutcome.ALREADY_ACTIVE)
             if self._attempt is not None and self._attempt.stage is not CaptureStage.FINISHED:
                 return CaptureStartResult(CaptureStartOutcome.ALREADY_ACTIVE)
             if self._completion is not None or self._delivered_completion is not None or self._resolved_completion is not None:
@@ -387,6 +409,18 @@ class CaptureCoordinator:
             )
             self._changed.clear()
             return CaptureStartResult(CaptureStartOutcome.STARTED, request_id)
+
+    def stop_undispatched(self, paper_id: UUID) -> bool:
+        """Revoke only a matching command whose native-save grant has not escaped."""
+        with self._lock:
+            self._expire_locked(_monotonic(), _utc_now())
+            attempt = self._attempt
+            if (attempt is None or attempt.paper_id != paper_id
+                    or attempt.stage is CaptureStage.FINISHED
+                    or attempt.save_invocation is not None):
+                return False
+            self._finish_locked(attempt, CaptureOutcome.FAILED, _utc_now())
+            return True
 
     def wait_for_completion(self) -> CaptureCompletion:
         """Wait finitely for this command, independent of UI polls."""
@@ -639,6 +673,7 @@ class CaptureCoordinator:
                 completion_pending=self._completion is not None,
                 connector_online=self._last_heartbeat_monotonic is not None and now_monotonic - self._last_heartbeat_monotonic <= HEARTBEAT_STALE_SECONDS,
                 enrichment_capable=self._enrichment_capable,
+                covers_capable=self._covers_capable,
             )
 
     def _readiness_locked(self, now_monotonic: float) -> ConnectorReadiness:

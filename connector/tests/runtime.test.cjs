@@ -175,8 +175,10 @@ function makeEnvironment({
 	const scriptCalls = [];
 	const requests = [];
 	const createdTabs = [];
+	const createdWindows = [];
 	const removedTabs = [];
 	const focusCalls = [];
+	const tabUpdates = [];
 	const windowQueries = [];
 	const storageCalls = [];
 	const saveCalls = [];
@@ -189,6 +191,7 @@ function makeEnvironment({
 	const tabInfo = new Map();
 	const saveDeferred = new Deferred();
 	let nextTabID = 100;
+	let nextWindowID = Math.max(0, ...windows.map(window => window.id)) + 1;
 	let defaultOnline = true;
 	let saveImplementation = () => saveDeferred.promise;
 
@@ -218,7 +221,7 @@ function makeEnvironment({
 			return response(200, {accepted: true});
 		}
 		if (["/api/connector/result", "/api/connector/dispatch", "/api/connector/access",
-			"/api/connector/native-save-settled"].includes(pathname)) {
+			"/api/connector/native-save-settled", "/api/connector/import-browser-idle"].includes(pathname)) {
 			return response(200, {accepted: true});
 		}
 		throw new Error(`Unexpected bridge path ${pathname}`);
@@ -282,6 +285,24 @@ function makeEnvironment({
 			throw new Error("Automatic runtime must not access browser storage");
 		},
 		windows: {
+			async create(options) {
+				if (windowError) throw windowError;
+				const window = {id: nextWindowID++, type: options.type,
+					incognito: options.incognito, focused: options.focused};
+				windows.push(window);
+				const tab = {id: nextTabID++, windowId: window.id, incognito: window.incognito,
+					url: options.url, active: true, status: "complete"};
+				tabs.set(tab.id, tab);
+				frames.set(tab.id, {frameId: 0, documentId: "blank-document-" + tab.id,
+					url: tab.url, documentLifecycle: "active"});
+				createdWindows.push({options: {...options}, window, tab});
+				return {...window, tabs: [tab]};
+			},
+			async get(id) {
+				const window = windows.find(window => window.id === id);
+				if (!window) throw new Error("No such window");
+				return {...window, tabs: [...tabs.values()].filter(tab => tab.windowId === id)};
+			},
 			async update(id, options) { focusCalls.push({windowID: id, ...options}); },
 			async getAll(options) {
 				windowQueries.push({...options});
@@ -292,8 +313,9 @@ function makeEnvironment({
 			},
 		},
 		tabs: {
-			async query({active} = {}) {
-				return [...tabs.values()].filter(tab => !active || tab.active);
+			async query({active, windowId} = {}) {
+				return [...tabs.values()].filter(tab => (active === undefined || tab.active === active)
+					&& (windowId === undefined || tab.windowId === windowId));
 			},
 			onUpdated: tabUpdated,
 			onRemoved: tabRemoved,
@@ -304,11 +326,15 @@ function makeEnvironment({
 					id: nextTabID++,
 					url: options.url,
 					status: "loading",
+					active: options.active ?? true,
 					windowId: windowID,
 					incognito: createdIncognito === undefined
 						? window?.incognito
 						: createdIncognito,
 				};
+				if (tab.active) for (const existing of tabs.values()) {
+					if (existing.windowId === windowID) existing.active = false;
+				}
 				createdTabs.push({options: {...options}, tab});
 				tabs.set(tab.id, tab);
 				return tab;
@@ -320,7 +346,9 @@ function makeEnvironment({
 			},
 			async update(tabID, options) {
 				assert(tabs.has(tabID), "only the dedicated task tab may be navigated");
+				tabUpdates.push({tabID, ...options});
 				const tab = tabs.get(tabID); Object.assign(tab, options);
+				if (options.url) tab.status = "loading";
 				return tab;
 			},
 			async get(tabID) {
@@ -398,8 +426,10 @@ function makeEnvironment({
 		clock,
 		context,
 		createdTabs,
+		createdWindows,
 		removedTabs,
 		focusCalls,
+		tabUpdates,
 		windowQueries,
 		storageCalls,
 		enqueue,
@@ -462,8 +492,8 @@ async function makeSaveReady(env, translator = {
 	translatorID: "translator-single",
 	itemType: "journalArticle",
 }) {
-	assert.equal(env.createdTabs.length, 1);
-	const tab = env.createdTabs[0].tab;
+	const tab = env.tabs.get(env.runtime._activeTask?.tabID);
+	assert(tab, "the current Import task owns a tab");
 	tab.status = "complete";
 	if (!env.frames.has(tab.id)) commit(env, tab, tab.url);
 	await flush();
@@ -484,13 +514,14 @@ function taskMessage(env, type, sessionID = "native-session") {
 }
 
 async function finishParent(env, tabID) {
+	const sender = senderFor(tabID, 0, env.frames.get(tabID).documentId);
 	assert.equal(await env.runtime._handleRuntimeMessage(
-		taskMessage(env, "literature-monitor-before-parent-save"), senderFor(tabID),
+		taskMessage(env, "literature-monitor-before-parent-save"), sender,
 	), true);
 	await env.runtime._handleRuntimeMessage(
-		taskMessage(env, "literature-monitor-parent-saved"), senderFor(tabID));
+		taskMessage(env, "literature-monitor-parent-saved"), sender);
 	await env.runtime._handleRuntimeMessage(
-		taskMessage(env, "literature-monitor-pipeline-complete"), senderFor(tabID));
+		taskMessage(env, "literature-monitor-pipeline-complete"), sender);
 	await flush();
 }
 
@@ -549,7 +580,7 @@ for (const [name, flags] of [
 	});
 }
 
-test("Chrome uses one fresh non-incognito tab in a normal window despite a private window", async () => {
+test("Chrome creates an unfocused normal task window and preserves existing private and user windows", async () => {
 	const env = makeEnvironment({windows: [
 		{id: 9, type: "normal", incognito: true},
 		{id: 8, type: "popup", incognito: false},
@@ -568,10 +599,17 @@ test("Chrome uses one fresh non-incognito tab in a normal window despite a priva
 	assert.deepEqual(env.keepAliveCalls, [true]);
 	const tab = await makeSaveReady(env);
 	assert.equal(tab.incognito, false);
-	assert.equal(tab.windowId, 2);
+	assert.equal(tab.windowId, env.createdWindows[0].window.id);
+	assert.notEqual(tab.windowId, 2);
 	assert.notEqual(tab.id, 7);
 	assert.deepEqual(env.tabs.get(7), existing);
-	assert.deepEqual(JSON.parse(JSON.stringify(env.windowQueries)), [{windowTypes: ["normal"]}]);
+	assert.deepEqual(env.windowQueries, []);
+	assert.deepEqual(env.createdWindows[0].options, {
+		url: "about:blank", type: "normal", incognito: false, focused: false,
+	});
+	assert.equal(env.createdTabs[0].options.active, false);
+	assert.equal(tab.active, false);
+	assert(env.tabs.has(env.createdWindows[0].tab.id), "Import keeps its blank anchor");
 	assert.equal(env.createdTabs.length, 1);
 	assert.equal(env.saveCalls.length, 1);
 	await finishParent(env, tab.id);
@@ -579,11 +617,31 @@ test("Chrome uses one fresh non-incognito tab in a normal window despite a priva
 	assert.equal(env.storageCalls.length, 0);
 });
 
+for (const [name, windows] of [
+	["private-only windows", [{id: 9, type: "normal", incognito: true}]],
+	["no normal windows", [{id: 8, type: "popup", incognito: false}]],
+	["unknown existing-window privacy", [{id: 2, type: "normal", incognito: null}]],
+]) {
+	test(`${name} does not prevent creating an owned normal background window`, async () => {
+		const env = makeEnvironment({windows});
+		await claim(env, {request_id: "new-window", invocation_id: "new-window-invocation",
+			doi_url: "https://doi.org/10.5555/new-window"});
+		const tab = await makeSaveReady(env);
+		assert.equal(env.createdWindows.length, 1);
+		assert.equal(env.createdWindows[0].options.focused, false);
+		assert.equal(tab.windowId, env.createdWindows[0].window.id);
+		assert.equal(tab.incognito, false);
+		assert.equal(tab.active, false);
+		assert.equal(env.saveCalls.length, 1);
+		await finishParent(env, tab.id);
+		assert.equal(bodiesFor(env, "/api/connector/result")[0].outcome, "CONFIRMED");
+		assert.deepEqual(env.focusCalls, []);
+		assert.equal(env.storageCalls.length, 0);
+	});
+}
+
 for (const [name, config, expectedTabs] of [
-	["private-only windows", {windows: [{id: 9, type: "normal", incognito: true}]}, 0],
-	["no normal windows", {windows: [{id: 8, type: "popup", incognito: false}]}, 0],
-	["unknown window privacy", {windows: [{id: 2, type: "normal", incognito: null}]}, 0],
-	["window lookup failure", {windowError: new Error("Cannot inspect windows")}, 0],
+	["window creation failure", {windowError: new Error("Cannot create window")}, 0],
 	["unexpected incognito task tab", {createdIncognito: true}, 1],
 	["unknown task-tab privacy", {createdIncognito: null}, 1],
 ]) {
@@ -609,7 +667,8 @@ for (const [name, config, expectedTabs] of [
 		assert.equal(env.saveCalls.length, 0);
 		assert.equal(env.createdTabs.length, expectedTabs);
 		assert.deepEqual(env.removedTabs, expectedTabs ? [tabID] : []);
-		assert.equal(env.tabs.size, 0);
+		assert.equal(env.tabs.size, env.createdWindows.length);
+		for (const {tab} of env.createdWindows) assert(env.tabs.has(tab.id), "blank anchor remains owned");
 		assert.equal(env.runtime._activeTask, null);
 		assert.equal(env.tabUpdated.listeners.length, 0);
 		assert.equal(env.storageCalls.length, 0);
@@ -637,7 +696,7 @@ test("heartbeat is immediate, uses manifest version, and repeats inside stale wi
 	assert.deepEqual(JSON.parse(heartbeats[0].options.body), {
 		version: "5.0.999",
 		zotero_reachable: true,
-		capabilities: ["paper-enrichment/v2"],
+		capabilities: ["paper-enrichment/v2", "background-task-windows/v1"],
 	});
 
 	await env.clock.advance(10000);
@@ -738,7 +797,8 @@ test("safe command creates exactly one fresh dedicated tab without reusing exist
 	assert.equal(env.createdTabs.length, 1);
 	assert.deepEqual(env.createdTabs[0].options, {
 		url: "about:blank",
-		windowId: 1,
+		windowId: env.createdWindows[0].window.id,
+		active: false,
 	});
 	assert.equal(env.createdTabs[0].tab.incognito, false);
 	assert.equal(env.tabs.get(7).url, "https://publisher.example/already-open");
@@ -959,8 +1019,8 @@ test("terminal outcome is one-shot and never creates a second tab or save", asyn
 
 test("result body is minimal and delivery failure retries only the same terminal result", async () => {
 	const env = makeEnvironment();
-	env.enqueue("/api/connector/result", Promise.reject(new Error("bridge down")));
-	env.enqueue("/api/connector/result", Promise.reject(new Error("bridge still down")));
+	env.enqueue("/api/connector/result", new Error("bridge down"));
+	env.enqueue("/api/connector/result", new Error("bridge still down"));
 	await claim(env, {
 		request_id: "result-retry",
 		invocation_id: "invocation-" + "result-retry", doi_url: "https://doi.org/10.5555/result-retry",
@@ -1121,7 +1181,7 @@ const fullNativeHook = new Function("Zotero", "browser", "performance", `return 
 	${patchedLines.slice(hookStart, nativeEnd + "\n\t\treturn items;".length)}
 }`);
 
-test("201 empty body continues native collection and attachment saving before result, closes owned tab and refocuses app", async () => {
+test("201 empty body continues native collection and attachment saving before result, closes owned tab without changing app focus", async () => {
 	const env = makeEnvironment();
 	env.tabs.set(50, {id: 50, windowId: 1, url: "http://127.0.0.1:8000/?view=workspace", incognito: false, active: true});
 	await claim(env, {request_id: "pdf-continuation", invocation_id: "pdf-continuation-id", doi_url: "https://doi.org/10.5555/native"});
@@ -1161,11 +1221,12 @@ test("201 empty body continues native collection and attachment saving before re
 	await flush();
 	assert.equal(bodiesFor(env, "/api/connector/result")[0].outcome, "CONFIRMED");
 	assert.deepEqual(env.removedTabs, [tab.id]);
-	assert(env.focusCalls.some(call => call.windowID === 1 && call.focused === true));
+	assert.deepEqual(env.focusCalls, []);
+	assert.equal(env.tabUpdates.some(call => call.active === true), false);
 	assert.equal(env.tabs.get(50).active, true);
 });
 
-test("native error retains owned task tab and returns focus to original app", async () => {
+test("native error retains owned task tab without changing app focus", async () => {
 	const env = makeEnvironment();
 	env.tabs.set(51, {id: 51, windowId: 1, url: "http://127.0.0.1:8000/", incognito: false, active: true});
 	await claim(env, {request_id: "return-error", invocation_id: "return-error-id", doi_url: "https://doi.org/10.5555/native"});
@@ -1177,7 +1238,9 @@ test("native error retains owned task tab and returns focus to original app", as
 	assert.equal(bodiesFor(env, "/api/connector/result")[0].outcome, "UNCONFIRMED");
 	assert.equal(env.removedTabs.length, 0);
 	assert(env.tabs.has(tab.id));
-	assert(env.focusCalls.some(call => call.windowID === 1 && call.focused === true));
+	assert.deepEqual(env.focusCalls, []);
+	assert.equal(env.tabUpdates.some(call => call.active === true), false);
+	assert.equal(env.tabs.get(51).active, true);
 });
 
 test("attachment failure after proven parent retains inspection tab without demoting parent", async () => {
@@ -1302,6 +1365,69 @@ test("lost settlement acknowledgment retries twice, never fabricates native comp
 	await flush();
 	assert.equal(requestsFor(env, "/api/connector/native-save-settled").length, 2);
 	assert.equal(bodiesFor(env, "/api/connector/result")[0].outcome, "CONFIRMED");
+});
+
+test("browser idle proof survives two lost deliveries and retries on heartbeat", async () => {
+	const env = makeEnvironment();
+	await startRuntime(env);
+	env.runtime._importTaskWindow = async () => ({id: 1});
+	await claim(env, {request_id: "idle-retry", invocation_id: "idle-retry-id",
+		doi_url: "https://doi.org/10.5555/idle"});
+	env.enqueue("/api/connector/import-browser-idle", new Error("request dropped"));
+	env.enqueue("/api/connector/import-browser-idle", new Error("response dropped"));
+	env.runtime._finishTask(env.runtime._activeTask, "FAILED");
+	await flush();
+	await env.clock.advance(500);
+	await flush();
+	assert.equal(requestsFor(env, "/api/connector/import-browser-idle").length, 2);
+	assert.equal(env.runtime._activeTask, null);
+	assert.equal(env.runtime._pendingReleaseReceipts.size, 1);
+	await env.runtime._heartbeatTick();
+	assert.equal(requestsFor(env, "/api/connector/import-browser-idle").length, 3);
+	assert.equal(env.runtime._pendingReleaseReceipts.size, 0);
+	assert.equal(env.saveCalls.length, 0);
+});
+
+test("verified native settlement survives lost receipts without a second save", async () => {
+	const env = makeEnvironment();
+	await startRuntime(env);
+	env.runtime._importTaskWindow = async () => ({id: 1});
+	env.enqueue("/api/connector/native-save-settled", new Error("request dropped"));
+	env.enqueue("/api/connector/native-save-settled", new Error("response dropped"));
+	await claim(env, {request_id: "settled-retry", invocation_id: "settled-retry-id",
+		doi_url: "https://doi.org/10.5555/settled"});
+	const tab = await makeSaveReady(env);
+	await env.runtime._handleRuntimeMessage(taskMessage(env, "literature-monitor-before-parent-save"), senderFor(tab.id));
+	await env.runtime._handleRuntimeMessage(taskMessage(env, "literature-monitor-parent-saved"), senderFor(tab.id));
+	const completing = env.runtime._handleRuntimeMessage(
+		taskMessage(env, "literature-monitor-pipeline-complete"), senderFor(tab.id));
+	await flush();
+	await env.clock.advance(500);
+	await completing;
+	await flush();
+	assert.equal(requestsFor(env, "/api/connector/native-save-settled").length, 2);
+	assert.equal(env.runtime._pendingReleaseReceipts.size, 1);
+	await env.runtime._heartbeatTick();
+	assert.deepEqual(bodiesFor(env, "/api/connector/native-save-settled").at(-1), {
+		request_id: "settled-retry", invocation_id: "settled-retry-id",
+		doi_url: "https://doi.org/10.5555/settled", tab_id: tab.id, session_id: "native-session",
+	});
+	assert.equal(env.runtime._pendingReleaseReceipts.size, 0);
+	assert.equal(env.saveCalls.length, 1);
+});
+
+test("receipt capacity stops new claims without evicting proofs", async () => {
+	const env = makeEnvironment();
+	await startRuntime(env);
+	for (let index = 0; index < 127; index++) {
+		env.runtime._pendingReleaseReceipts.set("receipt-" + index, {
+			path: "/api/connector/import-browser-idle", payload: {}, sending: false,
+		});
+	}
+	const before = requestsFor(env, "/api/connector/claim").length;
+	await env.runtime._claimTick();
+	assert.equal(requestsFor(env, "/api/connector/claim").length, before);
+	assert.equal(env.runtime._pendingReleaseReceipts.size, 127);
 });
 
 test("manual authentication timeout retains task tab without stealing browser focus", async () => {
@@ -1545,7 +1671,7 @@ function commit(env, tab, url, extra = {}) {
 	env.beforeNavigate.emit({tabId: tab.id, frameId: 0, url});
 	env.requestStarted.emit({tabId: tab.id, type: "main_frame", requestId, url});
 	const details = {tabId: tab.id, frameId: 0, url, documentId, transitionQualifiers: ["server_redirect"], ...extra};
-	env.frames.set(tab.id, {documentId, url, documentLifecycle: "active", errorOccurred: false});
+	env.frames.set(tab.id, {frameId: 0, documentId, url, documentLifecycle: "active", errorOccurred: false});
 	env.documents.set(documentId, {translators: [], markers: new Set()});
 	// Upstream clears its tab cache even for a same-URL reload.
 	env.tabInfo.set(tab.id, {url, translators: null, instanceID: null});
@@ -2230,19 +2356,74 @@ function preparationCommand(requestID, serviceID, last = false) {
         name: "Example", last_service: last};
 }
 
+test("Preparation and consecutive Imports reuse one unfocused workflow window", async () => {
+    const env = makeEnvironment({enablePreparation: true});
+    const loginURL = "https://ds.carsi.edu.cn/Shibboleth.sso/Login?entityID=urn%3Atest%3Aidp&target="
+        + encodeURIComponent(env.context.LiteratureMonitorCARSI.PORTAL_URL);
+    const proto = env.context.LiteratureMonitorCARSI.Executor.prototype;
+    const execute = proto.execute;
+    const update = env.browser.tabs.update;
+    env.browser.tabs.update = async (id, options) => {
+        const tab = await update(id, options);
+        if (options.url === loginURL) {
+            commit(env, tab, env.context.LiteratureMonitorCARSI.RESOURCE_URL);
+            tab.status = "complete";
+        }
+        return tab;
+    };
+    proto.execute = async function() {
+        this.script = async () => ({status: "ready"});
+        assert.equal(await this.portal(), true);
+        return {outcome: "Needs attention", reason: "manual_action_required"};
+    };
+    try {
+        await startRuntime(env);
+        const windowContext = "kept-workflow-window";
+        env.enqueue("/api/connector/preparation/claim", response(200, {command: {
+            ...preparationCommand("workflow-preparation", "a", true),
+            kind: "carsi-preparation/v1", window_context: windowContext, login_url: loginURL,
+        }}));
+        await env.runtime._claimPreparation(); await flush();
+        assert.equal(env.runtime._prepActive, null);
+        assert.equal(env.createdWindows.length, 1);
+        const windowID = env.runtime._prepContext.windowID;
+        const portalID = env.runtime._prepContext.portalTabID;
+        for (const requestID of ["workflow-import-one", "workflow-import-two"]) {
+            await claim(env, {request_id: requestID, invocation_id: requestID + "-invocation",
+                doi_url: "https://doi.org/10.5555/" + requestID, window_context: windowContext});
+            const tab = await makeSaveReady(env);
+            assert.equal(tab.windowId, windowID);
+            assert.equal(tab.active, false);
+            await finishParent(env, tab.id);
+            assert.equal(bodiesFor(env, "/api/connector/result").at(-1).outcome, "CONFIRMED");
+            assert(env.tabs.has(portalID), "Preparation page remains open after Import");
+        }
+        assert.equal(env.createdWindows.length, 1);
+        assert.equal(env.tabUpdates.filter(call => call.url === loginURL).length, 1);
+        assert.equal(env.createdWindows[0].options.focused, false);
+        assert.equal(env.createdTabs.length, 2);
+        assert.equal(env.saveCalls.length, 2);
+        assert.deepEqual(env.focusCalls, []);
+        assert.equal(env.tabUpdates.some(call => call.active === true), false);
+    }
+    finally {proto.execute = execute;}
+});
+
 test("Preparation revokes local authority before Result and releases resources without closing tabs or waiting", async () => {
     const env = makeEnvironment({enablePreparation: true});
     env.browser.webNavigation.onCreatedNavigationTarget = new FakeEvent();
     const proto = env.context.LiteratureMonitorCARSI.Executor.prototype;
     const oldExecute = proto.execute;
     const post = env.runtime._postJSON.bind(env.runtime);
-    let executor, detailListener, outcome;
+    let executor, observer, outcome;
     env.browser.windows.remove = async id => {throw Error("Preparation must not close window " + id);};
     env.runtime._postJSON = (path, body) => {
         if (path === "/api/connector/preparation/result") {
             assert.equal(executor.revoked, true);
-            assert.equal(executor.detailListener, null);
-            assert(!env.browser.webNavigation.onCreatedNavigationTarget.listeners.includes(detailListener));
+            assert.equal(executor.visitObserver, null);
+            assert.equal(observer.done, true);
+            assert.equal(observer.handlers.length, 0);
+            assert.equal(env.browser.webNavigation.onCreatedNavigationTarget.listeners.length, 0);
             assert.equal([...env.clock.timers.values()].filter(timer => !timer.interval).length, 0);
         }
         return post(path, body);
@@ -2254,9 +2435,9 @@ test("Preparation revokes local authority before Result and releases resources w
             const tab = await this.browser.tabs.create({url, windowId: 1});
             this.context.portalTabID ??= tab.id;
         }
-        detailListener = () => {};
-        this.detailListener = detailListener;
-        this.browser.webNavigation.onCreatedNavigationTarget.addListener(detailListener);
+        observer = this.visitObserver = new env.context.LiteratureMonitorCARSI.VisitObservation(
+            this.browser.webNavigation, {detailTabID: env.createdTabs.at(-2).tab.id, current: () => this.live()});
+        void observer.run(() => true);
         return {outcome, reason: outcome === "Opened" ? "target_opened" : "connector_error"};
     };
     try {
@@ -2354,12 +2535,12 @@ test("missing Result acknowledgement does not retain an everlasting Connector ow
     finally {proto.execute = oldExecute; proto.cleanup = oldCleanup;}
 });
 
-test("revocation heartbeat invalidates an old running executor and preserves Zotero work", async () => {
+test("revocation heartbeat retains the serial slot until the old executor and Visit call exit", async () => {
     const env = makeEnvironment({enablePreparation: true});
     const proto = env.context.LiteratureMonitorCARSI.Executor.prototype;
     const oldExecute = proto.execute;
-    const gate = new Deferred();
-    proto.execute = () => gate.promise;
+    const gate = new Deferred(), visitGate = new Deferred();
+    proto.execute = function() {this.visitClick = visitGate.promise; return gate.promise;};
     try {
         await startRuntime(env);
         const active = {command: preparationCommand("request-old", "a"), executor: null};
@@ -2369,11 +2550,20 @@ test("revocation heartbeat invalidates an old running executor and preserves Zot
         env.enqueue("/api/connector/preparation/authorize", response(409, {accepted: false}));
         await env.runtime._heartbeatTick();
         await flush();
-        assert.equal(env.runtime._prepActive, null);
-        assert.equal(active.executor, null);
+        assert.equal(env.runtime._prepActive, active);
+        assert.equal(active.executor.revoked, true);
+        assert.equal(active.executor.live(), false);
+        const claims = bodiesFor(env, "/api/connector/preparation/claim").length;
+        await env.runtime._claimPreparation();
+        assert.equal(bodiesFor(env, "/api/connector/preparation/claim").length, claims);
         assert.equal(bodiesFor(env, "/api/connector/preparation/settled").length, 0);
         gate.resolve({outcome: "Opened", reason: "target_opened"});
+        await flush();
+        assert.equal(env.runtime._prepActive, active);
+        visitGate.resolve();
         await running;
+        assert.equal(env.runtime._prepActive, null);
+        assert.equal(active.executor, null);
         assert.equal(bodiesFor(env, "/api/connector/preparation/result").length, 0);
     }
     finally {proto.execute = oldExecute;}
@@ -2456,11 +2646,12 @@ async function enrichmentEnvironment() {
 	const command = {request_id: "abstract-request", invocation_id: "abstract-invocation", doi_url: "https://doi.org/10.5555/abstract"};
 	env.enqueue("/api/connector/enrichment/claim", response(200, {command}));
 	await env.runtime._claimTick(); await flush();
-	assert.equal(env.createdTabs.length, 1);
+	assert.equal(env.createdWindows.length, 1);
+	assert.equal(env.createdTabs.length, 0);
 	return env;
 }
 async function enrichmentDocument(env, doc = {}) {
-	const tab = env.createdTabs[0].tab;
+	const tab = env.tabs.get(env.runtime._enrichActive.tabID);
 	commit(env, tab, "https://publisher.example/article");
 	tab.status = "complete";
 	Object.assign(env.documents.get(env.frames.get(tab.id).documentId), {
@@ -2468,9 +2659,9 @@ async function enrichmentDocument(env, doc = {}) {
 	});
 	return tab;
 }
-test("Abstract: Desktop offline closes only the task tab after accepted Preview", async () => {
+test("Abstract: Desktop offline closes only the task tab after accepted Completed", async () => {
 	const env = await enrichmentEnvironment();
-	env.enqueue("/api/connector/enrichment/result", response(200, {accepted: true, phase: "Preview"}));
+	env.enqueue("/api/connector/enrichment/result", response(200, {accepted: true, phase: "Completed"}));
 	const sent = [];
 	env.browser.tabs.sendMessage = async (tabID, message, options) => {
 		sent.push({tabID, message, options});
@@ -2551,14 +2742,14 @@ for (const receipt of [{accepted: true, phase: "Failed"}, {accepted: false}, {ac
 		assert.deepEqual(env.removedTabs, []);
 	});
 }
-test("Abstract: close waits for server Preview acknowledgement and preserves unrelated tabs", async () => {
+test("Abstract: close waits for server Completed acknowledgement and preserves unrelated tabs", async () => {
 	const env = await enrichmentEnvironment(); const gate = new Deferred();
 	env.enqueue("/api/connector/enrichment/result", gate.promise);
 	env.browser.tabs.sendMessage = async () => ({items: [{item_type: "journalArticle", doi: "10.5555/abstract", abstract: "Candidate"}]});
 	env.tabs.set(99, {id: 99, url: "https://example.org/user-tab"});
 	const tab = await enrichmentDocument(env); await env.clock.advance(500);
 	assert.deepEqual(env.removedTabs, []);
-	gate.resolve(response(200, {accepted: true, phase: "Preview"})); await flush();
+	gate.resolve(response(200, {accepted: true, phase: "Completed"})); await flush();
 	assert.deepEqual(env.removedTabs, [tab.id]);
 	assert.equal(env.tabs.has(99), true);
 });
@@ -2570,7 +2761,7 @@ for (const changed of ["document", "window"]) {
 		const tab = await enrichmentDocument(env); await env.clock.advance(500);
 		if (changed === "document") env.frames.get(tab.id).documentId = "user-navigated-document";
 		else tab.windowId = 999;
-		gate.resolve(response(200, {accepted: true, phase: "Preview"})); await flush();
+		gate.resolve(response(200, {accepted: true, phase: "Completed"})); await flush();
 		assert.deepEqual(env.removedTabs, []);
 	});
 }

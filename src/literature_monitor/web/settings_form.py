@@ -17,7 +17,7 @@ from literature_monitor.application.settings import (
     SettingsIssue,
     SettingsIssueSource,
 )
-from literature_monitor.config import AccessService, InstitutionConfig, JournalConfig, LegacyJournal, LogLevel, PublisherConfig
+from literature_monitor.config import AccessService, InstitutionConfig, KeptWorkflowConfig, JournalConfig, LegacyJournal, LogLevel, PublisherConfig
 from literature_monitor.date_range import DateRangeSpec, DateRangeError, validate_date_range_spec
 from literature_monitor.url_safety import normalize_public_http_url
 
@@ -87,6 +87,9 @@ class SettingsFormValues:
     institution_idp_entity_id: str = ""
     automatic_attribute_release_consent: bool = False
     institution_issues: tuple[SettingsIssue, ...] = ()
+    auto_import_after_preparation: bool = False
+    transition_delay_seconds: str = "3"
+    display_name: str = ""
 
     @property
     def legacy_rows(self) -> tuple[LegacyJournal, ...]:
@@ -140,6 +143,9 @@ def settings_form_from_draft(draft: MonitorDraft) -> SettingsFormValues:
         monitor_revision_digest=monitor_digest,
         journal_revision_exists=journal_exists,
         journal_revision_digest=journal_digest,
+        auto_import_after_preparation=draft.kept_workflow.auto_import_after_preparation,
+        transition_delay_seconds=str(draft.kept_workflow.transition_delay_seconds),
+        display_name=draft.kept_workflow.display_name or "",
         institution_name=draft.institution.name or "" if draft.institution else "",
         institution_idp_entity_id=draft.institution.idp_entity_id or "" if draft.institution else "",
         automatic_attribute_release_consent=draft.institution.automatic_attribute_release_consent if draft.institution else False,
@@ -154,11 +160,13 @@ def settings_form_from_submission(form: FormData) -> SettingsFormValues:
     publishers = tuple(str(value) for value in form.getlist("journal_publisher_id"))
     pending = tuple(str(value) == "1" for value in form.getlist("journal_pending"))
     assignments = tuple(str(value) for value in form.getlist("journal_group"))
-    rows = tuple(
-        SettingsJournalRow(name=name, issns=issn_values, group=group, publisher_id=publisher, pending=bool(is_pending))
-        for name, issn_values, group, publisher, is_pending in zip_longest(names, issns, assignments, publishers, pending, fillvalue="")
-    )
     order_values = tuple(str(v) for v in form.getlist("journal_order"))
+    raw_rows = tuple(zip_longest(names, issns, assignments, publishers, pending, fillvalue=""))
+    rows = tuple(
+        SettingsJournalRow(name=name, issns=issn_values, group=group, publisher_id=publisher,
+                           pending=bool(is_pending))
+        for name, issn_values, group, publisher, is_pending in raw_rows
+    )
     order_is_numeric = all(item.isascii() and item.isdecimal() and len(item) <= 12 for item in order_values)
     invalid_order = bool(order_values) and (
         len(order_values) != len(rows)
@@ -175,7 +183,8 @@ def settings_form_from_submission(form: FormData) -> SettingsFormValues:
     group_names += tuple(row.group for row in rows)
     institution_fields = {"institution_name", "institution_idp_entity_id", "automatic_attribute_release_consent"}
     # Enumerate the existing editor/import contract so credential aliases cannot be ignored.
-    supported_fields = institution_fields | {
+    workflow_fields = {"auto_import_after_preparation", "transition_delay_seconds", "display_name"}
+    supported_fields = institution_fields | workflow_fields | {
         "csrf_token", "name", "keyword_expression", "output_dir", "log_level",
         "from_month", "to_month",
         "monitor_revision_exists", "monitor_revision_digest", "journal_revision_exists", "journal_revision_digest",
@@ -189,12 +198,14 @@ def settings_form_from_submission(form: FormData) -> SettingsFormValues:
         "access_upgrade_proof", "confirm_access_upgrade", "upgrade_discard",
     }
     forbidden = any(key not in supported_fields for key in form)
-    duplicate = any(len(form.getlist(key)) > 1 for key in institution_fields)
+    duplicate = any(len(form.getlist(key)) > 1 for key in institution_fields | workflow_fields)
     publisher_lengths = {len(form.getlist(key)) for key in (
         "publisher_name", "publisher_id", "publisher_access_url", "publisher_access_service_id"
     )}
     service_lengths = {len(form.getlist(key)) for key in ("service_id", "service_name", "service_access_url", "service_access_method")}
-    incomplete_rows = len(publisher_lengths) != 1 or len(service_lengths) != 1
+    journal_lengths = {len(names), len(issns), len(assignments), len(publishers), len(pending)}
+    incomplete_rows = (len(journal_lengths) != 1 or len(publisher_lengths) != 1
+                       or len(service_lengths) != 1)
     publisher_order = tuple(str(v) for v in form.getlist("publisher_order"))
     invalid_publisher_order = bool(publisher_order) and (
         len(publisher_order) != len(form.getlist("publisher_id"))
@@ -206,9 +217,11 @@ def settings_form_from_submission(form: FormData) -> SettingsFormValues:
         (_form_issue("institution", "Unsupported Settings field or duplicate institution identifier. Credentials, sessions and login routes are not settings."),)
         if forbidden or duplicate or form.get("automatic_attribute_release_consent", "") not in {"", "1"} else ()
     )
+    if form.get("auto_import_after_preparation", "") not in {"", "1"}:
+        institution_issues += (_form_issue("kept_workflow", "Invalid automatic continuation option."),)
     if incomplete_rows:
         institution_issues += (_form_issue(
-            "access_services", "Incomplete Publisher/Access Service form rows; reload Settings before saving.",
+            "journals/publishers/access_services", "Incomplete Journal/Publisher/Access Service form rows; reload Settings before saving.",
         ),)
     if invalid_order:
         institution_issues += (_form_issue("journals", "Invalid Journal order. Reload Settings before saving."),)
@@ -248,6 +261,9 @@ def settings_form_from_submission(form: FormData) -> SettingsFormValues:
         institution_idp_entity_id=str(form.get("institution_idp_entity_id", "")),
         automatic_attribute_release_consent=form.get("automatic_attribute_release_consent") == "1",
         institution_issues=institution_issues,
+        auto_import_after_preparation=form.get("auto_import_after_preparation") == "1",
+        transition_delay_seconds=str(form.get("transition_delay_seconds", "3")),
+        display_name=str(form.get("display_name", "")),
     )
 
 
@@ -288,6 +304,14 @@ def settings_draft_from_form(
     except ValidationError as error:
         detail = error.errors()[0]
         issues.append(_form_issue("institution." + str(detail["loc"][0]), detail["msg"]))
+    try:
+        kept_workflow = KeptWorkflowConfig(
+            auto_import_after_preparation=values.auto_import_after_preparation,
+            transition_delay_seconds=float(values.transition_delay_seconds),
+            display_name=values.display_name,
+        )
+    except (ValueError, TypeError) as error:
+        issues.append(_form_issue("kept_workflow", str(error)))
     date_spec = DateRangeSpec(values.from_month, values.to_month)
     try:
         validate_date_range_spec(date_spec)
@@ -334,7 +358,8 @@ def settings_draft_from_form(
             continue
         try:
             journals.append(
-                JournalConfig(name=row.name, issn_l=row.issns, publisher_id=row.publisher_id or None, group=row.group.strip() or None)
+                JournalConfig(name=row.name, issn_l=row.issns, publisher_id=row.publisher_id or None,
+                              group=row.group.strip() or None)
             )
             if row.pending:
                 pending_ids.append(journals[-1].issn_l)
@@ -361,6 +386,7 @@ def settings_draft_from_form(
             monitor_revision=monitor_revision,
             journal_revision=journal_revision,
             institution=institution,
+            kept_workflow=kept_workflow,
         ),
         (),
     )

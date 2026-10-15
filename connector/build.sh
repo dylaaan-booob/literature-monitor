@@ -3,7 +3,7 @@ set -euo pipefail
 
 CONNECTOR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPOSITORY_ROOT="$(cd "$CONNECTOR_ROOT/.." && pwd -P)"
-CONNECTOR_VERSION="0.6.8"
+CONNECTOR_VERSION="0.7.0"
 DEFAULT_WORK_ROOT="$CONNECTOR_ROOT/.work"
 DEFAULT_OUTPUT_DIR="$CONNECTOR_ROOT/build/chrome-mv3"
 WORK_ROOT_IS_EXTERNAL=0
@@ -215,9 +215,10 @@ node - "$OUTPUT_DIR/background-worker.js" <<'NODE'
 const source = require('fs').readFileSync(process.argv[2], 'utf8');
 const access = source.indexOf('"literature-monitor-access.js"');
 const carsi = source.indexOf('"literature-monitor-carsi.js"');
+const covers = source.indexOf('"literature-monitor-covers.js"');
 const runtime = source.indexOf('"literature-monitor-runtime.js"');
-if (access < 0 || carsi < access || runtime < carsi)
-    throw new Error('access and CARSI overlays must load before runtime');
+if (access < 0 || carsi < access || covers < carsi || runtime < covers)
+    throw new Error('access, CARSI and cover overlays must load before runtime');
 NODE
 grep -Fq '"literature-monitor-runtime.js"' "$OUTPUT_DIR/background-worker.js" \
     || fail "MV3 service worker is not wired to the Literature Monitor runtime"

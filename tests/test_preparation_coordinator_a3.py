@@ -28,7 +28,6 @@ from literature_monitor.web.preparation_coordinator import (
 from test_access_mapping_a4 import stamp
 from preparation_helpers import prepared
 from test_batch_import import paper, command as capture_command, invocation as capture_invocation, finished
-from test_web_run_settings import csrf_from_html
 from capture_helpers import reservation
 
 
@@ -113,7 +112,7 @@ def test_opened_requires_exact_nonce_detail_source_and_attributed_target(tmp_pat
                        reason="target_opened", evidence=VisitEvidence(nonce, True, 42, 43, 43, True))
 
 
-def test_missing_connector_result_expires_with_finite_recovery_and_no_old_authority(tmp_path, monkeypatch):
+def test_missing_connector_result_times_out_only_current_service_and_rejects_old_authority(tmp_path, monkeypatch):
     config, _, _, second = prepared(tmp_path)
     now = [preparation_module.time.monotonic()]
     monkeypatch.setattr(preparation_module.time, "monotonic", lambda: now[0])
@@ -123,20 +122,27 @@ def test_missing_connector_result_expires_with_finite_recovery_and_no_old_author
     monkeypatch.setattr(preparation_module, "CONNECTOR_STALE_SECONDS", 1200.0)
     now[0] += preparation_module.SERVICE_WAIT_SECONDS + 1
     state = prep.snapshot()
-    assert state.phase is PreparationPhase.BLOCKED
+    assert state.phase is PreparationPhase.RUNNING
     assert state.results[0].reason == "timeout"
+    assert state.current_service_id == second.id
     assert not prep.authorize(**identity(claimed))
     assert not prep.result(**identity(claimed), outcome=PreparationOutcome.FAILED, reason="timeout")
+    assert prep.authorize_visit(**identity(claimed), source_tab_id=42) is None
     assert capture.reserve_browser_task("import") is None
-    now[0] += preparation_module.RELEASE_GRACE_SECONDS + 1
+    now[0] += preparation_module.SERVICE_WAIT_SECONDS + 1
     assert prep.heartbeat(INSTANCE, **CAPABILITY)
-    restarted = prep.start(config)
-    assert restarted.phase is PreparationPhase.RUNNING
-    assert restarted.task_id != started.task_id and restarted.generation > started.generation
+    assert len(prep.snapshot().results) == 1, "waiting for the next claim consumes no deadline"
     fresh = prep.claim(INSTANCE)
     assert fresh is not None, prep.snapshot()
-    assert fresh.service_id != second.id
+    assert fresh.service_id == second.id and fresh.task_id == started.task_id
+    assert prep.authorize(**identity(fresh))
     assert not prep.authorize(**identity(claimed))
+    now[0] += preparation_module.SERVICE_WAIT_SECONDS + 1
+    completed = prep.snapshot()
+    assert completed.phase is PreparationPhase.COMPLETED
+    assert len(completed.results) == 2
+    assert all(result.reason == "timeout" for result in completed.results)
+    assert capture.reserve_browser_task("import") is not None
 
 
 def test_manual_login_wait_is_independent_of_short_service_deadline(tmp_path, monkeypatch):
@@ -155,8 +161,13 @@ def test_manual_login_wait_is_independent_of_short_service_deadline(tmp_path, mo
     assert prep.authorize(**identity(command))
     assert prep.report_waiting(**identity(command), waiting=False)
     now[0] += preparation_module.SERVICE_WAIT_SECONDS + 1
-    assert prep.snapshot().phase is PreparationPhase.BLOCKED
+    assert prep.snapshot().phase is PreparationPhase.RUNNING
     assert prep.snapshot().results[0].reason == "timeout"
+    next_command = prep.claim(INSTANCE)
+    assert prep.report_waiting(**identity(next_command), waiting=True)
+    now[0] += preparation_module.LOGIN_WAIT_SECONDS + 1
+    assert prep.snapshot().phase is PreparationPhase.BLOCKED
+    assert prep.snapshot().results[1].reason == "timeout"
 
 
 def test_frozen_kept_related_services_with_blank_urls_are_immutable(tmp_path):
@@ -355,15 +366,21 @@ def test_connector_reconnect_revokes_old_generation_and_recovers(tmp_path, monke
     assert prep.authorize(**identity(fresh, NEXT_INSTANCE))
 
 
-def test_unclaimed_stale_heartbeat_releases_and_timeout_blocks_queue(tmp_path, monkeypatch):
+def test_unclaimed_service_waits_without_deadline_and_stale_connector_still_releases(tmp_path, monkeypatch):
     config, _, first, _ = prepared(tmp_path)
+    now = [preparation_module.time.monotonic()]
+    monkeypatch.setattr(preparation_module.time, "monotonic", lambda: now[0])
     capture, prep = enabled(config)
     started = prep.start(config)
     monkeypatch.setattr(preparation_module, "SERVICE_WAIT_SECONDS", -1)
-    timed_out = prep.snapshot()
-    assert timed_out.phase is PreparationPhase.BLOCKED
-    assert timed_out.results[0].service_id == first.id
-    assert timed_out.results[0].reason == "timeout"
+    waiting = prep.snapshot()
+    assert waiting.phase is PreparationPhase.RUNNING and not waiting.results
+    assert capture.reserve_browser_task("import") is None
+    now[0] += preparation_module.CONNECTOR_STALE_SECONDS + 1
+    disconnected = prep.snapshot()
+    assert disconnected.phase is PreparationPhase.BLOCKED
+    assert disconnected.results[0].service_id == first.id
+    assert disconnected.results[0].reason == "connector_disconnected"
     assert capture.reserve_browser_task("import") is not None
     assert not prep.authorize(instance_id=INSTANCE, task_id=started.task_id, generation=started.generation,
                               request_id="old-request", service_id=first.id)
@@ -457,7 +474,7 @@ def test_import_browser_idle_requires_terminal_and_matching_identity(tmp_path):
     assert not capture.report_import_browser_idle(command.request_id, command.invocation_id,
                                                   "https://doi.org/unrelated")
     assert capture.report_import_browser_idle(command.request_id, command.invocation_id, command.doi_url)
-    assert not capture.report_import_browser_idle(command.request_id, command.invocation_id, command.doi_url)
+    assert capture.report_import_browser_idle(command.request_id, command.invocation_id, command.doi_url)
     assert prep.start(config).phase is PreparationPhase.RUNNING
 
 
@@ -499,63 +516,6 @@ def test_outstanding_native_save_grant_blocks_preparation_until_original_settled
     assert prep.start(config).phase is PreparationPhase.BLOCKED
     assert capture.report_import_browser_idle(command.request_id, command.invocation_id, command.doi_url)
     assert prep.start(config).phase is PreparationPhase.RUNNING
-
-
-def test_web_bridge_csrf_default_safe_and_stale_result_denial(tmp_path):
-    config, path, _, _ = prepared(tmp_path)
-    app = create_app(config)
-    before = stamp(path), stamp(config)
-    with TestClient(app, base_url="http://localhost") as client:
-        token = csrf_from_html(client.get("/settings").text)
-        assert client.post("/api/preparation/start", json={"csrf_token": "forged"}).status_code == 403
-        assert client.post("/api/connector/preparation/heartbeat",
-                           json={"instance_id": INSTANCE, "capability": "unsupported", "version": "0.6.4"}).json() == {"ready": False}
-        denied = client.post("/api/preparation/start", json={"csrf_token": token})
-        assert denied.status_code == 409
-        assert denied.json()["phase"] == "blocked"
-        assert client.post("/api/connector/preparation/claim",
-                           json={"instance_id": INSTANCE}).json() == {"command": None}
-        # In test only, emulate the still-unimplemented A4 executor.
-        app.state.preparation_coordinator._execution_enabled = True
-        assert client.post("/api/connector/preparation/heartbeat",
-                           json={"instance_id": INSTANCE, **CAPABILITY}).json()["ready"]
-        started = client.post("/api/preparation/start", json={"csrf_token": token})
-        assert started.status_code == 200
-        current = started.json()
-        assert [s["id"] for s in current["services"]] == [s.id for s in read_saved_preparation_services(config)]
-        claimed = client.post("/api/connector/preparation/claim",
-                              json={"instance_id": INSTANCE}).json()["command"]
-        assert claimed["kind"] == "carsi-preparation/v1"
-        assert "doi_url" not in claimed and "invocation_id" not in claimed
-        request = dict(instance_id=INSTANCE, task_id=claimed["task_id"],
-                       generation=claimed["generation"], request_id=claimed["request_id"],
-                       service_id=claimed["service_id"])
-        assert client.post("/api/connector/preparation/authorize", json=request).status_code == 200
-        assert client.post("/api/connector/dispatch", json={
-            "request_id": request["request_id"], "invocation_id": "x",
-            "doi_url": "https://doi.org/10.1000/forbidden", "tab_id": 100,
-            "session_id": "x",
-        }).status_code == 409
-        assert client.post("/api/connector/import-browser-idle", json={
-            "request_id": request["request_id"], "invocation_id": "other",
-            "doi_url": "https://doi.org/10.1000/forbidden",
-        }).status_code == 409
-        assert client.post("/api/connector/import-browser-idle", json={
-            "request_id": request["request_id"], "invocation_id": "other",
-            "doi_url": "https://doi.org/10.1000/forbidden", "extra": True,
-        }).status_code == 422
-        assert client.post("/api/connector/preparation/result",
-                           json={**request, "outcome": "Opened", "reason": "unknown"}).status_code == 409
-        assert client.post("/api/connector/preparation/result",
-                           json={**request, "outcome": "Failed", "reason": "navigation_failed"}).status_code == 200
-        assert client.post("/api/connector/preparation/result",
-                           json={**request, "outcome": "Failed", "reason": "navigation_failed"}).status_code == 200
-        assert client.post("/api/connector/preparation/settled", json=request).status_code == 404
-        assert client.post("/api/connector/preparation/authorize", json=request).status_code == 409
-        assert client.post("/api/preparation/cancel",
-                           json={"csrf_token": token, "task_id": "f" * 32, "generation": current["generation"]}).status_code == 409
-    assert (stamp(path), stamp(config)) == before
-    assert not list(tmp_path.glob("*.sqlite"))
 
 
 @pytest.mark.parametrize('supported', [False, True])

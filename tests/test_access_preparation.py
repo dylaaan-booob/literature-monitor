@@ -10,7 +10,7 @@ from literature_monitor.web.capture_coordinator import ACTIVE_TIMEOUT_SECONDS
 import literature_monitor.web.capture_coordinator as capture_module
 import literature_monitor.web.app as web
 from test_batch_import import paper, command, finished, state
-from test_unified_import_ui import setup, start_data, poll
+from kept_workflow_helpers import setup, start_data
 
 
 def access_payload(cmd, reason="unknown_service", **observation):
@@ -35,10 +35,10 @@ def result(client, cmd, outcome, *, settle=True):
 
 def test_origin_observation_is_readonly_and_official_parent_stays_pdf_unverified(tmp_path):
     app, config, root = setup(tmp_path)
-    _, path = paper(root, "a")
+    created, path = paper(root, "a")
     config_before = config.read_bytes()
     with TestClient(app, base_url="http://localhost") as client:
-        assert client.post("/imports/start", data=start_data(client)).status_code == 200
+        assert client.post("/api/kept-workflow/start", json={**start_data(client), "mode": "import_only"}).status_code == 200
         cmd = command(app.state.batch_import)
         reserved = path.read_bytes()
         body = access_payload(cmd)
@@ -48,9 +48,9 @@ def test_origin_observation_is_readonly_and_official_parent_stays_pdf_unverified
         assert client.post("/api/connector/access", json=body).status_code == 409
         assert path.read_bytes() == reserved
         for _ in range(3):
-            html = poll(client, app).text
-            assert "Access Service unknown" in html and "https://landing.example" in html
-            assert "resource entitlement: unknown" in html
+            observed = client.get("/api/kept-workflow/state").json()["batch"]
+            assert observed["phase"] == "running"
+            assert observed["current_paper_id"] == str(created.id)
         # 观测既不能证明 parent，也不能替代一次性、匹配 tab 的 native permission。
         assert result(client, cmd, "CONFIRMED", settle=False).status_code == 409
         assert client.post("/api/connector/dispatch", json=invocation(cmd, 11)).status_code == 409
@@ -62,8 +62,9 @@ def test_origin_observation_is_readonly_and_official_parent_stays_pdf_unverified
         assert snapshot.successful and snapshot.statistics.exported_parent == 1
         assert snapshot.statistics.pdf_unverified == 1 and snapshot.statistics.pdf_verified_success == 0
         assert snapshot.results[0].access == AccessObservation(**body["observation"])
-        html = poll(client, app).text
-        assert "Access Service unknown" in html and "PDF: unverified" in html
+        published = client.get("/api/kept-workflow/state").json()["batch"]
+        assert published["statistics"]["pdf_unverified"] == 1
+        assert published["results"][0]["access"]["reason"] == "unknown_service"
     assert state(path).status is WorkflowStatus.EXPORTED
     assert "landing.example" not in path.read_text() and "access_context" not in path.read_text()
     assert config.read_bytes() == config_before
@@ -76,7 +77,7 @@ def test_failed_preparation_blocks_native_permission_but_isolates_other_paper(tm
     _, first = paper(root, "a")
     _, second = paper(root, "b")
     with TestClient(app, base_url="http://localhost") as client:
-        client.post("/imports/start", data=start_data(client))
+        client.post("/api/kept-workflow/start", json={**start_data(client), "mode": "import_only"})
         a = command(app.state.batch_import)
         assert client.post("/api/connector/access", json=access_payload(a, reason)).status_code == 200
         assert client.post("/api/connector/dispatch", json=invocation(a)).status_code == 409
@@ -92,7 +93,7 @@ def test_failed_preparation_blocks_native_permission_but_isolates_other_paper(tm
         assert snapshot.phase is BatchPhase.COMPLETED and not snapshot.successful
         assert snapshot.statistics.no_effect == snapshot.statistics.exported_parent == 1
         assert snapshot.results[0].access.reason == reason
-        assert "Batch finished with errors" in poll(client, app).text
+        assert client.get("/api/kept-workflow/state").json()["batch"]["statistics"]["no_effect"] == 1
     assert state(first).status is WorkflowStatus.KEPT and not state(first).export_attempt_present
     assert state(second).status is WorkflowStatus.EXPORTED
 
@@ -101,12 +102,11 @@ def test_prepared_navigation_never_claims_authentication_or_entitlement(tmp_path
     app, _, root = setup(tmp_path)
     paper(root, "a")
     with TestClient(app, base_url="http://localhost") as client:
-        client.post("/imports/start", data=start_data(client))
+        client.post("/api/kept-workflow/start", json={**start_data(client), "mode": "import_only"})
         cmd = command(app.state.batch_import)
         body = access_payload(cmd, "prepared", service_origin="https://sp.example")
         assert client.post("/api/connector/access", json=body).status_code == 200
-        html = poll(client, app).text
-        assert "authentication and full-text entitlement remain unknown" in html
+        assert app.state.batch_import.snapshot().current_access.reason == "prepared"
         assert result(client, cmd, "FAILED").status_code == 200
         finished(app.state.batch_import)
 
@@ -126,7 +126,7 @@ def test_unproven_sessions_and_sensitive_fields_rejected_by_http(tmp_path, field
     app, _, root = setup(tmp_path)
     _, path = paper(root, "a")
     with TestClient(app, base_url="http://localhost") as client:
-        client.post("/imports/start", data=start_data(client))
+        client.post("/api/kept-workflow/start", json={**start_data(client), "mode": "import_only"})
         cmd = command(app.state.batch_import)
         before = path.read_bytes()
         body = access_payload(cmd, **{field: "secret-or-confirmed"})
@@ -146,7 +146,7 @@ def test_timeout_restart_and_late_observation_cannot_revive_save(tmp_path, monke
     _, b = paper(root, "b")
     unsent = b.read_bytes()
     with TestClient(app, base_url="http://localhost") as client:
-        client.post("/imports/start", data=start_data(client))
+        client.post("/api/kept-workflow/start", json={**start_data(client), "mode": "import_only"})
         cmd = command(app.state.batch_import)
         assert client.post("/api/connector/dispatch", json=invocation(cmd)).status_code == 200
         clock[0] += ACTIVE_TIMEOUT_SECONDS + 1
@@ -161,7 +161,7 @@ def test_timeout_restart_and_late_observation_cannot_revive_save(tmp_path, monke
     with TestClient(restarted, base_url="http://localhost") as client:
         assert client.post("/api/connector/access", json=access_payload(cmd)).status_code == 409
         assert client.post("/api/connector/dispatch", json=invocation(cmd)).status_code == 409
-        client.post("/imports/start", data=start_data(client))
+        client.post("/api/kept-workflow/start", json={**start_data(client), "mode": "import_only"})
         fresh = command(restarted.state.batch_import)
         assert fresh.request_id != cmd.request_id
         assert client.post("/api/connector/dispatch", json=invocation(fresh)).status_code == 200
@@ -178,12 +178,15 @@ def test_new_explicit_batch_gets_new_process_local_access_context(tmp_path):
     app, _, root = setup(tmp_path)
     paper(root, "a")
     with TestClient(app, base_url="http://localhost") as client:
-        client.post("/imports/start", data=start_data(client))
+        client.post("/api/kept-workflow/start", json={**start_data(client), "mode": "import_only"})
         first = command(app.state.batch_import)
         assert first.access_context and str(root) not in first.access_context
         assert result(client, first, "FAILED").status_code == 200
         finished(app.state.batch_import)
-        client.post("/imports/start", data=start_data(client))
+        app.state.kept_workflow.advance()
+        assert client.get("/api/kept-workflow/state").json()["phase"] == "completed"
+        started = client.post("/api/kept-workflow/start", json={**start_data(client), "mode": "import_only"})
+        assert started.status_code == 200 and started.json()["phase"] == "importing"
         second = command(app.state.batch_import)
         assert second.access_context != first.access_context
         assert result(client, second, "FAILED").status_code == 200

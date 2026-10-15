@@ -95,6 +95,7 @@ class BatchImportService:
         self._mutex = threading.Lock()
         self._snapshot = BatchSnapshot(BatchPhase.IDLE, None, None, (), "No batch started")
         self._worker: threading.Thread | None = None
+        self._stop = threading.Event()
 
     def snapshot(self) -> BatchSnapshot:
         capture = self.coordinator.snapshot().attempt
@@ -124,6 +125,7 @@ class BatchImportService:
                                                "Browser task busy or native save unresolved")
                 return self._snapshot
             ready = threading.Event()
+            self._stop.clear()
             self._snapshot = BatchSnapshot(BatchPhase.RUNNING, None, None, (), "Scanning all Workspace Kept Papers")
             self._worker = threading.Thread(target=self._execute,
                                             args=(workspace, ready, validate_target, owner), daemon=True)
@@ -134,6 +136,15 @@ class BatchImportService:
                 raise
         ready.wait()
         return self.snapshot()
+
+    def stop(self) -> None:
+        """Stop further dispatch; a dispatched native save keeps its owner until resolved."""
+        with self._mutex:
+            self._stop.set()
+            if self._snapshot.phase is BatchPhase.RUNNING:
+                self._snapshot = replace(self._snapshot, message="Stopping; current native save is settling")
+                if self._snapshot.current_paper_id is not None:
+                    self.coordinator.stop_undispatched(self._snapshot.current_paper_id)
 
     def _publish(self, phase, plan, current, results, message):
         with self._mutex:
@@ -157,21 +168,28 @@ class BatchImportService:
                 self._publish(BatchPhase.RUNNING, plan, None, results, "Kept import plan created")
                 for paper in plan.papers:
                     lock.verify()
+                    if self._stop.is_set():
+                        phase, message = BatchPhase.STOPPED, "Import stopped; remaining Papers stay kept"
+                        break
                     if self.coordinator.snapshot().readiness is not ConnectorReadiness.CONNECTED:
                         phase, message = BatchPhase.STOPPED, "Connector/Zotero unavailable; remaining Papers stay kept"
                         break
                     self._publish(BatchPhase.RUNNING, plan, paper.paper_id, results, "Checking selected Paper")
-                    try:
-                        reservation = _reserve_export_attempt_locked(
-                            lock, paper.paper_id, expected_paper=paper,
-                            expected_papers_identity=plan.papers_identity,
-                        )
-                    except (ExportAttemptError, CompareReadError, ContentChangedError, OSError) as error:
-                        results.append(BatchPaperResult(paper.paper_id, "skipped", f"Paper changed or unsafe: {error}"))
-                        continue
-
-                    started = self.coordinator.start_capture(reservation, operation_lock=lock,
-                                                             access_context=access_context)
+                    # Serialize the stop acknowledgement with reservation/dispatch.
+                    with self._mutex:
+                        if self._stop.is_set():
+                            phase, message = BatchPhase.STOPPED, "Import stopped; remaining Papers stay kept"
+                            break
+                        try:
+                            reservation = _reserve_export_attempt_locked(
+                                lock, paper.paper_id, expected_paper=paper,
+                                expected_papers_identity=plan.papers_identity,
+                            )
+                        except (ExportAttemptError, CompareReadError, ContentChangedError, OSError) as error:
+                            results.append(BatchPaperResult(paper.paper_id, "skipped", f"Paper changed or unsafe: {error}"))
+                            continue
+                        started = self.coordinator.start_capture(reservation, operation_lock=lock,
+                                                                 access_context=access_context)
                     if started.outcome is not CaptureStartOutcome.STARTED:
                         if started.outcome is CaptureStartOutcome.CONNECTOR_UNAVAILABLE:
                             phase, message = BatchPhase.STOPPED, "Connector/Zotero became unavailable"
@@ -184,8 +202,8 @@ class BatchImportService:
                                   "Waiting for Connector native parent result")
                     ready.set()
                     completion = self.coordinator.wait_for_completion()
-                    can_continue = self.coordinator.save_authority_ended(completion)
                     result = resolve_export_completion(completion, coordinator=self.coordinator)
+                    can_continue = self.coordinator.save_authority_ended(completion)
                     outcome = {
                         ExportCompletionOutcome.EXPORTED: "exported",
                         ExportCompletionOutcome.NO_EFFECT: "no_effect",
@@ -199,6 +217,8 @@ class BatchImportService:
                                           "Unconfirmed dispatched save; next explicit Import can retry kept Papers")
                         break
 
+                if self._stop.is_set() and phase is BatchPhase.COMPLETED:
+                    phase, message = BatchPhase.STOPPED, "Import stopped; completed native saves are retained"
                 if phase is not BatchPhase.COMPLETED:
                     finished = {result.paper_id for result in results}
                     results.extend(BatchPaperResult(p.paper_id, "skipped", message)

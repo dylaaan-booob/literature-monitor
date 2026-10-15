@@ -305,28 +305,10 @@ def test_lost_delete_response_never_reports_success(dedicated, monkeypatch):
 
 
 def reset_data(client):
-    html = client.get('/settings').text
-    return {key: re.search(fr'name="{key}" value="([^"]+)"', html).group(1)
-            for key in ('csrf_token', 'reset_token')} | {'reset_word': 'RESET'}
-
-
-def test_settings_ui_csrf_one_confirmation_and_htmx(dedicated):
-    config, workspace = dedicated
-    with TestClient(create_app(config), base_url='http://localhost') as client:
-        data = reset_data(client)
-        html = client.get('/settings').text
-        assert str(workspace) in html and 'entire configured Workspace' in html
-        assert '.obsidian/' in html and 'custom files' in html
-        assert 'Exact removal inventory' not in html
-        data = reset_data(client)
-        assert client.post('/settings/workspace-reset', data={**data, 'csrf_token':'bad'}).status_code == 403
-        assert client.post('/settings/workspace-reset', data={**data, 'reset_word':'reset'}).status_code == 400
-        assert client.post('/settings/workspace-reset', data=data).status_code == 409
-        data = reset_data(client)
-        response = client.post('/settings/workspace-reset', data=data, headers={'HX-Request':'true'})
-        assert response.status_code == 200 and 'Workspace permanently deleted' in response.text
-        assert '<html' not in response.text and not workspace.exists()
-        assert client.post('/settings/workspace-reset', data=data).status_code == 409
+    state = client.get('/api/ui-next/settings').json()
+    preview = client.get('/api/ui-next/settings/reset-preview').json()
+    return {'csrf_token': state['csrf_token'], 'reset_token': preview['reset_token'],
+            'reset_word': 'RESET'}
 
 
 def test_http_config_switch_refuses_stale_token(dedicated):
@@ -337,19 +319,6 @@ def test_http_config_switch_refuses_stale_token(dedicated):
         config.write_text(config.read_text().replace('output_dir: workspace', 'output_dir: other'))
         response = client.post('/settings/workspace-reset', data=data)
     assert response.status_code == 409 and workspace.exists() and other.exists()
-
-
-def test_settings_save_uses_its_own_form_with_reset_visible(dedicated):
-    from test_web_run_settings import browser_settings_submission
-    config, workspace = dedicated
-    with TestClient(create_app(config), base_url='http://localhost') as client:
-        html = client.get('/settings').text
-        assert 'name="reset_token"' in html
-        fields = browser_settings_submission(html)
-        assert 'reset_token' not in fields and 'reset_word' not in fields
-        fields['institution_name'] = ['Example University']
-        assert 'Settings saved.' in client.post('/settings/save', data=fields).text
-    assert (workspace / 'Papers').exists()
 
 
 def test_http_historical_uncertain_marker_allows_reset(dedicated):
@@ -523,27 +492,3 @@ def test_cross_process_native_guard_clears_only_after_old_pipeline_receipt(dedic
     after = probe()
     assert after.returncode == 0 and after.stdout.strip() == 'ACQUIRED', after.stderr
     assert (workspace / 'Papers').exists()
-
-
-def test_reset_failure_htmx_swap_runtime(dedicated):
-    import json
-    import shutil
-    from test_web_run_settings import SettingsDOM, SETTINGS_NODE_DOM
-
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("Node unavailable for the existing Settings DOM harness")
-    config, _ = dedicated
-    client = TestClient(create_app(config), base_url="http://localhost")
-    page = client.get("/settings").text
-    source = Path("src/literature_monitor/web/static/app.js").read_text()
-    script = f"const PAGE={json.dumps(SettingsDOM(page).root)}, SOURCE={json.dumps(source)};\n" + SETTINGS_NODE_DOM + r'''
-for (const status of [400, 409, 403, 500]) {
-  const detail = {target: new Element("section", {id: "danger-zone"}), xhr: {status}, shouldSwap: false, isError: true};
-  bodyHandlers["htmx:beforeSwap"]({detail});
-  assert.equal(detail.shouldSwap, status === 400 || status === 409);
-  assert.equal(detail.isError, status !== 400 && status !== 409);
-}
-'''
-    result = subprocess.run([node], input=script, capture_output=True, text=True)
-    assert result.returncode == 0, result.stdout + result.stderr

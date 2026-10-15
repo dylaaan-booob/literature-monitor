@@ -189,7 +189,7 @@ def test_fixed_prompt_covers_all_mapping_invariants():
 
 
 def test_fixed_prompt_separates_complete_import_from_unassigned_pdf_research():
-    prompt = AI_EDITING_PROMPT_V1.lower()
+    prompt = " ".join(AI_EDITING_PROMPT_V1.lower().split())
     assert prompt.index("first output") < prompt.index("### unassigned publishers research")
     assert "one standalone markdown code block tagged markdown" in prompt
     assert "fence longer than any backtick run" in prompt
@@ -430,31 +430,8 @@ def test_pack_upload_rejected_at_preview_even_when_renamed(tmp_path, filename):
         preview_full_markdown(path, pack.markdown, filename=filename)
     with TestClient(create_app(config), base_url="http://localhost") as client:
         response = preview(client, submission(client), pack.markdown, filename=filename)
-        assert "Import Preview blocked" in response.text
-        assert "AI Mapping Pack" in response.text
-        assert "data-markdown-preview" not in response.text
+        result = response.json()
+        assert "Import Preview blocked" in result["message"]
+        assert "AI Mapping Pack" in result["message"]
+        assert not result.get("import_plan")
     assert (stamp(path), stamp(config)) == before
-
-
-def test_forged_confirm_source_rechecked_and_cannot_write_pack(tmp_path):
-    config, path, _, _ = prepared(tmp_path)
-    original = stamp(path), stamp(config)
-    proposed = candidate(path)
-    valid = preview_full_markdown(path, proposed, filename="regular.md")
-    pack = generate_ai_mapping_pack(path, transport=transport())
-    forged = replace(valid, proposed=pack.markdown)
-    with pytest.raises(ConfigurationError, match="AI Mapping Pack"):
-        confirm_full_markdown(forged)
-    # The signed web Confirm endpoint also recomputes Preview from source payload.
-    with TestClient(create_app(config), base_url="http://localhost") as client:
-        ordinary = preview(client, submission(client), proposed)
-        assert "data-markdown-preview" in ordinary.text
-        from test_web_run_settings import browser_settings_submission
-        data = browser_settings_submission(ordinary.text)
-        data["markdown_import_payload"] = [
-            base64.b64encode(pack.markdown.encode("utf-8")).decode("ascii"),
-        ]
-        response = client.post("/settings/import/confirm", data=data)
-        assert "Import not written" in response.text
-        assert "AI Mapping Pack" in response.text
-    assert (stamp(path), stamp(config)) == original

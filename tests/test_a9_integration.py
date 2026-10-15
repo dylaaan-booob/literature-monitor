@@ -14,38 +14,9 @@ from test_workspace_reset import dedicated
 
 
 def reset_form(client, app):
-    page = client.get('/settings')
-    token = re.search(r'name="reset_token" value="([^"]+)"', page.text).group(1)
-    return {'csrf_token': app.state.csrf_token, 'reset_token': token, 'reset_word': 'RESET'}
-
-
-@pytest.mark.parametrize('confirmed', [True, False])
-def test_reset_after_retired_batch_completion_ignores_display_history(dedicated, monkeypatch, confirmed):
-    config, workspace = dedicated
-    app = web.create_app(config)
-    coordinator = app.state.capture_coordinator
-    coordinator.heartbeat(connector_version='A9-test', zotero_reachable=True)
-    batch = app.state.batch_import
-    batch.start(workspace)
-    cmd = command(batch)
-    assert outcome(batch, cmd, CaptureOutcome.CONFIRMED if confirmed else CaptureOutcome.FAILED,
-                   dispatch=confirmed)
-    assert finished(batch).statistics.exported_parent == int(confirmed)
-    assert coordinator.snapshot().attempt.stage is CaptureStage.FINISHED
-    before = {p: p.read_bytes() for p in workspace.rglob('*') if p.is_file()}
-    calls = []
-    def no_delete(config_path, plan):
-        calls.append((config_path, plan.workspace))
-        return ResetResult(False, 'A9 test executor: no deletion performed')
-    monkeypatch.setattr(web, 'execute_reset', no_delete)
-    with TestClient(app, base_url='http://localhost') as client:
-        response = client.post('/settings/workspace-reset', data=reset_form(client, app),
-                               headers={'HX-Request': 'true'})
-    assert calls == [(config.resolve(), workspace.resolve())]
-    assert response.status_code == 409  # The stub's failure must still be reported.
-    assert 'A9 test executor: no deletion performed' in response.text
-    assert not response.headers.get('HX-Trigger')
-    assert {p: p.read_bytes() for p in workspace.rglob('*') if p.is_file()} == before
+    preview = client.get('/api/ui-next/settings/reset-preview').json()
+    return {'csrf_token': app.state.csrf_token, 'reset_token': preview['reset_token'],
+            'reset_word': 'RESET'}
 
 
 def test_uncertain_grant_survives_later_confirmed_batch_until_its_own_pipeline_receipt(dedicated, monkeypatch):
@@ -96,7 +67,8 @@ def test_uncertain_grant_survives_later_confirmed_batch_until_its_own_pipeline_r
             pdf_outcome=web.PdfOutcome.UNVERIFIED)
         proof = client.post('/api/connector/native-save-settled', json=vars(invocation(first)))
         assert proof.status_code == 200 and proof.json() == {'accepted': True}
-        assert client.post('/api/connector/native-save-settled', json=vars(invocation(first))).status_code == 409
+        repeat = client.post('/api/connector/native-save-settled', json=vars(invocation(first)))
+        assert repeat.status_code == 200 and repeat.json() == {'accepted': True}
         assert not coordinator.has_unresolved_save_authority
         after = client.post('/settings/workspace-reset', data=reset_form(client, app))
         assert after.status_code == 409

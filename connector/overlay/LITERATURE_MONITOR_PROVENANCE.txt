@@ -72,3 +72,33 @@ listeners, periodic intervals, native Translator/parent/attachment saving and
 read-only Enrichment remain unchanged. No tabs or offscreen documents are
 closed; no persistent state, telemetry or measured memory-saving claim is added.
 Upstream pins, submodule revisions and Manifest permissions remain unchanged.
+
+Journal cover search development delta (SPEC §56): the separate AGPL cover overlay
+recognizes regional Google pages and maps the first result's imgurl or embedded
+result-ID/thumbnail/original record to its original URL. It parses page data without
+executing it or requiring a preview click. URL recovery mechanisms were informed
+by ViewImage (https://github.com/bijij/ViewImage) and Classic View for Google Images
+(https://github.com/hsr88/classic-view-for-google-images); no dependency is bundled.
+Chrome's extension background downloads originals using existing host permissions,
+credentials=omit, normal redirects, a 20-second deadline and streaming 5 MiB limit.
+Three searches run per group; download/submission is serial. Runtime advertises
+journal-covers/v2 and submits Base64 bytes for MIT-side conversion and atomic saving,
+with shared browser exclusion and 25-second result transport. Continue/Retry use
+fresh request IDs over an in-memory current batch; Reset locally deletes cover
+assets without starting a task. Navigation uses owned tabs and committed documents,
+retaining user-navigated pages. No permission, browser dependency, Zotero save
+authority, application version or upstream revision changes are introduced.
+
+Background task window development delta (SPEC §61): runtime and CARSI overlays
+create unfocused normal non-incognito task windows. Subsequent Import tabs and
+verified CARSI Detail tabs are inactive. Detail navigation extracts the unique
+exact Service result's official URL, rechecks its Portal Document and authority,
+and owns the Tab ID returned by tabs.create instead of observing an anchor popup.
+Official Visit observation and evidence are unchanged. Completion does not
+focus/activate the application. The optional
+background-task-windows/v1 claim metadata associates one Kept workflow/generation
+with a transient window, without changing task/native-save authority. Import Only
+retains an owned blank anchor until batch end and removes it only when its original
+committed document and unchanged URL are verified. Preparation pages remain open;
+Enrich/Import matching-document cleanup and native-save settlement are preserved.
+No browser-state persistence, permission, version or upstream pin changes are added.

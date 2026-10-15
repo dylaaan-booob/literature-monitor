@@ -1,4 +1,4 @@
-"""One transient Paper enrichment candidate; browser ownership stays in CaptureCoordinator."""
+"""Explicit Paper enrichment with immediate saving; browser ownership stays in CaptureCoordinator."""
 from __future__ import annotations
 
 import secrets
@@ -65,6 +65,7 @@ class PaperEnrichment:
         self.capture = capture
         self._lock = threading.RLock()
         self._task = None
+        self._completed_papers: set[UUID] = set()
 
     def _release(self, task):
         self.capture.release_browser_task('enrichment', task['owner'])
@@ -83,21 +84,23 @@ class PaperEnrichment:
             task = self._task
             online = self.capture.snapshot()
             result = {'phase': 'Idle', 'connector_online': online.connector_online,
-                      'supported': online.enrichment_capable, 'message': '', 'request_id': None}
+                      'supported': online.enrichment_capable, 'message': '', 'request_id': None,
+                      'completed_in_session': paper_id in self._completed_papers}
             if task and task['target'].paper_id == paper_id and (request_id is None or task['request_id'] == request_id):
                 result.update(phase=task['phase'], message=task['message'], request_id=task['request_id'])
                 result['missing_abstract'] = task['target'].missing_abstract and 'abstract' not in task['saved']
-                result['missing_date'] = task['target'].missing_date and 'publication_date' not in task['saved']
+                saved_date = task['saved'].get('publication_date')
+                result['missing_date'] = task['target'].missing_date if saved_date is None else len(saved_date) == 7
                 result['missing_authors'] = task['target'].missing_authors and 'authors' not in task['saved']
-                if task['phase'] == 'Preview':
-                    result.update(task['candidate'])
-                elif task['phase'] == 'Completed':
+                if task['phase'] == 'Completed':
                     result['saved'] = task['saved']
             return result
 
     def start(self, workspace: Path, paper_id: UUID):
         target = read_enrichment_target(workspace, paper_id)
         with self._lock:
+            if paper_id in self._completed_papers:
+                raise ValueError('Enrichment was already saved for this Paper in the current Web session')
             self._expire()
             online = self.capture.snapshot()
             if not online.connector_online or not online.enrichment_capable:
@@ -109,7 +112,7 @@ class PaperEnrichment:
             self._task = dict(target=target, owner=owner, request_id=secrets.token_urlsafe(32),
                               invocation_id=secrets.token_urlsafe(32), phase='Retrieving', message='Retrieving missing fields…',
                               doi_url=f'https://doi.org/{quote(target.doi, safe="/")}',
-                              claimed=False, deadline=deadline, manual=False, candidate={}, saved={})
+                              claimed=False, deadline=deadline, manual=False, saved={})
             return self.state(paper_id)
 
     def claim(self):
@@ -138,12 +141,15 @@ class PaperEnrichment:
                             message='Complete authentication or the challenge in Chrome')
             return task is not None
 
-    def result(self, identity, items, error=None):
+    def result(self, workspace, identity, items, error=None):
         with self._lock:
             task = self._matching(identity)
             if task is None:
                 return None
+            candidate = {}
             try:
+                if workspace != task['target'].workspace:
+                    raise ValueError('Configured Workspace changed')
                 if error:
                     raise ValueError(error)
                 if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
@@ -153,55 +159,42 @@ class PaperEnrichment:
                     raise ValueError('Translator did not return a literature Item')
                 if normalize_doi(item.get('doi')) != task['target'].doi:
                     raise ValueError('Translator DOI is missing or does not match this Paper')
-                candidate = {}
                 abstract = item.get('abstract')
                 if task['target'].missing_abstract and isinstance(abstract, str) and abstract.strip():
                     candidate['abstract'] = abstract
                 if task['target'].missing_date:
                     parsed_date = publication_date_candidate(item)
-                    if parsed_date is not None:
-                        candidate.update(publication_date=parsed_date, date_raw=item['date'])
+                    if parsed_date is not None and (task['target'].publication_date is None or len(parsed_date) == 10):
+                        candidate['publication_date'] = parsed_date
                 if task['target'].missing_authors:
                     authors = authors_candidate(item)
                     if authors:
                         candidate['authors'] = authors
                 if not candidate:
                     raise ValueError('Translator returned no usable missing fields')
-                task.update(phase='Preview', candidate=candidate, message='Review the fields before saving')
-            except (ValueError, TypeError) as exc:
-                task.update(phase='Failed', candidate={}, message=str(exc))
-            self._release(task)
+                task['phase'] = 'Saving'
+                save_enrichment(task['target'], candidate.get('abstract'),
+                                candidate.get('publication_date'),
+                                authors=candidate.get('authors'))
+                task.update(phase='Completed', saved=candidate,
+                            message='Enrichment saved')
+            except TextWriteCommittedError as exc:
+                task.update(phase='Completed', saved=candidate,
+                            message=f'Enrichment saved; filesystem sync failed: {exc}')
+            except (ValueError, TypeError, OSError, ContentChangedError, CompareReadError) as exc:
+                task.update(phase='Failed', message=str(exc))
+            finally:
+                if task['phase'] == 'Completed':
+                    self._completed_papers.add(task['target'].paper_id)
+                self._release(task)
             return {'accepted': True, 'phase': task['phase']}
 
     def cancel(self, paper_id, request_id):
         with self._lock:
             task = self._task
-            if not task or task['target'].paper_id != paper_id or task['request_id'] != request_id:
+            if (not task or task['target'].paper_id != paper_id
+                    or task['request_id'] != request_id or task['phase'] != 'Retrieving'):
                 return False
             self._release(task)
             self._task = None
             return True
-
-    def save(self, workspace, paper_id, request_id):
-        with self._lock:
-            task = self._task
-            if not task or task['target'].paper_id != paper_id or task['request_id'] != request_id or task['phase'] != 'Preview':
-                raise ValueError('Enrichment preview is no longer available')
-            if workspace != task['target'].workspace:
-                raise ValueError('Configured Workspace changed')
-            task['phase'] = 'Saving'
-            try:
-                candidate = task['candidate']
-                save_enrichment(task['target'], candidate.get('abstract'),
-                                candidate.get('publication_date'),
-                                authors=candidate.get('authors'))
-                task.update(phase='Completed', saved={k: v for k, v in candidate.items() if k != 'date_raw'},
-                            message='Enrichment saved')
-            except TextWriteCommittedError as exc:
-                task.update(phase='Completed', saved={k: v for k, v in task['candidate'].items() if k != 'date_raw'},
-                            message=f'Enrichment saved; filesystem sync failed: {exc}')
-            except (ValueError, OSError, ContentChangedError, CompareReadError) as exc:
-                task.update(phase='Failed', message=str(exc))
-            finally:
-                task['candidate'] = {}
-            return self.state(paper_id, request_id)

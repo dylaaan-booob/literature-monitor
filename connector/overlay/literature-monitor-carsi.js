@@ -1,5 +1,5 @@
 /*
- * Literature Monitor CARSI event attribution primitives (SPEC §44.6–44.7).
+ * Literature Monitor CARSI event attribution primitives (SPEC §44.6–44.7, §§61–62).
  * AGPLv3-or-later, © 2026 Literature Monitor contributors.
  *
  * Official resource-list and detail selectors supplied from normal Chrome DevTools.
@@ -49,9 +49,10 @@
 		const buttons = [...document.querySelectorAll("button.Btn1.searBtn")];
 		if (!list || !school || inputs.length !== 1 || buttons.length !== 1)
 			return {status: "unverified"};
-		if (!school.checked) {
-			if (action === "enable") {school.click(); return {status: "enabled"};}
-			return {status: "school_filter_off"};
+		if (typeof school.checked !== "boolean") return {status: "unverified"};
+		if (school.checked) {
+			if (action === "disable") {school.click(); return {status: "disabled"};}
+			return {status: "school_filter_on"};
 		}
 		if (action === "scan") return {status: "ready"};
 		const cards = [...list.querySelectorAll(".item a")];
@@ -60,31 +61,30 @@
 			return title ? [...title.childNodes].filter(node => node.nodeType === 3)
 				.map(node => node.textContent).join("").trim() : "";
 		};
-		const snapshot = JSON.stringify(cards.map(anchor => [titleText(anchor), anchor.href]));
 		if (action === "search") {
-			// 每次覆盖搜索词并点击官方按钮。提交前的列表不属于本次查询。
+			// 查询词只用于搜索；完整 Service Name 始终是匹配身份。
 			inputs[0].value = query;
 			buttons[0].click();
-			return {status: "submitted", snapshot};
+			return {status: "submitted"};
 		}
 		if (inputs[0].value !== query) return {status: "unverified"};
 		const matches = cards.filter(anchor => titleText(anchor) === name);
-		if (matches.length > 1) return {status: "ambiguous", snapshot};
+		if (matches.length > 1) return {status: "ambiguous"};
 		if (matches.length === 1) {
 			// 资源名相同不能授权任意跳转。
+			let target;
 			try {
 				const anchor = matches[0];
 				if (!anchor.getAttribute("href")) return {status: "unverified"};
-				const target = new URL(anchor.href);
+				target = new URL(anchor.href);
 				if (target.origin !== "https://ds.carsi.edu.cn"
 						|| target.pathname !== "/resource/resourceDetail.php"
 						|| target.username || target.password || target.hash) return {status: "unverified"};
 			}
 			catch (_) {return {status: "unverified"};}
-			if (action === "select") matches[0].click();
-			return {status: action === "select" ? "selected" : "found", snapshot};
+			return action === "select" ? {status: "selected", url: target.href} : {status: "found"};
 		}
-		return {status: "missing", snapshot};
+		return {status: "missing"};
 	}
 
 	function detailPageAction(action) {
@@ -246,7 +246,7 @@
 			this.post = post;
 			this.command = command;
 			this.context = context;
-			this.live = live;
+			this.live = () => live() && !this.revoked;
 			this.identity = {
 				instance_id: command.instance_id, task_id: command.task_id,
 				generation: command.generation, request_id: command.request_id,
@@ -258,9 +258,9 @@
 			const ampersand = name.lastIndexOf("&");
 			this.searchQuery = ampersand === -1 ? name : name.slice(ampersand + 1).trim();
 			this.visitObserver = null;
+			this.visitClick = null;
 			this.revoked = false;
 			this.detailAttributionInvalid = false;
-			this.detailListener = null;
 			this.visitBrowserError = false;
 			this.waitingReported = false;
 			this.traceCount = 0;
@@ -428,6 +428,8 @@
 				const after = await this.inspect(tabID, detail);
 				if (!after || after.frame.documentId !== before.frame.documentId
 						|| !this.live()) return null;
+				if (!detail && action === "select")
+					return {...results[0].result, documentID: before.frame.documentId};
 				return results[0].result;
 			}
 			catch (error) {
@@ -445,18 +447,18 @@
 		}
 
 		async portal() {
+			let loginOpened = false;
 			if (this.context.portalTabID === null) {
 				if (!await this.authorized()) return false;
-				const windows = await this.browser.windows.getAll({windowTypes: ["normal"]});
-				if (!this.live()) return false;
-				const window = windows.find(item => item.type === "normal"
-					&& item.incognito === false && Number.isInteger(item.id));
-				if (!window) return false;
-				this.context.windowID = window.id;
-				if (!await this.authorized() || !this.live() || this.revoked) return false;
 				let tab;
 				try {
-					tab = await this.browser.tabs.create({url: "about:blank", windowId: window.id});
+					const window = await this.browser.windows.create({
+						url: "about:blank", type: "normal", incognito: false, focused: false,
+					});
+					if (!window || window.type !== "normal" || window.incognito !== false || !Number.isInteger(window.id)) return false;
+					this.context.windowID = window.id;
+					const tabs = window.tabs || await this.browser.tabs.query({windowId: window.id});
+					tab = tabs.find(item => Number.isInteger(item.id) && item.incognito === false && item.windowId === window.id);
 					if (tab && Number.isInteger(tab.id)
 							&& tab.incognito === false && tab.windowId === window.id)
 						this.context.portalTabID = tab.id;
@@ -465,17 +467,18 @@
 					// 无法取得新建 Tab ID 时，不能推断 create 从未生效。
 					return false;
 				}
-				if (!tab || tab.incognito !== false || tab.windowId !== window.id
+				if (!tab || tab.incognito !== false || tab.windowId !== this.context.windowID
 						|| !Number.isInteger(tab.id)) {
 					return false;
 				}
 				if (!this.live()) return false;
 				if (!await this.authorized() || !this.live() || this.revoked) return false;
-				await this.browser.tabs.update(tab.id, {url: RESOURCE_URL});
+				await this.browser.tabs.update(tab.id, {url: this.command.login_url});
 				if (!this.live()) return false;
+				loginOpened = true;
+				await this.reportAuthenticationWait(true);
 			}
 			const until = Date.now() + 480000;
-			let loginOpened = false;
 			while (this.live() && Date.now() < until) {
 				if (!await this.authorized()) return false;
 				if (await this.inspect(this.context.portalTabID)) {
@@ -494,15 +497,6 @@
 					if (!await this.authorized() || !this.live() || this.revoked) return false;
 					await this.browser.tabs.update(tab.id, {url: RESOURCE_URL});
 				}
-				else if (!loginOpened && this.command.login_url
-						&& tab.url?.startsWith("https://ds.carsi.edu.cn/")
-						&& !officialURL(tab.url)) {
-					// Only official CARSI -> official IdP entry. External IdP pages
-					// are entirely user-controlled.
-					if (!await this.authorized() || !this.live() || this.revoked) return false;
-					loginOpened = true;
-					await this.browser.tabs.update(tab.id, {url: this.command.login_url});
-				}
 				await this.consent();
 				// Report login waiting only after this task invoked the verified
 				// CARSI IdP entry. An unexpected external URL is not IdP evidence.
@@ -515,33 +509,24 @@
 		async loadedTarget() {
 			if (!this.searchQuery) return "manual_action_required";
 			const tabID = this.context.portalTabID;
-			while (this.live()) {
-				const state = await this.script(tabID, false, "scan");
-				if (!state) return "unverified_official_page";
-				if (state.status !== "school_filter_off") {
-					if (state.status !== "ready") return "unverified_official_page";
-					break;
-				}
-				if ((await this.script(tabID, false, "enable"))?.status !== "enabled")
+			const state = await this.script(tabID, false, "scan");
+			if (state?.status === "school_filter_on") {
+				if ((await this.script(tabID, false, "disable"))?.status !== "disabled")
 					return "unverified_official_page";
 				await new Promise(resolve => setTimeout(resolve, 700));
+				if ((await this.script(tabID, false, "scan"))?.status !== "ready")
+					return "unverified_official_page";
 			}
+			else if (state?.status !== "ready") return "unverified_official_page";
 			if (!this.live()) return "manual_action_required";
 			const submitted = await this.script(tabID, false, "search");
 			if (submitted?.status !== "submitted") return "unverified_official_page";
 			const until = Date.now() + PAGE_WAIT_MS;
-			let latest = submitted.snapshot, changed = false, stableSince = Date.now();
 			while (this.live() && Date.now() < until) {
 				await new Promise(resolve => setTimeout(resolve, 350));
 				const current = await this.script(tabID, false, "results");
 				if (!current || !["found", "missing", "ambiguous"].includes(current.status))
 					return "unverified_official_page";
-				if (current.snapshot !== latest) {
-					latest = current.snapshot;
-					stableSince = Date.now();
-				}
-				if (latest !== submitted.snapshot) changed = true;
-				if (!changed || Date.now() - stableSince < 750) continue;
 				if (current.status === "found") return null;
 				if (current.status === "ambiguous") return "ambiguous_resource";
 				// 未知是否仍在异步加载时，不提前报告资源不存在。
@@ -551,44 +536,17 @@
 		}
 
 		async detailTab() {
-			const nav = this.browser.webNavigation;
-			let count = 0, chosen = null, invalid = false, finish;
-			const waiting = new Promise(resolve => {finish = resolve;});
-			const onTarget = event => {
-				if (!this.live()) {invalid = true; finish(); return;}
-				if (event.sourceTabId !== this.context.portalTabID) return;
-				count++;
-				if (event.sourceFrameId !== 0 || !Number.isInteger(event.tabId)
-						|| event.tabId === this.context.portalTabID || count > 1) invalid = true;
-				else chosen = event.tabId;
-				if (invalid) this.detailAttributionInvalid = true;
-				if (invalid) finish();
-			};
-			nav.onCreatedNavigationTarget.addListener(onTarget);
-			const timer = setTimeout(finish, 12000);
-			try {
-				const clicked = await this.script(this.context.portalTabID, false, "select");
-				if (!clicked || clicked.status !== "selected") return null;
-				// A bounded attribution window catches immediate duplicate targets.
-				let duplicateTimer;
-				try {
-					await Promise.race([waiting, new Promise(resolve => {
-						duplicateTimer = setTimeout(resolve, 250);
-					})]);
-				}
-				finally {clearTimeout(duplicateTimer);}
-				if (invalid || !this.live()) return null;
-				if (chosen === null) await waiting;
-				if (invalid || !this.live()) return null;
-				return chosen;
-			}
-			finally {
-				clearTimeout(timer);
-				// Detect later duplicate targets until the Service completes.
-				if (chosen !== null && !invalid && this.live() && !this.revoked)
-					this.detailListener = onTarget;
-				else nav.onCreatedNavigationTarget.removeListener(onTarget);
-			}
+			const selected = await this.script(this.context.portalTabID, false, "select");
+			if (selected?.status !== "selected" || !officialURL(selected.url, true)
+					|| !await this.authorized()) return null;
+			const portal = await this.inspect(this.context.portalTabID);
+			if (!portal || portal.frame.documentId !== selected.documentID || !this.live()) return null;
+			const tab = await this.browser.tabs.create({
+				windowId: this.context.windowID, url: selected.url, active: false,
+			});
+			if (!this.live() || !Number.isInteger(tab?.id) || tab.incognito !== false
+					|| tab.windowId !== this.context.windowID || tab.id === this.context.portalTabID) return null;
+			return tab.id;
 		}
 
 		async preVisitFailure() {
@@ -666,8 +624,11 @@
 			this.visitObserver = observer;
 			this.trace("visit_observer_created");
 			this.visitDispatchOpen = true;
-			const observed = await observer.run(async () =>
-				(await this.script(detailID, true, "visit"))?.status === "visited_click");
+			const observed = await observer.run(() => {
+				// 观察结束不能代表已经发出的浏览器点击调用也已返回（SPEC §62）。
+				this.visitClick = this.script(detailID, true, "visit");
+				return this.visitClick.then(result => result?.status === "visited_click");
+			});
 			// Disable any injection still waiting for an authorization or frame callback.
 			this.visitDispatchOpen = false;
 			if (["invalid_operation", "listener_unavailable", "listener_registration_failed",
@@ -691,10 +652,6 @@
 			this.consentDocuments.clear();
 			this.visitObserver?.cancel();
 			this.visitObserver = null;
-			if (this.detailListener) {
-				this.browser.webNavigation.onCreatedNavigationTarget.removeListener(this.detailListener);
-				this.detailListener = null;
-			}
 		}
 
 		cancel() {

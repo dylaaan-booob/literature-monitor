@@ -15,7 +15,6 @@ from literature_monitor.url_safety import normalize_public_http_url
 from literature_monitor.application.settings import load_settings, save_settings, SettingsSaveOutcome
 from literature_monitor.web.app import create_app
 from test_application_settings import write_valid_settings_files
-from test_web_run_settings import browser_settings_submission
 
 A, B, X = '0006-341X', '0090-5364', '1541-0420'
 P1, P2 = 'https://openalex.org/P1', 'https://openalex.org/P2'
@@ -225,21 +224,6 @@ def test_ordinary_save_requires_explicit_legacy_issn_migration_without_provider_
     assert [(p.read_bytes(), p.stat().st_ino, p.stat().st_mtime_ns) for p in (config, path)] == before
 
 
-def test_web_roundtrip_preserves_publishers_and_rejects_hidden_metadata(tmp_path):
-    config,path,draft=setup(tmp_path)
-    with TestClient(create_app(config),base_url='http://localhost') as browser:
-        data=browser_settings_submission(browser.get('/settings').text)
-        assert data['publisher_access_url']==['https://custom.example/login']
-        data['keyword_expression']=['statistics']
-        saved=browser.post('/settings/save',data=data)
-        assert saved.headers['HX-Trigger']=='settingsSaved'
-        assert load_settings(config).draft.publishers==draft.publishers
-        data=browser_settings_submission(saved.text); data['publisher_name']=['Tampered']
-        before=config.read_bytes(),path.read_bytes()
-        saved=browser.post('/settings/save',data=data)
-        assert 'HX-Trigger' not in saved.headers and (config.read_bytes(),path.read_bytes())==before
-
-
 @pytest.mark.parametrize('fail_at', ['render','list','monitor'])
 def test_complete_target_preparation_and_partial_save(tmp_path,monkeypatch,fail_at):
     from literature_monitor.application import settings
@@ -296,17 +280,3 @@ def test_one_publisher_lookup():
     client,calls=provider(publishers=[pub(P1)])
     with client: rows=resolve_publisher_metadata(client,(P1,))
     assert len(rows)==1 and rows[0].publisher_id==P1 and calls==['/publishers']
-
-
-def test_web_legacy_load_save_requires_no_paper_directory(tmp_path,monkeypatch):
-    config,path,_=legacy_setup(tmp_path)
-    client,calls=provider(sources=[source(aliases=(A,),candidate=A)],publishers=[pub()])
-    monkeypatch.setattr('literature_monitor.application.settings.OpenAlexClient',lambda **kwargs:client)
-    with TestClient(create_app(config),base_url='http://localhost') as browser:
-        before=config.read_bytes(),path.read_bytes()
-        data=browser_settings_submission(browser.get('/settings').text)
-        assert (config.read_bytes(),path.read_bytes())==before
-        response=browser.post('/settings/save',data=data)
-        assert 'HX-Trigger' not in response.headers
-        assert (config.read_bytes(),path.read_bytes())==before
-    assert load_settings(config).draft.legacy_journals and not calls

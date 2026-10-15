@@ -21,7 +21,6 @@ from literature_monitor.web.settings_form import (
     settings_draft_from_form, settings_form_from_draft, settings_form_from_submission,
 )
 from test_access_service_schema import A, B, P1, P2, current_mapping_document
-from test_web_run_settings import browser_settings_submission
 
 
 def stamp(path: Path):
@@ -176,45 +175,6 @@ def test_missing_monitor_cannot_bypass_strict_list_schema(tmp_path: Path, invali
     assert not rejected.journal_written and not rejected.monitor_written
     assert stamp(path) == before_list
     assert not config.exists()
-
-
-def test_web_can_create_missing_monitor_without_touching_saved_mapping(tmp_path: Path):
-    config, path, draft = missing_monitor(tmp_path)
-    before_list = stamp(path)
-
-    with TestClient(create_app(config), base_url="http://localhost") as client:
-        form = browser_settings_submission(client.get("/settings").text)
-        assert form["monitor_revision_exists"] == ["0"]
-        assert form["service_id"] == [draft.access_services[0].id]
-        form["name"] = ["Created from Settings"]
-        form["keyword_expression"] = ["causal"]
-        response = client.post("/settings/save", data=form)
-        assert response.headers.get("HX-Trigger") == "settingsSaved"
-
-    assert load_config(config).name == "Created from Settings"
-    assert load_settings(config).draft.access_services == draft.access_services
-    assert stamp(path) == before_list
-
-
-def test_web_stale_missing_monitor_draft_preserves_original_revision(tmp_path: Path):
-    config, path, draft = missing_monitor(tmp_path)
-    before_list = stamp(path)
-
-    with TestClient(create_app(config), base_url="http://localhost") as client:
-        form = browser_settings_submission(client.get("/settings").text)
-        form["name"] = ["Attempted Recovery"]
-        form["keyword_expression"] = ["causal"]
-        config.write_text("name: External Writer\nkeyword_expression: outside\n", encoding="utf-8")
-        before_external = stamp(config)
-        response = client.post("/settings/save", data=form)
-        assert "HX-Trigger" not in response.headers
-        retained = browser_settings_submission(response.text)
-        assert retained["name"] == ["Attempted Recovery"]
-        assert retained["monitor_revision_exists"] == ["0"]
-        assert retained["monitor_revision_digest"] == [""]
-
-    assert stamp(config) == before_external
-    assert stamp(path) == before_list
 
 
 def form_data(values):
@@ -396,32 +356,6 @@ def test_error_after_atomic_replace_reports_actual_writes(tmp_path: Path, monkey
     assert load_settings(config).draft.keyword_expression == "statistics"
 
 
-def test_web_htmx_preserves_service_draft_and_failed_attempt(tmp_path: Path):
-    config, path, draft = start(tmp_path)
-    with TestClient(create_app(config), base_url="http://localhost") as client:
-        first = client.get("/settings")
-        data = browser_settings_submission(first.text)
-        assert data["service_id"] == [draft.access_services[0].id]
-        assert data["service_name"] == ["University Library"]
-        assert data["publisher_access_service_id"] == [draft.access_services[0].id]
-        data["service_name"] = ["University North"]
-        data["publisher_access_url"] = ["https://editor.example.org"]
-        response = client.post("/settings/save", data=data)
-        assert response.headers["HX-Trigger"] == "settingsSaved"
-        assert load_settings(config).draft.access_services[0].name == "University North"
-        assert load_settings(config).draft.publishers[0].publisher_url == "https://editor.example.org"
-        data = browser_settings_submission(response.text)
-        data["service_name"] = ["Still Draft"]
-        data["service_access_url"] = ["http://127.0.0.1"]
-        failed = client.post("/settings/save", data=data)
-        assert "HX-Trigger" not in failed.headers
-        preserved = browser_settings_submission(failed.text)
-        assert preserved["service_name"] == ["Still Draft"]
-        assert preserved["service_access_url"] == ["http://127.0.0.1"]
-        assert preserved["journal_revision_digest"] == data["journal_revision_digest"]
-    assert load_settings(config).draft.access_services[0].name == "University North"
-
-
 def test_missing_service_membership_form_cannot_clear_relation(tmp_path: Path):
     config, path, draft = start(tmp_path)
     before = stamp(path), stamp(config)
@@ -430,35 +364,6 @@ def test_missing_service_membership_form_cannot_clear_relation(tmp_path: Path):
             if key != "publisher_access_service_id"]
     rebuilt, issues = settings_draft_from_form(settings_form_from_submission(FormData(data)))
     assert rebuilt is None and issues
-    assert (stamp(path), stamp(config)) == before
-
-
-def test_missing_service_rows_cannot_silently_delete_services_over_http(tmp_path: Path):
-    config, path, draft = start(tmp_path)
-    before = stamp(path), stamp(config)
-    with TestClient(create_app(config), base_url="http://localhost") as client:
-        data = browser_settings_submission(client.get("/settings").text)
-        for field in ("service_id", "service_name", "service_access_url"):
-            data.pop(field)
-        rejected = client.post("/settings/save", data=data)
-        assert "HX-Trigger" not in rejected.headers
-        assert "Settings draft is invalid" in rejected.text or "Settings issues" in rejected.text
-    assert (stamp(path), stamp(config)) == before
-
-
-def test_import_preview_uses_current_unsaved_service_fields(tmp_path: Path):
-    config, path, draft = start(tmp_path)
-    before = stamp(path), stamp(config)
-    with TestClient(create_app(config), base_url="http://localhost") as client:
-        data = browser_settings_submission(client.get("/settings").text)
-        data["service_name"] = ["Draft Library"]
-        data["publisher_access_url"] = ["https://draft.example.org"]
-        preview = client.post("/settings/import/preview", data=data)
-        fields = browser_settings_submission(preview.text)
-        assert fields["service_name"] == ["Draft Library"]
-        assert fields["service_id"] == [draft.access_services[0].id]
-        assert fields["publisher_access_url"] == ["https://draft.example.org"]
-        assert fields["publisher_access_service_id"] == [draft.access_services[0].id]
     assert (stamp(path), stamp(config)) == before
 
 

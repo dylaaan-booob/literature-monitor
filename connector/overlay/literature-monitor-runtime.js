@@ -19,6 +19,7 @@
 	const OBSERVATION_DEADLINE_MS = 75000;
 	const RESULT_RETRY_DELAY_MS = 500;
 	const RESULT_ATTEMPTS = 2;
+	const MAX_PENDING_RELEASE_RECEIPTS = 128;
 	const MAX_REQUEST_ID_LENGTH = 128;
 
 	const OUTCOME_CONFIRMED = "CONFIRMED";
@@ -84,7 +85,9 @@
 		const keys = Object.keys(command).sort();
 		const accessContext = command.access_context;
 		if (accessContext !== undefined && !requestIDIsValid(accessContext)) return {requestID, command: null};
-		const commandKeys = keys.filter(key => key !== "access_context");
+		const windowContext = command.window_context;
+		if (windowContext !== undefined && !requestIDIsValid(windowContext)) return {requestID, command: null};
+		const commandKeys = keys.filter(key => key !== "access_context" && key !== "window_context");
 		if (commandKeys.length !== 3
 				|| commandKeys[0] !== "doi_url"
 				|| commandKeys[1] !== "invocation_id"
@@ -104,6 +107,7 @@
 				doiURL,
 				invocationID: command.invocation_id,
 				accessContext: accessContext ?? requestID,
+				windowContext: windowContext ?? `import:${accessContext ?? requestID}`,
 			},
 		};
 	}
@@ -134,11 +138,15 @@
 		_heartbeatInFlight: false,
 		_claimInFlight: false,
 		_activeTask: null,
+		// 仅保留已完成操作的两类原始释放证明；达到容量上限便停止新 Import。
+		_pendingReleaseReceipts: new Map(),
 		_prepInstance: null,
 		_prepClaimInFlight: false,
 		_prepActive: null,
 		_enrichActive: null,
+		_coverActive: null,
 		_prepContext: null,
+		_importWindow: null,
 		_heartbeatTimer: null,
 		_claimTimer: null,
 		_runtimeMessageListener: null,
@@ -190,7 +198,7 @@
 			browser.webNavigation.onCommitted.addListener(details => void this._documentCommitted(details));
 			browser.webNavigation.onBeforeNavigate.addListener(details => {
 				const task = this._navigationTask(details);
-				if (!task) return;
+				if (!task || this._isBootstrapNavigation(task, details)) return;
 				this._invalidateDocument(task);
 				task.navigationPending = true;
 			});
@@ -253,6 +261,14 @@
 			return task && !task.terminalOutcome && details.tabId === task.tabID && details.frameId === 0 ? task : null;
 		},
 
+		_isBootstrapNavigation(task, details) {
+			// The owned initial blank may commit after DOI navigation starts. Ignore its old
+			// events, but keep subsequent user-initiated blank navigations subject to checks.
+			return details.url === "about:blank" && (!task.documentID
+				|| (Number.isFinite(details.timeStamp) && Number.isFinite(task.doiNavigationTime)
+					&& details.timeStamp < task.doiNavigationTime));
+		},
+
 		_requestTask(details) {
 			const task = this._activeTask;
 			return task && !task.terminalOutcome && details.tabId === task.tabID && details.type === "main_frame" ? task : null;
@@ -266,7 +282,7 @@
 
 		async _navigationFailed(details) {
 			const task = this._navigationTask(details);
-			if (!task) return;
+			if (!task || this._isBootstrapNavigation(task, details)) return;
 			if (task.saveTriggered) { this._finishTask(task, OUTCOME_UNCONFIRMED); return; }
 			if (details.documentId) task.erroredDocuments.add(details.documentId);
 			// 已在导航的文档没有保存资格；旧 provisional 错误不能取消新 commit 的核验。
@@ -287,15 +303,16 @@
 
 		async _documentCommitted(details) {
 			const task = this._navigationTask(details);
-			if (!task) return;
-			this._invalidateDocument(task);
+			if (!task || this._isBootstrapNavigation(task, details)) return;
 			const generation = task.generation;
 			try {
 				const frame = await browser.webNavigation.getFrame({tabId: task.tabID, frameId: 0});
-				if (!this._taskCanPrepare(task) || generation !== task.generation
+				if (this._activeTask !== task || task.terminalOutcome || generation !== task.generation
 					|| !details.documentId || frame?.documentId !== details.documentId
 					|| task.erroredDocuments.has(frame.documentId)
 					|| frame.errorOccurred || frame.documentLifecycle !== "active") return;
+				this._invalidateDocument(task);
+				if (!this._taskCanPrepare(task)) return;
 				task.documentID = frame.documentId;
 				task.navigationPending = false;
 				task.access.observe(details);
@@ -303,15 +320,17 @@
 				else void this._navigateAccess(task);
 			}
 			catch (_) {
-				if (this._taskCanPrepare(task)) this._finishTask(task, OUTCOME_FAILED);
+				if (generation === task.generation && this._activeTask === task && !task.terminalOutcome) {
+					this._finishTask(task, task.saveTriggered ? OUTCOME_UNCONFIRMED : OUTCOME_FAILED);
+				}
 			}
 		},
 
-		async _postJSON(path, payload) {
+		async _postJSON(path, payload, timeoutMS = FETCH_TIMEOUT_MS) {
 			const controller = new AbortController();
 			const timeout = setTimeout(
 				() => controller.abort(),
-				FETCH_TIMEOUT_MS,
+				timeoutMS,
 			);
 			try {
 				const response = await fetch(BRIDGE_BASE + path, {
@@ -361,7 +380,7 @@
 					{
 						version: browser.runtime.getManifest().version,
 						zotero_reachable: reachable,
-						capabilities: ["paper-enrichment/v2"],
+						capabilities: ["paper-enrichment/v2", "background-task-windows/v1", ...(global.LiteratureMonitorCovers ? ["journal-covers/v2"] : [])],
 					},
 				);
 				if (!response.ok) {
@@ -369,6 +388,7 @@
 						`Literature Monitor heartbeat failed with status ${response.status}`,
 					);
 				}
+				await this._retryReleaseReceipts();
 			}
 			catch (_) {
 				// Bridge availability is intentionally not Connector/Zotero authority.
@@ -395,9 +415,7 @@
 					void executor.authorized().then(allowed => {
 						if (!allowed && this._prepActive === active && executor.revoked) {
 							executor.cancel();
-							active.executor = null;
-							this._prepActive = null;
-							this._prepContext = null;
+							// _runPreparation 退出后才释放串行槽位；撤销不代表浏览器调用已返回。
 						}
 					}).finally(() => {active.checkingAuthority = false;});
 				}
@@ -405,7 +423,9 @@
 		},
 
 		async _claimTick() {
-			if (this._claimInFlight || this._activeTask || this._prepActive || this._enrichActive) {
+			// 为本次 Import 预留 Browser Idle 和 Native Settled 两个证明槽位。
+			if (this._pendingReleaseReceipts.size > MAX_PENDING_RELEASE_RECEIPTS - 2
+					|| this._claimInFlight || this._activeTask || this._prepActive || this._enrichActive || this._coverActive) {
 				return;
 			}
 			this._claimInFlight = true;
@@ -419,6 +439,7 @@
 					return;
 				}
 				if (response.body.command === null) {
+					if (response.body.import_running === false) await this._releaseImportAnchor();
 					return;
 				}
 
@@ -429,6 +450,7 @@
 					requestID: parsed.command.requestID,
 					doiURL: parsed.command.doiURL,
 					invocationID: parsed.command.invocationID,
+					windowContext: parsed.command.windowContext,
 					sessionID: null,
 					dispatchRequested: false,
 					dispatchAccepted: false,
@@ -442,6 +464,7 @@
 					translatorCancel: null,
 					translatorReady: false,
 					generation: 0,
+					doiNavigationTime: null,
 					navigationPending: true,
 					documentID: null,
 					response: null,
@@ -465,29 +488,45 @@
 				// A failed claim request cannot manufacture a command or result.
 			}
 			finally {
+				await this._claimCovers();
 				await this._claimEnrichment();
-				if (this._prepInstance && !this._activeTask && !this._prepActive && !this._enrichActive) {
+				if (this._prepInstance && !this._activeTask && !this._prepActive && !this._enrichActive && !this._coverActive) {
 					await this._claimPreparation();
 				}
 				this._claimInFlight = false;
 			}
 		},
 
+		async _claimCovers() {
+			if (!global.LiteratureMonitorCovers || this._activeTask || this._prepActive || this._enrichActive || this._coverActive) return;
+			try {
+				const reply = await this._postJSON("/api/connector/covers/claim", {});
+				const command = reply.ok && reply.body?.command;
+				if (!command || !requestIDIsValid(command.request_id) || !Array.isArray(command.journals)) return;
+				if (this._activeTask || this._prepActive || this._enrichActive || this._coverActive) return;
+				const executor = new global.LiteratureMonitorCovers.Executor(browser, command,
+					(path, payload, timeout) => this._postJSON(path, payload, timeout));
+				this._coverActive = executor;
+				void executor.run().catch(() => {}).finally(() => {if (this._coverActive === executor) this._coverActive = null;});
+			} catch (_) { /* An unavailable claim starts no browser work. */ }
+		},
+
 		async _claimPreparation() {
 			if (!this._prepInstance || this._prepClaimInFlight
-					|| this._activeTask || this._prepActive || this._enrichActive) return;
+					|| this._activeTask || this._prepActive || this._enrichActive || this._coverActive) return;
 			this._prepClaimInFlight = true;
 			try {
 				const response = await this._postJSON("/api/connector/preparation/claim", {
 					instance_id: this._prepInstance,
 				});
 				const cmd = response.ok && response.body?.command;
-				if (!cmd || this._activeTask || this._prepActive || this._enrichActive
+				if (!cmd || this._activeTask || this._prepActive || this._enrichActive || this._coverActive
 						|| cmd.kind !== "carsi-preparation/v1"
 						|| !requestIDIsValid(cmd.task_id) || !requestIDIsValid(cmd.request_id)
 						|| !/^svc_[0-9a-f]{32}$/.test(cmd.service_id)
 						|| !Number.isSafeInteger(cmd.generation) || cmd.generation < 1
 						|| typeof cmd.last_service !== "boolean"
+						|| (cmd.window_context !== undefined && !requestIDIsValid(cmd.window_context))
 						|| (cmd.automatic_attribute_release_consent !== undefined
 							&& typeof cmd.automatic_attribute_release_consent !== "boolean")
 						|| typeof cmd.name !== "string" || !cmd.name.trim()
@@ -506,7 +545,8 @@
 				if (!this._prepContext || this._prepContext.taskID !== cmd.task_id
 						|| this._prepContext.generation !== cmd.generation) {
 					this._prepContext = {taskID: cmd.task_id, generation: cmd.generation,
-						portalTabID: null, windowID: null};
+						portalTabID: null, windowID: null,
+						windowContext: cmd.window_context ?? `prepare:${cmd.task_id}:${cmd.generation}`};
 				}
 				void this._runPreparation(active);
 			}
@@ -531,7 +571,7 @@
 				let result;
 				try {result = await executor.execute();}
 				catch (_) {result = {outcome: "Failed", reason: "connector_error"};}
-				if (!live()) return;
+				if (!live() || executor.revoked) return;
 				// 收回本 Service 的操作授权并释放监听器，不等待或关闭任何 Prepare 页面。
 				executor.cancel();
 				if (result) {
@@ -549,17 +589,20 @@
 			}
 			finally {
 				executor.cancel();
-				active.executor = null;
-				if (this._prepActive === active) this._prepActive = null;
+				try {await executor.visitClick;}
+				finally {
+					active.executor = null;
+					if (this._prepActive === active) this._prepActive = null;
+				}
 			}
 		},
 
 		async _claimEnrichment() {
-			if (this._activeTask || this._prepActive || this._enrichActive) return;
+			if (this._activeTask || this._prepActive || this._enrichActive || this._coverActive) return;
 			try {
 				const response = await this._postJSON("/api/connector/enrichment/claim", {});
 				const parsed = response.ok && parseCommand(response.body?.command);
-				if (!parsed?.command || this._activeTask || this._prepActive || this._enrichActive) return;
+				if (!parsed?.command || this._activeTask || this._prepActive || this._enrichActive || this._coverActive) return;
 				const command = parsed.command;
 				const task = {request_id: command.requestID, invocation_id: command.invocationID,
 					doi_url: command.doiURL, tabID: null, documentID: null, translating: false,
@@ -567,6 +610,57 @@
 				this._enrichActive = task;
 				void this._runEnrichment(task);
 			} catch (_) { /* A failed claim cannot create a task. */ }
+		},
+
+		async _backgroundWindow() {
+			const window = await browser.windows.create({
+				url: "about:blank", type: "normal", incognito: false, focused: false,
+			});
+			if (!window || window.type !== "normal" || window.incognito !== false || !Number.isInteger(window.id)) {
+				throw new Error("Normal background task window unavailable");
+			}
+			const tabs = window.tabs || await browser.tabs.query({windowId: window.id});
+			const tab = tabs.find(tab => Number.isInteger(tab.id) && tab.incognito === false && tab.windowId === window.id);
+			if (!tab) throw new Error("Background task window has no owned tab");
+			return {window, tab};
+		},
+
+		async _releaseImportAnchor() {
+			const owned = this._importWindow;
+			this._importWindow = null;
+			if (!Number.isInteger(owned?.anchorTabID) || !owned.anchorDocumentID) return;
+			try {
+				const tab = await browser.tabs.get(owned.anchorTabID);
+				const frame = await browser.webNavigation.getFrame({tabId: owned.anchorTabID, frameId: 0});
+				if (tab.incognito === false && tab.windowId === owned.windowID && tab.url === "about:blank"
+						&& !tab.pendingUrl && frame?.documentId === owned.anchorDocumentID
+						&& frame.url === "about:blank" && !frame.errorOccurred && frame.documentLifecycle === "active") {
+					await browser.tabs.remove(tab.id);
+				}
+			}
+			catch (_) { /* Retain an anchor whose unchanged identity cannot be verified. */ }
+		},
+
+		async _importTaskWindow(task) {
+			const owned = this._importWindow;
+			if (owned?.context === task.windowContext) {
+				const window = await browser.windows.get(owned.windowID).catch(() => null);
+				if (window?.type === "normal" && window.incognito === false) return window;
+			}
+			await this._releaseImportAnchor();
+			const prepared = this._prepContext;
+			if (prepared?.windowContext === task.windowContext && Number.isInteger(prepared.windowID)) {
+				const window = await browser.windows.get(prepared.windowID).catch(() => null);
+				if (window?.type === "normal" && window.incognito === false) {
+					this._importWindow = {context: task.windowContext, windowID: window.id};
+					return window;
+				}
+			}
+			const {window, tab} = await this._backgroundWindow();
+			const frame = await browser.webNavigation.getFrame({tabId: tab.id, frameId: 0}).catch(() => null);
+			this._importWindow = {context: task.windowContext, windowID: window.id,
+				anchorTabID: tab.id, anchorDocumentID: frame?.documentId ?? null};
+			return window;
 		},
 
 		async _runEnrichment(task) {
@@ -603,10 +697,7 @@
 				deadlineTimer = setInterval(() => { if (Date.now() >= task.deadline) stop("Enrichment retrieval timed out"); }, 500);
 				browser.webNavigation.onBeforeNavigate.addListener(navigation);
 				browser.tabs.onRemoved.addListener(removed);
-				const windows = await browser.windows.getAll({windowTypes: ["normal"]});
-				const normal = windows.find(window => window.type === "normal" && window.incognito === false);
-				if (!normal || !live()) throw new Error("Normal Chrome window unavailable");
-				const tab = await browser.tabs.create({url: "about:blank", windowId: normal.id});
+				const {window: normal, tab} = await this._backgroundWindow();
 				if (!tab || tab.incognito !== false || tab.windowId !== normal.id || !Number.isInteger(tab.id)) {
 					throw new Error("Normal task tab unavailable");
 				}
@@ -665,7 +756,7 @@
 			}
 			try {
 				const reply = await this._postJSON("/api/connector/enrichment/result", {...identity, ...result});
-				if (!result.error && reply.ok && reply.body?.accepted === true && reply.body.phase === "Preview") {
+				if (!result.error && reply.ok && reply.body?.accepted === true && reply.body.phase === "Completed") {
 					const tab = await browser.tabs.get(task.tabID);
 					const frame = await browser.webNavigation.getFrame({tabId: task.tabID, frameId: 0});
 					// Close only our completed document, never a page the user navigated elsewhere.
@@ -679,26 +770,12 @@
 
 		async _runTask(task) {
 			try {
-				const windows = await browser.windows.getAll({windowTypes: ["normal"]});
-				const activeTabs = await browser.tabs.query({active: true}).catch(() => []);
-				const inNormalWindow = tab => this._isAppTab(tab)
-					&& windows.some(window => window.id === tab.windowId
-						&& window.type === "normal" && window.incognito === false);
-				const appTab = activeTabs.find(tab => inNormalWindow(tab)
-					&& windows.some(window => window.id === tab.windowId && window.focused === true))
-					|| activeTabs.find(inNormalWindow);
-				const normalWindow = windows.find(window => window.id === appTab?.windowId)
-					|| windows.find(window => window.type === "normal"
-						&& window.incognito === false && Number.isInteger(window.id));
-				if (!normalWindow) {
-					throw new Error("No normal non-incognito Chrome window is available");
-				}
+				const normalWindow = await this._importTaskWindow(task);
 				if (!this._taskCanPrepare(task)) return;
-				task.appTabID = appTab?.id ?? null;
-				task.appWindowID = appTab?.windowId ?? null;
 				const tab = await browser.tabs.create({
 					url: "about:blank",
 					windowId: normalWindow.id,
+					active: false,
 				});
 				if (!tab || !Number.isInteger(tab.id)) {
 					throw new Error("Dedicated task tab could not be created");
@@ -715,6 +792,7 @@
 				task.windowID = normalWindow.id;
 				// 先拥有空白任务标签页，再导航 DOI，避免 tabs.create 返回前漏掉 DOI 事件。
 				task.access.anchored = true;
+				task.doiNavigationTime = Date.now();
 				await browser.tabs.update(task.tabID, {url: task.doiURL});
 
 				let candidate;
@@ -1147,54 +1225,67 @@
 					throw new Error("Import task-tab cleanup could not be verified");
 				}
 			}
-			if (!Number.isInteger(task.appTabID) || task.manualAccessPending) return;
-			try {
-				const app = await browser.tabs.get(task.appTabID);
-				if (!this._isAppTab(app) || app.windowId !== task.appWindowID) return;
-				await browser.windows.update(task.appWindowID, {focused: true});
-				await browser.tabs.update(task.appTabID, {active: true});
+		},
+
+		_retainReleaseReceipt(path, payload) {
+			const key = path + ":" + JSON.stringify(payload);
+			if (!this._pendingReleaseReceipts.has(key)) {
+				// Claim admission reserves two slots; never evict an unacknowledged proof.
+				if (this._pendingReleaseReceipts.size >= MAX_PENDING_RELEASE_RECEIPTS)
+					throw new Error("Import release receipt capacity exhausted");
+				this._pendingReleaseReceipts.set(key, {path, payload, sending: false});
 			}
-			catch (_) {
-				// Returning focus may have partially completed; do not release
-				// browser authority on an ambiguous cleanup operation.
-				throw new Error("Import application-tab cleanup could not be verified");
+			return key;
+		},
+
+		async _sendReleaseReceipt(key, attempts) {
+			const receipt = this._pendingReleaseReceipts.get(key);
+			if (!receipt || receipt.sending) return false;
+			receipt.sending = true;
+			try {
+				for (let attempt = 0; attempt < attempts; attempt++) {
+					try {
+						const response = await this._postJSON(receipt.path, receipt.payload);
+						if (response.ok && response.body?.accepted === true) {
+							this._pendingReleaseReceipts.delete(key);
+							return true;
+						}
+					}
+					catch (_) { /* 回执丢失不能推定服务器已释放对应资源。 */ }
+					// 409 也可能仅因 Capture 终态尚未到达；保持原证明待补发。
+					if (attempt + 1 < attempts) await delay(RESULT_RETRY_DELAY_MS);
+				}
+				return false;
+			}
+			finally {receipt.sending = false;}
+		},
+
+		async _retryReleaseReceipts() {
+			// 借用现有 Heartbeat；每次只处理少量回执，避免影响其他任务心跳。
+			for (const key of [...this._pendingReleaseReceipts.keys()].slice(0, 2)) {
+				await this._sendReleaseReceipt(key, 1);
+				const pending = this._pendingReleaseReceipts.get(key);
+				if (pending) {
+					this._pendingReleaseReceipts.delete(key);
+					this._pendingReleaseReceipts.set(key, pending);
+				}
 			}
 		},
 
 		async _reportNativeSaveSettled(task) {
-			// A rejected/lost receipt never clears server custody by inference.
-			for (let attempt = 0; attempt < RESULT_ATTEMPTS; attempt++) {
-				try {
-					const response = await this._postJSON(
-						"/api/connector/native-save-settled", this._invocationPayload(task));
-					if (response.ok && response.body?.accepted === true) return true;
-					if (response.status === 409) return false;
-				}
-				catch (_) { /* Do not fabricate completion on transport loss. */ }
-				if (attempt + 1 < RESULT_ATTEMPTS) await delay(RESULT_RETRY_DELAY_MS);
-			}
-			return false;
+			// 仅已核实的原始 pipeline-complete 进入补发，不重新触发 saveItems。
+			const key = this._retainReleaseReceipt(
+				"/api/connector/native-save-settled", this._invocationPayload(task));
+			return this._sendReleaseReceipt(key, RESULT_ATTEMPTS);
 		},
 
 		async _reportImportBrowserIdle(task) {
-			// Result delivery is not browser idle. A3 receives proof only
-			// after _activeTask is cleared and all cleanup has finished.
-			// This cannot retire native-save grants or mutate Paper state.
-			const identity = {
+			// 浏览器操作已全部退出后才保留证明；与 Native Save Grant 独立。
+			const key = this._retainReleaseReceipt("/api/connector/import-browser-idle", {
 				request_id: task.requestID, invocation_id: task.invocationID,
 				doi_url: task.doiURL,
-			};
-			for (let attempt = 0; attempt < RESULT_ATTEMPTS; attempt++) {
-				try {
-					const response = await this._postJSON(
-						"/api/connector/import-browser-idle", identity);
-					if (response.ok && response.body?.accepted === true) return true;
-					if (response.status === 409) return false;
-				}
-				catch (_) { /* Missing browser-idle proof must remain fail-closed. */ }
-				if (attempt + 1 < RESULT_ATTEMPTS) await delay(RESULT_RETRY_DELAY_MS);
-			}
-			return false;
+			});
+			return this._sendReleaseReceipt(key, RESULT_ATTEMPTS);
 		},
 
 		async _deliverResult(task) {

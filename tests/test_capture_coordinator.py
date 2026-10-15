@@ -218,6 +218,65 @@ def test_request_ids_are_opaque_distinct_and_doi_target_is_server_built(clock: F
     assert second.request_id != first.request_id
 
 
+def test_browser_idle_replay_only_releases_original_finished_invocation(clock: FakeClock) -> None:
+    coordinator = CaptureCoordinator()
+    connect(coordinator)
+    start(coordinator)
+    original = claim(coordinator)
+    assert not coordinator.report_import_browser_idle(
+        original.request_id, original.invocation_id, original.doi_url)
+    assert submit_result(coordinator, original, CaptureOutcome.FAILED)
+    resolve_export_completion(coordinator.consume_completion(), coordinator=coordinator)
+
+    start(coordinator)
+    current = claim(coordinator)
+    assert not coordinator.report_import_browser_idle(
+        original.request_id, current.invocation_id, original.doi_url)
+    assert not coordinator.report_import_browser_idle(
+        original.request_id, original.invocation_id, current.doi_url + "/other")
+
+    assert coordinator.report_import_browser_idle(
+        original.request_id, original.invocation_id, original.doi_url)
+    assert coordinator.report_import_browser_idle(
+        original.request_id, original.invocation_id, original.doi_url)
+    assert not coordinator.report_import_browser_idle(
+        current.request_id, current.invocation_id, current.doi_url)
+
+
+def test_native_settled_replay_preserves_other_grants_and_reset_guard(clock: FakeClock) -> None:
+    coordinator = CaptureCoordinator()
+    connect(coordinator)
+    start(coordinator)
+    first = claim(coordinator)
+    original = SaveInvocation(first.request_id, first.invocation_id, first.doi_url, 100, "session-one")
+    assert coordinator.authorize_parent_dispatch(original)
+    assert coordinator.reset_blocker is not None
+
+    wrong_session = SaveInvocation(first.request_id, first.invocation_id, first.doi_url, 100, "other")
+    wrong_doi = SaveInvocation(first.request_id, first.invocation_id, first.doi_url + "/other", 100, "session-one")
+    assert not coordinator.report_native_save_settled(wrong_session)
+    assert not coordinator.report_native_save_settled(wrong_doi)
+    assert coordinator.reset_blocker is not None
+
+    assert coordinator.submit_connector_result(
+        request_id=first.request_id, invocation_id=first.invocation_id,
+        doi_url=first.doi_url, tab_id=100, session_id="session-one",
+        outcome=CaptureOutcome.UNCONFIRMED, pdf_outcome=PdfOutcome.UNVERIFIED)
+    resolve_export_completion(coordinator.consume_completion(), coordinator=coordinator)
+
+    start(coordinator)
+    second = claim(coordinator)
+    later = SaveInvocation(second.request_id, second.invocation_id, second.doi_url, 101, "session-two")
+    assert coordinator.authorize_parent_dispatch(later)
+    assert coordinator.report_native_save_settled(original)
+    assert coordinator.report_native_save_settled(original)
+    assert coordinator.reset_blocker is not None
+    assert not coordinator.report_native_save_settled(
+        SaveInvocation(second.request_id, second.invocation_id, second.doi_url, 101, "wrong"))
+    assert coordinator.report_native_save_settled(later)
+    assert coordinator.reset_blocker is not None  # The current Capture still owns its save slot.
+
+
 def test_pending_command_is_claimed_exactly_once(clock: FakeClock) -> None:
     coordinator = CaptureCoordinator()
     connect(coordinator)

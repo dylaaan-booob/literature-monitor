@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 from pathlib import Path
 from uuid import uuid4
 
@@ -19,8 +20,15 @@ from literature_monitor.web.capture_coordinator import (
     CaptureCoordinator, CaptureFailureStage, CaptureOutcome, CaptureStartOutcome,
     PdfOutcome, SaveInvocation,
 )
-from literature_monitor.web.zotero_capture import process_capture_completion
 from test_batch_import import state
+
+
+def resolve_receipt(coordinator):
+    completion = coordinator.consume_completion()
+    return SimpleNamespace(
+        completion=completion,
+        result=resolve_export_completion(completion, coordinator=coordinator) if completion else None,
+    )
 
 
 def prepared(tmp_path, *, outcome=CaptureOutcome.CONFIRMED, dispatch=True,
@@ -45,7 +53,7 @@ def test_native_parent_confirmation_commits_exported_without_marker(tmp_path):
     token, coordinator, invocation = prepared(tmp_path)
     path = Path(token.attempt.workspace_path) / token.attempt.paper_path
     before = state(path)
-    processed = process_capture_completion(coordinator)
+    processed = resolve_receipt(coordinator)
     assert processed.result.outcome is ExportCompletionOutcome.EXPORTED
     assert processed.completion.pdf_outcome is PdfOutcome.UNVERIFIED
     after = state(path)
@@ -54,7 +62,7 @@ def test_native_parent_confirmation_commits_exported_without_marker(tmp_path):
     expected["status"] = "exported"
     assert after.frontmatter == expected and after.body == before.body
     assert not after.export_attempt_present
-    assert process_capture_completion(coordinator).result is None
+    assert resolve_receipt(coordinator).result is None
     assert not coordinator.authorize_parent_dispatch(invocation)
     assert not coordinator.submit_connector_result(
         **vars(invocation), outcome=CaptureOutcome.CONFIRMED,
@@ -90,7 +98,7 @@ def test_native_save_failure_does_not_claim_definite_failure_or_export(tmp_path)
     )
     path = Path(token.attempt.workspace_path) / token.attempt.paper_path
     original = path.read_bytes()
-    result = process_capture_completion(coordinator)
+    result = resolve_receipt(coordinator)
     assert result.result.outcome is ExportCompletionOutcome.UNCERTAIN
     assert "Native save" in result.result.message
     assert path.read_bytes() == original
@@ -102,7 +110,7 @@ def test_translator_pre_dispatch_failure_is_no_effect(tmp_path):
         tmp_path, dispatch=False, outcome=CaptureOutcome.FAILED,
         failure_stage=CaptureFailureStage.TRANSLATOR,
     )
-    result = process_capture_completion(coordinator)
+    result = resolve_receipt(coordinator)
     assert result.result.outcome is ExportCompletionOutcome.NO_EFFECT
     assert "Translator" in result.result.message
     path = Path(token.attempt.workspace_path) / token.attempt.paper_path
@@ -131,7 +139,7 @@ def test_persisted_historical_marker_survives_export(tmp_path):
         **vars(invocation), outcome=CaptureOutcome.CONFIRMED,
         pdf_outcome=PdfOutcome.UNVERIFIED,
     )
-    assert process_capture_completion(coordinator).result.outcome is ExportCompletionOutcome.EXPORTED
+    assert resolve_receipt(coordinator).result.outcome is ExportCompletionOutcome.EXPORTED
     after = state(path)
     assert after.status is WorkflowStatus.EXPORTED
     assert after.frontmatter["export_attempt"] == legacy
@@ -145,7 +153,7 @@ def test_local_write_error_reports_distinct_result_and_preserves_paper(tmp_path,
     original = path.read_bytes()
     monkeypatch.setattr(attempts, "replace_regular_text_at_identity",
                         lambda *args, **kwargs: (_ for _ in ()).throw(OSError("fsync failed")))
-    result = process_capture_completion(coordinator)
+    result = resolve_receipt(coordinator)
     assert result.result.outcome is ExportCompletionOutcome.FAILED
     assert "Local Paper completion write failed" in result.result.message
     assert path.read_bytes() == original

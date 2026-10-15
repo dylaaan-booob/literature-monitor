@@ -32,26 +32,26 @@ MAX_CARSI_RECORDS = 10_000
 CARSI_TIMEOUT = httpx.Timeout(8.0, connect=4.0)
 CARSI_TOTAL_SECONDS = 20.0
 
-AI_EDITING_PROMPT_V1 = """### Editing contract (access-aware mapping)
+AI_EDITING_PROMPT_V1 = """### Editing contract (CARSI Access Mapping)
 
-You are editing the complete saved Literature Monitor list.md, using the official
-CARSI resource records below as reference data. First output the final, complete,
-importable list.md in ONE standalone Markdown code block tagged markdown. Choose
-an enclosing fence longer than any backtick run inside list.md. The fences are not part of the importable file.
-These code fences are response formatting only. After closing that block,
-provide, IN ORDER: (2) Mapping changes summary, (3) Existing manual Services
-review, (4) Unassigned Publishers research, and (5) Manual action items.
-The first output is always part (1): the full list.md alone in its code block.
-Do not return the AI Mapping Pack, its marker or the CARSI catalog appendix,
-and never put research inside list.md.
+Maintain CARSI Access Mapping using the complete saved list.md and the official
+resource records below. Preserve all Journal fields.
+
+In the successful response, first output the final, complete, importable list.md
+in ONE standalone Markdown code block tagged markdown. Choose an enclosing
+fence longer than any backtick run inside list.md. The fences are not part of
+the importable file. These code fences are response formatting only.
+After closing that block, provide the Mapping changes summary, Existing manual
+Services review, Unassigned Publishers research, and Manual action items.
+Do not return this Pack, its marker or the CARSI catalog appendix, and never
+put research inside list.md.
 
 - Edit ONLY rows in ## Access Services and the Access Service ID cell of
-  EXISTING rows in ## Publishers. Preserve the full file and its original
-  non-managed content, including all Journals, ISSN-L, Group assignments,
-  Conferences, unknown Sections, human notes and other text.
-- Preserve all Journal names and machine-managed Publisher relationships.
+  EXISTING rows in ## Publishers. Preserve the complete file, all Journal names,
+  ISSN-L values, Group assignments and original Journal row order.
   Preserve each Publisher ID, official Publisher name and user-maintained
-  Publisher URL. Never add, delete or rename a Journal or Publisher.
+  Publisher URL. Never add, delete or rename a Journal or Publisher. Preserve
+  Conferences, unknown Sections, human notes and other non-managed content.
 - Before ANY modification, inspect the complete list.md: ALL Journals and their
   direct Publisher links, ALL Publishers and their Access Service ID references,
   ALL existing Access Services and their Publisher members. Classify each
@@ -221,6 +221,7 @@ subscription to check, a useful Publisher URL suggestion, or a justified
 decision to leave a Publisher Unassigned. Every suggestion is advisory; no
 additional changes to the already generated list.md and no separate report
 file.
+
 """
 
 
@@ -326,7 +327,7 @@ def fetch_carsi_directory(*, transport: httpx.BaseTransport | None = None) -> tu
         ) as client:
             with client.stream("GET", CARSI_DIRECTORY_URL, headers={
                 "Accept": "text/html",
-                "User-Agent": "literature-monitor/0.6.8 (public CARSI catalog export)",
+                "User-Agent": "literature-monitor/0.7.0 (public CARSI catalog export)",
             }) as response:
                 if response.is_redirect:
                     raise MappingPackError("CARSI directory redirected; refusing unexpected destination")

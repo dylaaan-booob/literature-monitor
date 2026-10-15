@@ -21,6 +21,7 @@ from literature_monitor.config import (
     validate_access_mapping,
     ConfigurationError,
     InstitutionConfig,
+    KeptWorkflowConfig,
     JournalConfig,
     PublisherConfig,
     LegacyJournal,
@@ -99,6 +100,7 @@ class MonitorDraft:
     migration_confirmations: tuple[MigrationConfirmation, ...] = ()
     pending_journal_ids: tuple[str, ...] = ()  # Transient Add/Import placeholders.
     institution: InstitutionConfig | None = None
+    kept_workflow: KeptWorkflowConfig = KeptWorkflowConfig()
 
 
 @dataclass(frozen=True)
@@ -222,6 +224,7 @@ class _DraftFields:
     date_spec: DateRangeSpec
     log_level: LogLevel | str
     institution: InstitutionConfig | None = None
+    kept_workflow: KeptWorkflowConfig = KeptWorkflowConfig()
 
 
 def _digest(contents: str) -> str:
@@ -302,6 +305,11 @@ def _recovery_fields(config_path: Path, raw: Any) -> _DraftFields:
     except ValueError:
         institution = None  # Never project invalid or sensitive institution data.
 
+    try:
+        kept_workflow = KeptWorkflowConfig.model_validate(raw.get("kept_workflow", {}))
+    except ValueError:
+        kept_workflow = defaults.kept_workflow
+
     recovered_name = name.strip() if isinstance(name, str) else defaults.name
     recovered_keyword = (
         keyword.strip() if isinstance(keyword, str) else defaults.keyword_expression
@@ -333,6 +341,7 @@ def _recovery_fields(config_path: Path, raw: Any) -> _DraftFields:
         date_spec=recovered_date,
         log_level=recovered_log,
         institution=institution,
+        kept_workflow=kept_workflow,
     )
 
 
@@ -384,6 +393,7 @@ def _monitor_fields(
             date_spec=definition.date_spec,
             log_level=definition.log_level,
             institution=definition.institution,
+            kept_workflow=definition.kept_workflow,
         ),
         (),
     )
@@ -507,6 +517,7 @@ def load_settings(config_path: Path) -> SettingsLoadResult:
         monitor_revision=monitor_snapshot.revision,
         journal_revision=journal_snapshot.revision,
         institution=fields.institution,
+        kept_workflow=fields.kept_workflow,
     )
     return SettingsLoadResult(
         config_path=config_path,
@@ -532,6 +543,7 @@ def _draft_monitor_mapping(
     raw["from_month"] = draft.date_spec.from_month
     raw["to_month"] = draft.date_spec.to_month
     raw["institution"] = draft.institution
+    raw["kept_workflow"] = draft.kept_workflow
     return raw
 
 
@@ -650,6 +662,7 @@ def _render_monitor_yaml(
     )
     if draft.institution is not None and (draft.institution.name or draft.institution.idp_entity_id or draft.institution.automatic_attribute_release_consent):
         values["institution"] = draft.institution.model_dump(exclude_none=True)
+    values["kept_workflow"] = draft.kept_workflow.model_dump(exclude_none=True)
     return yaml.safe_dump(values, sort_keys=False, allow_unicode=True)
 
 
@@ -846,7 +859,8 @@ def _save_settings(
         if validation.outcome is SettingsValidationOutcome.INVALID:
             raise ConfigurationError("; ".join(i.message for i in validation.issues))
         if validation.config is not None:
-            draft = replace(draft, institution=validation.config.institution)
+            draft = replace(draft, institution=validation.config.institution,
+                            kept_workflow=validation.config.kept_workflow)
     except (ConfigurationError, OpenAlexError, ValueError) as error:
         return _result_from_state(
             outcome=SettingsSaveOutcome.INVALID_DRAFT, validation=validation,

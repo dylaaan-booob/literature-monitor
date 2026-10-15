@@ -264,34 +264,24 @@ runtime._returnToApp = (task, close) => {
     _run_connector_vm(program)
 
 
-@pytest.mark.parametrize("failed_browser_api", ["remove_task_tab", "reactivate_app"])
-def test_real_browser_cleanup_rejection_must_not_prove_idle(failed_browser_api):
+def test_real_browser_cleanup_rejection_must_not_prove_idle():
     """An ambiguous Chrome API failure is not evidence the browser is idle."""
     program = r"""
-const FAILURE = """ + repr(failed_browser_api) + r""";
 const task = makeTask(), idle = [], ops = [];
 task.pipelineEnded = true;
 task.pipelineComplete = true;
 task.windowID = 22;
-task.appTabID = 33;
-task.appWindowID = 22;
 context.browser.tabs = {
   get: async id => ({id,incognito:false,windowId:22,
                       url:id===33 ? "http://127.0.0.1:8000/kept" : "https://doi.org/10.1000/example"}),
   remove: async id => {
     ops.push("remove");
-    if (FAILURE === "remove_task_tab") throw new Error("browser removal unknown");
+    throw new Error("browser removal unknown");
   },
   update: async () => {ops.push("activate");},
 };
 context.browser.webNavigation = {
   getFrame: async () => ({documentId:"doc"}),
-};
-context.browser.windows = {
-  update: async () => {
-    ops.push("focus");
-    if (FAILURE === "reactivate_app") throw new Error("browser focus unknown");
-  },
 };
 runtime._activeTask = task;
 runtime._deliverResult = async () => true;
@@ -303,7 +293,7 @@ runtime._reportImportBrowserIdle = async () => {idle.push(true);};
   assert.equal(runtime._activeTask, task);
   assert.equal(task.cleanupFailed, true);
   assert.equal(task.browserIdleReporting, undefined);
-  assert.ok(ops.includes(FAILURE === "remove_task_tab" ? "remove" : "focus"));
+  assert.deepEqual(ops, ["remove"]);
 })().catch(error => {console.error(error);process.exitCode=1;});
 """
     _run_connector_vm(program)

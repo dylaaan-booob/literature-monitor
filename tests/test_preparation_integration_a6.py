@@ -1,4 +1,4 @@
-"""A6 real Executor → Runtime → FastAPI → Coordinator → rendered Kept fragment.
+"""A6 real Executor → Runtime → FastAPI → Coordinator → Kept Workflow.
 
 Only Chrome DOM/events and transport are simulated; no Executor method is replaced.
 """
@@ -15,11 +15,10 @@ from fastapi.testclient import TestClient
 
 from literature_monitor.application.batch_import import BatchPhase
 from literature_monitor.web.app import create_app
-from literature_monitor.web.preparation_coordinator import EXECUTOR_CAPABILITY
+from literature_monitor.web.preparation_coordinator import EXECUTOR_CAPABILITY, PreparationPhase
 from test_access_mapping_a4 import stamp
 from preparation_helpers import prepared
 from test_batch_import import paper, state
-from test_web_run_settings import csrf_from_html
 
 
 PROGRAM = r'''
@@ -36,7 +35,7 @@ const nav = Object.fromEntries(["onCreatedNavigationTarget", "onBeforeNavigate",
 const removed = new Event(), activated = new Event(), tabs = new Map(), frames = new Map();
 const resourceURL = "https://ds.carsi.edu.cn/resource/resource.php";
 const searches = [], visits = [], removals = [];
-let schoolOnly = false, showing = "initial", portalCreations = 0, cardClicks = 0;
+let schoolOnly = true, showing = "initial", portalCreations = 0, cardClicks = 0;
 const searchInput = {value: ""};
 function putTab(id, url, documentId) {
     tabs.set(id, {id, url, windowId: 1, incognito: false, status: "complete", title: "Research content"});
@@ -50,12 +49,7 @@ function card(name) {
         querySelector() {return {childNodes: [
             {nodeType: 3, textContent: name}, {nodeType: 1, textContent: "校购"},
         ]};},
-        click() {
-            cardClicks++;
-            putTab(detailID, "https://ds.carsi.edu.cn/resource/resourceDetail.php?id=" + index,
-                "detail-" + index);
-            nav.onCreatedNavigationTarget.emit({sourceTabId: 3, sourceFrameId: 0, tabId: detailID});
-        },
+        click() {cardClicks++; throw Error("Detail cards must be opened by tabs.create");},
     };
 }
 const portalDoc = {
@@ -63,7 +57,7 @@ const portalDoc = {
         if (selector === "div.con.text.act #padInfo.list")
             return {querySelectorAll: () => [card(showing)]};
         if (selector === 'input[type="checkbox"]#onlyMySchool[name="onlyMySchool"]')
-            return {get checked() {return schoolOnly;}, click() {schoolOnly = true;}};
+            return {get checked() {return schoolOnly;}, click() {schoolOnly = false;}};
         return null;
     },
     querySelectorAll(selector) {
@@ -100,17 +94,30 @@ function detailDoc(detailID) {
 }
 const browser = {
     runtime: {getManifest() {return {version: "0.6.4"};}},
-    windows: {async getAll() {return [{id: 1, type: "normal", incognito: false}];}},
+    windows: {async create({url, type, incognito, focused}) {
+        assert.equal(url, "about:blank"); assert.equal(type, "normal");
+        assert.equal(incognito, false); assert.equal(focused, false);
+        portalCreations++; putTab(3, url, "blank");
+        return {id: 1, type, incognito, tabs: [tabs.get(3)]};
+    }},
     webNavigation: {...nav, async getFrame({tabId}) {return frames.get(tabId);}},
     tabs: {
         onRemoved: removed, onActivated: activated,
-        async create({url, windowId}) {
-            assert.equal(windowId, 1); assert.equal(url, "about:blank");
-            portalCreations++; putTab(3, url, "blank"); return tabs.get(3);
+        async query({windowId}) {assert.equal(windowId, 1); return [tabs.get(3)];},
+        async create({url, windowId, active}) {
+            assert.equal(windowId, 1); assert.equal(active, false);
+            const index = Number(new URL(url).searchParams.get("id"));
+            const id = 10 + index * 10;
+            putTab(id, url, "detail-" + index);
+            return tabs.get(id);
         },
         async update(id, {url}) {
-            assert.equal(id, 3); assert.equal(url, resourceURL);
-            putTab(id, url, "portal-doc"); return tabs.get(id);
+            assert.equal(id, 3);
+            assert(url.startsWith("https://ds.carsi.edu.cn/"));
+            // Simulate the user completing the official IdP login and returning to /wxds.
+            putTab(id, url === resourceURL ? resourceURL : "https://ds.carsi.edu.cn/wxds",
+                url === resourceURL ? "portal-doc" : "login-doc");
+            return tabs.get(id);
         },
         async get(id) {if (!tabs.has(id)) throw Error("No such tab"); return tabs.get(id);},
         async remove(id) {
@@ -184,8 +191,8 @@ const tick = async () => {await new Promise(setImmediate); await new Promise(set
         assert.deepEqual([...tabs.keys()], [3, 10, 11]);
     }
     assert.equal(portalCreations, 1);
-    assert.equal(cardClicks, input.cancel ? 1 : 2);
-    assert.equal(schoolOnly, true);
+    assert.equal(cardClicks, 0);
+    assert.equal(schoolOnly, false);
     assert(Object.values(nav).every(event => event.listeners.size === 0));
     fs.writeSync(1, JSON.stringify({done: true}) + "\n");
 })().catch(error => {
@@ -213,12 +220,17 @@ def test_serial_preparation_with_real_executor_bridge_and_kept(tmp_path, cancel_
     results = []
     overlay = Path(__file__).resolve().parents[1] / "connector/overlay"
     with TestClient(app, base_url="http://localhost") as client:
-        token = csrf_from_html(client.get("/?view=kept").text)
+        tokens = client.get("/api/ui-next/workspace").json()
         assert client.post("/api/connector/preparation/heartbeat", json={
             "instance_id": instance, "capability": EXECUTOR_CAPABILITY, "version": "0.6.4",
         }).json()["ready"]
-        assert "data-preparation-state>Running</strong>" in client.post(
-            "/preparation/start", data={"csrf_token": token}).text
+        started = client.post("/api/kept-workflow/start", json={
+            "csrf_token": tokens["csrf_token"], "import_token": tokens["import_token"],
+            "mode": "full",
+        })
+        assert started.status_code == 200
+        workflow = started.json()
+        assert prep.snapshot().phase is PreparationPhase.RUNNING
         with subprocess.Popen(
             [node, "-e", PROGRAM, str(overlay), json.dumps(payload)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -241,7 +253,7 @@ def test_serial_preparation_with_real_executor_bridge_and_kept(tmp_path, cancel_
                         assert response.status_code == 200, response.json()
                         assert response.json() == {"accepted": True}
                         body = message["body"]
-                        assert body["outcome"] == "Opened", body
+                        assert body["outcome"] == "Opened", json.dumps(body, ensure_ascii=False)
                         assert body["reason"] == "target_opened"
                         assert body["evidence"]["navigation_observed"] is True
                         assert "final_document_id" not in body["evidence"]
@@ -250,16 +262,15 @@ def test_serial_preparation_with_real_executor_bridge_and_kept(tmp_path, cancel_
                         else:
                             assert body == results[-1], "retry must preserve original identity/proof"
                         assert len(prep.snapshot().results) == len(results)
-                        page = client.get("/fragments/preparation").text
-                        assert f'data-preparation-count>{len(results)}</span>' in page
-                        assert f'data-preparation-stat="opened">{len(results)}' in page
-                        assert "data-preparation-pending-result" not in page
+                        visible = client.get("/api/kept-workflow/state").json()
+                        assert len(visible["preparation"]["results"]) == len(results)
                         if deliveries["result"] == 1 and cancel_after_result:
-                            canceled = client.post("/preparation/cancel", data={
-                                "csrf_token": token, "task_id": body["task_id"],
-                                "generation": body["generation"],
-                            }).text
-                            assert 'data-preparation-state>Canceled</strong>' in canceled
+                            canceled = client.post("/api/kept-workflow/cancel", json={
+                                "csrf_token": tokens["csrf_token"],
+                                "workflow_id": workflow["workflow_id"],
+                                "generation": workflow["generation"],
+                            })
+                            assert canceled.status_code == 200
                         # First receipt is accepted, but the HTTP response is lost.
                         # The identical retry cannot advance another Service.
                         if deliveries["result"] == 1:
@@ -276,11 +287,9 @@ def test_serial_preparation_with_real_executor_bridge_and_kept(tmp_path, cancel_
         assert len(snapshot.results) == expected
         assert deliveries == {"result": expected + 1}
         assert [result["service_id"] for result in results] == [first.id, second_service.id][:expected]
-        completed = client.get("/?view=kept").text
-        assert f'data-preparation-state>{"Canceled" if cancel_after_result else "Completed"}</strong>' in completed
-        assert f'data-preparation-count>{expected}</span>' in completed
-        assert f'data-preparation-stat="opened">{expected}' in completed
-        assert "Import to Zotero" in completed and "a6-kept" in completed
+        completed = client.get("/api/kept-workflow/state").json()
+        assert len(completed["preparation"]["results"]) == expected
+        assert all(item["outcome"] == "Opened" for item in completed["preparation"]["results"])
         assert app.state.batch_import.snapshot().phase is BatchPhase.IDLE
         owner = capture.reserve_browser_task("import")
         assert owner is not None

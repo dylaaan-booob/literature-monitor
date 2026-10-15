@@ -1,4 +1,4 @@
-"""Explicit, compare-and-replace Paper enrichment writes (SPEC §§48, 50–51)."""
+"""Explicit, compare-and-replace Paper enrichment writes (SPEC §§48, 50–51, 55)."""
 from __future__ import annotations
 
 import os
@@ -32,6 +32,7 @@ class EnrichmentTarget:
     workspace_identity: tuple[int, int]
     directory_identity: tuple[int, int]
     file_identity: tuple[int, int]
+    publication_date: str | None
     missing_abstract: bool
     missing_date: bool
     missing_authors: bool
@@ -56,13 +57,13 @@ def read_enrichment_target(workspace: Path, paper_id: UUID) -> EnrichmentTarget:
         if identity is None or identity.problems or len(identity.dois) != 1:
             raise ValueError('Paper DOI is missing or conflicting')
         missing_abstract = not state.abstract or not state.abstract.strip()
-        missing_date = state.publication_date is None
+        missing_date = state.publication_date is None or len(state.publication_date) == 7
         missing_authors = not state.author_links
         if not (missing_abstract or missing_date or missing_authors):
             raise ValueError('Paper already has an Abstract, publication date and Authors')
         lock.verify()
         return EnrichmentTarget(lock.path, path, paper_id, next(iter(identity.dois)), read.contents,
-                              lock.identity, read.directory_identity, read.file_identity,
+                              lock.identity, read.directory_identity, read.file_identity, state.publication_date,
                               missing_abstract, missing_date, missing_authors)
 
 
@@ -94,7 +95,7 @@ def fill_abstract(original: str, abstract: str) -> str:
 
 
 def fill_publication_date(original: str, value: str) -> str:
-    """Replace one null YAML scalar, without dumping other frontmatter."""
+    """Fill an absent date or upgrade a month scalar, without dumping frontmatter."""
     if not isinstance(value, str) or parse_publication_date(value) is None:
         raise ValueError('Publication date must be a valid ISO string')
     replacement = json.dumps(value)
@@ -112,7 +113,11 @@ def fill_publication_date(original: str, value: str) -> str:
         raise ValueError('Duplicate publication_date')
     key, node = entries[0]
     start, end = node.start_mark.index, node.end_mark.index
-    if (not isinstance(node, yaml.ScalarNode) or node.tag != 'tag:yaml.org,2002:null'
+    monthly = (isinstance(node, yaml.ScalarNode) and node.tag == 'tag:yaml.org,2002:str'
+               and len(node.value) == 7 and parse_publication_date(node.value) is not None)
+    if monthly and len(value) != 10:
+        raise ValueError('A month date can only be enriched with a complete YYYY-MM-DD date')
+    if (not isinstance(node, yaml.ScalarNode) or (node.tag != 'tag:yaml.org,2002:null' and not monthly)
             or node.style in {'|', '>'} or start < key.end_mark.index
             or any(isinstance(token, (yaml.AnchorToken, yaml.AliasToken))
                    and start <= token.start_mark.index < end for token in yaml.scan(payload))):

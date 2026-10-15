@@ -88,6 +88,38 @@ def test_bridge_claim_is_atomic_minimal_and_does_not_leak_previous_command(
     assert "11111111-1111-4111-8111-111111111111" not in state.text
 
 
+def test_release_receipt_endpoints_accept_exact_replays_only(tmp_path: Path) -> None:
+    app = create_app(tmp_path / "missing.yaml")
+    connect(app)
+    start_capture(app)
+    with TestClient(app, base_url="http://localhost") as client:
+        command = client.post("/api/connector/claim", json={}).json()["command"]
+        idle = {key: command[key] for key in ("request_id", "invocation_id", "doi_url")}
+        invocation = {**idle, "tab_id": 100, "session_id": "original-session"}
+        assert client.post("/api/connector/import-browser-idle", json=idle).status_code == 409
+        assert client.post("/api/connector/dispatch", json=invocation).json() == {"accepted": True}
+        assert client.post("/api/connector/native-save-settled",
+                           json={**invocation, "session_id": "wrong"}).status_code == 409
+        result = client.post("/api/connector/result", json={
+            **invocation, "outcome": "UNCONFIRMED", "pdf_outcome": "unverified",
+        })
+        assert result.json() == {"accepted": True}
+
+        for endpoint, payload in (
+            ("/api/connector/import-browser-idle", idle),
+            ("/api/connector/native-save-settled", invocation),
+        ):
+            accepted = client.post(endpoint, json=payload)
+            replay = client.post(endpoint, json=payload)
+            assert accepted.status_code == replay.status_code == 200
+            assert accepted.json() == replay.json() == {"accepted": True}
+
+        assert client.post("/api/connector/import-browser-idle",
+                           json={**idle, "invocation_id": "forged"}).status_code == 409
+        assert client.post("/api/connector/native-save-settled",
+                           json={**invocation, "tab_id": 101}).status_code == 409
+
+
 def test_bridge_no_command_response_is_compact(tmp_path: Path) -> None:
     app = create_app(tmp_path / "missing.yaml")
 

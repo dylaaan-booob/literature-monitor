@@ -1,81 +1,49 @@
-# Literature Monitor Connector patches
+# Connector upstream patches
 
-Files in this directory are the reviewable Literature Monitor source delta
-against the exact Zotero Connector revision in `../upstream.lock`.
+The files in this directory are the entire reviewable upstream-source patch portion of Literature Monitor's
+AGPLv3 Chrome Connector delta. They apply **only** to the exact Zotero Connector revision and top-level
+submodule pins in [upstream.lock](../upstream.lock). New files owned by Literature Monitor live separately in
+[overlay](../overlay/); [delta.lock](../delta.lock) enumerates every modified upstream path and overlay target.
 
-`../build.sh` applies `*.patch` files in lexical order with
-`git apply --check` before applying them. A context mismatch is a hard build
-failure; the build never silently accepts upstream drift.
+## Current patch set
 
-The tracked patches currently contain:
+Patches apply in filename lexical order:
 
-- `0001-literature-monitor-component-name.patch`: the A1 Chrome/MV3 component
-  name change;
-- `0002-literature-monitor-automatic-capture-hooks.patch`: the A5 MV3 worker
-  wiring and the smallest upstream save-lifecycle hooks required for
-  Literature Monitor automatic capture.
+| Patch | Current purpose |
+| --- | --- |
+| `0001-literature-monitor-component-name.patch` | Distinguish the Literature Monitor Chrome/MV3 extension name from the official Connector. |
+| `0002-literature-monitor-automatic-capture-hooks.patch` | Wire local runtime into the background worker; enforce current-document automatic translation; pass invocation-local identity and one-shot dispatch permission through native ItemSaver; prevent Zotero-server fallback on the automatic path; capture attributable top-level native parent acceptance before attachment work. |
+| `0003-literature-monitor-paper-enrichment.patch` | Add separate browser-only, read-only translation message via inject/PageSaving/MV3 offscreen. The pinned Translate Framework runs with saving disabled and returns the matching Item's Abstract, date and creators without sending an Item to Zotero. |
+| `0004-literature-monitor-connector-lifecycle-cleanup.patch` | Normalize tab IDs and safely sweep orphaned tab-info, injection and offscreen translation caches, including loading tabs and candidates added during an asynchronous sweep. No tab/document is closed by this patch. |
 
-The A5 hook is deliberately narrow. It propagates an automatic/local-only
-marker, prevents that path from falling back to Zotero's remote server, reports
-deterministic pre-parent failure, and signals local top-level `saveItems`
-acceptance before collection/attachment work. The bridge/task orchestration
-itself lives in the Literature Monitor-owned overlay runtime rather than in a
-vendored upstream tree.
+The automatic parent hook handles empty-body HTTP 201 or a single matching echoed client-side parent ID.
+Incompatible, missing and post-dispatch ambiguous replies remain uncertain; they cannot trigger a second native
+save or declare a PDF saved. Collection and attachment processing remain upstream-owned. Author interpretation,
+date precision and Paper Markdown saving belong to the Python server, not the AGPL patch.
 
-Every changed upstream path remains declared in `../delta.lock`.
+The read-only enrichment patch contains the pinned `Zotero.Date.strToDate()` call in AGPL MV3 code. Do not copy
+its implementation into the MIT Python package. The lifecycle patch cleans references only; it neither cancels
+user work nor proves a measured memory benefit.
 
-The unreleased v0.6.3 A2 changes extend `0002` on the same pinned revision:
-invocation-local identity and dispatch state replace shared-session reads,
-a one-shot live permission guards native `saveItems`, and the acceptance signal
-carries the matching invocation/native session. Native parent DOI, one-parent ID and native HTTP 201 checks apply only
-to automatic saves. `src/common/connector.js` exposes status and body for that
-one endpoint without altering other Connector callers. Both empty-body 201
-and matching single-item JSON 201 responses are supported; errors and missing
-transport acknowledgments remain unconfirmed. The parent hook leaves upstream
-collection and attachment saving intact; a separate pipeline-finished signal
-allows the runtime to close only the completed project task tab. A monotonic
-deadline rejects expired commands, including delayed permission replies.
-No attachment hook claims PDF completion; see `../PROVENANCE.md` for the
-inspected evidence boundary.
+## Application and maintenance
 
-The unreleased v0.6.3 A6 addition to `0002` only imports the AGPL access overlay
-before the runtime. It adds no upstream translator, `saveItems`, attachment or
-proxy-association modifications. The empty production rule table and bounded
-navigation/observation policy live in `../overlay/literature-monitor-access.js`.
+`../build.sh` reconstructs the pinned upstream source into its generated work directory. It checks every patch
+with `git apply --check` before applying it in lexical order and validates the resulting upstream-file delta
+against `delta.lock`. Patch/context drift is a **build failure**; do not use fuzzy application, silently skip a
+patch or alter the upstream pin to bypass review. Overlay files are copied separately after the upstream build.
 
-The unreleased v0.6.3 challenge/readiness correction also changes
-`src/browserExt/background.js`: automatic translation bypasses the unbound
-background tab cache and uses `tabs.sendMessage` with the selected document ID
-and current top-frame translator. Manual saves and native Zotero saving remain
-unchanged. Current-document readiness, response/DOM challenge observation and
-pre-trigger navigation recovery live in the overlay; see SPEC §42.16.
+If changing an upstream file, inspect the exact pinned implementation and downstream callers, edit the relevant
+numbered patch, update `delta.lock` when its affected paths change, and verify source/delta/license
+preservation. Use an isolated Connector build only when authorized. For deterministic lifecycle regression after
+reconstruction:
 
-`0003-literature-monitor-paper-enrichment.patch` adds a separate read-only
-content-script message and MV3 offscreen handler (SPEC §§47–48). It uses the pinned
-Translate Framework with `libraryID:false` and `saveAttachments:false`, guards
-the actual loaded translator against Desktop/Server execution, and never
-enters PageSaving's native-save path. Upstream pins and permissions are unchanged.
+~~~bash
+node --test connector/tests/lifecycle-cleanup.test.cjs
+~~~
 
-The same read-only handler transports Abstract and publication date. It calls
-upstream `Zotero.Date.strToDate()` and preserves absent components, rejecting
-unparsed remainder and explicit numeric-month correction. The Python server
-alone applies missing-component `01` defaults and calendar validation.
+Other runtime/CARSI/Enrichment tests are invoked by `./connector/test.sh`. A successful mocked Node test, patch
+application or Chrome build does not prove real Zotero parent/PDF outcomes or CARSI login.
 
-SPEC §50 extends the same Item projection with original `creators`; it adds no
-translator adapter or saving path. Creator interpretation and explicit local
-Author/Paper writes remain outside the AGPL Connector.
-
-`0004-literature-monitor-connector-lifecycle-cleanup.patch` follows `0003` and
-fixes only `background.js`, `background/offscreenManager.js` and
-`offscreen/offscreenTranslate.js`. Cleanup compares normalized tab IDs against
-all live tabs, including loading pages. Both periodic paths snapshot candidate
-IDs before querying tabs, so records created during the query survive that pass.
-The background sweep covers tab info and injection caches; offscreen cleanup
-returns the IDs actually removed and uses working JSON diagnostics. Existing
-tab-close listeners, fifteen-minute intervals, native saving and attachment
-processing remain unchanged. No cleanup closes a tab or the offscreen document.
-
-After `./connector/build.sh`, run
-`node --test connector/tests/lifecycle-cleanup.test.cjs` from the repository root.
-This deterministic VM regression reads the applied source in `.work/upstream`;
-it needs no Chrome profile or Zotero Library and does not measure memory use.
+Exact upstream provenance, AGPL notices, source-submodule pins, corresponding-source distribution and
+intentional-update procedure are documented in [PROVENANCE](../PROVENANCE.md). No patch may change native
+saving, browser permissions or user data ownership outside the reviewed delta.

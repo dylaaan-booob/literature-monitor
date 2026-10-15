@@ -1,0 +1,56 @@
+{
+  "width": 3840,
+  "height": 2160,
+  "fps": 60,
+  "shots": {
+    "access": {
+      "duration": 2.04
+    },
+    "identity": {
+      "duration": 8.92
+    },
+    "scan": {
+      "duration": 4.566666666666666
+    },
+    "welcome": {
+      "duration": 4.16,
+      "holdAt": 3.24
+    }
+  },
+  "scanCycle": {
+    "duration": 8,
+    "introFrames": 274,
+    "introSeconds": 4.566666666666666,
+    "bridgeSeconds": 1.8066666666666666,
+    "periods": {
+      "orange": 2,
+      "doubleGap": 2.6666666666666665,
+      "side": 1.6,
+      "satellites": 1
+    },
+    "satelliteRadius": 4.25,
+    "satelliteMotion": {
+      "degreesPerSecond": -60,
+      "bridgeSeconds": 0.4
+    }
+  },
+  "processingCycle": {
+    "logoSeconds": 2.6,
+    "dotsSeconds": 1.2,
+    "duration": 15.6
+  },
+  "clips": {
+    "processing": {
+      "src": "assets/kept/processing.mp4",
+      "poster": "assets/kept/processing.png",
+      "duration": 15.6,
+      "loop": true
+    },
+    "scan-loop": {
+      "src": "assets/kept/scan-loop.mp4",
+      "poster": "assets/kept/scan-loop.png",
+      "duration": 8,
+      "loop": true
+    }
+  }
+}

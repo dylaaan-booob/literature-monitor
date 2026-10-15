@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Literature Monitor</title>
+  <base href="/static/ui_next/">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="document-decryption.css">
+  <link rel="stylesheet" href="run.css">
+  <link rel="stylesheet" href="kept.css">
+  <link rel="stylesheet" href="kept-app.css">
+  <link rel="stylesheet" href="notifications.css">
+  <link rel="stylesheet" href="settings.css">
+  <script defer src="document-decryption.js"></script>
+  <script defer src="ui-transitions.js"></script>
+  <script defer src="api.js"></script>
+  <script defer src="app.js"></script>
+  <script type="module" src="run.js"></script>
+  <script type="module" src="kept-app.js"></script>
+  <script type="module" src="settings.js"></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="identity"><svg class="identity-mark" viewBox="0 0 66 46" aria-hidden="true"><path d="M9 8h18v30H9zM39 8h18v30H39zM27 8l12 4v26l-12-4z" fill="none" stroke="currentColor"/><path d="M33 4v38" stroke="#ff7a01"/></svg><div><strong>LITERATURE MONITOR</strong><small>研究档案馆 / Local journal archive</small></div></div>
+    <div class="header-browse"><div class="view-nav-scroll"><nav class="view-nav" aria-label="Workspace views">
+      <span id="view-nav-plate" aria-hidden="true"><span class="nav-clip"><span class="nav-inverse"><span><small>01</small> INBOX</span><span><small>02</small> KEPT</span><span><small>03</small> JOURNALS</span><span><small>04</small> ACCESS</span><span><small>05</small> SETTINGS</span></span></span></span>
+      <button id="inbox-open" aria-current="page" disabled><small>01</small> INBOX</button>
+      <button id="kept-open" disabled><small>02</small> KEPT <span id="kept-count" hidden>00</span></button>
+      <button id="journals-open" disabled><small>03</small> JOURNALS</button>
+      <button id="access-open" disabled><small>04</small> ACCESS</button>
+      <button id="settings-open" disabled><small>05</small> SETTINGS</button>
+    </nav></div>
+    <div id="settings-shell" hidden></div></div>
+    <button id="run-start" class="run-start" disabled>RUN <span>↗</span></button>
+    <aside class="message-region" aria-label="消息">
+      <section id="run-notice" class="run-notice" hidden>
+        <div class="message-body">
+          <p id="run-notice-summary" role="status" aria-live="polite"></p>
+          <details id="run-notice-details" hidden><summary>详情</summary><div id="run-notice-messages"></div></details>
+          <button id="retry-inbox" type="button" hidden>重新准备 Inbox</button>
+        </div>
+        <button id="message-close" type="button" aria-label="关闭消息">×</button>
+      </section>
+    </aside>
+  </header>
+  <main id="selected-view">
+    <section class="collection" aria-label="Journal archive">
+      <div class="collection-top"><span>JOURNAL COLLECTION</span></div>
+      <canvas id="archive" tabindex="0" aria-label="期刊档案架：上下键选期刊，左右键切换学科，Enter 查看"></canvas>
+      <p id="load-status" role="status">正在载入本地档案…</p>
+      <div class="collection-bottom">
+        <div class="selection-count"><span>JOURNAL / SELECT</span><div><strong id="selection-number">00</strong><small id="selection-total">/ 00</small></div></div>
+        <div class="journal-navigation"><button id="previous-journal" aria-label="上一本期刊">↑</button><div id="journal-ticks" aria-label="期刊刻度"></div><button id="next-journal" aria-label="下一本期刊">↓</button></div>
+        <div class="group-navigation"><button id="previous-group" aria-label="上一个学科">←</button><div><small id="group-number"></small><strong id="group-name"></strong></div><button id="next-group" aria-label="下一个学科">→</button></div>
+      </div>
+    </section>
+    <aside class="file-panel" aria-label="选中期刊">
+      <div class="file-path"><span>JOURNAL ARCHIVE</span><span>/</span><strong id="journal-group-label"></strong></div>
+      <h1 id="journal-title"></h1>
+      <div class="summary-meta"><span id="paper-count"></span><div id="tiers" role="group" aria-label="等级导航"></div></div>
+      <div class="profile-heading"><span>JOURNAL PROFILE</span><span id="profile-identity"></span></div>
+      <dl class="journal-profile">
+        <div><dt>PUBLISHER</dt><dd id="profile-publisher"></dd></div>
+        <div><dt>ACCESS SERVICE</dt><dd id="profile-service"></dd></div>
+      </dl>
+      <div class="papers-heading"><h2>Candidate papers</h2><span>PUBLICATION DATE ↓</span></div>
+      <div id="paper-lists"></div>
+      <span id="ghost-subject" aria-hidden="true"></span>
+    </aside>
+    <section id="journal-view" hidden aria-label="Paper Detail">
+      <div class="review-left">
+        <div class="review-back"><button id="back">← 返回 Inbox <kbd>Esc</kbd></button></div>
+        <div class="left-review-actions"><button id="keep-paper">Keep <span>保留</span></button><button id="reject-paper">Reject <span>略过</span></button></div>
+      </div>
+      <div class="review-right">
+      <div class="paper-navigation"><span>Paper / Candidate</span><div><button id="previous-paper" aria-label="上一篇 Paper">←</button><strong id="paper-position"></strong><button id="next-paper" aria-label="下一篇 Paper">→</button></div></div>
+      <article id="paper-detail" tabindex="-1">
+        <p id="view-title" class="paper-journal"></p>
+        <h1 id="view-paper-title"></h1>
+        <dl class="paper-metadata">
+          <div><dt>Authors</dt><dd id="paper-authors"></dd></div>
+          <div><dt>Publication date</dt><dd id="paper-date"></dd></div>
+          <div><dt>DOI</dt><dd><a id="paper-doi" target="_blank" rel="noopener noreferrer"></a></dd></div>
+        </dl>
+        <div class="abstract-heading"><h2>Abstract</h2></div>
+        <div id="paper-abstract"></div>
+        <p id="view-paper-id" class="paper-uuid"></p>
+      </article>
+      <div class="review-controls">
+        <p id="enrich-status" role="status" aria-live="polite"></p>
+        <div class="review-actions"><div class="enrich-actions"><button id="enrich-paper">Enrich</button><button id="cancel-enrich" hidden>Cancel</button></div></div>
+      </div>
+      </div>
+    </section>
+    <section id="empty-inbox" hidden><span>Inbox / Complete</span><h1>本轮审阅完成</h1><p>当前没有待审阅文献。可点击 RUN 检索新文献。</p></section>
+  </main>
+  <section id="kept-view" hidden aria-label="Kept Playlist">
+    <aside class="kept-manager" aria-label="Journals"><div class="kept-manager-heading"><span>JOURNALS</span></div><div id="kept-journals"></div></aside>
+    <div class="kept-center">
+      <header class="kept-list-head s-browser-head"><div class="kept-list-heading s-browser-title"><h1 id="kept-title" tabindex="-1">All Kept</h1><button id="kept-sort" class="s-button">SORT / DATE ↓</button></div><div class="kept-list-tools s-browser-meta"><span id="kept-summary"></span><span aria-hidden="true">·</span><span id="kept-source">WORKSPACE</span></div></header>
+      <div id="kept-list" aria-label="Kept Papers"></div>
+      <p id="kept-empty" hidden>尚无保留文献。审阅时点击 Keep，论文会出现在这里。</p>
+      <div id="kept-reader" hidden><button id="kept-reader-back">← 返回列表</button><div id="kept-reader-body"></div></div>
+    </div>
+    <aside class="kept-card" aria-label="Import record"><div class="kept-card-heading"><span>KEPT PROFILE</span><span id="kept-all-count"></span></div><span class="kept-ghost" aria-hidden="true">02</span><h2>Ready to archive.</h2><div class="kept-actions"><button id="kept-start">PREPARE &amp; IMPORT ↗</button><button id="kept-import-only">IMPORT ONLY ↗</button></div><div class="kept-record-heading"><span>IMPORT / LATEST</span><span id="kept-record-count">—</span></div><p id="kept-record-summary" role="status">本次尚未导入。</p><ol id="kept-record-items"></ol></aside>
+  </section>
+  <footer><span><i></i> ARCHIVE SECTION <b id="mode-label">BROWSE</b></span><span id="snapshot-label">WORKSPACE</span></footer>
+  <section id="settings-view" hidden aria-label="Settings"></section>
+  <dialog id="kept-flow" aria-label="Kept import animation">
+    <div id="kept-film" aria-hidden="true"><div id="kept-scene"></div><video muted playsinline preload="auto"></video><video muted playsinline preload="auto"></video></div>
+    <div id="kept-flow-actions">
+      <section id="kept-flow-gate" hidden aria-label="Continue import"><p id="kept-gate-message" role="status"></p><div id="kept-manual-services"></div><button id="kept-continue">CONTINUE TO IMPORT ↗</button></section>
+      <div id="kept-skip-slot" hidden><button id="kept-skip">CLICK TO SKIP</button><span id="kept-skip-status" role="status" tabindex="-1" hidden></span></div>
+      <button id="kept-leave" aria-label="结束本次流程">结束本次流程</button>
+    </div>
+  </dialog>
+  <dialog id="run-view" aria-labelledby="run-title">
+    <div class="run-background" aria-hidden="true">
+      <img class="run-poster" src="assets/run/poster.png" alt="">
+      <video class="run-loop" src="assets/run/idle.mp4" poster="assets/run/poster.png" preload="auto" loop muted playsinline hidden></video>
+      <video class="run-intro" src="assets/run/intro.mp4" preload="auto" muted playsinline hidden></video>
+    </div>
+    <div id="run-stage-layer" class="run-stage-layer">
+      <h1 id="run-title">SELECTING FILES...</h1>
+      <div class="run-status-area">
+        <p class="run-time">ELAPSED <span id="run-elapsed">0:00</span></p>
+        <p id="run-stage" role="status">CHECKING MONITOR</p>
+        <p id="run-description">Validating monitor settings</p>
+      </div>
+    </div>
+    <div id="run-wash" hidden aria-hidden="true"></div>
+  </dialog>
+</body>
+</html>

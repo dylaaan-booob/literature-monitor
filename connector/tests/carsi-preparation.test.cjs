@@ -56,8 +56,7 @@ function executorFixture({last = false, portalID = null, windowID = 1} = {}) {
     const nav = navigation(), tabs = new Map(), frames = new Map();
     const removedIDs = [];
     const browser = {
-        windows: {async getAll() {return [{type: "normal", incognito: false, id: windowID}];},
-            async remove(id) {removedIDs.push("window:" + id);}},
+        windows: {async remove(id) {removedIDs.push("window:" + id);}},
         webNavigation: {...nav, async getFrame({tabId}) {return frames.get(tabId);}},
         tabs: {onRemoved: nav.onTabRemoved, onActivated: new Event(),
             async get(id) {
@@ -108,7 +107,7 @@ test("resource identity is exact: zero, one, duplicates, case and whitespace", (
     assert.equal(exactNameMatches(matches, "").length, 0);
 });
 
-test("unconfirmed search results never report a false match or resource_not_found", async () => {
+test("search accepts unique matches without list snapshots and waits for delayed results", async () => {
     const command = {instance_id: "instance", task_id: "task", generation: 1,
         request_id: "request", service_id: "service", name: "Target"};
     const executor = new Executor({}, async () => ({ok: true, body: {accepted: true}}),
@@ -116,20 +115,23 @@ test("unconfirmed search results never report a false match or resource_not_foun
     // 缩短本用例的有界时钟，不改变生产接口或真实浏览器行为。
     const originalDate = context.Date;
     try {
-        for (const result of [
-            {status: "found", snapshot: "before"},
-            {status: "missing", snapshot: "after"},
+        for (const [statuses, expected] of [
+            [["found"], null],
+            [["missing", "found"], null],
+            [["missing"], "manual_action_required"],
+            [["ambiguous"], "ambiguous_resource"],
         ]) {
             const actions = [];
+            let polls = 0;
             executor.script = async (_tab, _detail, action) => {
                 actions.push(action);
-                if (action === "search") return {status: "submitted", snapshot: "before"};
+                if (action === "search") return {status: "submitted"};
                 if (action === "scan") return {status: "ready"};
-                return result;
+                return {status: statuses[Math.min(polls++, statuses.length - 1)]};
             };
             let now = 0;
             context.Date = {now: () => (now += 4000)};
-            assert.equal(await executor.loadedTarget(), "manual_action_required");
+            assert.equal(await executor.loadedTarget(), expected);
             assert.equal(actions.filter(action => action === "search").length, 1);
             assert(actions.includes("results"));
         }
@@ -140,10 +142,10 @@ test("unconfirmed search results never report a false match or resource_not_foun
     }
 });
 
-test("Taylor & Francis uses a searchable suffix but selects only the exact saved Service", async () => {
+test("Taylor & Francis uses a searchable suffix but extracts only the exact saved Service Detail URL", async () => {
     const name = "Taylor & Francis期刊数据库", query = "Francis期刊数据库";
     const input = {value: ""};
-    let schoolEnabled = false, searches = 0, selected = 0, cards = [];
+    let schoolEnabled = false, schoolClicks = 0, searches = 0, selected = 0, cards = [];
     const card = title => ({
         href: "https://ds.carsi.edu.cn/resource/resourceDetail.php?id=42",
         getAttribute: attribute => attribute === "href" ? "/resource/resourceDetail.php?id=42" : null,
@@ -155,7 +157,7 @@ test("Taylor & Francis uses a searchable suffix but selects only the exact saved
     cards = [oldCard];
     const school = {
         get checked() {return schoolEnabled;},
-        click() {schoolEnabled = true;},
+        click() {schoolClicks++; schoolEnabled = !schoolEnabled;},
     };
     const doc = {
         querySelector(selector) {
@@ -201,11 +203,14 @@ test("Taylor & Francis uses a searchable suffix but selects only the exact saved
         if (originalDate === undefined) delete context.Date;
         else context.Date = originalDate;
     }
-    assert.equal(schoolEnabled, true);
+    assert.equal(schoolEnabled, false);
+    assert.equal(schoolClicks, 0, "an unchecked filter is never clicked");
     assert.equal(input.value, query, "search input must contain the suffix, not canonical identity");
     assert.equal(searches, 1, "one official search submission");
-    assert.equal((await executor.script(3, false, "select")).status, "selected");
-    assert.equal(selected, 1);
+    const selection = await executor.script(3, false, "select");
+    assert.equal(selection.status, "selected");
+    assert.equal(selection.url, target.href);
+    assert.equal(selected, 0, "the verified Detail URL is extracted without clicking");
 
     cards = [card(query)]; // A partial name is not the saved Service name.
     assert.equal((await executor.script(3, false, "select")).status, "missing");
@@ -213,10 +218,18 @@ test("Taylor & Francis uses a searchable suffix but selects only the exact saved
     assert.equal((await executor.script(3, false, "select")).status, "ambiguous");
     input.value = name;
     assert.equal((await executor.script(3, false, "select")).status, "unverified");
-    assert.equal(selected, 1, "no approximate, duplicate or wrong-query result is clicked");
+    assert.equal(selected, 0, "no Detail anchor is clicked");
+
+    schoolEnabled = true;
+    school.click = () => {schoolClicks++;}; // An ineffective native click.
+    assert.equal(await executor.loadedTarget(), "unverified_official_page");
+    assert.equal(searches, 1, "an unconfirmed filter state prevents search submission");
+    schoolEnabled = undefined;
+    assert.equal(await executor.loadedTarget(), "unverified_official_page");
+    assert.equal(schoolClicks, 1, "an unknown state must not trigger another click");
 });
 
-test("matching resource names never click external, script or non-detail anchors", () => {
+test("matching resource names never authorize external, script or non-detail URLs", () => {
     for (const raw of [
         "https://outside.example.org/resource/resourceDetail.php?id=1",
         "https://ds.carsi.edu.cn.evil.org/resource/resourceDetail.php",
@@ -241,7 +254,7 @@ test("matching resource names never click external, script or non-detail anchors
                 if (selector === "div.con.text.act #padInfo.list")
                     return {querySelectorAll: () => [card]};
                 if (selector.includes("#onlyMySchool"))
-                    return {checked: true};
+                    return {checked: false};
                 return null;
             },
             querySelectorAll(selector) {
@@ -256,6 +269,89 @@ test("matching resource names never click external, script or non-detail anchors
         });
         assert.equal(result.status, "unverified", JSON.stringify(raw));
         assert.equal(clicks, 0, JSON.stringify(raw));
+    }
+});
+
+test("Detail navigation refuses revoked authority, a changed Portal document and cancellation", async () => {
+    for (const condition of ["authority", "document", "cancel"]) {
+        const f = executorFixture({portalID: 3});
+        const detailURL = "https://ds.carsi.edu.cn/resource/resourceDetail.php?id=42";
+        f.tabs.set(3, {id: 3, windowId: 1, incognito: false, status: "complete", url: RESOURCE_URL});
+        f.frames.set(3, {frameId: 0, documentId: "portal-document", documentLifecycle: "active", url: RESOURCE_URL});
+        f.executor.command.login_url = "https://ds.carsi.edu.cn/Shibboleth.sso/Login";
+        f.executor.portal = async () => true;
+        f.executor.loadedTarget = async () => null;
+        let selected = false, creations = 0, visitGrants = 0;
+        f.browser.scripting.executeScript = async ({target, args}) => {
+            assert.equal(args[0], "select");
+            assert.equal(target.documentIds[0], "portal-document");
+            selected = true;
+            return [{frameId: 0, documentId: "portal-document", result: {status: "selected", url: detailURL}}];
+        };
+        f.executor.post = async url => {
+            if (url.endsWith("/visit-authorize")) visitGrants++;
+            if (selected) {
+                if (condition === "authority") return {ok: true, body: {accepted: false}};
+                if (condition === "document") f.frames.get(3).documentId = "user-navigated-document";
+                if (condition === "cancel") f.executor.cancel();
+            }
+            return {ok: true, body: {accepted: true}};
+        };
+        f.browser.tabs.create = async () => {creations++; throw Error("Unexpected Detail creation");};
+        const result = await f.executor.execute();
+        assert.equal(selected, true, condition);
+        assert.equal(result.outcome, "Needs attention", condition);
+        assert.equal(creations, 0, condition);
+        assert.equal(visitGrants, 0, condition);
+        assert.deepEqual(f.removedIDs, [], condition);
+        allDisposed(f.nav);
+    }
+});
+
+test("failed Detail creation and cancellation during creation cannot dispatch Visit or close pages", async () => {
+    for (const condition of ["failed", "cancel"]) {
+        const f = executorFixture({portalID: 3});
+        f.tabs.set(3, {id: 3, windowId: 1, incognito: false, status: "complete", url: RESOURCE_URL});
+        f.frames.set(3, {frameId: 0, documentId: "portal-document", documentLifecycle: "active", url: RESOURCE_URL});
+        f.executor.command.login_url = "https://ds.carsi.edu.cn/Shibboleth.sso/Login";
+        f.executor.portal = async () => true;
+        f.executor.loadedTarget = async () => null;
+        const detailURL = "https://ds.carsi.edu.cn/resource/resourceDetail.php?id=42";
+        let scripts = 0, visitGrants = 0, completeCreation, started;
+        const creating = new Promise(resolve => {started = resolve;});
+        f.executor.post = async url => {
+            if (url.endsWith("/visit-authorize")) visitGrants++;
+            return {ok: true, body: {accepted: true}};
+        };
+        f.browser.scripting.executeScript = async ({args}) => {
+            scripts++;
+            assert.equal(args[0], "select");
+            return [{frameId: 0, documentId: "portal-document", result: {status: "selected", url: detailURL}}];
+        };
+        f.browser.tabs.create = async options => {
+            assert.equal(options.windowId, 1);
+            assert.equal(options.active, false);
+            assert.equal(options.url, detailURL);
+            started();
+            if (condition === "failed") throw Error("Cannot create Detail tab");
+            return new Promise(resolve => {completeCreation = resolve;});
+        };
+        const executing = f.executor.execute();
+        if (condition === "failed") {
+            await assert.rejects(executing, /Cannot create Detail tab/);
+        } else {
+            await creating;
+            f.executor.cancel();
+            const tab = {id: 4, windowId: 1, incognito: false, url: detailURL, active: false};
+            f.tabs.set(tab.id, tab);
+            completeCreation(tab);
+            assert.equal((await executing).outcome, "Needs attention");
+            assert(f.tabs.has(4), "the late-created page remains open");
+        }
+        assert.equal(scripts, 1, condition);
+        assert.equal(visitGrants, 0, condition);
+        assert.deepEqual(f.removedIDs, [], condition);
+        allDisposed(f.nav);
     }
 });
 
@@ -302,11 +398,12 @@ test("two CARSI Services reuse the Portal and retain every official Detail and V
     const frames = new Map([
         [3, {frameId: 0, documentId: "portal-doc", documentLifecycle: "active", url: RESOURCE_URL}],
     ]);
-    let onlyMySchool = false;
+    let onlyMySchool = true, schoolClicks = 0;
     let searchClicks = 0;
     let showing = "initial";
     const searchInput = {value: ""};
     let cardClicks = 0;
+    const createdDetails = [];
     let detailTabID;
     let visitTabID;
     let visitClicks = 0;
@@ -325,12 +422,7 @@ test("two CARSI Services reuse the Portal and retain every official Detail and V
         },
         click() {
             cardClicks++;
-            detailTabID = 2 + cardClicks * 2;
-            tabs.set(detailTabID, {id: detailTabID, windowId: 1, incognito: false, status: "complete",
-                url: "https://ds.carsi.edu.cn/resource/resourceDetail.php?id=42"});
-            frames.set(detailTabID, {frameId: 0, documentId: "detail-doc-" + cardClicks,
-                documentLifecycle: "active", url: tabs.get(detailTabID).url});
-            nav.onCreatedNavigationTarget.emit({sourceTabId: 3, sourceFrameId: 0, tabId: detailTabID});
+            throw Error("Detail anchors must not be clicked");
         },
     });
     const sourceCard = fakeCard("Other Service", "免费");
@@ -342,7 +434,7 @@ test("two CARSI Services reuse the Portal and retain every official Detail and V
     }};
     const school = {
         get checked() {return onlyMySchool;},
-        click() {onlyMySchool = true;},
+        click() {schoolClicks++; onlyMySchool = false;},
     };
     const resourceDoc = {
         querySelector(selector) {
@@ -382,6 +474,19 @@ test("two CARSI Services reuse the Portal and retain every official Detail and V
         tabs: {
             onRemoved: nav.onTabRemoved,
             onActivated: activated,
+            async create(options) {
+                assert.equal(options.windowId, 1);
+                assert.equal(options.active, false);
+                assert.equal(options.url, targetCard.href);
+                detailTabID = 4 + createdDetails.length * 2;
+                const tab = {id: detailTabID, windowId: options.windowId, incognito: false,
+                    active: options.active, status: "complete", url: options.url};
+                tabs.set(tab.id, tab);
+                frames.set(tab.id, {frameId: 0, documentId: "detail-doc-" + tab.id,
+                    documentLifecycle: "active", url: tab.url});
+                createdDetails.push({options, tab});
+                return tab;
+            },
             async get(tabId) {
                 if (!tabs.has(tabId)) throw Error("No such tab");
                 return tabs.get(tabId);
@@ -431,10 +536,13 @@ test("two CARSI Services reuse the Portal and retain every official Detail and V
     assert.equal(result.reason, "target_opened");
     assert.equal(result.evidence.nonce, "n".repeat(43));
     assert.equal(result.evidence.target_tab_id, 5);
-    assert.equal(onlyMySchool, true);
+    assert.equal(onlyMySchool, false);
+    assert.equal(schoolClicks, 1);
     assert.equal(searchClicks, 1);
     assert.equal(searchInput.value, "Sample Research");
-    assert.equal(cardClicks, 1);
+    assert.equal(cardClicks, 0);
+    assert.equal(createdDetails.length, 1);
+    assert.equal(result.evidence.source_tab_id, createdDetails[0].tab.id);
     assert.equal(visitClicks, 1);
     assert.equal(externalScripts, 0);
     assert.equal(calls.filter(call => call.url.endsWith("/visit-authorize")).length, 1);
@@ -450,6 +558,8 @@ test("two CARSI Services reuse the Portal and retain every official Detail and V
     assert.deepEqual([...tabs.keys()], [3, 4, 5]);
     allDisposed(nav);
 
+    // The official page may restore its checked default between Services.
+    onlyMySchool = true;
     const last = new Executor(browser, post, {
         ...command, request_id: "request-bbbbbbbb", service_id: "svc_" + "b".repeat(32),
         name: "Second Research", last_service: true,
@@ -464,9 +574,13 @@ test("two CARSI Services reuse the Portal and retain every official Detail and V
     assert.deepEqual([...tabs.keys()], [3, 4, 5, 6, 7]);
     assert.equal(lastResult.evidence.target_tab_id, 7);
     allDisposed(nav);
-    assert.equal(cardClicks, 2);
+    assert.equal(cardClicks, 0);
+    assert.equal(createdDetails.length, 2);
+    assert.equal(lastResult.evidence.source_tab_id, createdDetails[1].tab.id);
     assert.equal(visitClicks, 2);
     assert.equal(searchClicks, 2);
+    assert.equal(onlyMySchool, false);
+    assert.equal(schoolClicks, 2);
     assert.equal(searchInput.value, "Second Research");
     assert.equal(externalScripts, 0);
 });
@@ -589,8 +703,6 @@ for (const scenario of ["Opened", "loading", "redirects", "active", "same-tab", 
             setTimer(callback, delay) {assert.equal(delay, 10000); timers.set(1, callback); return 1;},
             clearTimer(id) {timers.delete(id);}});
         executor.visitObserver = observer;
-        executor.detailListener = () => {};
-        nav.onCreatedNavigationTarget.addListener(executor.detailListener);
         const pending = observer.run(async () => {
             if (scenario === "Failed") throw Error("Official click failed");
             if (scenario === "Needs attention") return false;
@@ -618,7 +730,6 @@ for (const scenario of ["Opened", "loading", "redirects", "active", "same-tab", 
         assert.deepEqual([...tabs.keys()], [3, 4, 5, 6]);
         assert.equal(context.portalTabID, 3);
         assert.equal(executor.visitObserver, null);
-        assert.equal(executor.detailListener, null);
         assert.equal(timers.size, 0);
         allDisposed(nav);
     });

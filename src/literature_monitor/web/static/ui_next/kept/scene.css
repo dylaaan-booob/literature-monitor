@@ -1,0 +1,92 @@
+.kept-reference{position:absolute;left:50%;top:50%;width:1920px;height:1080px;transform:translate(-50%,-50%) scale(var(--kept-scene-scale,1));font-family:"Kept Film",MiSans,sans-serif;font-synthesis:none;font-size:16px;line-height:normal;font-weight:400;font-style:normal;letter-spacing:normal;text-align:left;color:#080a08;transform-origin:center;overflow:hidden}
+.kept-reference .brand{position:absolute;left:59px;top:114px;line-height:1;width:270px;white-space:nowrap;z-index:2}
+.kept-reference .brand h1{margin:0;font-weight:750;line-height:48px}
+.kept-reference .brand>div{font-size:19px;line-height:23px;letter-spacing:.65px;font-weight:600}
+.kept-reference .brand p{margin:0;font-size:35px;line-height:40px;display:flex;justify-content:space-between}
+.kept-reference .brand p b{font-weight:750;letter-spacing:3px}
+.kept-reference .brand-analysis{position:relative;display:block;width:189px;height:40px}
+.kept-reference .brand-analysis>span{position:absolute;top:0;font-kerning:none}
+.kept-reference .powered{position:absolute;right:59px;bottom:108px;font-size:19px;display:flex;align-items:center;gap:5px;line-height:24px;z-index:2}
+.kept-reference .powered i{height:6px;width:25px;background:#090a08;margin-left:11px}
+.kept-reference .boot-background{position:absolute;inset:0;background:radial-gradient(ellipse at 51% 48%,#e7e7e1 0%,#e3e1dc 76%,#e4dfdb 100%)}
+.kept-reference .boot-background svg{width:100%;height:100%;opacity:.09;filter:blur(3px)}
+.kept-reference .boot-logo{position:absolute;left:518px;top:462px;width:296px;height:177px;opacity:0}
+.kept-reference .boot-logo svg{width:100%;height:100%}
+.kept-reference .auth-status{position:absolute;left:931px;top:527px;display:flex;align-items:center;gap:10px;font-size:21.35px;white-space:nowrap;opacity:0}
+.kept-reference .auth-status>span:first-child{font-size:14px}
+.kept-reference .access-text{position:absolute;top:532px;left:800px;width:420px;text-align:left;font-size:18px;opacity:0}
+.kept-reference .scan{position:absolute;inset:0;width:1920px;height:1080px;opacity:0}
+.kept-reference .scan svg{display:block;width:100%;height:100%}
+
+.kept-reference .powered b{font-weight:750}
+
+/* Original Blog Theme Welcome layout. */
+.kept-reference .welcome{position:absolute;text-align:center;font-size:55px;font-weight:700;line-height:1.05;opacity:0}
+.kept-reference .welcome-logo{width:203px;height:121px}
+.kept-reference .welcome-logo svg{width:100%;height:100%}
+
+.kept-reference .boot-white{position:absolute;inset:0;background:#fff;opacity:0}
+.kept-reference .welcome  {
+  left: 720px;
+  top: 403px;
+  width: 480px;
+  height: 340px;
+  transform-origin: 50% 44%;
+  transition: none;
+}
+.kept-reference .welcome-heading  {
+  position: relative;
+  z-index: 1;
+  line-height: 65px;
+  font-size: 55px;
+  white-space: nowrap;
+}
+.kept-reference .welcome-panel  {
+  position: absolute;
+  top: -59px;
+  left: 5px;
+  width: 470px;
+  height: 392px;
+  background: #080a08;
+}
+.kept-reference .welcome-company  {
+  position: absolute;
+  top: 67px;
+  left: 35px;
+  width: 410px;
+  height: 60px;
+}
+.kept-reference .welcome-company strong  {
+  display: block;
+  position: absolute;
+  inset: 0;
+  padding: 5px 8px;
+  background: transparent;
+  color: #080a08;
+  font-size: 48px;
+  line-height: 50px;
+  white-space: nowrap;
+  letter-spacing: -0.5px;
+}
+.kept-reference .welcome-company .welcome-highlight  {
+  background: #080a08;
+  color: #eeede8;
+}
+.kept-reference .welcome-database  {
+  position: absolute;
+  top: 134px;
+  left: 0;
+  width: 100%;
+  font-size: 36px;
+  line-height: 43px;
+  white-space: nowrap;
+}
+.kept-reference .welcome-logo  {
+  position: absolute;
+  top: 187px;
+  left: 138.5px;
+  margin: 0;
+}
+
+.kept-reference,.kept-reference *{box-sizing:border-box}
+.kept-reference .boot-logo text,.kept-reference .welcome-logo text{font-family:"Kept Film",MiSans,sans-serif}

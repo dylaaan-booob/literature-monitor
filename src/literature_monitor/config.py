@@ -185,6 +185,20 @@ class InstitutionConfig(BaseModel):
         return value
 
 
+class KeptWorkflowConfig(BaseModel):
+    """Public display and explicit Kept workflow preferences (SPEC §59)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    auto_import_after_preparation: bool = Field(default=False, strict=True)
+    transition_delay_seconds: float = Field(default=3, strict=True, gt=0, allow_inf_nan=False)
+    display_name: str | None = None
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def public_display_name(cls, value: Any) -> str | None:
+        return InstitutionConfig.public_name(InstitutionConfig.optional_public_text(value))
+
+
 class _Settings(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -196,6 +210,7 @@ class _Settings(BaseModel):
     to_month: str
     log_level: LogLevel = LogLevel.INFO
     institution: InstitutionConfig | None = None
+    kept_workflow: KeptWorkflowConfig = KeptWorkflowConfig()
 
     @field_validator("institution")
     @classmethod
@@ -235,6 +250,7 @@ class LoadedConfig:
     log_level: LogLevel
     journals: tuple[JournalConfig, ...]
     institution: InstitutionConfig | None = None
+    kept_workflow: KeptWorkflowConfig = KeptWorkflowConfig()
 
 
 @dataclass(frozen=True)
@@ -249,6 +265,7 @@ class MonitorDefinition:
     date_spec: DateRangeSpec
     log_level: LogLevel
     institution: InstitutionConfig | None = None
+    kept_workflow: KeptWorkflowConfig = KeptWorkflowConfig()
 
 
 def _read_text(path: Path) -> str:
@@ -609,6 +626,7 @@ def parse_monitor_definition(path: Path, raw: Any) -> MonitorDefinition:
         date_spec=date_spec,
         log_level=settings.log_level,
         institution=settings.institution,
+        kept_workflow=settings.kept_workflow,
     )
 
 
@@ -635,6 +653,7 @@ def build_loaded_config(
         log_level=definition.log_level,
         journals=normalized_journals,
         institution=definition.institution,
+        kept_workflow=definition.kept_workflow,
     )
 
 
